@@ -20,7 +20,8 @@
 >   `FlowNarrowingAt` / `ContextualTypeAt`, NOT inside `ProgramAnalysisContext`; R21 five split env hashes; R6
 >   content-free keys. This design does NOT redesign these shapes.
 > - `docs/arch/native-flow-return.md` — the parent U6 subplan (the block contracts, the `FlowReturn` key shape,
->   the `FlowSlice` fact + `validates_program_analysis_domain`, the demand-sliced `ReturnPathPeeker`). This
+>   the `FlowSlice` discriminator fact, the `ProgramAnalysisFactRef::FlowBody` rooting consumed by the
+>   `validates_program_analysis_domain` rail, the demand-sliced `ReturnPathPeeker`). This
 >   design LOCKS the cross-cutting mechanisms the subplan's block contracts carry and CORRECTS the two
 >   load-bearing items the subplan's prose left ambiguous (D2 the narrowing-invalidation rail; the
 >   CONTEXTUAL_CALLBACK fixation-time mechanism ownership).
@@ -47,8 +48,9 @@ The U6 flow/call/narrowing/contextual engines are **four typed views of the ONE
 second flow walker, a second call resolver, a second inference matcher, or a query-time OXC re-walk. Call
 resolution opens one **speculative `InferenceSession` per overload candidate** and admits only the **winning,
 `CompletedDeterministic`** result; every cached flow/narrowing/contextual value is **version-rooted on the
-value** (the `FlowSlice` fact's whole-function `flow_body_stable_hash` + the union of consumed
-`ReadSetSignature.facts`), never on its query-identity key (R6); flow/narrowing/predicate/contextual facts live
+value** (the SOLE rooting carrier `ProgramAnalysisFactRef::FlowBody`'s whole-function
+`flow_body_stable_hash` + the union of consumed `ReadSetSignature.facts`; the `FlowSlice` fact is a
+candidate discriminator only), never on its query-identity key (R6); flow/narrowing/predicate/contextual facts live
 in `FactDomain::ProgramAnalysis` and publish through `ProgramAnalysisGraph`, **never** as `GraphTypeNode` type
 nodes; and the cross-engine recursion `ResolveCall → FlowReturn → narrowing → ResolveCall` discharges through a
 transient re-entry assumption on the one shared stack — only a converged/stable/deterministic per-domain result
@@ -85,6 +87,7 @@ SHAPE/model it reuses — it did NOT pre-register the variant (the standing
 
 ```rust
 SemanticQueryKey::ResolveCall {
+    point: ProgramPointId,                   // the call site's content-free program point (C4 addition)
     callee: SemanticNodeId,                  // resolved via the typed-IR resolver, NEVER a text parse
     call_kind: CallKind,                     // Call | New | TaggedTemplate | Decorator | JsxFactory
     receiver_this: Option<SemanticNodeId>,   // `this`-receiver method calls
@@ -92,9 +95,15 @@ SemanticQueryKey::ResolveCall {
     explicit_type_args: Arc<[SemanticNodeId]>,
     contextual_result: Option<SemanticNodeId>, // the ENCLOSING contextual target / expected return type
     policy: OverloadPolicy,                  // first-applicable-for-calls / last-visible-for-ReturnType
+    flow: FlowNarrowingKey,                  // SEALED-EMPTY until non-empty narrowing lands (C4 addition)
     context: ResolveCallContext,             // R21 split env (R T L J, +P where the producer reads parse-env — Decorator/JsxFactory resolution + contextual-arg parse reads) + substitution + projection-reduction
 }
 ```
+
+This key and the final C4 key (Substrate consumption contract below) are the SAME shape — one governing
+`ResolveCallKey`, no second key statement. `point` and the sealed-empty `flow` axis are additions ratified
+into this key together with C4; the wider `call_kind`, `contextual_result`, and `policy` axes are IMMEDIATE
+`U6.CALL_RESOLVE` obligations landed with the variant — not unspecified future re-keying.
 Value domain: `SemanticQueryValue::ResolvedCall(Arc<ResolvedCallResult>)`. The key carries NO content/version/
 `fact_dep` hash (R6); version rooting is on the value's `ReadSetSignature` (§6). `CallResolutionBudget` is keyed
 on this full identity; `BudgetExceeded` ⇒ `ReturnOnly` (three-layer: no result, no overload-candidate /
@@ -193,7 +202,9 @@ flow analogue of relation-infer's admission-soundness crux (`ReadSetSignature.se
 
 **The corrected rationale — what is the validity rail, and what is merely a discriminant.** The `FlowSlice`
 fact records `{ function_slot, projection_path, slice_hash, selected_binding_ids, selected_effect_ids,
-selected_control_region_ids, closure_summary_ids }` + `flow_body_stable_hash`. The parent subplan's prose
+selected_control_region_ids, closure_summary_ids }`; the whole-function `flow_body_stable_hash` rides the
+SOLE version-rooting carrier `ProgramAnalysisFactRef::FlowBody { function, flow_body_stable_hash }`, never
+the `FlowSlice` fact. The parent subplan's prose
 ("the extra `FlowSlice` fields are required because effect-only changes must invalidate") is **true but
 mechanism-ambiguous**, and reading it as "root validity on the slice's recorded `selected_effect_ids`" is the
 **under-rooting bug** (it ships the fi02 defect — §2.3). The corrected mechanism:
@@ -209,24 +220,27 @@ mechanism-ambiguous**, and reading it as "root validity on the slice's recorded 
   re-derivation reproduces byte-identical ids — adding **zero** invalidation precision; given a changed hash it
   is already a warm miss. So they CANNOT be the rail.
 - The only gate the validator can evaluate cheaply on a warm read is the **whole-function
-  `flow_body_stable_hash`**: it is computed ONCE during shallow analysis and lives in/under `IndexedReady`
-  (eagerly available, no re-plan), body-SENSITIVE and cosmetic-INSENSITIVE.
-  `StoreView::validates_program_analysis_domain` re-derives the live function's `flow_body_stable_hash` from the
-  current `FunctionFlowGraph` and **fails closed** on any mismatch. Because it is WHOLE-BODY-sensitive it busts
+  `flow_body_stable_hash`**: it is computed ONCE per function content version by the **authoritative
+  structural flow-body producer** — the query-independent per-function structural artifact whose storage
+  shape (share vs. split with the callable inventory) and build timing (eager vs. lazy, once per content
+  version from the retained snapshot) are settled by the share-vs-split condition below, NOT by this rail —
+  available on the warm path without re-planning the slice, body-SENSITIVE and cosmetic-INSENSITIVE.
+  `StoreView::validates_program_analysis_domain` re-derives the live function's `flow_body_stable_hash` from
+  that producer's current artifact and **fails closed** on any mismatch. Because it is WHOLE-BODY-sensitive it busts
   on the **INTRODUCTION** of an effect the old slice never traversed — not merely on a change to an
   already-selected one. That is what makes both fi01 and fi02 sound.
 
 ### 2.2 THE FINAL ROOTING RULE (the analog of `self_root_canonicals` + `facts`)
 
 > A `FlowReturn` / `FlowNarrowingAt` value is version-rooted by
-> `FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef { function_slot, projection_path,
-> flow_body_stable_hash, slice_semantic_hash })` **plus** the union of every consumed sub-dispatch's
+> `FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function,
+> flow_body_stable_hash })` **plus** the union of every consumed sub-dispatch's
 > `ReadSetSignature.facts` — notably the consumed `ResolveCall` fact-set (for predicate/assertion carriers and
 > cross-file callee signatures), the consumed closure/callee **effect-summary** facts, and
 > `Member` / `MemberPresence` / `LibIntrinsic` / `TypeEnvOptions` / route / project-generation facts.
 > Warm-read validity is the **conjunction**:
-> - **(a)** the live function's `flow_body_stable_hash` (re-derived from the current `FunctionFlowGraph` in
->   `IndexedReady`, available WITHOUT re-planning the slice) **equals** the recorded `flow_body_stable_hash` —
+> - **(a)** the live function's `flow_body_stable_hash` (re-derived from the authoritative structural
+>   flow-body producer's current artifact, available WITHOUT re-planning the slice) **equals** the recorded `flow_body_stable_hash` —
 >   the **SOLE intra-function invalidation gate**, whole-body, fail-closed; **AND**
 > - **(b)** every consumed fact in the unioned `ReadSetSignature.facts` revalidates against the live
 >   `StoreView` — the **cross-function / cross-file gate**.
@@ -455,7 +469,7 @@ EXERCISED here (owned at U2.RELATION_INFER) and must not be regressed.
 | typed-IR-only | the OXC scanner (`infer_return_type` et al., LIVE in `type_eval_build.rs`) is DELETED in U6.FLOW_RETURN_SUBSTRATE; no source-slicing / regex / `parse_type_annotation` at query time. |
 | `ProgramAnalysisGraph`, never `GraphTypeNode` | flow/narrowing/predicate/contextual facts publish through `ProgramAnalysisGraph` (qvd §2.2); predicate/assertion carriers are `SignatureEffect` metadata, never a published return-type node. |
 | R21 five split env hashes | `FlowReturnContext` / `ResolveCallContext` / `RelationContext` / `ProgramAnalysisContext` carry `R T L J` (+ `P` where the producer reads parse-env) split, never a bundled `project_config_hash`. |
-| R6 version-rooting on the value | the `FlowReturn` / `ResolveCall` query-identity keys carry NO `flow_body_stable_hash` / `parse_stable_hash` / `fact_dep_signature`; the body hash rides the content-addressed `FlowSliceHashNode` artifact node + the `FlowSlice` fact's `FactVersionRef::ProgramAnalysis` (the documented two-family split — content-addressed artifact caches DO carry the body hash, query-identity caches do NOT). No violation. |
+| R6 version-rooting on the value | the `FlowReturn` / `ResolveCall` query-identity keys carry NO `flow_body_stable_hash` / `parse_stable_hash` / `fact_dep_signature`; the body hash rides the content-addressed `FlowSliceHashNode` artifact node + the SOLE version-rooting ref `ProgramAnalysisFactRef::FlowBody` (the `FlowSlice` fact stays a candidate discriminator; the documented two-family split — content-addressed artifact caches DO carry the body hash, query-identity caches do NOT). No violation. |
 | shallow-by-default | `ReturnType<typeof callee>` projector admission is path-precise; no eager body expansion. |
 | one shared `CheckerReentryStack` | the `FlowReturn` / `ResolveCall` / `ContextualTypeAt` / `FlowNarrowingAt` typed views are wired onto the U2/RI-3-built stack AT U6; U6 owns `checker_reentry_graph_spans_flow_call_contextual_narrowing` + `cross_engine_cycle_discharge_admits_only_stable_deterministic_results`. |
 
@@ -498,10 +512,379 @@ the absence of any depth counter on the flow-return path regardless.
 
 ---
 
+## Substrate consumption contract (NORMATIVE — the interface the call path consumes)
+
+This section is the ratified consumption contract between the flow-return substrate
+(`U6.FLOW_RETURN_SUBSTRATE`, the producer) and the call path (`U6.CALL_RESOLVE`, the consumer). The
+authorities above and in the parent subplan describe how flow results are PRODUCED; this section defines the
+interface REQUIRED to replace the live call path, so that neither a second whole-body evaluator nor a graph
+substrate that cannot serve the already-reviewed consumers can land. `docs/arch/native-flow-return.md`
+IMPLEMENTS this contract; it MUST NOT restate it. The reviewed consumers this contract must serve are the
+`U6.CALL_RESOLVE` sources (`project_semantic_dispatch/call_resolve.rs`, `dispatch_txn.rs`, `relation.rs` on
+branch `block/u6-call-resolve`); the landed producer substrate is the whole-function `FlowReturn` authority in
+the main tree (`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`,
+`crates/verter_session/src/flow_ir.rs`, `crates/verter_semantic/src/analysis/function_program.rs`). Where the
+landed tree diverges from a point below, the divergence is RECORDED here, not silently reconciled.
+
+Throughout this section the live whole-body evaluator (`WholeFunctionFlowIrNode`,
+`crates/verter_session/src/flow_ir.rs`) is **interim, discard-class evidence** — it records where the tree
+diverges from this contract, and it is **NEVER normative authority**. It is divergence evidence, not the
+producer authority; the demand-sliced substrate is the producer authority, and `U6.FLOW_RETURN_SUBSTRATE`
+deletes the evaluator.
+
+### C1 — `FlowReturn` as a dispatchable key over a content-free function slot
+
+**Consumer demand.** `CALL_RESOLVE` demands one whole-function return per selected body-derived signature:
+`execute_flow_return(flow_return_key_for_instantiation(identity, ordered_args, substitution))`
+(call_resolve.rs:1971–1976 on `block/u6-call-resolve`), and reads `{ return_type, can_fall_through }`.
+
+**Producer guarantee.** `SemanticQueryKey::FlowReturn(Box<FlowReturnKey>)`
+(`crates/verter_session/src/semantic_query.rs:6431`) dispatches through the ONE
+`ProjectSemanticDispatch::execute` path (`build_flow_return`,
+`project_semantic_dispatch/flow_return.rs:336`); the key is content-free over
+`FlowFunctionSlotIdentity` (`semantic_query.rs:1356` — `ResolvedDeclSlotIdentity` +
+`FunctionPartIdentity` + `overload_ordinal`); reentry identity on the obligation runtime IS the key exactly
+(`semantic_query.rs:1459`). The contract value is the SUCCESS carrier `FlowReturnResult { return_type,
+can_fall_through, degradation: Option<FlowReturnDegradation> }` (value-side metadata below); the landed
+struct (`semantic_query.rs:1476`) carries `{ return_type, can_fall_through }` today.
+
+**Key surface vs. consumption point (the required distinction).** The consumer's demand is the
+whole-return / empty-input POINT; the substrate's key surface MUST nevertheless retain every demand/input
+axis. Concretely:
+
+- The full `FlowReturnKey` surface retains the demand axis (`ReturnProjectionDemand`) and the input axis
+  (`FlowInputContext`) locked in `native-flow-return.md` §"`FlowReturn` key shape", IN ADDITION to
+  `function` / `normalized_type_args` / `context` — because the later blocks thread them:
+  `U6.CONTEXTUAL_CALLBACK` distinguishes two re-entries differing only in contextual callback input
+  signature via `input`, and path-precise projection (`ReturnType<typeof f>['b']`) enters via `demand`.
+  Collapsing the key to the whole-return-only surface would force a cache re-key when those blocks land
+  (forbidden — additive variants in the U2-finalized shape, no re-key) and would collide distinct
+  re-entries on the obligation runtime (the sentinel-masking hazard recorded in `native-flow-return.md`
+  §"Mutual recursion").
+- `CALL_RESOLVE` passes exactly `demand = WholeReturn` and `input = FlowInputContext::empty()` — a POINT in
+  the key lattice, never a private narrower key type and never an implicit default that erases the axes.
+- **Recorded divergence.** The landed `FlowReturnKey` (`semantic_query.rs:1459`) carries NO `demand` /
+  `input` fields today ("There is NO demand path, projection mode, callback input" — its own doc), and no
+  `WholeReturn` / `FlowInputContext` symbol exists in either tree. The landed key IS the degenerate
+  whole-return-only surface. `U6.FLOW_RETURN_SUBSTRATE` OWES the two axes as key fields (with the
+  whole-return / empty-input values as the canonical degenerate point) before any narrower-than-whole-return
+  demand ships; until then the whole-return arm is the only live point and `CALL_RESOLVE`'s consumption is
+  already at the required point.
+
+**Value-side metadata — the split result/carrier model.** Degraded SUCCESS and no-value FAILURE are
+DIFFERENT public outcomes and MUST NOT be conflated:
+
+- `FlowReturnResult` retains `{ return_type, can_fall_through, degradation: Option<FlowReturnDegradation> }`.
+  A degraded-success result — a usable value, e.g. a successful `Unknown` with a typed degradation reason —
+  returns through this SUCCESS carrier and defaults to `ReturnOnly`; it may warm ONLY if a later explicit,
+  fact-rooted admission-table row authorizes that exact degradation.
+- `FlowReturnFailure` (`semantic_query.rs:1486`) remains for genuine NO-VALUE outcomes only — missing
+  function, cancellation, budget exhaustion, torn state, irrecoverable undecidability — carried through
+  `ReturnOnly`, never admitted, never a cache value. `FlowReturnFailure` MUST NOT be substituted for
+  degraded-success metadata: it cannot represent a successful `Unknown` with a typed degradation reason.
+- The signature/satisfaction/admission metadata rides the published-value CARRIER, not the domain result
+  (accepted — better than duplicating it per domain): a cacheable publication carries `ReadSetSignature`
+  (`crates/verter_workspace/src/fact_cache.rs:188`, admission-typed as `SignatureAdmission::{Cacheable,
+  NonCacheable}` — `fact_cache.rs:293`), the actual `satisfied_projection: MaterializedSet`
+  (`semantic_query_memo/family.rs:82`, flow's modeless point minted in
+  `semantic_query_memo/flow_return_memo.rs:20`), self roots, and publication metadata through
+  `MemoEntry`/`PublishedMemoCandidate { read_set_signature, self_root_canonicals, validated_at_generation,
+  admission_seq }` (`semantic_query_memo/mod.rs:620`); a refusal carries its typed `NonAdmissionReason`.
+
+**Recorded divergence:** the landed `FlowReturnResult` carries `{ return_type, can_fall_through }` only and
+no `FlowReturnDegradation` type exists in either tree — `U6.FLOW_RETURN_SUBSTRATE` OWES the `degradation`
+field and the `FlowReturnDegradation` type. The landed failure-only discipline is NOT stronger than the
+locked degraded-success value contract: a no-value failure and a usable degraded value are different public
+outcomes, and the failure type cannot carry the second one.
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` (key axes, value carrier); `U6.CALL_RESOLVE` (the whole-return /
+empty-input consumption point).
+
+### C2 — Served-callable-position inventory
+
+**Consumer demand.** Resolve `(owner, name, space, FunctionPartIdentity, overload_ordinal)` → position /
+params / type-params / declared return / `flow_body_stable_hash`, plus call-span → same-file served
+position, without re-walking the AST.
+
+**Producer guarantee.** The per-file `FunctionProgramIndex`
+(`crates/verter_semantic/src/analysis/function_program.rs:264`) is the ONE inventory: `get(FunctionProgramKey)`
+(:272) covers the full five-axis identity (`FunctionDeclarationRef { owner, name, space }` + `part` +
+`overload_ordinal`), `value_function` (:279) is the value-space convenience lookup; each
+`FunctionProgramEntry` (:235) carries the body locator (position), `params`, `bindings`, `references`,
+`return_sites`, `writes`, `effects`, `control`, `direct_calls`, and `flow_body_stable_hash`. It is built in
+ONE structural walk with no lowering and no type resolution (`build_function_program_index`, :323).
+
+- **Type-params and declared return are resolved, not entry-stored.** The inventory entry does NOT carry
+  type-parameters or a declared return; they resolve from the adjacent prepared-declaration fact rail keyed
+  by the same slot — `NarrowTypeParam` / `TypeParamDeclFact` (content-free bound locators) and
+  `FunctionReturnSource::Declared(locator)` (`crates/verter_type_expr/src/facts.rs:1774`). The contract
+  requires the RESOLUTION to exist from the five-axis identity; it does not mandate entry-embedding, and
+  embedding lowered types in the inventory is FORBIDDEN (it would break the type-lowering-free condition of
+  the share-vs-split test below).
+- **Call-span → same-file served position.** Landed as `FunctionDirectCall { span, target }`
+  (function_program.rs:225 — bare-identifier direct calls only). The reviewed consumers unify this as
+  `FunctionCallSiteRecord { span, callee, target: Option<FunctionProgramKey>, args }` (function_program.rs:218
+  on `block/u6-call-resolve`) — the single call record every call-shaped consumer reads. `U6.CALL_RESOLVE`
+  lands that unification; a second, per-consumer call-site index is FORBIDDEN.
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` (inventory + hash); `U6.CALL_RESOLVE` (the unified call-site record).
+
+### C3 — Content-free expression-site evaluation as a callable evaluation
+
+**Consumer demand.** Evaluate an expression at a content-free `ProgramPointId`
+(`semantic_query.rs:5224` — `(canonical_id, offset)`) to a `SemanticNodeId`, callable directly (call
+arguments, inferred-declaration initializers), NOT reachable only as the interior of a return-site slice.
+
+**Producer guarantee.** One evaluation entry over the indexed program-expression record:
+`FunctionProgramIndex::expression(ProgramExpressionIdentity)` → `ProgramExpressionRecord { point, span,
+locator, source: ProgramExpressionSource::{Value, SemanticCall, FunctionReturn, UnsupportedCall} }`
+(function_program.rs:236/258/437 on `block/u6-call-resolve`), consumed through
+`evaluate_indexed_value_expression_node` (flow_return.rs:147 on `block/u6-call-resolve`; calls route ONLY
+through `ResolveCall`, a non-result is a typed miss, no scanner/raw-expression fallback) and
+`execute_semantic_expression_source` (flow_return.rs:251). `ProgramExpressionIdentity`
+(`verter_type_expr/src/facts.rs:1577` on `block/u6-call-resolve`) is content-free.
+
+**Recorded divergence (the measured "five non-flow consumers" claim).** The claim does not reproduce as
+stated. Verified counts:
+
+- The landed CALLABLE evaluation entry is the whole-function one, `execute_function_return_source`
+  (`project_semantic_dispatch/flow_return.rs:157`), with FIVE production call sites, FOUR of them non-flow:
+  `project_semantic_dispatch/semantic_source_compose.rs:706` (interior `ReturnType` composition),
+  `project_semantic_dispatch/locator_shape.rs:1166` (locator-shape composition),
+  `project_semantic_dispatch/lower.rs:2233` (function/arrow value lowering), and
+  `typeinfo/vue_macro_codegen/tsc_projection.rs:749` (class-inference return position); the fifth
+  (`project_semantic_dispatch/flow_return.rs:1427`) is the flow evaluator's own symbolic-call thread.
+- EXPRESSION-site evaluation at a `ProgramPointId` exists ONLY on `block/u6-call-resolve`, with two
+  consumers there: the prepared-declaration `expression_source` path
+  (`project_semantic_dispatch/build.rs:745` — non-flow) and call-argument acquisition
+  (`call_resolve.rs:1331`). It has ZERO consumers in the main tree today.
+
+The normative requirement stands regardless of the count: the expression-site evaluation MUST be exposed as
+a callable evaluation (the C3 entry points above), because non-flow consumers (C3's `build.rs:745` class and
+the four C1-adjacent callable-evaluation consumers) demand evaluation outside any return-site slice.
+
+The evaluation entry MUST return a typed outcome — `Complete(node) | ReturnOnly(reason) | ProvenAbsent`, or
+an equivalent typed three-way carrier — with the consumed facts/completeness bubbled into the enclosing
+query. A bare `Option<SemanticNodeId>` plus a side-channel partial marker is INSUFFICIENT: it loses
+admission state. (The three-way outcome carrier is OWED — it does not exist in either tree;
+`U6.FLOW_RETURN_SUBSTRATE` owns the entry's outcome type, `U6.CALL_RESOLVE` the call arm.)
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` (the indexed expression records + the evaluation entry);
+`U6.CALL_RESOLVE` (the `ResolveCall`-routed call arm).
+
+### C4 — In-body call sites surface as `ResolveCall` demands with EXACT key reconstruction
+
+**Consumer demand.** An in-body call site reaches the executor as a `ResolveCall` demand reconstructing
+EXACTLY the `ResolveCallKey` that `execute_resolve_call` (call_resolve.rs:96 on `block/u6-call-resolve`)
+accepts — byte-identical identity, because the reentry identity on the obligation runtime IS the key and a
+near-miss reconstruction forks the cycle space.
+
+**The final governing key.** The locked U6 design (§1.1 — the SAME shape, one key statement) defines the
+final identity; `U6.CALL_RESOLVE` implements it:
+
+```text
+ResolveCallKey {
+  point, callee,
+  call_kind: Call | New | TaggedTemplate | Decorator | JsxFactory,
+  receiver_this, args, explicit_type_args,
+  contextual_result, policy, flow, context,
+}
+```
+
+`args` MUST distinguish EAGER type identities from CONTEXT-SENSITIVE expression identities carrying
+`ProgramPointId`, spread/literal authored form, flow narrowing, substitution-at-typing-time, binder
+identity, and the resolved contextual-target identity (§1.3). `point` and the sealed-empty `flow` axis are
+ADDITIONS to Decision 1; its wider call kind, `contextual_result`, and `policy` axes are IMMEDIATE
+`U6.CALL_RESOLVE` obligations — not unspecified future re-keying. Current branch narrowness is not evidence
+those axes are unnecessary.
+
+**Reconstruction evidence (the reviewed narrower key — it governs reconstruction evidence ONLY, never
+final identity).** The reviewed key is `ResolveCallKey { point: ProgramPointId, callee: SemanticNodeId,
+kind: CallKind::{Call, Construct}, receiver: Option<SemanticNodeId>, args: Arc<[CallArgKey]>,
+explicit_type_args, flow: FlowNarrowingKey (SEALED-EMPTY until non-empty narrowing lands), context:
+ResolveCallContext }` (worktree `semantic_query.rs:1677`), with `CallArgKey::{ Eager, ProgramExpression }`
+(:1599) carrying `spread` / `literal_mode` / `context_sensitive` as authored-form facts. It lacks the
+`contextual_result` and `policy` axes and carries a two-arm `CallKind` — divergences from the final key
+recorded here, discharged by `U6.CALL_RESOLVE` landing the full axis set. What it DOES evidence is the
+reconstruction discipline: reconstruction routes through ONE shared derivation set —
+`resolve_call_context_for` for the context, `FlowNarrowingKey::empty()` for the sealed axis, interned nodes
+for callee/receiver/eager args, `ProgramPointId` for expression args — exactly as
+`evaluate_indexed_value_expression_node` does (worktree flow_return.rs:221–241). A consumer-private key
+constructor is FORBIDDEN. SCC-6 tests EVERY final axis and the one shared reconstruction function.
+
+Owner: the locked U6 design (the final key shape); `U6.CALL_RESOLVE` (implementation + reconstruction).
+
+### C5 — Coinductive obligation domains, SCC close, the mixed return equation, staged commit/replay
+
+**Consumer demand.** `FlowReturn` and `ResolveCall` are coinductive obligation domains on ONE runtime:
+same-component re-entry records an assumption and returns a hold (never self-await, never budget-spin);
+the mixed `FlowReturn ↔ ResolveCall` component closes as one SCC; the mixed return-equation fixpoint
+resolves held returns (`solve_return_equation`, worktree `project_semantic_dispatch/return_equation.rs:22`,
+over `ReturnEquationMember { fresh_literal_returns, identity, concrete_seeds, holds, domain }` and
+`ReturnObligationIdentity::{FlowReturn, ResolveCall}` — worktree dispatch_txn.rs:1864/1878); candidate
+inference sessions stage and commit atomically (`InferenceSessionState::{Collecting, StagedDeterministic,
+CommittedDeterministic, Abandoned}`, `commit_completed`, worktree dispatch_txn.rs:927/1574) with
+relation-only assumptions forcing an applicability REPLAY at the component root before the equation runs
+(`ResolveCallPendingState { staged_session, replay_applicability, .. }`, worktree dispatch_txn.rs:715–735).
+SCC-closed members drain onto the root's committing admission as fenced backfill
+(`CompletedFlowReturnMember` / `CompletedResolveCallMember`, `flow_return_drain_completed_members` —
+main-tree flow_return.rs:270), never a second commit boundary; a `ReturnOnly` root releases the batch
+without publish.
+
+**Producer guarantee — the runtime's authority must be PROVEN, not assumed.** The landed tagged obligation
+runtime (`CheckerDispatchTransaction` / `ObligationRuntime` / `ObligationReentryStack`,
+`project_semantic_dispatch/dispatch_txn.rs`; live domains `ObligationIdentity::{Relate, FlowReturn}`,
+dispatch_txn.rs:187–198) is the de-facto `CheckerReentryGraph`. It is REUSABLE EVIDENCE, not automatically
+the authority: before `U6.CALL_RESOLVE` lands on it, it must prove it is the ONE shared
+relation/flow/call runtime by showing, with discriminating tests:
+
+1. ONE `CheckerDispatchTransaction` owns ONE generic obligation stack/ledger used by `Relate`,
+   `FlowReturn`, and `ResolveCall` (later the `ContextualTypeAt` / `FlowNarrowingAt` views); no second
+   relation stack, TLS cycle set, or flow depth sentinel participates (Decision 6.1);
+2. a REAL mixed `Relate → ResolveCall → FlowReturn → Relate` cycle closes as ONE SCC through the same
+   lowlink and assumption storage — identical APIs over separate stacks do NOT satisfy this; the proof
+   must exercise a real mixed component containing all three current domains;
+3. each node uses its FULL normalized identity, including transient inference occurrence/session identity
+   where required;
+4. no member publishes before the component root commits; any unknown, abandoned, superseded, budgeted, or
+   nonconvergent member releases the ENTIRE component without publication (the D1 predicate
+   `admit ⇔ winner ∧ CompletedDeterministic`; every other state is `ReturnOnly`);
+5. staged applicability replay starts from a FRESH collecting session, reproduces the winner and
+   substitution, and only then permits the mixed return equation and atomic drain.
+
+The deferred guards `checker_reentry_graph_spans_flow_call_contextual_narrowing` and
+`cross_engine_cycle_discharge_admits_only_stable_deterministic_results` (owned by `U6.CALL_RESOLVE`)
+contribute acceptance evidence, but naming those two broad guards ALONE is insufficient — relation merely
+ADJACENT to the flow/call runtime is not proven inside the same topology by them; SCC-7's mixed-component
+demonstration of 1–5 is the required proof. A runtime that cannot pass it is not the authority, whatever
+landed first.
+
+Owner: `U6.CALL_RESOLVE` (consumer/reentry guarantees, the equation, staged commit/replay);
+`U6.FLOW_RETURN_SUBSTRATE` (the flow domain's frames and SCC close).
+
+### C6 — `this`-binding and capture environments at served positions
+
+**Consumer demand.** At a served position the consumer can see the position's `this` binding and its
+capture environment as SLICE-VISIBLE INPUTS: typed inputs the evaluation reads, never hidden globals and
+never silent re-derivation per site.
+
+**Producer guarantee.** The stored `this` representation is CONTENT-FREE `this` source/identity/locator
+facts, lowered LAZILY only when the selected slice actually evaluates — a stored `Option<TypeExpr>` is
+FORBIDDEN at this layer (it would fail the type-lowering-free storage condition of the share-vs-split
+section by construction). `FlowIrExpr::This` rehydrates from those facts at slice-evaluation time;
+`FlowIrExpr::Capture { name }` (worktree flow_ir.rs:282) rehydrates from the enclosing frame's indexed
+binding facts under the final substitution; a non-reconstructible `this`/capture is a typed `ReturnOnly`,
+never a guessed `any`. The content-free position-level capture identity is
+`FunctionProgramEntry.captures: CanonicalCaptureIdentity` over
+`FlowBindingIdentity { name, kind, defining_function, binding_slot }` (worktree function_program.rs:275/292).
+These are position facts and IR inputs, NOT key axes today; when the C1 demand/input axes land, `this` /
+capture identities enter the key surface only through those defined axes. **Recorded divergence:** the
+reviewed worktree stores `WholeFunctionFlowIrNode.this_binding: Option<TypeExpr>` (worktree
+flow_ir.rs:152/288) — interim discard-class divergence evidence, NOT the contract shape — and the main-tree
+flow IR has neither `This` nor `Capture` carriers. `U6.FLOW_RETURN_SUBSTRATE` owes the content-free `this`
+source/identity/locator facts plus the `This`/`Capture` carriers; `U6.CALL_RESOLVE` owes the receiver
+threading.
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` (position facts + IR carriers); `U6.CALL_RESOLVE` (receiver threading via
+`ResolveCallKey.receiver_this`).
+
+### C7 — The `FlowBody` fact rail as sole intra-function warm gate (clarified)
+
+Per the ruling clarifying this point: `FlowSlice` remains the recorded fact / candidate DISCRIMINATOR, while
+`ProgramAnalysisFactRef::FlowBody` MAY remain the SOLE intra-function validation rail; slice hashes and
+selected IDs MUST NOT become a second warm-validity oracle. Concretely:
+
+- The landed rail is `ProgramAnalysisFactRef::FlowBody { function: ProgramAnalysisFunctionRef,
+  flow_body_stable_hash }` (`crates/verter_workspace/src/fact_cache.rs:120–129`) — the only
+  `ProgramAnalysis` variant in the tree; validation compares the recorded hash against the authoritative
+  structural flow-body producer's live artifact (Decision 2 — the landed producer today is
+  `FunctionProgramIndex`, a recorded implementation fact that decides NEITHER eager/lazy build timing NOR
+  share/split storage; env-free, content-free ref — `FlowFunctionSlotIdentity::program_analysis_ref`,
+  `semantic_query.rs:1374`). This IS the Decision 2 rail: whole-body, fail-closed, plus the unioned consumed
+  `ReadSetSignature.facts` as the cross-function gate.
+- When the demand-sliced substrate lands, the `FlowSlice` fact (`native-flow-return.md`) is recorded as a
+  candidate-selection discriminator under the same slot. It does not replace `FlowBody` as the validation
+  rail, and re-deriving `slice_semantic_hash` / `selected_*_ids` on a warm read as an independent gate is
+  FORBIDDEN (Decision 2.2: cache-defeating re-planning or a no-op masquerading as a rail). `FlowSlice`
+  remains FUTURE owed work (owner `U6.FLOW_RETURN_SUBSTRATE`); its absence from both trees is correctly
+  recorded here and does not weaken this rail.
+- `FlowSliceHashNode` hashes and per-candidate selected IDs MUST NOT be consulted by
+  `validates_program_analysis_domain` (or any warm-read validator) as a second validity oracle; they
+  discriminate candidates and key content-addressed artifacts only.
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` (the rail + the future discriminator recording);
+`U6.NARROW_INVALIDATION` (the rail's discriminating fixtures, per Decision 2).
+
+### Skeleton/index storage: share vs. split — a TESTABLE condition, settled by building
+
+The callable inventory (`FunctionProgramIndex`) and the flow graph/skeleton MAY share storage ONLY if the
+shared artifact satisfies ALL of, as executable checks:
+
+1. **Structural and query-independent** — it may be built eagerly or lazily ONCE per file/function content
+   version from the retained snapshot, but never rebuilt per query or demand.
+2. **Arena-free** — `Send + Sync + 'static`; no retained OXC borrow (the existing
+   `flow_slice_ir_detaches_from_oxc_arena` class of check).
+3. **Type-lowering-free** — inventory/graph construction produces ZERO type lowering, resolution dispatch
+   (`Relate` / `Instantiate` or any other `SemanticQueryKey` execution), route lookup, or imported-fact
+   production (the `flow_graph_build_is_shallow_interned_no_lowering` check class).
+4. **One graph build** — one construction per function per content version; subsequent demands re-plan
+   reachability only (the `function_flow_graph_built_once_per_function_skeleton` check class).
+5. **Discriminating member-slice non-materialization** — the `ReturnType<typeof myType>['b']` acceptance
+   fixture materializes no sibling and no `Mytype` fact through the shared storage.
+
+At this layer `this` and captures are represented as CONTENT-FREE facts/locators (C6) — never stored
+lowered types. Each of the five conditions has a discriminating executable guard; SCC-10 records those
+guards' RESULTS as implementation evidence — it does not duplicate this interface contract.
+
+Any failed condition forces a split; a shared implementation passing all five is EQUALLY conforming. This
+contract does not decide the outcome — static measurement cannot (adjudicated above); only building settles
+it. **No compatibility evaluator may influence the choice:** the interim whole-body evaluator
+(`WholeFunctionFlowIrNode` and its reuse of the scanner's expression lowering,
+`crates/verter_session/src/flow_ir.rs:50–52`) is exactly such an evaluator — discard-class divergence
+evidence, never producer authority; its convenience, layout, or call pattern is INADMISSIBLE as evidence
+for either storage shape.
+
+Owner: `U6.FLOW_RETURN_SUBSTRATE` decides at implementation, recording the five guard results; U0 registers
+the guards.
+
+### Owners
+
+| Surface | Owner |
+|---|---|
+| The interface (this section; C1–C7 shapes — including the final C4 `ResolveCallKey` — and their divergence records) | the locked U6 cross-cutting design (this doc) |
+| Producer guarantees (C1 key axes + value carrier, C2 inventory, C3 evaluation entries, C6 position facts, C7 rail, share-vs-split) | `U6.FLOW_RETURN_SUBSTRATE` |
+| Consumer / reentry guarantees (C1 consumption point, C2 unified call record, C4 exact reconstruction, C5 equation + staged commit/replay + runtime authority proof) | `U6.CALL_RESOLVE` |
+| Jointly-owned criteria (SCC-1 key surface + consumption point; SCC-5 evaluation entry + call arm) | `U6.FLOW_RETURN_SUBSTRATE` + `U6.CALL_RESOLVE` |
+| SCC-7 runtime authority proof | `U6.CALL_RESOLVE` (primary), with flow-frame/SCC-close evidence supplied by `U6.FLOW_RETURN_SUBSTRATE` |
+| SCC-9 sole-rail check | `U6.FLOW_RETURN_SUBSTRATE` + `U6.NARROW_INVALIDATION` (co-owned) |
+| Executable registration throughout (manifest rows, every SCC criterion, and every named guard in this section — plus `mechanism_id` / `consumed_mechanisms` metadata feeding the U0 DAG guard) | U0 manifest extension |
+
+### Acceptance criteria (each executably checkable)
+
+| ID | Check | Owner |
+|---|---|---|
+| SCC-1 | `FlowReturn` key-surface guard: the key retains demand/input axes; two keys differing only in `demand` or `input` hash unequal; `CALL_RESOLVE`'s demand constructs the whole-return / empty-input point through the shared constructor (extends `flow_return_key_covers_input_context_and_projection_demand`). | U6.FLOW_RETURN_SUBSTRATE + U6.CALL_RESOLVE (jointly owned) |
+| SCC-2 | Split result/carrier model: a cacheable published `FlowReturn` value carries `ReadSetSignature`, the actual `satisfied_projection`, self roots, and publication metadata through `MemoEntry`/`PublishedMemoCandidate`; a refusal carries its typed `NonAdmissionReason`; a degraded-success result returns through the SUCCESS carrier (`FlowReturnResult.degradation`) and defaults to `ReturnOnly`; a typed `FlowReturnFailure` covers no-value outcomes only. The test proves BOTH semantic outcome preservation (degraded success stays a usable success; failure stays no-value) AND zero memo/fact/reverse-index writes for every `ReturnOnly` route. | U6.FLOW_RETURN_SUBSTRATE |
+| SCC-3 | Inventory resolution test: `(owner, name, space, part, overload_ordinal)` resolves position/params/`flow_body_stable_hash` from the callable inventory and type-params/declared-return from the prepared-decl rail, with zero AST re-walks (fact-trace-asserted). | U6.FLOW_RETURN_SUBSTRATE |
+| SCC-4 | Call-span lookup: every indexed call site resolves through ONE record family (`FunctionCallSiteRecord`); no second call-site index exists. Lexical-scope and hoisting correctness is proven: a nested same-name function SHADOWS outer candidates; direct recursion resolves exactly; an unserved nested target FAILS CLOSED and never falls back to an outer same-name function. | U6.CALL_RESOLVE |
+| SCC-5 | Expression-site evaluation is callable at a bare `ProgramPointId` outside any return-slice (the `build.rs` `expression_source` class fixture) and routes calls only through `ResolveCall` (no scanner fallback on that path). The entry returns a typed outcome `Complete(node) \| ReturnOnly(reason) \| ProvenAbsent` (or equivalent) with consumed facts/completeness bubbled into the enclosing query; a bare `Option<SemanticNodeId>` plus a side-channel partial marker is INSUFFICIENT. | U6.FLOW_RETURN_SUBSTRATE (the evaluation entry) + U6.CALL_RESOLVE (the call arm) — jointly owned |
+| SCC-6 | `ResolveCallKey` reconstruction: the key built from an in-body indexed call site equals the executor-accepted key (equality-asserted) through ONE shared reconstruction function; EVERY final key axis is tested (`point`, `callee`, `call_kind`, `receiver_this`, `args`, `explicit_type_args`, `contextual_result`, `policy`, sealed-empty `flow`, derived `context`); the unified call record provably retains call kind, receiver, explicit type args, ordered arguments, authored spread/literal/context-sensitive facts, and the exact program points reconstruction uses. | U6.CALL_RESOLVE |
+| SCC-7 | Runtime authority proof over a REAL mixed component (C5 items 1–5): ONE `CheckerDispatchTransaction` owns ONE generic obligation stack/ledger used by `Relate`, `FlowReturn`, and `ResolveCall` — no second relation stack, TLS cycle set, or flow depth sentinel participates; a real `Relate → ResolveCall → FlowReturn → Relate` cycle closes as ONE SCC through the same lowlink and assumption storage; each node uses its full normalized identity (incl. transient inference occurrence/session identity where required); no member publishes before the component root commits, and any unknown/abandoned/superseded/budgeted/nonconvergent member releases the ENTIRE component without publication; staged applicability replay starts from a fresh collecting session, reproduces winner + substitution, and only then permits the mixed return equation and atomic drain. `checker_reentry_graph_spans_flow_call_contextual_narrowing` + `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` supplement this; alone they are insufficient. | U6.CALL_RESOLVE (primary), flow-frame/SCC-close evidence supplied by U6.FLOW_RETURN_SUBSTRATE |
+| SCC-8 | `this`/capture visibility: a served position exposes the content-free `this` facts and `captures`; a non-reconstructible `this`/capture is a typed `ReturnOnly` (never `any`). | U6.FLOW_RETURN_SUBSTRATE |
+| SCC-9 | Sole-rail check: warm `FlowReturn` validity consults `FlowBody` + consumed facts ONLY; a probe asserting slice-hash / selected-ID consultation on the warm path fails the build (extends `flow_narrowing_roots_on_body_stable_hash_not_per_slice`). | U6.FLOW_RETURN_SUBSTRATE + U6.NARROW_INVALIDATION (co-owned) |
+| SCC-10 | Share-vs-split record: the five storage conditions' discriminating guards run against the landed artifact and their RESULTS are recorded in the `U6.FLOW_RETURN_SUBSTRATE` contract as implementation evidence (not a duplicate of the interface contract); a shared artifact failing any condition fails the gate. | U6.FLOW_RETURN_SUBSTRATE |
+
+U0 owns executable registration throughout: every criterion above and every named guard in this section is
+registered as a manifest/guard row by the U0 manifest extension. Per the Now-landable-guard decision below,
+none of the variant-naming checks can land before its variant does — each is SPECIFIED here and lands WITH
+the behavior it tests.
+
+---
+
 ## Implementation mini-DAG (U6 sub-blocks)
 
 ```
-U6.FLOW_RETURN_SUBSTRATE                 ← U2.QUERY_VALUE_DOMAIN, U2.RELATION_INFER, U4
+U6.FLOW_RETURN_SUBSTRATE                 ← U2.QUERY_VALUE_DOMAIN, U2.RELATION_INFER, U4[persistence-only]
    ├── U6.CALL_RESOLVE                   ← FLOW_RETURN_SUBSTRATE, U2.RELATION_INFER, U2.CLASS_SURFACES[shape-only]
    ├── U6.NARROW_{TYPEOF,EQUALITY,TRUTHINESS,IN,INSTANCEOF,DISCRIMINATED,SUBSTITUTION,INVALIDATION}  ← FLOW_RETURN_SUBSTRATE   (mutually independent)
    ├── U6.ASYNC_GENERATOR                ← FLOW_RETURN_SUBSTRATE
@@ -511,6 +894,11 @@ U6.FLOW_RETURN_SUBSTRATE                 ← U2.QUERY_VALUE_DOMAIN, U2.RELATION_
    ├── U6.CROSS_FILE                     ← VALUE_INFERENCE, CALL_RESOLVE
    └── U6.LOOP_CLOSURE                   ← CALL_RESOLVE, PREDICATE_ASSERTION
 ```
+`U4[persistence-only]` is an ARTIFACT-LEVEL edge, not a block-level prerequisite: U4 gates ONLY the
+persistent slice registration (`FlowSliceHashNode` / `FlowSliceLoweredBodyNode` as persistent cache-runtime
+nodes). The memory substrate — everything else `U6.FLOW_RETURN_SUBSTRATE` lands — may proceed without U4.
+U0 records the narrowed edge in the manifest metadata.
+
 Topological order (one valid linearization): FLOW_RETURN_SUBSTRATE → CALL_RESOLVE → {NARROW_*} → ASYNC_GENERATOR
 → VALUE_INFERENCE → PREDICATE_ASSERTION → CONTEXTUAL_CALLBACK → CROSS_FILE → LOOP_CLOSURE. **Acyclic.** Every
 consumed key/mechanism owner is a transitive prerequisite (U0 DAG-guard checks 3/4): CALL_RESOLVE consumes
@@ -603,7 +991,7 @@ The deferred-guard → owner registry below is this gate's landable artifact.
 | `checker_reentry_graph_spans_flow_call_contextual_narrowing` | U6.CALL_RESOLVE | with the 4 wired views |
 | `cross_engine_cycle_discharge_admits_only_stable_deterministic_results` | U6.CALL_RESOLVE | with the cross-engine cycle |
 | `flow_narrowing_roots_on_body_stable_hash_not_per_slice` | U6.NARROW_INVALIDATION | with the narrowing rail |
-| `program_analysis_fact_domain_validates_flow_slice` | U6.FLOW_RETURN_SUBSTRATE | with the `FlowSlice` fact |
+| `program_analysis_fact_domain_validates_flow_slice` | U6.FLOW_RETURN_SUBSTRATE | with the `FlowSlice` discriminator fact (validation runs on the sole `FlowBody` rooting) |
 | `flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash` | U6.FLOW_RETURN_SUBSTRATE | with the key |
 | `no_depth_sentinel_on_flow_return_path` | U6.FLOW_RETURN_SUBSTRATE | with the cycle-id space |
 | `legacy_return_scanner_removed` / `flow_solver_never_slices_source_text` | U6.FLOW_RETURN_SUBSTRATE | with scanner deletion |
@@ -638,7 +1026,10 @@ The deferred-guard → owner registry below is this gate's landable artifact.
 ## Rescope / consumers
 
 - **U6.FLOW_RETURN_SUBSTRATE** owns the demand-sliced flow substrate, the `FlowReturn` variant + value arm, the
-  `FlowSlice` fact + `validates_program_analysis_domain` rail (Decision 2), the scanner deletion + the
+  `FlowSlice` discriminator fact + the flow-fact production/consumption over the SOLE
+  `ProgramAnalysisFactRef::FlowBody` rooting consumed by the landed `validates_program_analysis_domain`
+  rail (Decision 2; schema owned by `verter_workspace`, validation owned and implemented by
+  `verter_session`), the scanner deletion + the
   depth-sentinel retirement (Decision 6.1), the fixation-time contextual pre-binding mechanism (mini-DAG split),
   and the shared `CheckerReentryStack` flow cycle-id view.
 - **U6.CALL_RESOLVE** owns the `ResolveCall` variant + value arm + the speculative-session overload algorithm
