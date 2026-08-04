@@ -2,8 +2,8 @@
 
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Generate "Extract to Component" code action for a selected template range.
 ///
@@ -17,7 +17,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 pub fn extract_component_action(
     source: &str,
     range: &Range,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     line_index: &LineIndex,
     uri: &Uri,
 ) -> Option<CodeActionOrCommand> {
@@ -155,12 +155,12 @@ fn build_sibling_uri(uri: &Uri, component_name: &str) -> Option<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
 
     #[test]
     fn test_extract_component_in_template() {
         let source = "<template>\n  <div>\n    <span>Hello</span>\n  </div>\n</template>\n\n<script setup lang=\"ts\">\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn test_no_extract_empty_selection() {
         let source = "<template>\n  <div/>\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
@@ -214,7 +214,7 @@ mod tests {
     fn test_no_extract_outside_template() {
         let source =
             "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 

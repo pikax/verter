@@ -17,8 +17,12 @@
 use std::sync::Arc;
 
 use verter_type_expr::facts::{
-    InferenceUnavailableReason, ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass,
-    ValueDeclIdentityPart, ValueTypeAnnotationFact,
+    AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, InferenceUnavailableReason,
+    ResolvedLocalTypeFact, SemanticTypeSource, ValueAnnotationClass, ValueDeclIdentityPart,
+    ValueTypeAnnotationFact,
+};
+use verter_type_expr::locators::{
+    AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, TypeArgLocator, TypeBodyPathStep,
 };
 use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
@@ -85,6 +89,7 @@ pub(crate) fn value_type_annotation_fact(
             typeof_alias_target: None,
             classification: ValueAnnotationClass::InferenceUnavailable(reason),
             annotation: None,
+            reference_head: AuthoredReferenceHeadFact::Unavailable,
         };
     }
     let Some(annotation) = annotation else {
@@ -96,6 +101,7 @@ pub(crate) fn value_type_annotation_fact(
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Absent,
             annotation: None,
+            reference_head: AuthoredReferenceHeadFact::NotReference,
         };
     };
 
@@ -121,6 +127,150 @@ pub(crate) fn value_type_annotation_fact(
         typeof_alias_target,
         classification,
         annotation: annotation_source,
+        reference_head: authored_reference_head_fact_with(annotation, |arg_index| {
+            Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
+                anchor: AuthoredAnchor {
+                    canonical_id: Arc::clone(declaring_canonical),
+                    owner,
+                    symbol: Arc::from(own_decl_name),
+                    space: LocatorSymbolSpace::Value,
+                },
+                path: Arc::from([]),
+                arg_index: u32::try_from(arg_index).ok()?,
+            }))
+        }),
+    }
+}
+
+/// Mint the closed authored reference head of a VALUE-SPACE function
+/// signature's AUTHORED return annotation, while the signature producer already
+/// holds the transient lowered return `TypeExpr`.
+///
+/// `anchor` is the owning value declaration's authored anchor and `first_step`
+/// roots the argument locators at the signature's authored position — the same
+/// `(anchor, first_step)` pair the signature's parameter / return body locators
+/// use — so the head's arguments address
+/// `[first_step, FunctionReturn]` at `arg_index`.
+///
+/// The CALLER owns the authorship gate: this entry must be reached only for a
+/// signature whose return annotation was actually authored. Reading the
+/// transient `TypeExpr` here is producer-legal; the produced fact carries none.
+pub(crate) fn signature_return_reference_head_fact(
+    annotation: &TypeExpr,
+    anchor: &AuthoredAnchor,
+    first_step: TypeBodyPathStep,
+) -> AuthoredReferenceHeadFact {
+    authored_reference_head_fact_with(annotation, |arg_index| {
+        Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor.clone(),
+            path: Arc::from([first_step, TypeBodyPathStep::FunctionReturn]),
+            arg_index: u32::try_from(arg_index).ok()?,
+        }))
+    })
+}
+
+/// Mint the closed authored reference head of ONE prepared type-decl MEMBER's
+/// AUTHORED annotation, while the member indexer already holds the transient
+/// declaration body.
+///
+/// `anchor` is the owning declaration's authored anchor and `member_value_path`
+/// is the member's own body path (`[..prefix, Member { ordinal }, MemberValue]`)
+/// — the SAME `(anchor, path)` pair the member's `ty` body locator carries — so
+/// the head's arguments address the authored annotation itself rather than the
+/// declaration body root.
+///
+/// The CALLER owns the authorship gate: this entry must be reached only for a
+/// property member whose `spans.type_annotation` is `Some` — a property's `ty`
+/// is NOT always authored (an initializer-only class field carries an INFERRED
+/// type), and an unauthored member publishes
+/// [`AuthoredReferenceHeadFact::Unavailable`] without reaching here, exactly as
+/// a method member (which has no member type annotation at all) does. Reading
+/// the transient `TypeExpr` here is producer-legal; the produced fact carries
+/// none.
+pub(crate) fn member_annotation_reference_head_fact(
+    annotation: &TypeExpr,
+    anchor: &AuthoredAnchor,
+    member_value_path: &[TypeBodyPathStep],
+) -> AuthoredReferenceHeadFact {
+    authored_reference_head_fact_with(annotation, |arg_index| {
+        Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor.clone(),
+            path: Arc::from(member_value_path.to_vec()),
+            arg_index: u32::try_from(arg_index).ok()?,
+        }))
+    })
+}
+
+/// Mint the closed authored reference head for a macro field while the macro
+/// hot-mirror producer already holds the transient payload body.
+#[doc(hidden)]
+pub fn macro_payload_reference_head_fact(
+    annotation: &TypeExpr,
+    payload: &MacroPayloadLocator,
+) -> AuthoredReferenceHeadFact {
+    authored_reference_head_fact_with(annotation, |arg_index| {
+        Some(AuthoredReferenceArgLocator::MacroPayload {
+            payload: payload.clone(),
+            arg_index: u32::try_from(arg_index).ok()?,
+        })
+    })
+}
+
+fn authored_reference_head_fact_with(
+    annotation: &TypeExpr,
+    arg_locator: impl Fn(usize) -> Option<AuthoredReferenceArgLocator> + Copy,
+) -> AuthoredReferenceHeadFact {
+    let annotation = match annotation {
+        TypeExpr::Parenthesized(inner) => {
+            return authored_reference_head_fact_with(inner, arg_locator);
+        }
+        other => other,
+    };
+    let args = |len: usize| -> Option<Arc<[AuthoredReferenceArgLocator]>> {
+        (0..len)
+            .map(arg_locator)
+            .collect::<Option<Vec<_>>>()
+            .map(Arc::from)
+    };
+    match annotation {
+        TypeExpr::Ref {
+            name,
+            type_arguments,
+        } => {
+            let Some(args) = args(type_arguments.len()) else {
+                return AuthoredReferenceHeadFact::Unavailable;
+            };
+            let mut parts = name.split('.').map(Arc::<str>::from);
+            let Some(root) = parts.next() else {
+                return AuthoredReferenceHeadFact::Unavailable;
+            };
+            let members = parts.collect::<Vec<_>>();
+            if members.is_empty() {
+                AuthoredReferenceHeadFact::Bare {
+                    local_name: root,
+                    args,
+                }
+            } else {
+                AuthoredReferenceHeadFact::Qualified {
+                    local_root: root,
+                    member_path: Arc::from(members),
+                    args,
+                }
+            }
+        }
+        TypeExpr::ImportType {
+            specifier,
+            qualifier,
+            type_arguments,
+            ..
+        } => args(type_arguments.len()).map_or(AuthoredReferenceHeadFact::Unavailable, |args| {
+            AuthoredReferenceHeadFact::ImportType {
+                specifier: Arc::clone(specifier),
+                member_path: Arc::clone(qualifier),
+                args,
+            }
+        }),
+        _ => AuthoredReferenceHeadFact::NotReference,
     }
 }
 
@@ -245,6 +395,93 @@ mod tests {
         );
         assert_eq!(fact.typeof_alias_target, None, "self-peel must break");
         assert_eq!(fact.classification, ValueAnnotationClass::Direct);
+    }
+
+    /// The producer contract for the authored reference head, pinned in EVERY
+    /// direction so a future producer cannot leave the provenance inconsistent.
+    ///
+    /// [`value_type_annotation_fact`] is the SINGLE producer of the head for an
+    /// authored value annotation. Two production sites construct the enclosing
+    /// fact without it — `PreparedValueDecl::new`'s placeholder (immediately
+    /// overwritten by preparation) and the SYNTHESISED component-default value
+    /// decl — and both describe a declaration with NO authored annotation, for
+    /// which `NotReference` is the CORRECT head, not a stub. This test pins the
+    /// mapping that makes those two sites honest: reference ⇒ exact head,
+    /// non-reference ⇒ `NotReference`, absent ⇒ `NotReference`,
+    /// inference-refused ⇒ `Unavailable`. A producer that returned
+    /// `NotReference` for an authored REFERENCE annotation fails here.
+    #[test]
+    fn the_reference_head_producer_is_exact_for_every_annotation_shape() {
+        let canonical: Arc<str> = Arc::from("/ws/a.ts");
+        let head_for = |annotation: Option<&TypeExpr>, unavailable| {
+            value_type_annotation_fact(
+                annotation,
+                "subject",
+                &canonical,
+                TopLevelOwnerId::ordinary_file(),
+                None,
+                unavailable,
+            )
+            .reference_head
+        };
+
+        // A bare authored reference mints the EXACT authored local name — never
+        // `NotReference`, and never the resolved target.
+        let bare = TypeExpr::Ref {
+            name: Arc::from("Alias"),
+            type_arguments: Arc::from([TypeExpr::Primitive(PrimitiveName::String)]),
+        };
+        let AuthoredReferenceHeadFact::Bare { local_name, args } = head_for(Some(&bare), None)
+        else {
+            panic!("an authored bare reference must mint a `Bare` head");
+        };
+        assert_eq!(local_name.as_ref(), "Alias");
+        assert_eq!(args.len(), 1, "one authored argument locator per type arg");
+
+        // A dotted authored reference keeps the root AND the member path.
+        let qualified = TypeExpr::Ref {
+            name: Arc::from("Ns.Inner"),
+            type_arguments: Arc::from([]),
+        };
+        let AuthoredReferenceHeadFact::Qualified {
+            local_root,
+            member_path,
+            ..
+        } = head_for(Some(&qualified), None)
+        else {
+            panic!("a dotted authored reference must mint a `Qualified` head");
+        };
+        assert_eq!(local_root.as_ref(), "Ns");
+        assert_eq!(
+            member_path.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+            ["Inner"]
+        );
+
+        // NEGATIVE half: a non-reference annotation, an ABSENT annotation, and
+        // a refused inference are each their own typed state. `NotReference`
+        // for an absent annotation is what makes the two non-producer
+        // production construction sites correct rather than inconsistent.
+        assert_eq!(
+            head_for(Some(&TypeExpr::Primitive(PrimitiveName::String)), None),
+            AuthoredReferenceHeadFact::NotReference,
+            "a non-reference annotation has no authored reference head"
+        );
+        assert_eq!(
+            head_for(None, None),
+            AuthoredReferenceHeadFact::NotReference,
+            "an ABSENT annotation has no authored reference head — the state \
+             the synthesised-default and placeholder sites legitimately carry"
+        );
+        assert_eq!(
+            head_for(None, Some(InferenceUnavailableReason::WorkBudgetExceeded)),
+            AuthoredReferenceHeadFact::Unavailable,
+            "a refused inference is UNAVAILABLE, never a claimed non-reference"
+        );
+        assert_ne!(
+            AuthoredReferenceHeadFact::Unavailable,
+            AuthoredReferenceHeadFact::NotReference,
+            "unavailable and not-a-reference must stay distinguishable"
+        );
     }
 
     #[test]

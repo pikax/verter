@@ -236,7 +236,7 @@ function convertType(
       return { kind: "object" as const, type: td.bindingName, schema: {} };
 
     case "unknown":
-      return td.rawType || "unknown";
+      return "unknown";
   }
 }
 
@@ -429,7 +429,7 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
     case "enum":
       return td.name;
     case "unknown":
-      return td.rawType || "unknown";
+      return "unknown";
     case "syntheticSlotBinding":
       // Synthetic carriers display as their user-visible `bindingName`. They
       // MUST NOT route through `TypeRegistry`.

@@ -98,6 +98,251 @@ fn get_component_meta_returns_some_for_loaded_sfc() {
     assert!(result.is_some(), "should return meta for loaded SFC");
 }
 
+#[test]
+fn overlay_payload_preserves_inline_property_style_emit_jsdoc() {
+    const FILE: &str = "/src/OverlayEmitJsdoc.vue";
+    let host = make_host();
+    let session = host.open_session_batch().unwrap();
+    session
+        .upsert(
+            FILE,
+            r#"<script setup lang="ts">
+defineProps<{
+  label: string
+}>()
+
+defineEmits<{
+  /** Fired on click */
+  click: []
+  close: []
+}>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let output = session
+        .get_component_meta_output(FILE)
+        .expect("overlay component-meta output resolves")
+        .expect("overlay SFC produces component-meta output");
+    let (analysis, _resolution, _types) = output.into_parts();
+
+    let structure = analysis
+        .ordered_sfc_structure
+        .as_ref()
+        .expect("schema-8 overlay output carries its registered structure");
+    assert_eq!(structure.schema_version, 1);
+    assert!(
+        structure.inventory.blocks().len() >= 2,
+        "script and template blocks must come from the overlay registration"
+    );
+
+    let click = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "click")
+        .expect("click event must surface");
+    assert_eq!(
+        click.description.as_deref(),
+        Some("Fired on click"),
+        "the NAPI payload lane must preserve exact local authored emit JSDoc"
+    );
+
+    let close = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "close")
+        .expect("close event must surface");
+    assert_eq!(
+        close.description.as_deref(),
+        None,
+        "an undocumented sibling must not inherit the documented event's description"
+    );
+    assert!(
+        close.tags.is_empty(),
+        "an undocumented sibling must not gain fabricated tags, got {:?}",
+        close.tags
+    );
+}
+
+#[test]
+fn overlay_payload_preserves_inline_call_signature_emit_jsdoc() {
+    const FILE: &str = "/src/OverlayCallEmitJsdoc.vue";
+    let host = make_host();
+    let session = host.open_session_batch().unwrap();
+    session
+        .upsert(
+            FILE,
+            r#"<script setup lang="ts">
+defineEmits<{
+  /**
+   * Fired on click
+   * @deprecated use press instead
+   */
+  (e: 'click'): void
+  (e: 'close'): void
+}>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let output = session
+        .get_component_meta_output(FILE)
+        .expect("overlay component-meta output resolves")
+        .expect("overlay SFC produces component-meta output");
+    let (analysis, _resolution, _types) = output.into_parts();
+
+    let click = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "click")
+        .expect("click event must surface");
+    assert_eq!(
+        click.description.as_deref(),
+        Some("Fired on click"),
+        "the overlay output lane must preserve exact local call-signature JSDoc"
+    );
+    let deprecated = click
+        .tags
+        .iter()
+        .find(|tag| tag.name == "deprecated")
+        .expect("the exact authored call-signature tag must publish");
+    assert_eq!(deprecated.text.as_deref(), Some("use press instead"));
+
+    let close = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "close")
+        .expect("close event must surface");
+    assert_eq!(
+        close.description.as_deref(),
+        None,
+        "an undocumented call signature must not inherit a sibling's description"
+    );
+    assert!(
+        close.tags.is_empty(),
+        "an undocumented call signature must not gain fabricated tags, got {:?}",
+        close.tags
+    );
+}
+
+#[test]
+fn overlay_call_signature_jsdoc_join_discriminates_duplicate_names_and_payload_shapes() {
+    const FILE: &str = "/src/OverlayDuplicateCallEmitJsdoc.vue";
+    let host = make_host();
+    let session = host.open_session_batch().unwrap();
+    session
+        .upsert(
+            FILE,
+            r#"<script setup lang="ts">
+defineEmits<{
+  /**
+   * Numeric change
+   * @category numeric
+   */
+  (e: 'change', value: number): void
+  /**
+   * Text change
+   * @category textual
+   */
+  (e: 'change', value: string): void
+}>()
+</script>
+<template><div /></template>"#
+                .to_string(),
+        )
+        .unwrap();
+
+    let output = session
+        .get_component_meta_output(FILE)
+        .expect("overlay component-meta output resolves")
+        .expect("overlay SFC produces component-meta output");
+    let (analysis, _resolution, _types) = output.into_parts();
+    let changes: Vec<_> = analysis
+        .events
+        .iter()
+        .filter(|event| event.name == "change")
+        .collect();
+    assert_eq!(
+        changes.len(),
+        2,
+        "both call-signature overloads must surface"
+    );
+    assert_eq!(changes[0].description.as_deref(), Some("Numeric change"));
+    assert_eq!(changes[1].description.as_deref(), Some("Text change"));
+    assert_eq!(
+        changes[0].tags.len(),
+        1,
+        "numeric tag must stay occurrence-local"
+    );
+    assert_eq!(changes[0].tags[0].name, "category");
+    assert_eq!(changes[0].tags[0].text.as_deref(), Some("numeric"));
+    assert_eq!(
+        changes[1].tags.len(),
+        1,
+        "text tag must stay occurrence-local"
+    );
+    assert_eq!(changes[1].tags[0].name, "category");
+    assert_eq!(changes[1].tags[0].text.as_deref(), Some("textual"));
+}
+
+#[test]
+fn call_signature_surface_jsdoc_wins_over_distinct_overlay_authored_jsdoc() {
+    const FILE: &str = "/src/CallEmitJsdocPrecedence.vue";
+    const BASE: &str = r#"<script setup lang="ts">
+defineEmits<{
+  /**
+   * SPAN-DOC
+   * @spanTag span-text
+   */
+  (e: 'change', value: string): void
+}>()
+</script>
+<template><div /></template>"#;
+    const OVERLAY: &str = r#"<script setup lang="ts">
+defineEmits<{
+  /**
+   * AUTH-DOC
+   * @authTag auth-text
+   */
+  (e: 'change', value: string): void
+}>()
+</script>
+<template><div /></template>"#;
+    assert_eq!(
+        BASE.len(),
+        OVERLAY.len(),
+        "the fixture keeps every post-JSDoc byte span aligned"
+    );
+
+    let host = make_host();
+    host.upsert_base(FILE, BASE).unwrap();
+    let session = host.open_session_batch().unwrap();
+    session.upsert(FILE, OVERLAY.to_string()).unwrap();
+
+    let output = session
+        .get_component_meta_output(FILE)
+        .expect("overlay component-meta output resolves")
+        .expect("overlay SFC produces component-meta output");
+    let (analysis, _resolution, _types) = output.into_parts();
+    let change = analysis
+        .events
+        .iter()
+        .find(|event| event.name == "change")
+        .expect("change event must surface");
+    assert_eq!(
+        change.description.as_deref(),
+        Some("SPAN-DOC"),
+        "surface-span description must win over distinct authored fallback text"
+    );
+    assert_eq!(change.tags.len(), 1);
+    assert_eq!(change.tags[0].name, "spanTag");
+    assert_eq!(change.tags[0].text.as_deref(), Some("span-text"));
+}
+
 /// FIX-B regression (scalar, `ComponentMetaSession` boundary): a
 /// fail-closed output-materialization failure crossing the host boundary
 /// stays the TYPED `ComponentMetaHostError::OutputMaterialization`

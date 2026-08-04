@@ -68,7 +68,7 @@ fn empty_meta() -> ComponentMetaAnalysis {
         models: vec![],
         exposed: vec![],
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: vec![],
         components: vec![],
         template_refs: vec![],
@@ -95,10 +95,14 @@ fn empty_meta() -> ComponentMetaAnalysis {
 fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(type_source),
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            None,
+            None,
+        ),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: false,
         has_default: false,
         default_value: None,
@@ -220,7 +224,7 @@ fn recursive_pick_local_alias_terminates_via_cycle_guard() {
     // Discriminating shape: the published source must stay a SYMBOLIC
     // carrier (the bare seed or the authored alias-body source) — never a
     // materialized expansion, and the walk must have returned.
-    let published = meta.props[0].type_source.present();
+    let published = meta.props[0].publication.result().selected_source();
     assert!(
         source_is_bare_ref(published, "Recursive")
             || matches!(published, Some(SemanticTypeSource::Authored(_))),
@@ -252,7 +256,7 @@ fn recursive_omit_self_referential_alias_terminates() {
     )
     .expect("recursive Omit<SelfOmit,'gone'> must terminate via the cycle guard");
 
-    let published = meta.props[0].type_source.present();
+    let published = meta.props[0].publication.result().selected_source();
     assert!(
         source_is_bare_ref(published, "SelfOmit")
             || matches!(published, Some(SemanticTypeSource::Authored(_))),
@@ -290,9 +294,9 @@ fn policy_active_refs_breaks_mutual_alias_spine_cycle() {
     // The published source stays symbolic — the guard's back-edge keeps
     // the carrier rather than half-chasing the spine.
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "A"),
+        source_is_bare_ref(meta.props[0].publication.result().selected_source(), "A"),
         "the cyclic alias spine must keep the symbolic seed; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
@@ -335,11 +339,11 @@ fn policy_active_refs_breaks_mutual_alias_cycle() {
     // Rule 3 fired: the published source is A's authored body.
     assert!(
         matches!(
-            meta.props[0].type_source.present(),
+            meta.props[0].publication.result().selected_source(),
             Some(SemanticTypeSource::Authored(_))
-        ) || source_is_bare_ref(meta.props[0].type_source.present(), "A"),
+        ) || source_is_bare_ref(meta.props[0].publication.result().selected_source(), "A"),
         "mutual object cycle must publish A's body source or keep the seed; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
@@ -464,11 +468,11 @@ fn recursive_indexed_access_terminates_deterministically() {
 
     assert!(
         matches!(
-            meta.props[0].type_source.present(),
+            meta.props[0].publication.result().selected_source(),
             Some(SemanticTypeSource::Authored(_))
-        ) || source_is_bare_ref(meta.props[0].type_source.present(), "R"),
+        ) || source_is_bare_ref(meta.props[0].publication.result().selected_source(), "R"),
         "recursive R['self'] must terminate with a symbolic or authored-body source; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 

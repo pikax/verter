@@ -1,18 +1,23 @@
 // Hover — binding name, kind, source location from verter_session analysis.
 // Enhanced with full resolved type signature, JSDoc from TypeProvider.
 
-use std::collections::{HashMap, HashSet};
-
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
-
-use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{
-    classify_cursor, parse_opening_tag, SfcBlock, SfcCursorContext,
+use verter_session::carrier_publication_store::RegisteredFileStructure;
+use verter_session::framework::{
+    ComponentContractAvailability, ComponentContractUnsupported, PublicParameter, PublicSlot,
+    PublicTypeReference,
 };
+use verter_session::FileAnalysisSnapshot;
+use verter_type_expr::{render_type_expr_display, PublicationResult, TypeExpr};
+
+use crate::documents::carrier_structure::{
+    classify_cursor, offset_in_markup_comment, parse_opening_tag, project_markup_comment_facts,
+    CarrierBlockView, CarrierCursorContext,
+};
+use crate::documents::line_index::LineIndex;
 use crate::features::hover_event_tokens::{
-    camelize_event_name, capitalize_first, event_directive_hover, hyphenate_event_name,
-    v_model_hover, vue_event_attr_label,
+    camelize_event_name, capitalize_first, event_directive_hover, v_model_hover,
+    vue_event_attr_label,
 };
 
 /// Hover result from verter's own analysis, optionally carrying a Vue-specific
@@ -114,18 +119,19 @@ impl From<Hover> for VerterHoverResult {
 pub fn hover_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     ssr_context: bool,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<VerterHoverResult> {
     let offset = line_index.position_to_offset(position)?;
 
     // Check SFC structural context BEFORE requiring analysis data.
     // This allows hover on tags even when analysis hasn't completed.
     match classify_cursor(offset, blocks) {
-        SfcCursorContext::OpeningTag { block_index } => {
-            if let Some(hover) = sfc_tag_hover(source, &blocks[block_index], offset) {
+        CarrierCursorContext::OpeningTag { block } => {
+            if let Some(hover) = sfc_tag_hover(source, &block, offset) {
                 return Some(hover.into());
             }
             // A phantom custom block from the depth-ignorant scanner (an
@@ -144,6 +150,7 @@ pub fn hover_at_position(
                         source,
                         analysis.unwrap(),
                         line_index,
+                        structure,
                     );
                 }
             }
@@ -159,10 +166,10 @@ pub fn hover_at_position(
             }
             return None;
         }
-        SfcCursorContext::ClosingTag { block_index } => {
-            return sfc_tag_name_hover(&blocks[block_index].tag_name).map(|h| h.into());
+        CarrierCursorContext::ClosingTag { block } => {
+            return sfc_tag_name_hover(&block.tag_name).map(|h| h.into());
         }
-        SfcCursorContext::RootLevel => {
+        CarrierCursorContext::RootLevel => {
             // Vue template markup the SFC scanner can leave in a dead zone on
             // MALFORMED input: with the outer close missing, the scanner's
             // depth-balanced walk fails closed to the first-close boundary, so
@@ -180,6 +187,7 @@ pub fn hover_at_position(
                         source,
                         analysis.unwrap(),
                         line_index,
+                        structure,
                     );
                 }
             }
@@ -195,7 +203,7 @@ pub fn hover_at_position(
             }
             return None;
         }
-        SfcCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
+        CarrierCursorContext::BlockContent { .. } => {} // fall through to analysis-based hover
     }
 
     let analysis = analysis?;
@@ -210,7 +218,7 @@ pub fn hover_at_position(
     match block {
         Some(b) => match b.tag_name.as_str() {
             "script" => hover_in_script(offset, source, analysis, ssr_context),
-            "template" => hover_in_template(offset, source, analysis, line_index),
+            "template" => hover_in_template(offset, source, analysis, line_index, structure),
             "style" => crate::css::css_hover(position, source, blocks, Some(analysis), line_index)
                 .map(|h| h.into()),
             _ => {
@@ -224,7 +232,7 @@ pub fn hover_at_position(
                     .iter()
                     .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
                 {
-                    hover_in_template(offset, source, analysis, line_index)
+                    hover_in_template(offset, source, analysis, line_index, structure)
                 } else {
                     None
                 }
@@ -238,7 +246,7 @@ pub fn hover_at_position(
                 .iter()
                 .any(|el| offset >= el.span.start as usize && offset < el.span.end as usize)
             {
-                hover_in_template(offset, source, analysis, line_index)
+                hover_in_template(offset, source, analysis, line_index, structure)
             } else {
                 None
             }
@@ -251,7 +259,7 @@ pub fn hover_at_position(
 /// Hover on an SFC opening tag — dispatches to tag name or attribute hover.
 /// Returns `None` for cursor inside `generic`/`attrs`/`attributes` attribute values
 /// on script tags, letting the TypeProvider handle those via sourcemapped TSX positions.
-fn sfc_tag_hover(source: &str, block: &SfcBlock, offset: u32) -> Option<Hover> {
+fn sfc_tag_hover(source: &str, block: &CarrierBlockView, offset: u32) -> Option<Hover> {
     let ctx = parse_opening_tag(source, block);
 
     // Check if cursor is on the tag name
@@ -365,107 +373,63 @@ pub fn child_hover_target_at_offset(
 pub fn build_child_component_hover(
     component_name: &str,
     import_source: &str,
-    child_analysis: &FileAnalysisSnapshot,
-    public_contract: Option<&verter_session::framework::api_projector::ComponentPublicContract>,
-    public_api_code: Option<&str>,
+    availability: &ComponentContractAvailability,
     usage_props: &[ComponentUsagePropInfo],
 ) -> Hover {
-    let template = child_analysis.template.as_deref();
-    let handler_props = public_api_code
-        .map(parse_public_api_handler_props)
-        .unwrap_or_default();
-    let prop_types = public_api_code
-        .map(parse_public_api_props)
-        .unwrap_or_default();
-
     let mut lines = vec![format!("**`<{component_name}>`** (from `{import_source}`)")];
+    let ComponentContractAvailability::Supported(contract) = availability else {
+        let ComponentContractAvailability::Unsupported(unsupported) = availability else {
+            unreachable!("component contract availability is closed")
+        };
+        lines.push(String::new());
+        lines.push(render_contract_unsupported(unsupported));
+        return make_hover(lines.join("\n"));
+    };
 
-    let mut prop_lines = Vec::new();
-    if let Some(contract) = public_contract {
-        for prop in &contract.props {
-            let optional_marker = if prop.optional || prop.has_default {
-                "?"
-            } else {
-                ""
-            };
-            let prop_type = prop.type_annotation.as_deref().unwrap_or("unknown");
-            prop_lines.push(format!(
+    if !contract.props.is_empty() {
+        lines.push(String::new());
+        lines.push("**Props:**".to_string());
+        lines.extend(contract.props.iter().map(|prop| {
+            let optional_marker = if prop.optional { "?" } else { "" };
+            format!(
                 "- `{}`{}: {}",
-                prop.name, optional_marker, prop_type
-            ));
-        }
-    } else if let Some(template) = template {
-        if !template.prop_definitions.is_empty() {
-            for prop in &template.prop_definitions {
-                let prop_type = prop
-                    .type_annotation
-                    .clone()
-                    .or_else(|| prop_types.get(&prop.name).cloned())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let optional = !prop.is_required || prop.has_default;
-                let optional_marker = if optional { "?" } else { "" };
-                prop_lines.push(format!(
-                    "- `{}`{}: {}",
-                    prop.name, optional_marker, prop_type
+                prop.name,
+                optional_marker,
+                render_public_type(&prop.ty)
+            )
+        }));
+    }
+
+    if !contract.events.is_empty() {
+        lines.push(String::new());
+        lines.push("**Emits:**".to_string());
+        for event in contract.events.iter() {
+            for signature in event.derived_handler.overloads.iter() {
+                lines.push(format!(
+                    "- `{}`{}",
+                    event_summary_name(&event.name),
+                    render_handler_signature(&signature.parameters, &signature.return_type)
                 ));
             }
         }
     }
-    if prop_lines.is_empty() && !prop_types.is_empty() {
-        let mut props: Vec<_> = prop_types.into_iter().collect();
-        props.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, prop_type) in props {
-            prop_lines.push(format!("- `{name}`: {prop_type}"));
-        }
-    }
-    if !prop_lines.is_empty() {
-        lines.push(String::new());
-        lines.push("**Props:**".to_string());
-        lines.extend(prop_lines);
-    }
 
-    let mut emit_lines = Vec::new();
-    if let Some(template) = template {
-        let emit_entries: Vec<String> = template
-            .emit_definitions
-            .iter()
-            .filter(|emit| emit.is_declared)
-            .map(|emit| {
-                format!(
-                    "- `{}`{}",
-                    emit_name_for_summary(&emit.event_name),
-                    emit_summary_signature(&emit.event_name, &handler_props)
-                )
-            })
-            .collect();
-        emit_lines.extend(emit_entries);
-    }
-    if emit_lines.is_empty() && !handler_props.is_empty() {
-        let mut seen = HashSet::new();
-        let mut fallback_emits = handler_props
-            .iter()
-            .filter_map(|(name, signature)| {
-                let vue_attr = crate::type_provider::merge::jsx_prop_to_vue_attr(name)?;
-                if !vue_attr.starts_with('@') {
-                    return None;
-                }
-                let emit_name = vue_attr.trim_start_matches('@').to_string();
-                if !seen.insert(emit_name.clone()) {
-                    return None;
-                }
-                Some(format!(
-                    "- `{emit_name}`{}",
-                    summarize_event_handler_signature(signature)
-                ))
-            })
-            .collect::<Vec<_>>();
-        fallback_emits.sort();
-        emit_lines.extend(fallback_emits);
-    }
-    if !emit_lines.is_empty() {
+    if !contract.slots.is_empty() {
         lines.push(String::new());
-        lines.push("**Emits:**".to_string());
-        lines.extend(emit_lines);
+        lines.push("**Slots:**".to_string());
+        // The component-tag summary lists EVERY slot and deepens NONE
+        // (path-precision: only a slot-name hover's rank-matched slot makes
+        // a deepen demand).
+        let no_deepen = crate::features::hover_slot_deepen::SlotBindingDeepenView::default();
+        lines.extend(contract.slots.iter().map(|slot| {
+            let optional_marker = if slot.optional { "?" } else { "" };
+            format!(
+                "- `{}`{}{}",
+                slot.name,
+                optional_marker,
+                render_slot_signature(slot, &no_deepen)
+            )
+        }));
     }
 
     if !usage_props.is_empty() {
@@ -495,72 +459,164 @@ pub fn build_child_component_hover(
 
 pub fn build_child_event_hover(
     vue_attr: &str,
-    child_analysis: &FileAnalysisSnapshot,
-    public_api_code: Option<&str>,
+    availability: &ComponentContractAvailability,
 ) -> Option<Hover> {
-    let template = child_analysis.template.as_deref()?;
-    let handler_props = public_api_code
-        .map(parse_public_api_handler_props)
-        .unwrap_or_default();
-
-    if let Some(prop) = template.prop_definitions.iter().find(|prop| {
-        crate::type_provider::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
-    }) {
-        let signature = prop
-            .type_annotation
-            .clone()
-            .or_else(|| {
-                handler_props
-                    .iter()
-                    .find(|(name, _)| {
-                        crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref()
-                            == Some(vue_attr)
-                    })
-                    .map(|(_, signature)| signature.clone())
-            })
-            .unwrap_or_else(|| "() => void".to_string());
-        return Some(make_hover(format!(
-            "```typescript\n{}{}\n```",
-            vue_attr,
-            normalize_event_handler_signature(&signature)
-        )));
-    }
-
-    if let Some(signature) = template
-        .emit_definitions
+    let ComponentContractAvailability::Supported(contract) = availability else {
+        let ComponentContractAvailability::Unsupported(unsupported) = availability else {
+            unreachable!("component contract availability is closed")
+        };
+        return Some(make_hover(render_contract_unsupported(unsupported)));
+    };
+    // Declared emits outrank the prop join: the CREO-projected events lane is
+    // the primary public-event authority.
+    if let Some(event) = contract
+        .events
         .iter()
-        .filter(|emit| emit.is_declared)
-        .find_map(|emit| {
-            let emit_vue_attr = vue_event_attr_label(&emit.event_name);
-            if emit_vue_attr == vue_attr {
-                Some(
-                    handler_signature_for_event(&emit.event_name, &handler_props)
-                        .unwrap_or_else(|| "() => void".to_string()),
-                )
-            } else {
-                None
-            }
-        })
+        .find(|event| public_event_matches_event_attr(&event.name, vue_attr))
     {
-        return Some(make_hover(format!(
-            "```typescript\n{}{}\n```",
-            vue_attr,
-            normalize_event_handler_signature(&signature)
-        )));
+        let signatures = event
+            .derived_handler
+            .overloads
+            .iter()
+            .map(|signature| {
+                format!(
+                    "{vue_attr}{}",
+                    render_handler_signature(&signature.parameters, &signature.return_type)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(make_hover(format!("```typescript\n{signatures}\n```")));
     }
+    // Prop-backed event arm: a child may accept a listener as an `onX`
+    // handler PROP (`onAlert?: (payload: string) => void`) instead of a
+    // declared emit. The join is typed end-to-end — the JSX name maps to the
+    // hovered attr through the sanctioned attr mapper AND the published type
+    // is structurally function-shaped in typed IR (never name-only, no `on*`
+    // suffix sniffing).
+    let prop = contract.props.iter().find(|prop| {
+        crate::type_provider::merge::jsx_prop_to_vue_attr(&prop.name).as_deref() == Some(vue_attr)
+            && matches!(
+                prop.ty.publication.materialized_type(),
+                Some(TypeExpr::Function(_))
+            )
+    })?;
+    let handler = prop.ty.publication.materialized_type()?;
+    let optional_marker = if prop.optional { "?" } else { "" };
+    Some(make_hover(format!(
+        "```typescript\n{vue_attr}{optional_marker}: {}\n```",
+        render_structured_type(handler)
+    )))
+}
 
-    handler_props
+fn render_public_type(reference: &PublicTypeReference) -> String {
+    if let Some(expression) = reference.publication.materialized_type() {
+        return render_structured_type(expression);
+    }
+    match reference.publication.publication() {
+        PublicationResult::Absent { absence, .. } => {
+            format!("<type absent: {absence:?}>")
+        }
+        PublicationResult::Failed { failure, .. } => {
+            format!("<type publication failed: {failure:?}>")
+        }
+        PublicationResult::Published { .. } => "<published type unavailable>".to_string(),
+    }
+}
+
+fn render_structured_type(expression: &TypeExpr) -> String {
+    render_type_expr_display(expression)
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|error| format!("<structured type cannot be displayed: {error}>"))
+}
+
+fn render_parameter(parameter: &PublicParameter, index: usize) -> String {
+    let name = parameter
+        .name
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("_arg{index}"));
+    let rest = if parameter.rest { "..." } else { "" };
+    let optional = if parameter.optional { "?" } else { "" };
+    format!(
+        "{rest}{name}{optional}: {}",
+        render_structured_type(&parameter.ty)
+    )
+}
+
+fn render_parameters(parameters: &[PublicParameter]) -> String {
+    parameters
         .iter()
-        .find(|(name, _)| {
-            crate::type_provider::merge::jsx_prop_to_vue_attr(name).as_deref() == Some(vue_attr)
-        })
-        .map(|(_, signature)| {
-            make_hover(format!(
-                "```typescript\n{}{}\n```",
-                vue_attr,
-                normalize_event_handler_signature(signature)
-            ))
-        })
+        .enumerate()
+        .map(|(index, parameter)| render_parameter(parameter, index))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_handler_signature(parameters: &[PublicParameter], return_type: &TypeExpr) -> String {
+    format!(
+        "({}) => {}",
+        render_parameters(parameters),
+        render_structured_type(return_type)
+    )
+}
+
+fn event_summary_name(event_name: &str) -> String {
+    vue_event_attr_label(event_name)
+        .trim_start_matches('@')
+        .to_string()
+}
+
+fn public_event_matches_event_attr(event_name: &str, vue_attr: &str) -> bool {
+    if vue_event_attr_label(event_name) == vue_attr {
+        return true;
+    }
+    let listener_prop = format!("on{}", capitalize_first(&camelize_event_name(event_name)));
+    crate::type_provider::merge::jsx_prop_to_vue_attr(&listener_prop).as_deref() == Some(vue_attr)
+}
+
+/// Render one slot's signature. `deepened` supplies demand-resolved views
+/// for THIS slot's carrier bindings (empty for surfaces that made no deepen
+/// demand — e.g. the component-tag summary, which lists every slot and stays
+/// path-precise by never deepening any).
+fn render_slot_signature(
+    slot: &PublicSlot,
+    deepened: &crate::features::hover_slot_deepen::SlotBindingDeepenView,
+) -> String {
+    let input = if slot.input.bindings.is_empty() {
+        "()".to_string()
+    } else {
+        let bindings = slot
+            .input
+            .bindings
+            .iter()
+            .map(|binding| match deepened.deepened(&binding.name) {
+                Some(view) => format!("{}: {}", binding.name, render_structured_type(view)),
+                None => format!("{}: {}", binding.name, render_public_type(&binding.ty)),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("(props: {{ {bindings} }})")
+    };
+    match slot.return_type.as_ref() {
+        Some(return_type) => format!("{input}: {}", render_public_type(return_type)),
+        None => input,
+    }
+}
+
+fn render_contract_unsupported(unsupported: &ComponentContractUnsupported) -> String {
+    let mut message = format!(
+        "**Component contract unavailable:** `{:?}` (`{}`)",
+        unsupported.reason,
+        unsupported.adapter_id.as_str()
+    );
+    for diagnostic in unsupported.diagnostics.iter() {
+        message.push_str(&format!(
+            "\n\n- `{:?}`: {}",
+            diagnostic.kind, diagnostic.context
+        ));
+    }
+    message
 }
 
 fn hover_in_script(
@@ -605,9 +661,12 @@ fn hover_in_template(
     source: &str,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
+    structure: Option<&RegisteredFileStructure>,
 ) -> Option<VerterHoverResult> {
-    // Don't provide hover inside HTML comments
-    if crate::features::definition::is_inside_html_comment(source, offset) {
+    // Don't provide hover inside HTML comments (parser comment-region facts)
+    if structure.is_some_and(|structure| {
+        offset_in_markup_comment(&project_markup_comment_facts(structure), offset as u32)
+    }) {
         return None;
     }
 
@@ -1336,83 +1395,33 @@ fn slot_attribute_hover_target(
 /// Build the typed slot-name hover from the CHILD's declared slots surface
 /// (D3): the slot's defineSlots signature — name, slot-props payload, return
 /// type — resolved with Vue's kebab↔camel equivalence (`#my-slot` → `mySlot`).
-/// Falls back to the child's template-defined slot names (untyped). A slot the
-/// child never declared yields `None`; the caller may retain source-derived
-/// syntax documentation, but must not fabricate a child signature.
+/// The authored spelling is presentation context only. A slot absent from the
+/// contract yields `None`; no child-analysis fallback fabricates a signature.
+///
+/// `deepened` carries the rank-matched slot's demand-resolved carrier views
+/// (derived from the SAME contract rows through the one sanctioned deepen
+/// route); a binding without a deepened view renders its published form —
+/// the typed refusal stays the fail-closed branch for a carrier that could
+/// not deepen.
 pub fn build_child_slot_hover(
     vue_attr: &str,
     slot_name: &str,
-    child_analysis: &FileAnalysisSnapshot,
+    availability: &ComponentContractAvailability,
+    deepened: &crate::features::hover_slot_deepen::SlotBindingDeepenView,
 ) -> Option<Hover> {
-    let best = crate::server::select_best_ranked_candidate(
-        child_analysis
-            .macros
-            .iter()
-            .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
-            .flat_map(|mac| mac.slot_fields.iter())
-            .filter_map(|slot_field| {
-                crate::server::attr_name_match_rank(slot_name, &slot_field.name)
-                    .map(|rank| (rank, slot_field.span, slot_field))
-            }),
-    );
-    if let Some((_, _, slot_field)) = best {
-        let props = if slot_field.bindings.is_empty() {
-            String::new()
-        } else {
-            let bindings = slot_field
-                .bindings
-                .iter()
-                .map(|binding| {
-                    format!(
-                        "{}: {}",
-                        binding.name,
-                        binding.type_annotation.as_deref().unwrap_or("unknown")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!("(props: {{ {bindings} }})")
+    let ComponentContractAvailability::Supported(contract) = availability else {
+        let ComponentContractAvailability::Unsupported(unsupported) = availability else {
+            unreachable!("component contract availability is closed")
         };
-        let return_type = slot_field.return_type.as_deref().unwrap_or("any");
-        let mut value = format!(
-            "```typescript\n(slot) {}{props}: {return_type}\n```",
-            slot_field.name
-        );
-        if let Some(description) = &slot_field.description {
-            value.push_str("\n\n");
-            value.push_str(description);
-        }
-        return Some(make_hover(value));
-    }
-
-    if let Some(child_template) = child_analysis.template.as_deref() {
-        let best = crate::server::select_best_ranked_candidate(
-            child_template
-                .defined_slots
-                .iter()
-                .filter_map(|defined_slot| {
-                    crate::server::attr_name_match_rank(slot_name, &defined_slot.name)
-                        .map(|rank| (rank, defined_slot.span, defined_slot))
-                }),
-        );
-        if let Some((_, _, defined_slot)) = best {
-            let mut lines = vec![format!("**Slot** `{vue_attr}`")];
-            if !defined_slot.binding_names.is_empty() {
-                lines.push(format!(
-                    "**Scoped props:** {}",
-                    defined_slot
-                        .binding_names
-                        .iter()
-                        .map(|name| format!("`{name}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            return Some(make_hover(lines.join("\n\n")));
-        }
-    }
-
-    None
+        return Some(make_hover(render_contract_unsupported(unsupported)));
+    };
+    let slot =
+        crate::features::hover_slot_deepen::select_contract_slot(&contract.slots, slot_name)?;
+    Some(make_hover(format!(
+        "```typescript\n(slot) {}{}\n```\n\n**Authored as:** `{vue_attr}`",
+        slot.name,
+        render_slot_signature(slot, deepened)
+    )))
 }
 
 /// Resolve the authored module source for a template component.
@@ -1478,11 +1487,12 @@ mod vue_api;
 pub(super) use vue_api::hover_for_word;
 use vue_api::vue_api_hover_at_offset;
 
-mod public_api_summary;
-use public_api_summary::*;
-
 use crate::utils::word_at_offset;
 
 #[cfg(test)]
 #[path = "hover_tests.rs"]
 mod hover_tests;
+
+#[cfg(test)]
+#[path = "hover/public_contract_guard_tests.rs"]
+mod public_contract_guard_tests;

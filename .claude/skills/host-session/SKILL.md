@@ -98,6 +98,12 @@ sync_coordinator.rs  -> Debounced type provider sync during typing
 
 Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown. Object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
 
+**Provider quick-info is STRUCTURED display data.** `HoverInfo` (`verter_type_runtime/src/protocol.rs`) carries, besides the rendered `contents` blob: `display_signature: Option<DisplaySignature>` (the engine's quick-info display string VERBATIM, branded), `kind: Option<QuickInfoKind>` (closed tsserver `ScriptElementKind` mirror), `documentation: Option<String>`, and real `range_start`/`range_end` from the engine wire. Authority order: (1) per-engine normalization INTO the neutral protocol happens ONCE, at the producer's IPC boundary (tsserver reads `displayString`/`kind`/`documentation` off the `quickinfo` body; tsgo splits its PLAINTEXT hover at the first blank line — its capability handshake advertises no `textDocument.hover` member, hence no `contentFormat`, hence plaintext); (2) recovering structure OUT of the rendered `contents` string is forbidden — that consumer class is deleted (`extract_type_from_hover`, `wrap_type_block`, `replace_kind_prefix` are gone); (3) markdown renders FROM the structured fields only at the LSP hover boundary (`type_provider/merge/hover.rs`; `HoverInfo::kind_labeled_signature` is the shared `(kind) display` formatter, also the v-bind completion `detail` source); (4) an unsupplied field is `None`, never fabricated.
+
+Per-engine availability matrix: `display_signature` — both engines wherever they answer; `kind` — tsserver-family only (LSP hover has no kind field; tsgo stays `None`, an accepted, pinned asymmetry — never prefix-sniffed); `documentation` — both (tsserver wire field / tsgo paragraph split); `range_start`/`range_end` — both (tsserver `quickinfo` `start`/`end`, tsgo LSP `hover.range`), fail-closed on unmappable positions.
+
+**The `DisplaySignature` brand is sealed**: private inner `String`; construction only via `DisplaySignature::from_provider_wire` with a `DisplaySignatureWireWitness` (obtainable only through a `TypeProvider` impl — `provider_wire_witness()`); the sole reader is the labelled `as_display_str()`; display rewrites derive through `with_display_rewrite`; no `Deserialize`, no `Deref`/`AsRef<str>`/`Into<String>`/`Display`. Primary rail = the ordinary compile; trybuild witness = `verter_type_runtime/tests/cases/compile_fail.rs` (`--features compile-fail`, out of the default gate — recorded as GI-20 in `docs/arch/gate-integrity-ledger.md`). `$/verter/getBindingTypes` projects the signature onto the client wire as `Record<string, { displaySignature: string } | null>`; TS renders it verbatim (`packages/vue-vscode/src/bindingTypeDisplay.ts`) — any TS-side re-split of the display value is a Native-vs-Compat violation.
+
 **Semantic tokens cross the trait boundary in Verter's published legend space.** `verter_type_runtime::semantic_tokens` is the single mapping owner: `VERTER_TOKEN_TYPES`/`VERTER_TOKEN_MODIFIERS` (the arrays `verter_lsp::capabilities` builds the advertised `SemanticTokensLegend` from — pinned by `advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary`), `decode_classification_2020` + `map_classified_spans_2020` (the ONE tsserver-family `"format": "2020"` decoder — `((typeIdx + 1) << 8) | modifierSet` — consumed by both the managed tsserver provider and the extension provider), and `SemanticTokenLegendMap` (name-built remap: types by index, modifiers per BIT). tsgo advertises the `textDocument.semanticTokens` client capability (the engine gates the whole feature on it), retains the server-advertised legend from the `initialize` result — for the shared attach, from the relay's in-band `InitializedWitness.semantic_tokens_legend` via `WaitInitializedResult` — and remaps per token. Fail closed everywhere: an unmappable token type or modifier bit drops the token; a session with no retained legend returns no tokens. tsgo inlay hints ride the `workspace.configuration` client capability + the read loop's `workspace/configuration` responder answering the `typescript`/`javascript` sections with nested `inlayHints` preferences (TS inlay hints are preference-gated, default off).
 
 ### TSGO Module (`tsgo/`)
@@ -181,6 +187,72 @@ One provider SHAPE runs at a time; on the tsserver tier that shape owns N engine
 Request (stdio) -> server/mod.rs -> Find document in host cache -> Feature handler -> Response (stdio)
 ```
 
+### Macro Code-Action Authority: Membership, Placement, Revision
+
+Vue macro code actions (`features/macro_actions.rs` B3/B4/B5, and the cross-file
+arm `features/cross_file.rs::make_insert_into_macro` reached from
+`features/component_actions.rs`) read **no macro source text**. Three separate
+authorities:
+
+| Question | Sole authority | Forbidden |
+| --- | --- | --- |
+| **Membership** — which slots / slot-props / emits exist | analysis rows: `AnalyzedMacro.{slot_fields,emit_fields,prop_fields}`, `AnalyzedSlotField.bindings` | any read of macro source text for a decision |
+| **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
+| **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
+
+**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
+`analysis::mod`):
+
+- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
+  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
+- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
+  — typed absence, never `Option<u32>`.
+- `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
+  IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
+  reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
+  was never published is indistinguishable from "nothing to anchor" and both
+  yield zero actions. A bounds / char-boundary failure is NOT a producer variant
+  — the producer cannot know the live buffer; it is a consumer-side typed miss.
+- `MacroEditAnchors { type_literal, runtime_array }` on `AnalyzedMacro`, plus the
+  per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
+  it anchors, so no parallel-array ordinal can drift.
+
+Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+from the OXC nodes already in scope (`type_argument_member_list_anchor`,
+`runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
+(`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
+locator deref, no resolution, and no final-index stamping pass.
+
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
+`Hash16`) is stamped at every producer from the source node's own
+`ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
+producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
+matches no live buffer and therefore fails closed.
+
+**Two structural rails** (no name-keyed scanner guard lands — `CLAUDE.md` →
+landed-scanner bar):
+
+1. The membership/placement decision functions take **no `&str`**. They receive
+   `action_utils::LiveEditTarget`, whose only capability is
+   `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
+   scope a brace scan is a compile error, not a convention.
+2. `MemberListAnchor`'s offset field is private and its constructor is
+   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
+   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
+   witnessed by the `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
+   path DOES exist by wire mandate: the type derives `Deserialize`, so
+   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
+   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
+   obtain anchors by running the real analyzer over fixture source
+   (`features/macro_fixture.rs`).
+
+`LiveEditTarget::anchor_position` is the single conversion point and fails closed
+on BOTH an offset past the live source's end and an offset off a UTF-8 character
+boundary. Absent anchor, unsupported anchor, or a failed conversion ⇒ **zero
+actions**, never a fallback offset.
+
 ## TypeProvider Architecture
 
 The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends:
@@ -210,6 +282,31 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 ### Background File Sync
 
 During `initialized()`, the LSP spawns a priority-aware `WorkspaceScanner`. Filesystem-backed tsserver continues to resolve real `.ts`/`.tsx`/`.js`/`.jsx` and `node_modules` from disk. Framework carriers are compiled on the background lane and published by authored source identity into the durable plugin store; after the carrier pass, one coalesced refresh advances metadata without making every workspace carrier a Program root. No generated file is opened over the tsserver protocol. Before every carrier unit the scanner yields to active LSP handlers, with a bounded background-deferral interval so continuous editor traffic cannot starve project-wide warmup. TSGO retains its explicit eager project-input path for carrier and plain-source materialization. Verter semantic/type-info caches remain a separate host concern; they are not serialized into either TypeScript engine or used as a substitute for its project graph.
+
+### Public-API Entries: Response-Only vs Projection
+
+The public-API surface has TWO consumer classes with distinct costs, split at the
+entry level (`host_resolve/virtual_file_pipeline.rs`):
+
+- **Response-only** — `get_public_api`, `get_public_api_with_mode`,
+  `get_public_api_batch`: adapter declaration render ONLY (the shared
+  `render_public_api_items` body). They never compose the structured component
+  contract and never run the component-meta walk, so a completion-time carrier
+  reconcile (`reconcile_carrier_source` → live `get_public_api`) cannot
+  `ensure_loaded` an evicted child or commit child analysis (pinned by
+  `completion_does_not_cold_load_children_for_native_enrichment`).
+- **Projection** — `get_public_api_projection`: the ONE entry returning
+  `ComponentApiProjection { response, contract }`. The mandatory contract
+  composes HERE, at the demand that consumes it, under the SAME `(fixed, view)`
+  capture as the render (`compose_component_contract`); composition never gates
+  the response (absent/failed component-meta output ⇒ typed `Unsupported`).
+  The contract stays NON-OPTIONAL on the projection type (compile-fail rail
+  `component_api_projection_contract_not_optional`).
+
+Single-knob proof that composition is projection-entry-scoped:
+`response_only_public_api_render_composes_no_contract`
+(`host_resolve_tests.rs`) — an armed `OUTPUT_MATERIALIZE_FORCE_FAIL_FOR`
+survives `get_public_api` and is consumed by `get_public_api_projection`.
 
 ### Ordinary Carrier Import → Public-API Surface
 
@@ -623,3 +720,18 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | `ResilientTsserverProvider` |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |
+
+### Template class fact lanes
+
+Normal compile, content override, and lazy raw-template conversion must all
+build `TemplateClassSemanticFacts` from the exact source `whole_hash` and the
+same script snapshot used by conversion. `CompileInput` and
+`VueTemplateInputs` carry that hash. Base-current computations may retain
+complete facts only with their validated dependency `ReadSetSignature`;
+overlay, missing/cyclic, or otherwise `ReturnOnly` computations never populate
+base-only caches. Content publication is owner-only, so dependency-derived
+class facts are served fresh without entering the pure-content store.
+
+`template_converter_inputs` is linkage-only. Semantic class domains flow
+through the opaque, revision-checked `TemplateClassDomainIndex`; callers must
+not manufacture raw class-domain tuples or recover domains from display text.

@@ -1283,7 +1283,11 @@ defineProps<{
     let color_ty = crate::test_only::semantic_source_probe::demand_type_expr(
         &host,
         "/src/Alert.vue",
-        color_prop.type_source.present().expect("typed color prop"),
+        color_prop
+            .publication
+            .source_position()
+            .present()
+            .expect("typed color prop"),
     )
     .unwrap_or_else(|| panic!("color's published source must demand-materialize"));
     let is_resolved_color = matches!(&color_ty, TypeExpr::Union(_) | TypeExpr::Literal(_));
@@ -1302,7 +1306,8 @@ defineProps<{
         &host,
         "/src/Alert.vue",
         variant_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("typed variant prop"),
     )
@@ -1325,7 +1330,8 @@ defineProps<{
         &host,
         "/src/Alert.vue",
         avatar_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("typed avatar prop"),
     )

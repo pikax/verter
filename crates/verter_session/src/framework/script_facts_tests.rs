@@ -66,31 +66,64 @@ fn candidate_store_is_content_addressed_hit_and_version_miss() {
 }
 
 #[test]
-fn carrier_parser_v3_candidate_is_rejected_by_v4_key() {
-    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 3;
-    assert_eq!(
-        crate::file_artifact_store::LEGACY_PARSER_VERSION,
-        PREVIOUS_CARRIER_PARSER_VERSION + 1
+fn carrier_parser_v4_candidate_is_rejected_by_v5_key() {
+    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 4;
+    const CALL_SIGNATURE_SPAN_PARSER_VERSION: u32 = 5;
+    const _: () = assert!(
+        crate::file_artifact_store::LEGACY_PARSER_VERSION >= CALL_SIGNATURE_SPAN_PARSER_VERSION
     );
 
     let store = FrameworkScriptCandidateStore::new();
-    let current = candidate_key("/Fixture.vue", [3u8; 16]);
+    let current = CandidateSlotKey {
+        parser_version: CALL_SIGNATURE_SPAN_PARSER_VERSION,
+        ..candidate_key("/Fixture.vue", [3u8; 16])
+    };
     let stale = CandidateSlotKey {
         parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());
 
-    assert!(store.get(&stale).is_some(), "the planted v3 row exists");
+    assert!(store.get(&stale).is_some(), "the planted v4 row exists");
     assert!(
         store.get(&current).is_none(),
-        "the owner-exact v4 key rejects the v3 carrier candidate"
+        "the declaration-span-aware v5 key rejects the v4 carrier candidate"
     );
 
     store.insert(current.clone(), fixture_candidates());
     assert!(
         store.get(&current).is_some(),
-        "a v4 candidate roundtrips under the current key"
+        "a v5 candidate roundtrips under the v5 key"
+    );
+}
+
+// @ai-generated - Pins the authored-only import-target carrier invalidation boundary.
+#[test]
+fn carrier_parser_v5_candidate_is_rejected_by_v6_key() {
+    const PREVIOUS_CARRIER_PARSER_VERSION: u32 = 5;
+    assert_eq!(
+        crate::file_artifact_store::LEGACY_PARSER_VERSION,
+        PREVIOUS_CARRIER_PARSER_VERSION + 1
+    );
+
+    let store = FrameworkScriptCandidateStore::new();
+    let current = candidate_key("/AuthoredImport.vue", [6u8; 16]);
+    let stale = CandidateSlotKey {
+        parser_version: PREVIOUS_CARRIER_PARSER_VERSION,
+        ..current.clone()
+    };
+    store.insert(stale.clone(), fixture_candidates());
+
+    assert!(store.get(&stale).is_some(), "the planted v5 row exists");
+    assert!(
+        store.get(&current).is_none(),
+        "the authored-import-only v6 key rejects the v5 carrier candidate"
+    );
+
+    store.insert(current.clone(), fixture_candidates());
+    assert!(
+        store.get(&current).is_some(),
+        "a v6 candidate roundtrips under the current key"
     );
 }
 
@@ -279,6 +312,15 @@ fn unresolved_resolution_keeps_exact_syntax_facts_but_does_not_warm() {
     assert_eq!(
         props_call_count, 1,
         "resolution failure cannot erase the observed syntax call"
+    );
+    let mut resolved_snippet_count = 0;
+    partial
+        .conservative_svelte_observations()
+        .resolved_snippet_imports()
+        .visit(|_| resolved_snippet_count += 1);
+    assert_eq!(
+        resolved_snippet_count, 0,
+        "an unresolved import is not a conservative positive identity"
     );
     assert_eq!(
         host.framework_script_caches().candidates.len(),

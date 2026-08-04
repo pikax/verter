@@ -3655,16 +3655,12 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
     install_svelte_at(tmp.path(), USABLE_SVELTE);
     let src_dir = tmp.path().join("src");
     std::fs::create_dir_all(&src_dir).expect("src dir");
-    let root = tmp.path().to_string_lossy().replace('\\', "/");
+    let root = verter_span::path::canonicalize_path(&tmp.path().to_string_lossy());
 
-    let child_canonical = src_dir
-        .join("Child.svelte")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let parent_canonical = src_dir
-        .join("Parent.svelte")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let child_canonical =
+        verter_span::path::canonicalize_path(&src_dir.join("Child.svelte").to_string_lossy());
+    let parent_canonical =
+        verter_span::path::canonicalize_path(&src_dir.join("Parent.svelte").to_string_lossy());
     let child_source = |n: usize| {
         format!(
             "<script lang=\"ts\">\n  export let label{n}: string;\n</script>\n\

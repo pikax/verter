@@ -217,16 +217,11 @@ impl ProjectSemanticDispatch<'_> {
                 ProjectedTypeFact::MemberPath { base, path } => {
                     self.raise_projected_member_path(base, path, &ctx)
                 }
-                ProjectedTypeFact::CallableParams {
+                ProjectedTypeFact::CallableOccurrence {
                     base,
-                    signature_ordinal,
-                    first_param,
-                } => self.raise_projected_callable_params(
-                    base,
-                    *signature_ordinal,
-                    *first_param,
-                    &ctx,
-                ),
+                    occurrence,
+                    projection,
+                } => self.raise_projected_callable_occurrence(base, occurrence, *projection, &ctx),
                 ProjectedTypeFact::IndexPosition {
                     base,
                     signature_ordinal,
@@ -362,11 +357,13 @@ impl ProjectSemanticDispatch<'_> {
         if let AuthoredBodyLocator::MacroPayload(payload) = locator {
             match payload.payload {
                 MacroPayloadPosition::TypeArgument => {
-                    if let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                        self.ctx,
-                        payload.anchor.canonical_id.as_ref(),
-                        payload.macro_index as usize,
-                    ) {
+                    if let Some(product) =
+                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                            self.ctx,
+                            payload.anchor.canonical_id.as_ref(),
+                            payload.macro_index as usize,
+                        )
+                    {
                         // Terminal-demand mode split (mirroring the per-FIELD
                         // arm below): `Expanded` / `Identity` complete the
                         // carrier-head resolution through the one dispatch.
@@ -376,10 +373,10 @@ impl ProjectSemanticDispatch<'_> {
                                 | crate::semantic_query::ProjectionMode::Identity
                         ) {
                             return Some(HotTypeRef::new(
-                                self.resolve_hot_handle_with_context(handle, context),
+                                self.resolve_hot_handle_with_context(product.hot, context),
                             ));
                         }
-                        return Some(handle);
+                        return Some(product.hot);
                     }
                     // Framework script-fact macros are not analyzer-macro
                     // mirror rows. Fall through to the retained-AST locator
@@ -460,14 +457,14 @@ impl ProjectSemanticDispatch<'_> {
                 _ => return None,
             }
         };
-        let base = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             canonical,
             payload.macro_index as usize,
         )?;
         let path: Arc<[PathSegment]> = std::iter::once(PathSegment::Member(member_name)).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
-            base: base.node(),
+            base: product.hot.node(),
             path,
             context,
         });
@@ -600,32 +597,75 @@ impl ProjectSemanticDispatch<'_> {
         }
     }
 
-    /// Raise a projected CALLABLE-PARAMS fact
-    /// ([`ProjectedTypeFact::CallableParams`]) by replaying the publication
-    /// surface's own producing route: the BASE macro type argument re-projects
-    /// to the SAME one-level macro surface the normalization read
-    /// (`resolve_vue_macro_surface_with_ctx` — the one existing surface entry,
-    /// so projection context, provenance, and heritage substitution are
-    /// IDENTICAL by construction, and its `ProjectPath` queries hit the shared
-    /// memo), the call signature at `signature_ordinal` is selected in the
-    /// NODE domain (the surface's declaration-order sequence, the exact
-    /// pre-expansion order the producer stamped), the callable realizes
-    /// through the SAME shared [`CallableNodeView`] policy the emit
-    /// normalization used (`published(Navigate)`), and a TRANSIENT tuple node
-    /// is synthesized from the realized signature's RAW parameters from
-    /// `first_param` on — label / optionality / rest / ORDER preserved, each
-    /// element carrying the parameter's own (possibly substituted) value
-    /// node, so nesting, composites, imported references, and generic
-    /// substitutions ride through shallow-by-default. Every step routes
-    /// through the one shared dispatch (`macro_type_arg_hot_ref`,
-    /// `ProjectPath`, `ResolveDecl`/`Instantiate` via the structural-fact
-    /// demand primitive) — never a second resolver, never an output-local
-    /// walker.
+    /// Replay a callable member route and select its combined return node using
+    /// the same callable-arm policy as framework slot normalization.
+    fn raise_projected_callable_occurrence(
+        &self,
+        base: &AuthoredBodyLocator,
+        occurrence: &verter_type_expr::facts::CallableOccurrenceHandle,
+        projection: verter_type_expr::facts::CallableOccurrenceProjection,
+        ctx: &SourceRaiseContext<'_>,
+    ) -> Option<HotTypeRef> {
+        let context =
+            ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
+        let callable = if occurrence.is_root() {
+            let locator = absolutize_locator(base, ctx.scope_canonical_id);
+            let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
+                return None;
+            };
+            let surface = self.replay_vue_macro_type_argument_surface(payload)?;
+            surface
+                .surface
+                .call_signatures
+                .iter()
+                .find(|signature| occurrence.matches_subject(signature.node.0))?
+                .node
+        } else {
+            let callable = self
+                .raise_projected_member_path(base, &Arc::from(occurrence.path()), ctx)?
+                .node();
+            if !occurrence.matches_subject(callable.0) {
+                return None;
+            }
+            callable
+        };
+        if let verter_type_expr::facts::CallableOccurrenceProjection::Parameters { first_param } =
+            projection
+        {
+            return self.raise_projected_callable_params(callable, first_param, ctx);
+        }
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
+        let return_node = if occurrence.is_root() {
+            view.signature(context)?.return_type()?
+        } else {
+            let realized_root = view.realized_callable_root(context)?;
+            let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    crate::meta_resolve::callable_view::ArmCombineNode::Union
+                }
+                _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+            };
+            view.slot_param_and_return_by_arm(combine, context)?
+                .return_type?
+        };
+        if super::raise::node_is_unknown_materializing_failure(self, return_node) {
+            return None;
+        }
+        let hot = HotTypeRef::new(return_node);
+        ctx.check_raised_unknown_materializing(self, Some(&hot));
+        Some(hot)
+    }
+
+    /// Raise the parameter projection of an exact callable occurrence.
+    /// Occurrence selection has already replayed the authored base and matched
+    /// the resolver-minted instantiated subject. This step synthesizes the
+    /// transient payload tuple from `first_param` onward while preserving
+    /// labels, optionality, rest, order, nesting, and substitutions.
     ///
     /// FAIL-CLOSED, never a fabricated tuple: a non-macro / non-type-argument
-    /// base, an unresolvable surface, an out-of-bounds `signature_ordinal`, a
-    /// non-callable ordinal, or a `first_param` past the parameter list is an
-    /// honest `None` (bounds drift never synthesizes an empty tuple); a
+    /// base, an unresolvable occurrence, or a `first_param` past the parameter
+    /// list is an honest `None` (bounds drift never synthesizes an empty
+    /// tuple); a
     /// payload parameter whose root stays an UNRESOLVED residual reference
     /// carrier (`BareRef` / `ImportType` the shared demand primitive could
     /// not resolve) or resolves to an unknown-materializing failure carrier
@@ -637,33 +677,13 @@ impl ProjectSemanticDispatch<'_> {
     /// [`CallableNodeView`]: crate::meta_resolve::callable_view::CallableNodeView
     fn raise_projected_callable_params(
         &self,
-        base: &AuthoredBodyLocator,
-        signature_ordinal: u32,
+        callable: SemanticNodeId,
         first_param: u32,
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
-        let locator = absolutize_locator(base, ctx.scope_canonical_id);
-        // The only producer-minted base position is the macro TYPE-ARGUMENT
-        // (the emit normalization replays off the macro's stamped type
-        // argument); any other base has no surface-projection route here.
-        let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
-            return None;
-        };
-        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
-        // Deterministic NODE-domain signature selection: the ordinal indexes
-        // the surface's declaration-order call-signature sequence (the exact
-        // pre-expansion sequence the producer stamped). Bounds drift is an
-        // honest miss.
-        let sig = surface
-            .surface
-            .call_signatures
-            .get(signature_ordinal as usize)?;
-        // SAME callable-realization policy as the emit normalization
-        // (`emits_from_typeinfo_surface`): `published(Navigate)` realizes an
-        // aliased / generic callable to its `Function` node.
         let realize_context =
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
-        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, sig.node);
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
         let signature = view.signature(realize_context)?;
         let params = signature.raw_params();
         // `first_param` past the parameter list is bounds drift — fail
@@ -882,6 +902,17 @@ impl ProjectSemanticDispatch<'_> {
         HotTypeRef::new(node)
     }
 
+    /// Node-domain fact: whether `node` is the terminal shallow
+    /// [`SemanticNodeData::SyntheticBinding`] carrier — the raise arm's honest
+    /// degraded fallback when a terminal-demand deepen cannot complete
+    /// ([`Self::raise_synthetic_binding_source_to_hot`]). Consumers decide on
+    /// THIS node-domain fact, never on a reverse-materialized `TypeExpr`.
+    pub(crate) fn node_is_synthetic_binding_carrier(&self, node: SemanticNodeId) -> bool {
+        self.graph()
+            .node_data(node)
+            .is_some_and(|data| matches!(data.as_ref(), SemanticNodeData::SyntheticBinding { .. }))
+    }
+
     /// Terminal-demand explicit deepen for a synthetic slot-binding carrier —
     /// the production consumer of the content-free synthetic-binding cache
     /// route: the host-owned `ShapeCacheDb` slot keyed by
@@ -1029,7 +1060,9 @@ impl ProjectSemanticDispatch<'_> {
         match demand.route {
             // The hot-mirror route IS the base handle: the demand names the
             // macro payload itself.
-            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => Some(base),
+            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => {
+                Some(base.hot)
+            }
             // A member-role path projects off the base through the one
             // dispatch — both routes converge on the same `ProjectPath`
             // projection when a path is present.
@@ -1040,10 +1073,10 @@ impl ProjectSemanticDispatch<'_> {
                     .map(|segment| PathSegment::Member(Arc::from(segment.as_str())))
                     .collect();
                 if path.is_empty() {
-                    return Some(base);
+                    return Some(base.hot);
                 }
                 let read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: base.node(),
+                    base: base.hot.node(),
                     path,
                     context,
                 });

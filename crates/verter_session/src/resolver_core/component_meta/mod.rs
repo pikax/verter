@@ -205,7 +205,9 @@ pub(crate) fn component_meta_resolved_macros(
                     .map(
                         |row| verter_semantic::analysis::component_meta::ResolvedPropInput {
                             field: row.analysis.clone(),
-                            type_source: row.type_source.clone(),
+                            authority: row.authority.clone(),
+                            authored_evidence: row.authored_evidence.clone(),
+                            callable_role: row.callable_role.clone(),
                         },
                     )
                     .collect(),
@@ -214,12 +216,23 @@ pub(crate) fn component_meta_resolved_macros(
                     .iter()
                     .map(
                         |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
-                            field: row.analysis.clone(),
+                            id: row.id.clone(),
+                            name: row.name.clone(),
+                            span: row.span,
+                            payload_type: row.payload_type.clone(),
+                            payload: row.payload.clone(),
+                            payload_expr_scope: row.payload_expr_scope.clone(),
+                            description: row.description.clone(),
+                            tags: row.tags.clone(),
                             payload_source: row.payload_source.clone(),
+                            payload_publication: row.payload_publication.clone(),
+                            return_publication: row.return_publication.clone(),
+                            return_publication_scope: row.return_publication_scope.clone(),
                         },
                     )
                     .collect(),
                 slots: dtos.slot_fields().to_vec(),
+                slot_return_publications: dtos.slot_return_publications().to_vec(),
                 exposed: dtos
                     .expose_fields()
                     .iter()
@@ -230,8 +243,93 @@ pub(crate) fn component_meta_resolved_macros(
                         },
                     )
                     .collect(),
+                default_keys: Vec::new(),
             },
         );
+    }
+
+    let host = ctx.host_for_fact_tracer_install();
+    let is_svelte = host
+        .scheduler
+        .try_get_source(owner_canonical)
+        .and_then(|snapshot| {
+            snapshot
+                .downcast_data::<crate::host_executor::HostSourceData>()
+                .map(|data| data.file_language.clone())
+        })
+        .and_then(|language| language.adapter_id().cloned())
+        .is_some_and(|adapter| adapter.is_svelte());
+    if is_svelte {
+        use crate::typeinfo::framework_surface::SvelteSurfaceSource;
+
+        let native_index = snapshot_macros.len();
+        let mut native = verter_semantic::analysis::component_meta::ResolvedMacroInput {
+            macro_index: native_index,
+            props: Vec::new(),
+            emits: Vec::new(),
+            slots: Vec::new(),
+            slot_return_publications: Vec::new(),
+            exposed: Vec::new(),
+            default_keys: Vec::new(),
+        };
+        for source in [
+            SvelteSurfaceSource::RunesProps,
+            SvelteSurfaceSource::LegacyExportLet,
+            SvelteSurfaceSource::CallbackPropEvents,
+            SvelteSurfaceSource::LegacyDispatcher,
+            SvelteSurfaceSource::SnippetProps,
+            SvelteSurfaceSource::LegacySlotInventory,
+        ] {
+            let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+                host,
+                ctx,
+                owner_canonical,
+                source,
+            );
+            if matches!(
+                outcome,
+                crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
+            ) {
+                crate::request_context::mark_request_result_partial();
+            }
+            let Some(dtos) = outcome.value() else {
+                continue;
+            };
+            native.props.extend(dtos.prop_fields().iter().map(|row| {
+                verter_semantic::analysis::component_meta::ResolvedPropInput {
+                    field: row.analysis.clone(),
+                    authority: row.authority.clone(),
+                    authored_evidence: row.authored_evidence.clone(),
+                    callable_role: row.callable_role.clone(),
+                }
+            }));
+            native.default_keys.extend(
+                dtos.prop_defaults()
+                    .iter()
+                    .map(|default| default.key.clone()),
+            );
+            native.emits.extend(dtos.emit_fields().iter().map(|row| {
+                verter_semantic::analysis::component_meta::ResolvedEmitInput {
+                    id: row.id.clone(),
+                    name: row.name.clone(),
+                    span: row.span,
+                    payload_type: row.payload_type.clone(),
+                    payload: row.payload.clone(),
+                    payload_expr_scope: row.payload_expr_scope.clone(),
+                    description: row.description.clone(),
+                    tags: row.tags.clone(),
+                    payload_source: row.payload_source.clone(),
+                    payload_publication: row.payload_publication.clone(),
+                    return_publication: row.return_publication.clone(),
+                    return_publication_scope: row.return_publication_scope.clone(),
+                }
+            }));
+            native.slots.extend_from_slice(dtos.slot_fields());
+            native
+                .slot_return_publications
+                .extend_from_slice(dtos.slot_return_publications());
+        }
+        inputs.push(native);
     }
     inputs
 }

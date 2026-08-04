@@ -1,10 +1,10 @@
-﻿// Document symbols from SFC structure + verter_session analysis.
+// Document symbols from SFC structure + verter_session analysis.
 
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Build a document symbol tree from SFC blocks and analysis data.
 ///
@@ -14,13 +14,11 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// - Children of template: component usages and root elements from analysis
 /// - Children of style: CSS classes, custom properties, at-rules from analysis
 pub fn build_document_symbols(
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
-    let mut style_index = 0usize;
-
     for block in blocks {
         let open_start = line_index
             .offset_to_position(block.open_tag_start)
@@ -41,12 +39,7 @@ pub fn build_document_symbols(
                 .map(|a| build_script_children(a, block, line_index))
                 .unwrap_or_default(),
             "template" => analysis.and_then(|a| build_template_children(a, block, line_index)),
-            "style" => {
-                let result =
-                    analysis.and_then(|a| build_style_children(a, style_index, block, line_index));
-                style_index += 1;
-                result
-            }
+            "style" => analysis.and_then(|a| build_style_children(a, block, line_index)),
             _ => None,
         };
 
@@ -72,7 +65,7 @@ pub fn build_document_symbols(
     symbols
 }
 
-fn format_block_name(block: &SfcBlock) -> String {
+fn format_block_name(block: &CarrierBlockView) -> String {
     let mut name = block.tag_name.clone();
     if block.is_setup() {
         name.push_str(" setup");
@@ -86,7 +79,7 @@ fn format_block_name(block: &SfcBlock) -> String {
     name
 }
 
-fn build_block_detail(block: &SfcBlock) -> Option<String> {
+fn build_block_detail(block: &CarrierBlockView) -> Option<String> {
     match block.tag_name.as_str() {
         "script" if block.is_setup() => Some("script setup".to_string()),
         "script" => Some("options script".to_string()),
@@ -127,7 +120,7 @@ fn block_symbol_kind(tag_name: &str) -> SymbolKind {
 /// when spans are zero (not yet populated).
 fn build_script_children(
     analysis: &FileAnalysisSnapshot,
-    block: &SfcBlock,
+    block: &CarrierBlockView,
     line_index: &LineIndex,
 ) -> Option<Vec<DocumentSymbol>> {
     let mut children = Vec::new();
@@ -231,6 +224,77 @@ fn build_script_children(
     }
 }
 
+/// Build child symbols for CSS classes and custom properties within a style
+/// block.
+///
+/// The analysis entry is selected exclusively through the sealed block ref —
+/// a full-identity join (artifact identity + block id). A missing or foreign
+/// identity fails closed (no children), never an ordinal fallback. Children
+/// carry the analysis' real SFC-absolute spans.
+fn build_style_children(
+    analysis: &FileAnalysisSnapshot,
+    block: &CarrierBlockView,
+    line_index: &LineIndex,
+) -> Option<Vec<DocumentSymbol>> {
+    let block_ref = block.block_ref.artifact_block_ref();
+    let style = analysis
+        .styles
+        .iter()
+        .find(|style| style.block_ref.as_ref() == Some(block_ref))?;
+    let css = style.css.as_ref()?;
+
+    let (content_start, content_end) = block.content_range();
+    let fallback_range = Range {
+        start: line_index
+            .offset_to_position(content_start)
+            .unwrap_or_default(),
+        end: line_index
+            .offset_to_position(content_end)
+            .unwrap_or_default(),
+    };
+
+    let mut children = Vec::new();
+    for class in &css.classes {
+        let range = span_to_range(class.span.start, class.span.end, line_index, fallback_range);
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: format!(".{}", class.name),
+            detail: None,
+            kind: SymbolKind::CLASS,
+            tags: None,
+            deprecated: None,
+            range,
+            selection_range: range,
+            children: None,
+        });
+    }
+    for property in &css.custom_properties {
+        let range = span_to_range(
+            property.name_span.start,
+            property.name_span.end,
+            line_index,
+            fallback_range,
+        );
+        #[allow(deprecated)]
+        children.push(DocumentSymbol {
+            name: property.name.clone(),
+            detail: Some("custom property".to_string()),
+            kind: SymbolKind::VARIABLE,
+            tags: None,
+            deprecated: None,
+            range,
+            selection_range: range,
+            children: None,
+        });
+    }
+
+    if children.is_empty() {
+        None
+    } else {
+        Some(children)
+    }
+}
+
 /// Convert analysis span offsets to an LSP Range, falling back if spans are zero.
 fn span_to_range(span_start: u32, span_end: u32, line_index: &LineIndex, fallback: Range) -> Range {
     if span_start == 0 && span_end == 0 {
@@ -287,7 +351,7 @@ fn build_binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) ->
 /// with their props as children.
 fn build_template_children(
     analysis: &FileAnalysisSnapshot,
-    block: &SfcBlock,
+    block: &CarrierBlockView,
     line_index: &LineIndex,
 ) -> Option<Vec<DocumentSymbol>> {
     let template = analysis.template.as_deref()?;
@@ -358,81 +422,6 @@ fn build_template_children(
     }
 }
 
-/// Build child symbols for CSS classes, custom properties, and at-rules in a style block.
-///
-/// Uses the style block index to match the correct `StyleBlockAnalysis` entry.
-fn build_style_children(
-    analysis: &FileAnalysisSnapshot,
-    style_index: usize,
-    block: &SfcBlock,
-    line_index: &LineIndex,
-) -> Option<Vec<DocumentSymbol>> {
-    let style_analysis = analysis.styles.get(style_index)?;
-    let css = style_analysis.css.as_ref()?;
-
-    let mut children = Vec::new();
-    let (content_start, content_end) = block.content_range();
-    let fallback_range = Range {
-        start: line_index
-            .offset_to_position(content_start)
-            .unwrap_or_default(),
-        end: line_index
-            .offset_to_position(content_end)
-            .unwrap_or_default(),
-    };
-
-    // CSS class selectors
-    for class in &css.classes {
-        #[allow(deprecated)]
-        children.push(DocumentSymbol {
-            name: format!(".{}", class.name),
-            detail: Some("class".to_string()),
-            kind: SymbolKind::STRING,
-            tags: None,
-            deprecated: None,
-            range: fallback_range,
-            selection_range: fallback_range,
-            children: None,
-        });
-    }
-
-    // CSS custom properties
-    for prop in &css.custom_properties {
-        #[allow(deprecated)]
-        children.push(DocumentSymbol {
-            name: prop.name.clone(),
-            detail: Some("custom property".to_string()),
-            kind: SymbolKind::PROPERTY,
-            tags: None,
-            deprecated: None,
-            range: fallback_range,
-            selection_range: fallback_range,
-            children: None,
-        });
-    }
-
-    // At-rules
-    for rule in &css.at_rules {
-        #[allow(deprecated)]
-        children.push(DocumentSymbol {
-            name: format!("@{}", rule.name),
-            detail: Some(format!("{:?}", rule.kind)),
-            kind: SymbolKind::NAMESPACE,
-            tags: None,
-            deprecated: None,
-            range: fallback_range,
-            selection_range: fallback_range,
-            children: None,
-        });
-    }
-
-    if children.is_empty() {
-        None
-    } else {
-        Some(children)
-    }
-}
-
 fn macro_kind_display(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
     match kind {
         verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
@@ -448,7 +437,7 @@ fn macro_kind_display(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
     use verter_semantic::analysis::types::ImportBindingKind;
     use verter_semantic::analysis::*;
@@ -469,7 +458,7 @@ mod tests {
     #[test]
     fn test_basic_sfc_structure() {
         let source = "<template>\n  <div/>\n</template>\n\n<script setup>\nconst x = 1;\n</script>\n\n<style scoped>\n.foo {}\n</style>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let symbols = build_document_symbols(&blocks, None, &line_index);
@@ -483,7 +472,7 @@ mod tests {
     #[test]
     fn test_script_children_from_analysis() {
         let source = "<script setup lang=\"ts\">\nconst x = ref(0);\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(
@@ -498,6 +487,7 @@ mod tests {
                     callee_import_source: Some("vue".to_string()),
                     vue_api: Some(VueApiClassification::Ref),
                     async_component_source: None,
+                    binds_whole_call_result: true,
                 }),
                 span: verter_span::Span::new(0, 0),
                 used_in_script: false,
@@ -535,13 +525,14 @@ mod tests {
     #[test]
     fn test_macro_symbols() {
         let source = "<script setup>\nconst props = defineProps<{ msg: string }>()\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(
             vec![],
             vec![],
             vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -573,7 +564,7 @@ mod tests {
     fn test_block_naming() {
         let source =
             "<script setup lang=\"ts\">\n</script>\n<style scoped lang=\"scss\">\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let symbols = build_document_symbols(&blocks, None, &line_index);
@@ -586,7 +577,7 @@ mod tests {
     #[test]
     fn test_no_children_for_empty_analysis() {
         let source = "<script setup>\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(vec![], vec![], vec![]);
@@ -597,7 +588,7 @@ mod tests {
     #[test]
     fn test_template_children_components() {
         let source = "<template>\n<MyButton @click=\"handle\">Click</MyButton>\n</template>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -636,7 +627,7 @@ mod tests {
     #[test]
     fn test_template_children_root_elements() {
         let source = "<template>\n<div><span>inner</span></div>\n</template>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -676,10 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn test_style_children_classes() {
+    fn style_children_fail_closed_without_block_reference() {
         let source =
             "<style scoped>\n.container { padding: 16px; }\n.title { font-size: 2rem; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = FileAnalysisSnapshot {
@@ -708,9 +699,99 @@ mod tests {
 
         let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
         let style = &symbols[0];
-        let children = style.children.as_ref().unwrap();
-        assert_eq!(children.len(), 2);
-        assert_eq!(children[0].name, ".container");
-        assert_eq!(children[1].name, ".title");
+        assert!(style.children.is_none());
+    }
+
+    /// Style document-symbol children are restored on a sealed-identity
+    /// match: classes and custom properties from the joined analysis appear
+    /// under the style block with their real spans.
+    #[test]
+    fn style_children_restored_on_sealed_identity_match() {
+        let source =
+            "<style scoped>\n.container { --gap: 4px; }\n.title { font-size: 2rem; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let style_block = blocks
+            .iter()
+            .find(|block| block.tag_name == "style")
+            .expect("style block");
+        let (content_start, content_end) = style_block.content_range();
+        let mut style = verter_semantic::analysis::style::build_css_style_analysis(
+            &source[content_start as usize..content_end as usize],
+            verter_semantic::analysis::style::VueStyleInput::default(),
+            true,
+            false,
+            None,
+            content_start,
+        );
+        style.block_ref = Some(style_block.block_ref.artifact_block_ref().clone());
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(source);
+
+        let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
+        let children = symbols[0]
+            .children
+            .as_ref()
+            .expect("style children on sealed identity match");
+        let names = children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&".container"), "classes present: {names:?}");
+        assert!(names.contains(&".title"), "classes present: {names:?}");
+        assert!(
+            names.contains(&"--gap"),
+            "custom properties present: {names:?}"
+        );
+        // Real spans, not the zero-span fallback: the `.title` child range
+        // starts at the authored class-name offset.
+        let title_offset = source.find(".title").unwrap() as u32 + 1;
+        let title = children
+            .iter()
+            .find(|child| child.name == ".title")
+            .unwrap();
+        assert_eq!(
+            title.range.start,
+            line_index.offset_to_position(title_offset).unwrap(),
+            "child ranges come from analysis spans"
+        );
+    }
+
+    /// A stale artifact's analysis (same local id, different sealed
+    /// identity) must never attach style children to the current block.
+    #[test]
+    fn style_children_refuse_stale_artifact_analysis() {
+        let current = "<style>\n.current {}\n</style>";
+        let stale = "<style>\n.staleee {}\n</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let stale_block = stale_blocks
+            .iter()
+            .find(|block| block.tag_name == "style")
+            .expect("stale style block");
+        let (content_start, content_end) = stale_block.content_range();
+        let mut style = verter_semantic::analysis::style::build_css_style_analysis(
+            &stale[content_start as usize..content_end as usize],
+            verter_semantic::analysis::style::VueStyleInput::default(),
+            false,
+            false,
+            None,
+            content_start,
+        );
+        style.block_ref = Some(stale_block.block_ref.artifact_block_ref().clone());
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+
+        let symbols = build_document_symbols(&blocks, Some(&analysis), &line_index);
+        assert!(
+            symbols[0].children.is_none(),
+            "sealed identity mismatch fails closed: {:?}",
+            symbols[0].children
+        );
     }
 }

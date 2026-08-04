@@ -153,10 +153,16 @@ function crossProjectErrorFixture(framework: "vue" | "svelte"): ReferenceFixture
 }
 
 describe("§2.4 mirror-host spike — build mode diagnostic parity with tsc -b", () => {
-  it("the .ts twin baseline reports exactly TS2322 (the authoritative cross-project error)", () => {
-    const codes = tscBaselineCodesForCrossProjectError();
-    expect(codes).toContain(2322);
-  });
+  it(
+    "the .ts twin baseline reports exactly TS2322 (the authoritative cross-project error)",
+    () => {
+      const codes = tscBaselineCodesForCrossProjectError();
+      expect(codes).toContain(2322);
+    },
+    // A real `tsc -b` baseline build — same integration bound as the
+    // framework rows below, for the same CI-contention reason.
+    BUILD_MODE_INTEGRATION_TIMEOUT_MS,
+  );
 
   for (const framework of ["vue", "svelte"] as const) {
     it(

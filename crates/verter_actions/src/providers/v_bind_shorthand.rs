@@ -173,6 +173,7 @@ mod tests {
             template,
             script: None,
             styles: &[],
+            blocks: &[],
         }
     }
 

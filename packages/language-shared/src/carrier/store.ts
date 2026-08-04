@@ -41,6 +41,14 @@ export interface ReadyFile {
   blob_rel: string;
   /** `maps/blake3-<map_hash_hex>.json` — relative to the store dir; absent when no map. */
   map_rel?: string;
+  /** Content-free ownership facts stamped beside the unchanged standard source map. */
+  structure?: {
+    schema_version: number;
+    artifact_token: string;
+    script_content_ranges: readonly (readonly [number, number])[];
+    /** Parser-identified markup opening-tag spans (additive; absent in older stamps). */
+    markup_opening_ranges?: readonly (readonly [number, number])[];
+  };
 }
 
 /** One project's manifest entry: its owned carrier set plus the ready subset. */

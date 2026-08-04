@@ -14,7 +14,7 @@ use verter_span::TsPosition;
 use super::definition::{
     is_carrier_ide_path, normalize_carrier_path, path_to_uri, resolve_carrier_ide_range_strict,
 };
-use super::hover::{extract_hover_text, replace_kind_prefix, strip_leading_code_block};
+use super::hover::{apply_kind_label_override, extract_hover_text, strip_leading_code_block};
 use super::*;
 use crate::documents::line_index::LineIndex;
 use crate::documents::position_map::PositionMapper;
@@ -59,6 +59,29 @@ fn make_mapper_and_indexes() -> (ProviderPositionMapper, LineIndex, LineIndex) {
     let tsx_li = LineIndex::new_utf16(tsx_source);
 
     (mapper, carrier_li, tsx_li)
+}
+
+/// A decoy rendered blob: the boundary renderer consumes ONLY the structured
+/// fields, so this string must never appear in any merged hover. Any test that
+/// went green through a `contents` re-parse would surface it and fail.
+const CONTENTS_DECOY: &str = "@@CONTENTS-BLOB-IS-NOT-A-RENDER-SOURCE@@";
+
+/// A provider hover whose STRUCTURED display signature drives the boundary
+/// renderer (`contents` deliberately carries [`CONTENTS_DECOY`]).
+fn make_type_hover(display: &str) -> HoverInfo {
+    HoverInfo {
+        contents: CONTENTS_DECOY.to_string(),
+        display_signature: Some(crate::type_provider::mock::test_display_signature(display)),
+        ..Default::default()
+    }
+}
+
+/// [`make_type_hover`] plus a structured documentation block.
+fn make_type_hover_with_docs(display: &str, docs: &str) -> HoverInfo {
+    HoverInfo {
+        documentation: Some(docs.to_string()),
+        ..make_type_hover(display)
+    }
 }
 
 /// @ai-generated — Vue position maps to correct TSX byte offset
@@ -175,11 +198,7 @@ fn make_verter_hover(text: &str) -> Hover {
 fn merge_hover_both_present() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let verter = make_verter_hover("**msg** (SetupConst)");
-    let type_hover = HoverInfo {
-        contents: "const msg: string".to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover = make_type_hover("const msg: string");
 
     let result = merge_hover(
         Some(verter),
@@ -193,6 +212,10 @@ fn merge_hover_both_present() {
     let text = extract_hover_text(&result.unwrap());
     assert!(text.contains("const msg: string"));
     assert!(text.contains("SetupConst"));
+    assert!(
+        !text.contains(CONTENTS_DECOY),
+        "the merged hover renders from structured fields, never the contents blob: {text}"
+    );
 }
 
 /// @ai-generated — Only verter hover present
@@ -219,11 +242,7 @@ fn merge_hover_verter_only() {
 #[test]
 fn merge_hover_type_only() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
-    let type_hover = HoverInfo {
-        contents: "const msg: string".to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover = make_type_hover("const msg: string");
 
     let result = merge_hover(
         None,
@@ -237,6 +256,91 @@ fn merge_hover_type_only() {
     assert!(result.is_some());
     let text = extract_hover_text(&result.unwrap());
     assert!(text.contains("const msg: string"));
+}
+
+/// The provider's generated-file byte range maps back to a carrier range in
+/// the type-only arm; a hover without a range keeps `range: None`.
+#[test]
+fn merge_hover_type_only_maps_provider_range_to_carrier() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    // TSX bytes 6..9 sit inside the mapped `msg` token run (TSX line 0 col 6 →
+    // Vue line 5 col 6).
+    let type_hover = HoverInfo {
+        range_start: Some(6),
+        range_end: Some(9),
+        ..make_type_hover("const msg: string")
+    };
+
+    let result = merge_hover(
+        None,
+        Some(type_hover),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    )
+    .expect("type-only hover merges");
+    let range = result.range.expect("provider range maps to the carrier");
+    assert_eq!((range.start.line, range.start.character), (5, 6));
+    assert_eq!(range.end.line, 5);
+
+    // Fail closed: no provider range ⇒ no carrier range, never a fabrication.
+    let rangeless = merge_hover(
+        None,
+        Some(make_type_hover("const msg: string")),
+        &mapper,
+        &tsx_li,
+        &carrier_li,
+        None,
+        None,
+    )
+    .expect("type-only hover merges");
+    assert_eq!(rangeless.range, None);
+}
+
+/// A provider hover WITHOUT a structured signature contributes nothing — the
+/// rendered `contents` blob is never a fallback render source (no dual path).
+#[test]
+fn merge_hover_without_structured_signature_fails_closed() {
+    let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
+    let blob_only = HoverInfo {
+        contents: "```typescript\nconst msg: string\n```".to_string(),
+        ..Default::default()
+    };
+
+    assert!(
+        merge_hover(
+            None,
+            Some(blob_only.clone()),
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            None,
+        )
+        .is_none(),
+        "a signature-less provider hover must contribute nothing"
+    );
+
+    let verter = make_verter_hover("**msg** (SetupConst)");
+    let text = extract_hover_text(
+        &merge_hover(
+            Some(verter),
+            Some(blob_only),
+            &mapper,
+            &tsx_li,
+            &carrier_li,
+            None,
+            None,
+        )
+        .expect("verter hover still serves"),
+    );
+    assert!(
+        !text.contains("const msg: string"),
+        "the blob must not be scraped into the merged hover: {text}"
+    );
+    assert!(text.contains("SetupConst"), "verter content still serves");
 }
 
 /// @ai-generated — Neither hover present returns None
@@ -254,13 +358,9 @@ fn merge_hover_neither() {
 #[test]
 fn merge_hover_strips_synthetic_prefix_from_type_block() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
-    let type_hover = HoverInfo {
-        contents:
-            "const GlobalCountComp: ___VERTER___GlobalComponentKebabType<\"GlobalCountComp\", \"global-count-comp\">"
-                .to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover = make_type_hover(
+        "const GlobalCountComp: ___VERTER___GlobalComponentKebabType<\"GlobalCountComp\", \"global-count-comp\">",
+    );
 
     let result = merge_hover(
         None,
@@ -301,11 +401,8 @@ fn merge_hover_strips_synthetic_prefix_from_type_block() {
 #[test]
 fn merge_hover_displays_svelte_snippet_contract_without_internal_brand() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
-    let type_hover = HoverInfo {
-        contents: "const header: __VerterSnippet<[{ title: string; count: number }]>".to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover =
+        make_type_hover("const header: __VerterSnippet<[{ title: string; count: number }]>");
 
     let result = merge_hover(
         None,
@@ -329,17 +426,20 @@ fn merge_hover_displays_svelte_snippet_contract_without_internal_brand() {
 
 #[test]
 fn svelte_public_facade_hover_uses_authored_component_name() {
-    let mut hover = HoverInfo {
-        contents: "(alias) const __VerterPublicComponent: Component<__VerterPublicProps, {}, \"\">"
-            .to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    // The rewrite targets the BRANDED display signature — the value the
+    // boundary renders from — through the labelled display-rewrite derivation.
+    let mut hover = make_type_hover(
+        "(alias) const __VerterPublicComponent: Component<__VerterPublicProps, {}, \"\">",
+    );
 
     super::hover::rewrite_svelte_public_component_label(&mut hover, Some("DirectChild"));
 
     assert_eq!(
-        hover.contents,
+        hover
+            .display_signature
+            .as_ref()
+            .expect("signature retained")
+            .as_display_str(),
         "(alias) const DirectChild: Component<__VerterPublicProps, {}, \"\">"
     );
 }
@@ -347,15 +447,18 @@ fn svelte_public_facade_hover_uses_authored_component_name() {
 #[test]
 fn svelte_public_facade_hover_is_unchanged_without_an_authored_identifier() {
     let original = "(alias) const __VerterPublicComponent: Component<Props>";
-    let mut hover = HoverInfo {
-        contents: original.to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let mut hover = make_type_hover(original);
 
     super::hover::rewrite_svelte_public_component_label(&mut hover, None);
 
-    assert_eq!(hover.contents, original);
+    assert_eq!(
+        hover
+            .display_signature
+            .as_ref()
+            .expect("signature retained")
+            .as_display_str(),
+        original
+    );
 }
 
 // ── Completion merge tests ─────────────────────────────────────
@@ -4106,7 +4209,7 @@ fn merge_code_actions_vue_without_script_setup_prelude_insertion_is_dropped() {
 /// `resolve_script_import_anchor` resolves `ExistingScriptSetup` and the merge would emit ONE
 /// re-anchored import into the setup block — a non-empty result. The carrier-keyed
 /// `resolve_carrier_preamble_import_anchor` detects the conflicting non-empty normal `<script>` (via
-/// the typed `scan_sfc_blocks` classification, no new string scanner) and returns `None` ⇒ the action
+/// the typed `test_carrier_blocks` classification, no new string scanner) and returns `None` ⇒ the action
 /// is dropped ⇒ empty result.
 #[test]
 fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
@@ -4116,7 +4219,7 @@ fn merge_code_actions_mixed_script_vue_prelude_insertion_is_dropped() {
 
     // Precondition: the carrier really is mixed-script (both blocks present and the normal
     // `<script>` is non-empty), so the test exercises the ambiguity gate, not an unrelated drop.
-    let blocks = crate::documents::sfc_scanner::scan_sfc_blocks(carrier_source);
+    let blocks = crate::documents::carrier_structure::test_carrier_blocks(carrier_source);
     assert!(
         blocks.iter().any(|b| b.is_setup()),
         "fixture precondition: a `<script setup>` block must be present"
@@ -6089,11 +6192,7 @@ fn merge_hover_no_duplicate_fences() {
         }),
         range: None,
     });
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "const count: Ref<number>".to_string(),
-    });
+    let tsgo = Some(make_type_hover("const count: Ref<number>"));
 
     let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6123,11 +6222,7 @@ fn merge_hover_verter_only_code_block() {
         }),
         range: None,
     });
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "const x: string".to_string(),
-    });
+    let tsgo = Some(make_type_hover("const x: string"));
 
     let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6141,18 +6236,17 @@ fn merge_hover_verter_only_code_block() {
     assert_eq!(text, "```typescript\nconst x: string\n```");
 }
 
-// ── Bug 3: TSGO already-markdown hover tests ─────────────────
+// ── Structured docs rendering (the boundary renders docs OUTSIDE the fence) ─
 
 #[test]
-fn merge_hover_tsgo_already_markdown_no_double_fence() {
+fn merge_hover_renders_documentation_outside_the_fence() {
     let (mapper, _, tsx_li) = make_mapper_and_indexes();
     let carrier_li = LineIndex::new_utf16("");
 
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "```typescript\n(property) msg: string\n```\nThe message.".to_string(),
-    });
+    let tsgo = Some(make_type_hover_with_docs(
+        "(property) msg: string",
+        "The message.",
+    ));
 
     let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6165,12 +6259,14 @@ fn merge_hover_tsgo_already_markdown_no_double_fence() {
     // Should start with the type signature in a code fence
     assert!(
         text.starts_with("```typescript\n(property) msg: string\n```"),
-        "should start with original code fence: {text}"
+        "should start with the fenced signature: {text}"
     );
     // Documentation should appear OUTSIDE the code fence
+    let fence_end = text.find("\n```").unwrap();
+    let doc_pos = text.find("The message.").unwrap();
     assert!(
-        text.contains("The message."),
-        "documentation should be present: {text}"
+        doc_pos > fence_end,
+        "documentation should be outside the code fence: {text}"
     );
     // Count code fence openings — should be exactly 1
     assert_eq!(
@@ -6185,11 +6281,7 @@ fn merge_hover_tsgo_plain_text_gets_wrapped() {
     let (mapper, _, tsx_li) = make_mapper_and_indexes();
     let carrier_li = LineIndex::new_utf16("");
 
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "(property) msg: string".to_string(),
-    });
+    let tsgo = Some(make_type_hover("(property) msg: string"));
 
     let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6207,11 +6299,10 @@ fn merge_hover_tsgo_with_jsdoc_newlines_preserved() {
     let (mapper, _, tsx_li) = make_mapper_and_indexes();
     let carrier_li = LineIndex::new_utf16("");
 
-    let tsgo = Some(HoverInfo {
-            range_start: None,
-            range_end: None,
-            contents: "```typescript\n(property) select: (action: Action) => true\n```\nEmitted when selected.\n当选择时触发。".to_string(),
-        });
+    let tsgo = Some(make_type_hover_with_docs(
+        "(property) select: (action: Action) => true",
+        "Emitted when selected.\n当选择时触发。",
+    ));
 
     let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6249,11 +6340,10 @@ fn merge_hover_verter_and_tsgo_combined_markdown() {
         }),
         range: None,
     });
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "```typescript\nconst count: Ref<number>\n```\nA counter.".to_string(),
-    });
+    let tsgo = Some(make_type_hover_with_docs(
+        "const count: Ref<number>",
+        "A counter.",
+    ));
 
     let result = merge_hover(verter, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
     assert!(result.is_some());
@@ -6272,6 +6362,10 @@ fn merge_hover_verter_and_tsgo_combined_markdown() {
         text.contains("*(reactive)*"),
         "should have verter context: {text}"
     );
+    assert!(
+        text.contains("A counter."),
+        "should have provider documentation: {text}"
+    );
     // Only 1 typescript code fence
     assert_eq!(
         text.matches("```typescript").count(),
@@ -6280,123 +6374,42 @@ fn merge_hover_verter_and_tsgo_combined_markdown() {
     );
 }
 
-#[test]
-fn wrap_type_block_plain_text_with_blank_line_separator() {
-    let (mapper, _, tsx_li) = make_mapper_and_indexes();
-    let carrier_li = LineIndex::new_utf16("");
-
-    // TSGO returns plain text with type and doc separated by blank line
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "(property) GameItemProps.game: GameVo | ProfilePlayedVo\n\n游戏数据".to_string(),
-    });
-
-    let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
-    let text = match result.unwrap().contents {
-        HoverContents::Markup(m) => m.value,
-        _ => panic!("expected markup"),
-    };
-
-    // Type should be inside fence
-    assert!(
-        text.starts_with(
-            "```typescript\n(property) GameItemProps.game: GameVo | ProfilePlayedVo\n```"
-        ),
-        "type should be in code fence: {text}"
-    );
-    // Doc should be outside fence
-    assert!(
-        text.contains("游戏数据"),
-        "documentation should be preserved: {text}"
-    );
-    // Doc must not be inside the code fence
-    let fence_end = text.find("\n```").unwrap();
-    let doc_pos = text.find("游戏数据").unwrap();
-    assert!(
-        doc_pos > fence_end,
-        "documentation should be outside the code fence: {text}"
-    );
-}
+// ── Vue kind-label override on the signature line ──────────────
 
 #[test]
-fn wrap_type_block_plain_text_with_single_newline_separator() {
-    let (mapper, _, tsx_li) = make_mapper_and_indexes();
-    let carrier_li = LineIndex::new_utf16("");
-
-    // TSGO returns plain text with type and doc separated by single newline
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "(property) game: GameVo\nThe game data.".to_string(),
-    });
-
-    let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
-    let text = match result.unwrap().contents {
-        HoverContents::Markup(m) => m.value,
-        _ => panic!("expected markup"),
-    };
-
-    // Type should be inside fence
-    assert!(
-        text.starts_with("```typescript\n(property) game: GameVo\n```"),
-        "type should be in code fence: {text}"
-    );
-    // Doc should be outside fence
-    let fence_end = text.find("\n```").unwrap();
-    let doc_pos = text.find("The game data.").unwrap();
-    assert!(
-        doc_pos > fence_end,
-        "documentation should be outside the code fence: {text}"
-    );
-}
-
-#[test]
-fn wrap_type_block_plain_text_no_newline() {
-    // When there's no newline separator, everything goes in the fence
-    // (can't reliably split type from doc without a separator)
-    let (mapper, _, tsx_li) = make_mapper_and_indexes();
-    let carrier_li = LineIndex::new_utf16("");
-
-    let tsgo = Some(HoverInfo {
-        range_start: None,
-        range_end: None,
-        contents: "(property) msg: string".to_string(),
-    });
-
-    let result = merge_hover(None, tsgo, &mapper, &tsx_li, &carrier_li, None, None);
-    let text = match result.unwrap().contents {
-        HoverContents::Markup(m) => m.value,
-        _ => panic!("expected markup"),
-    };
-
-    assert_eq!(text, "```typescript\n(property) msg: string\n```");
-}
-
-#[test]
-fn replace_kind_prefix_replaces_const_with_ref() {
-    let input = "```typescript\n(const) const count: Ref<number>\n```";
-    let result = replace_kind_prefix(input, "ref");
-    assert_eq!(result, "```typescript\n(ref) const count: Ref<number>\n```");
+fn vue_kind_label_override_replaces_existing_display_prefix() {
+    let result = apply_kind_label_override("(const) const count: Ref<number>", "ref");
+    assert_eq!(result, "(ref) const count: Ref<number>");
     assert!(!result.contains("(const)"), "old prefix must be replaced");
 }
 
 #[test]
-fn replace_kind_prefix_no_prefix_passthrough() {
-    let input = "```typescript\nconst count: number\n```";
-    let result = replace_kind_prefix(input, "ref");
-    // No `(...)` prefix to replace, so content passes through unchanged
-    assert_eq!(result, input);
+fn vue_kind_label_override_applies_when_no_prefix_exists() {
+    // `(vue_kind_label ?? kind)` composition: a kind-less signature (tsgo)
+    // still gains the Vue label.
+    let result = apply_kind_label_override("const count: number", "ref");
+    assert_eq!(result, "(ref) const count: number");
+}
+
+#[test]
+fn vue_kind_label_override_is_idempotent() {
+    let already = "(ref) const count: Ref<number>";
+    assert_eq!(
+        apply_kind_label_override(already, "ref"),
+        already,
+        "an already-applied label is never doubled"
+    );
 }
 
 #[test]
 fn merge_hover_with_vue_kind_label() {
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let verter = make_verter_hover("```typescript\nconst count\n```\n\n*(ref — needs `.value`)*");
+    // The provider's STRUCTURED kind ("const") composes the (const) prefix;
+    // the Vue label then overrides it on the rendered line.
     let type_hover = HoverInfo {
-        contents: "```typescript\n(const) const count: Ref<number>\n```".to_string(),
-        range_start: None,
-        range_end: None,
+        kind: crate::type_provider::protocol::QuickInfoKind::from_tsserver_wire("const"),
+        ..make_type_hover("const count: Ref<number>")
     };
 
     let result = merge_hover(
@@ -6429,11 +6442,7 @@ fn merge_hover_rewrites_primary_label_from_typed_event_provenance() {
     // rendered verter hover text.
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let verter = make_verter_hover("`@custom`\n\nListens for the `custom` event.");
-    let type_hover = HoverInfo {
-        contents: "(property) onCustom: (payload: string) => void".to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover = make_type_hover("(property) onCustom: (payload: string) => void");
 
     let token = HoverSourceToken::EventDirective {
         vue_attr: "@custom".to_string(),
@@ -6470,11 +6479,7 @@ fn merge_hover_does_not_rewrite_label_without_typed_provenance() {
     // driven only by typed provenance, never by reparsing the hover markdown.
     let (mapper, carrier_li, tsx_li) = make_mapper_and_indexes();
     let verter = make_verter_hover("`@custom`\n\nSome descriptive context.");
-    let type_hover = HoverInfo {
-        contents: "(property) onCustom: (payload: string) => void".to_string(),
-        range_start: None,
-        range_end: None,
-    };
+    let type_hover = make_type_hover("(property) onCustom: (payload: string) => void");
 
     let result = merge_hover(
         Some(verter),

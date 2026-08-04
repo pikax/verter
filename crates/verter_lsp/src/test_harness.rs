@@ -122,9 +122,10 @@ fn real_provider_session_gate() -> &'static Arc<tokio::sync::Semaphore> {
 // sibling [`crate::test_harness_gating`] module.
 #[allow(unused_imports)]
 pub(crate) use crate::test_harness_gating::{
-    absent_provider_receipt_line, absent_provider_skip_receipt, body_receipt_line,
-    body_receipt_status, handle_absent_provider, provider_absence_outcome, provider_required,
-    BodyReceiptStatus, ProviderAbsence, TestProviderKind,
+    absent_provider_receipt_line, body_receipt_line, body_receipt_status, handle_absent_provider,
+    provider_absence_outcome, provider_required, provider_unavailable_receipt,
+    spawn_crashed_receipt_line, BodyReceiptStatus, ProviderAbsence, ProviderUnavailable,
+    TestProviderKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -261,32 +262,62 @@ impl TestSessionBuilder {
 
         let provider: Arc<dyn TypeProvider> = match self.kind {
             TestProviderKind::Tsserver => {
-                let tsdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../packages/vue-vscode/node_modules/typescript/lib")
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let tsdk = verter_span::path::canonicalize_path(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../packages/vue-vscode/node_modules/typescript/lib")
+                        .to_string_lossy(),
+                );
                 let node_path = match crate::tsserver::find_node() {
                     Some(p) => p,
-                    None => return handle_absent_provider(self.kind, "node not found"),
+                    None => {
+                        return handle_absent_provider(
+                            self.kind,
+                            ProviderUnavailable::NotFound,
+                            "node not found",
+                        )
+                    }
                 };
                 let tsserver_path = match harness_tsserver_path(&tsdk) {
                     Some(p) => p,
-                    None => return handle_absent_provider(self.kind, "tsserver.js not found"),
+                    None => {
+                        return handle_absent_provider(
+                            self.kind,
+                            ProviderUnavailable::NotFound,
+                            "tsserver.js not found",
+                        )
+                    }
                 };
-                let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../packages/vue-vscode/node_modules")
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let plugin_path = verter_span::path::canonicalize_path(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../packages/vue-vscode/node_modules")
+                        .to_string_lossy(),
+                );
                 // Deliver the SAME carrier-publish store dir the `VerterLanguageServer`
                 // built below publishes into, so the spawned tsserver's plugin reads
                 // exactly the store the LSP writes. Both sides resolve the per-session
                 // ISOLATED dir: the spawn from `session_carrier_store_dir` here, the
                 // LSP backend from the matching `store_segment` override installed
                 // around its construction below.
-                let carrier_store_dir = session_carrier_store_dir
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let tsserver_path_str = tsserver_path.to_string_lossy().replace('\\', "/");
+                let carrier_store_dir = verter_span::path::canonicalize_path(
+                    &session_carrier_store_dir.to_string_lossy(),
+                );
+                // PRODUCTION-FAITHFUL, and load-bearing on Windows. This is the
+                // CANONICAL `tsserver.js` from `resolve_tsserver`, which
+                // `Path::canonicalize()` returns in extended-length form
+                // (`\\?\D:\…`) on Windows. It is handed to spawn UNCHANGED —
+                // byte-identical to what `tsserver::project_router` passes — so
+                // the verbatim prefix is stripped at the EXEC boundary and only
+                // there, inside `build_tsserver_command`.
+                //
+                // Pre-normalizing it here is what broke: `.replace('\\', "/")`
+                // rewrote `\\?\D:\…` to `//?/D:/…`, which the exec-boundary
+                // refusal did not recognize as verbatim, so the KNOWN-FATAL
+                // value reached node with the fail-closed gate silently inert.
+                // Node's `resolveMainPath` then degenerated to `lstat('D:')` and
+                // exited `EISDIR` before tsserver initialised — every
+                // harness-spawned tsserver session on Windows, reported as a
+                // skip-as-pass. Hand the value through; do not reshape it.
+                let tsserver_path_str = tsserver_path.to_string_lossy().into_owned();
                 // When `.resilient()` is set, spawn WITH a crash-notify and wrap in
                 // the production `ResilientProvider` (the carrier path then runs
                 // through the wrapper, the real production seam). Otherwise the raw
@@ -311,6 +342,7 @@ impl TestSessionBuilder {
                     Err(e) => {
                         return handle_absent_provider(
                             self.kind,
+                            ProviderUnavailable::SpawnFailed,
                             &format!("tsserver spawn failed: {e}"),
                         )
                     }
@@ -359,6 +391,7 @@ impl TestSessionBuilder {
                     Err(err) => {
                         return handle_absent_provider(
                             self.kind,
+                            ProviderUnavailable::NotFound,
                             &format!("tsgo binary not found: {err}"),
                         )
                     }
@@ -393,6 +426,7 @@ impl TestSessionBuilder {
                         Err(e) => {
                             return handle_absent_provider(
                                 self.kind,
+                                ProviderUnavailable::SpawnFailed,
                                 &format!("tsgo spawn failed: {e}"),
                             )
                         }
@@ -405,6 +439,7 @@ impl TestSessionBuilder {
                         Err(e) => {
                             return handle_absent_provider(
                                 self.kind,
+                                ProviderUnavailable::SpawnFailed,
                                 &format!("tsgo --api attach failed: {e}"),
                             )
                         }
@@ -1433,7 +1468,7 @@ export namespace JSX {
 /// imports unresolved) alongside a `svelte-package-unusable` diagnostic.
 /// Modelling the real export map is what makes the Svelte assertions in this
 /// fixture exercise the production path instead of a degraded one.
-const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
+pub(crate) const VENDORED_SVELTE_PACKAGE: &[(&str, &str)] = &[
     (
         "package.json",
         include_str!(
@@ -1591,40 +1626,56 @@ fn language_id_for(path: &str) -> String {
 macro_rules! real_provider_test {
     ($name:ident, fixture = $fixture:expr, async fn $fn_name:ident ($session:ident) $body:block) => {
         paste::paste! {
-            #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name _tsserver>]() {
-                let Some(session) = $crate::test_harness::TestSessionBuilder::new(
-                    $crate::test_harness::TestProviderKind::Tsserver,
-                )
-                .fixture($fixture)
-                .build()
-                .await
-                else {
-                    return;
-                };
-                async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
-                    $body
-                $fn_name(&session).await;
-                session.emit_body_receipt(stringify!([<$name _tsserver>]));
-                session.shutdown().await;
+            #[test]
+            fn [<$name _tsserver>]() {
+                $crate::run_on_serve_thread(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("real-provider test runtime must build")
+                        .block_on(async {
+                            let Some(session) = $crate::test_harness::TestSessionBuilder::new(
+                                $crate::test_harness::TestProviderKind::Tsserver,
+                            )
+                            .fixture($fixture)
+                            .build()
+                            .await
+                            else {
+                                return;
+                            };
+                            async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
+                                $body
+                            $fn_name(&session).await;
+                            session.emit_body_receipt(stringify!([<$name _tsserver>]));
+                            session.shutdown().await;
+                        });
+                });
             }
 
-            #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name _tsgo>]() {
-                let Some(session) = $crate::test_harness::TestSessionBuilder::new(
-                    $crate::test_harness::TestProviderKind::Tsgo,
-                )
-                .fixture($fixture)
-                .build()
-                .await
-                else {
-                    return;
-                };
-                async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
-                    $body
-                $fn_name(&session).await;
-                session.emit_body_receipt(stringify!([<$name _tsgo>]));
-                session.shutdown().await;
+            #[test]
+            fn [<$name _tsgo>]() {
+                $crate::run_on_serve_thread(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("real-provider test runtime must build")
+                        .block_on(async {
+                            let Some(session) = $crate::test_harness::TestSessionBuilder::new(
+                                $crate::test_harness::TestProviderKind::Tsgo,
+                            )
+                            .fixture($fixture)
+                            .build()
+                            .await
+                            else {
+                                return;
+                            };
+                            async fn $fn_name($session: &$crate::test_harness::RealProviderTestSession)
+                                $body
+                            $fn_name(&session).await;
+                            session.emit_body_receipt(stringify!([<$name _tsgo>]));
+                            session.shutdown().await;
+                        });
+                });
             }
         }
     };

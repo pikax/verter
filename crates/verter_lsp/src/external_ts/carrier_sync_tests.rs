@@ -72,6 +72,42 @@ fn test_host() -> VerterHost {
     VerterHost::new(HostConfig::default(), workspace)
 }
 
+#[test]
+fn published_structure_carries_content_free_script_inventory_stamp() {
+    let host = test_host();
+    let canonical = "/workspace/App.vue";
+    let source = "<template><div/></template><script setup>const x = 1</script>";
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host.language_classifier().classify(canonical),
+            aliases: vec![],
+        })
+        .expect("registered carrier");
+    let stamp = published_structure_stamp(&host, canonical).expect("structure stamp");
+    assert_eq!(stamp.schema_version, 1);
+    assert_eq!(stamp.artifact_token.len(), 43);
+    assert_eq!(
+        stamp.script_content_ranges,
+        vec![[
+            source.find("const").unwrap() as u32,
+            source.find("</script>").unwrap() as u32
+        ]]
+    );
+    // Markup opening-tag spans come from the arena (the template's <div/>),
+    // giving the plugin parser-supplied spans for its bounded cursor lex.
+    let div_open = source.find("<div/>").unwrap() as u32;
+    assert!(
+        stamp
+            .markup_opening_ranges
+            .contains(&[div_open, div_open + "<div/>".len() as u32]),
+        "markup opening spans must include the template element: {:?}",
+        stamp.markup_opening_ranges
+    );
+}
+
 /// Admit a carrier state through a FRESH coordinator (owner-loss barrier at 0). The
 /// single-commit tests below do not exercise the owner-loss barrier or a superseding peer;
 /// the F1 equal-key and F5 vacant-resurrection tests use an explicit SHARED coordinator so
@@ -230,6 +266,7 @@ fn commit_carrier_provider_state_admits_a_matching_owner_receipt() {
 #[test]
 fn api_companion_publishes_the_ts_labeled_rendering() {
     let state = owned_carrier_state();
+    let host = test_host();
 
     // A widened JavaScript Options-API surface: JSDoc rendering in `code`,
     // ordinary TypeScript rendering in `ts_carrier_code`.
@@ -242,6 +279,7 @@ fn api_companion_publishes_the_ts_labeled_rendering() {
         )),
     );
     let companions = build_carrier_companions(
+        &host,
         &state,
         None,
         Some(&split),
@@ -269,6 +307,7 @@ fn api_companion_publishes_the_ts_labeled_rendering() {
         None,
     );
     let companions = build_carrier_companions(
+        &host,
         &state,
         None,
         Some(&unsplit),
@@ -319,8 +358,10 @@ fn carrier_companion_refuses_return_only_projection() {
         verter_compiler::tsc::SfcScriptDialect::TypeScript,
         None,
     );
+    let host = test_host();
 
     let companions = build_carrier_companions(
+        &host,
         &state,
         Some(&ide),
         Some(&api),

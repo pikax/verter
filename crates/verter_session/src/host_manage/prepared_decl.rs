@@ -116,10 +116,8 @@ impl VerterHost {
     /// Inspects `rejected_fact` (the first fact that failed validation
     /// in the most-recent candidate, as returned by
     /// [`crate::resolver_core::ValidatedFactCache::get_if_valid_self_rooted_attributed`])
-    /// and consults the view's direct accessors
-    /// ([`crate::resolver_core::StoreView::tracks_file`] for the self-root
-    /// arm; [`crate::resolver_core::StoreView::derived_hash_for`] for the
-    /// `ImportRoute` arm) to determine WHICH check rejected. Fires
+    /// and consults [`crate::resolver_core::StoreView::tracks_file`] for the
+    /// self-root arm to determine WHICH check rejected. Fires
     /// exactly one audit event per call:
     ///
     /// * `PreparedDeclBundleRejectEntryMissing` — `rejected_fact ==
@@ -128,11 +126,8 @@ impl VerterHost {
     ///   self-root, `view.tracks_file(canonical)` is `false`.
     /// * `PreparedDeclBundleRejectSelfRootHashMismatch` —
     ///   `FileWholeHash` self-root, tracked but stored hash differs.
-    /// * `PreparedDeclBundleRejectImportRouteAbsent` —
-    ///   `DerivedFactHash { kind: ImportRoute }` for the bundle's
-    ///   canonical, `view.derived_hash_for` returns `None`.
-    /// * `PreparedDeclBundleRejectImportRouteMismatch` — same but the
-    ///   stored hash differs from the view's hash.
+    /// * `PreparedDeclBundleRejectImportRouteMismatch` — historical audit
+    ///   event name retained for a moved path-precise resolution witness.
     /// * `PreparedDeclBundleRejectOther` — fallthrough; must stay 0
     ///   in steady state.
     fn attribute_prepared_decl_bundle_rejection(
@@ -180,8 +175,7 @@ impl VerterHost {
     ///
     /// `view` is a borrow into the request-bound [`HostStoreView`] built
     /// at the request entry point. The warm-hit path validates against
-    /// this view instead of building a fresh one — eliminating the
-    /// per-call full-workspace snapshot the pre-6.c rail performed.
+    /// this view instead of requesting another root capture.
     ///
     /// Same strict self-root validation contract as
     /// [`Self::prepared_decl_bundle`]: a deleted (now-untracked) keyed
@@ -1781,7 +1775,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, mut framework_parse, whole_hash) = {
+            let (raw_source, framework_parse, whole_hash) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -1813,11 +1807,7 @@ impl VerterHost {
             // parser; everything downstream (eval source, snapshot, env,
             // analysis) reuses its framework-neutral artifact.
             if framework_parse.is_none() && file_language.is_framework_carrier() {
-                framework_parse = crate::parse::build_carrier_parse_artifact_from_source(
-                    &file_language,
-                    &raw_source,
-                    &self.provenance,
-                );
+                return None;
             }
             let framework_parse = framework_parse;
 
@@ -1952,6 +1942,9 @@ impl VerterHost {
                             job_raw_source.as_ref(),
                             job_scope,
                             parsed_sfc,
+                            job_framework_parse
+                                .as_deref()
+                                .expect("Vue parse came from this framework artifact"),
                             &job_provenance,
                             VerterHost::vue_flight_script_program(
                                 eval_is_extracted_script,
@@ -2568,14 +2561,12 @@ impl VerterHost {
                                     hash: source_data.parse.whole_hash,
                                 }];
                             // Cross-file ROUTE fact — recorded ONLY from an
-                            // ALREADY-materialized, content-pinned, edge-current
+                            // already-materialized, content-pinned, parse-current
                             // artifact (a `get`, never an `ensure`): the fast
                             // path must not index the dependency just to derive
-                            // the hash (that mid-resolution index is exactly
-                            // what the bundle's dynamic-import-route-hash
-                            // discipline forbids). When available, the fact
+                            // the hash. When available, the fact
                             // uses the SAME `hash_route_surface` derivation the
-                            // store-view snapshot publishes, so warm validation
+                            // store-view root lookup publishes, so warm validation
                             // round-trips; when the artifact is absent, the
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
@@ -2777,8 +2768,7 @@ impl VerterHost {
     /// View-bound variant of [`Self::owner_import_surface`].
     ///
     /// Validates the cached surface against the supplied request-bound
-    /// view instead of building a fresh one — eliminating the per-call
-    /// full-workspace snapshot the legacy rail performed at this site.
+    /// view instead of requesting another root capture.
     /// Same correctness contract: R3/R26/R28 fact-validation rejects a
     /// stale entry on the next read; the producer's
     /// `validated_at_generation` ProjectGeneration fencing is

@@ -1,6 +1,6 @@
 //! Action provider trait and context.
 
-use verter_diagnostics::{DiagnosticSet, LintDiagnostic};
+use verter_diagnostics::{DiagnosticSet, LintDiagnostic, SfcBlockFact};
 use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
 use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_semantic::analysis::StyleBlockAnalysis;
@@ -21,6 +21,12 @@ pub struct ActionContext<'a> {
     pub script: Option<&'a ScriptAnalysisSnapshot>,
     /// Style block analyses.
     pub styles: &'a [StyleBlockAnalysis],
+    /// Ordered SFC section facts projected from the registered carrier
+    /// inventory. Providers derive block-anchored edit geometry (script
+    /// insertion anchors, opening/content spans) ONLY from these facts —
+    /// never from raw-source delimiter searches. Empty when the caller has no
+    /// registered inventory: block-anchored edits then fail closed.
+    pub blocks: &'a [SfcBlockFact],
 }
 
 /// Expand a removal span backwards to include leading whitespace (spaces/tabs).

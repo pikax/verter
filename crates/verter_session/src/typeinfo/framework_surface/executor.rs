@@ -717,6 +717,9 @@ fn fold_requested_slot(
                     .slots
                     .get_or_insert_with(Vec::new)
                     .extend(dtos.slot_fields().iter().cloned());
+                aggregate
+                    .slot_return_publications
+                    .extend(dtos.slot_return_publications().iter().cloned());
             } else {
                 // A slots macro that resolved an empty surface still establishes
                 // the slot bundle as present (supported-empty), distinct from a

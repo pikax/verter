@@ -69,7 +69,7 @@ use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generat
 /// Tokenizes in SFC mode with optional custom delimiters and custom element
 /// prefixes. The result can be cached and passed to [`compile_from_parsed`]
 /// to avoid re-parsing the same source.
-pub fn parse_sfc(
+pub(crate) fn parse_sfc(
     input: &str,
     delimiters: Option<(&str, &str)>,
     custom_elements: Option<&[String]>,
@@ -213,7 +213,7 @@ fn push_expression_errors(
 /// Returns a [`VerterCompileResult`] containing the generated code for each block,
 /// timing information, and any diagnostics emitted during compilation.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub fn compile(
+pub(crate) fn compile(
     input: &str,
     options: &CodegenOptions,
     verter_options: &VerterCompileOptions,
@@ -250,7 +250,7 @@ pub fn compile(
 /// Parse-affecting options (delimiters, custom_elements) must match those
 /// used to create the [`ParsedSfc`] — the caller is responsible for cache
 /// key correctness.
-pub fn compile_from_parsed(
+pub(crate) fn compile_from_parsed(
     input: &str,
     parsed: &ParsedSfc,
     options: &CodegenOptions,

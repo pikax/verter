@@ -827,8 +827,8 @@ closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
    [`ReadSetSignature`](../../crates/verter_session/src/fact_signature_helpers.rs)
    to `Admission::{Warm, ReturnOnly}`. `Clean` ⇒ `Warm`.
    `Partial(MissingDependency)` ⇒ `Warm` **iff**
-   `sig.records_missing_dependency_fact()` (a `DerivedFactKind::ImportRoute`
-   rail) else `ReturnOnly`; `Partial(UnresolvedReference)` ⇒ `Warm` **iff**
+   `sig.records_missing_dependency_fact()` (a `ResolveImports` fact carrying a
+   captured resolution witness) else `ReturnOnly`; `Partial(UnresolvedReference)` ⇒ `Warm` **iff**
    `sig.records_negative_resolution_fact()` (a `ResolvedImportClause` /
    `ResolvedReexportBinding` whose `resolved_canonical` is the
    `UNRESOLVED_SENTINEL`) else `ReturnOnly`. `Partial(IncompleteDeclaration)`,
@@ -1308,22 +1308,27 @@ read-side fact validation could retain such an aggregate.
 
 ### Exact-owner version audit (2026-07-19)
 
-The neutral lexical-owner cutover changes cached parse facts, declaration
-preparation, route results, semantic-query identity, and carrier script facts.
-The coordinated invalidation boundaries are:
+The neutral lexical-owner cutover and later analyzer-carrier additions change
+cached parse facts, declaration preparation, route results, semantic-query
+identity, and carrier script facts. The coordinated invalidation boundaries
+are:
 
-- `CACHE_CLUSTER_SCHEMA_VERSION = 4` rejects the former schema-3 cache cohort.
-- `CURRENT_PARSER_VERSION = 3` rejects ordinary/base artifacts whose parse
-  facts and declaration inventories predate exact owners.
-- `LEGACY_PARSER_VERSION = 4` rejects carrier-script candidates that predate
-  exact owners.
+- `CACHE_CLUSTER_SCHEMA_VERSION = 8` rejects the schema-7 cache cohort whose
+  shallow import targets may retain a resolved canonical beside the authored
+  specifier. Schema 7 added call-signature emit declaration spans; schema 5
+  was the CREO migration; schema 4 was the exact-owner cutover.
+- `CURRENT_PARSER_VERSION = 5` rejects ordinary/base artifacts whose shallow
+  import targets may retain that second import-resolution authority.
+- `LEGACY_PARSER_VERSION = 6` rejects carrier-script candidates with that same
+  pre-authored-only import-target shape.
 - `ROUTE_DB_RESOLVER_VERSION = 2` rejects route values that do not carry the
   defining declaration owner.
-- `SvelteScriptProvider::VERSION = 11` independently rejects Svelte candidate
+- `SvelteScriptProvider::VERSION = 12` independently rejects Svelte candidate
   payloads without the persisted exact module-export inventory, export owners,
   owner-qualified binding keys, or the per-call `$props()` public-key/local-
-  binding span inventory, and payloads predating exact-empty evidence plus the
-  syntax/resolution channel split.
+  binding span inventory; it also rejects payloads predating exact-empty
+  evidence, the syntax/resolution channel split, statement and inline
+  `import("svelte").Snippet` identities, or resolved callable-role decisions.
 
 Exact-owner shallow facts also govern qualified namespace roots. For
 `import * as Ns from './dep'`, the cached binding for `(owner, Ns)` is a MODULE
@@ -1370,6 +1375,14 @@ composition table. Summary:
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` slot identity (e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`); the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals`. |
 | `ShapeCacheDb` per-member slot | Generation/store-scoped graph-instance memo (NOT a durable content-free R6 query-identity key) | `ShapeCacheKey::surface_member_value_whole_with_context(scope, &SurfaceMember, context)` (`ShapeSubject::MemberValueNode`). Single-entry (not multi-candidate), not persistent, fact-validated + generation-gated. Warm reuse requires `validated_at_generation` + strict `ReadSetSignature` self-root validation over the exact `SurfaceMember.value` graph instance. |
 | `ComponentMetaResultDb` | Query-identity (multi-candidate) | `ComponentMetaResultKey { owner_canonical, options_fingerprint, project_identity, parse_env_hash, resolve_env_hash, type_env_hash, lib_env_hash }` — content-free (owner whole-hash is the VALUE-side candidate discriminant, never a key field). Value-side owner whole-hash candidate + `ReadSetSignature.facts` + `validated_at_generation`. |
+
+CREO event rows are cached only as values derived from the stored canonical
+resolved surface stream. Resolved callable identities carry the exact
+resolver-minted graph subject; runtime identities carry the exact authored
+canonical/range plus semantic event subject. Neither is a durable
+query-identity key. Warm component-meta results preserve the same ordered
+complete occurrence rows and never rebuild identity from names, kind-local
+positions, ordinals, or analyzer output.
 
 The split `MaterializeMemoDb`/`MemberShapeCacheDb` shape stores are RETIRED in
 favour of `ShapeCacheDb`; the static guard

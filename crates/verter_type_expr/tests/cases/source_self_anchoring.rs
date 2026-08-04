@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use verter_type_expr::facts::DeclarationOrigin;
 use verter_type_expr::facts::{
-    ClosedTypeFact, FactOrLocator, FunctionParamFact, FunctionSignatureFact, LeafTypeFact,
-    ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact, ProjectedMemberFact, ProjectedTypeFact,
-    ResolvedLocalShape, ReturnInferenceCompleteness, SemanticTypeSource, SynthesizedMemberFact,
+    AuthoredReferenceHeadFact, ClosedTypeFact, FactOrLocator, FunctionParamFact,
+    FunctionSignatureFact, LeafTypeFact, ObjectMemberFact, ObjectPropertyFact, ObjectShapeFact,
+    ProjectedMemberFact, ProjectedTypeFact, ResolvedLocalShape, ReturnInferenceCompleteness,
+    SemanticTypeSource, SynthesizedMemberFact,
 };
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
@@ -186,6 +187,7 @@ fn projected_member_and_function_positions_absolutize_deeply() {
             ),
             return_ty: Some(slot("/lib/keep.ts")),
             return_inference: ReturnInferenceCompleteness::NotInferred,
+            return_reference_head: AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: false,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }));

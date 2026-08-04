@@ -40,6 +40,7 @@ fn merge_semantic_prop_definitions(
         if enrichment.type_annotation.is_some() {
             native_prop.type_annotation = enrichment.type_annotation;
         }
+        native_prop.callable_role = enrichment.callable_role;
         native_prop.has_default = enrichment.has_default;
         native_prop.is_required = enrichment.is_required;
         native_prop.is_boolean = enrichment.is_boolean;
@@ -55,9 +56,8 @@ fn merge_semantic_prop_definitions(
 
 #[derive(Clone)]
 pub(super) struct SemanticSnapshot {
-    pub(super) version: i32,
-    pub(super) source: Arc<str>,
-    pub(super) analysis: verter_session::FileAnalysisSnapshot,
+    pub(super) document_revision: DocumentRevisionId,
+    pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,37 +134,43 @@ impl DocumentRegistry {
     /// by version + source identity checks, so handlers only ever observe a fully
     /// committed immutable snapshot and never wait for its construction.
     pub fn schedule_semantic_analysis(self: &Arc<Self>, uri: &Uri) {
+        let _ = self.spawn_semantic_analysis(uri);
+    }
+
+    fn spawn_semantic_analysis(self: &Arc<Self>, uri: &Uri) -> Option<tokio::task::JoinHandle<()>> {
         if !self.semantic_analysis_enabled() {
-            return;
+            return None;
         }
-        let Some(document) = self.documents.get(uri.as_str()) else {
-            return;
-        };
+        let document = self.documents.get(uri.as_str())?;
         if document.virtual_source_uri.is_some() {
-            return;
+            return None;
         }
         let uri_key = uri.as_str().to_string();
         let canonical_id = document.canonical_id.clone();
         let version = document.version;
+        let document_revision = document.document_revision;
         let source = Arc::clone(&document.source);
         let file_language = self.document_file_language(&document.language_id, &canonical_id);
         let is_framework_carrier = file_language.is_framework_carrier();
+        let registered_structure = is_framework_carrier
+            .then(|| self.host.registered_file_structure(&canonical_id))
+            .flatten();
         drop(document);
 
         let registry = Arc::clone(self);
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             #[cfg(not(test))]
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
 
             if !registry.semantic_analysis_enabled()
-                || !registry.document_snapshot_is_current(&uri_key, version, &source)
+                || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
             }
             let serial = Arc::clone(&registry.semantic_serial);
             let _guard = serial.lock().await;
             if !registry.semantic_analysis_enabled()
-                || !registry.document_snapshot_is_current(&uri_key, version, &source)
+                || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
             }
@@ -173,15 +179,18 @@ impl DocumentRegistry {
             let work_source = Arc::clone(&source);
             let work_canonical = canonical_id.clone();
             let analysis = tokio::task::spawn_blocking(move || {
-                let _ = host
-                    .upsert(UpsertRequest {
-                        canonical_id: Some(work_canonical.clone()),
-                        input_id: work_canonical.clone(),
-                        source: work_source,
-                        file_language,
-                        aliases: Vec::new(),
-                    })
-                    .ok()?;
+                let request = UpsertRequest {
+                    canonical_id: Some(work_canonical.clone()),
+                    input_id: work_canonical.clone(),
+                    source: work_source,
+                    file_language,
+                    aliases: Vec::new(),
+                };
+                let _ = match registered_structure {
+                    Some(structure) => host.upsert_registered_envelope(request, structure),
+                    None => host.upsert(request),
+                }
+                .ok()?;
                 let mut analysis = host.get_analysis(&work_canonical)?;
                 if is_framework_carrier {
                     let mut semantic_props = host
@@ -194,11 +203,16 @@ impl DocumentRegistry {
                                 .props
                                 .into_iter()
                                 .zip(types.into_lanes().props)
-                                .map(|(prop, prop_type)| {
-                                    let is_boolean = type_expr_contains_boolean(&prop_type);
+                                .map(|(prop, publication)| {
+                                    let is_boolean = publication
+                                        .materialized_type()
+                                        .is_some_and(type_expr_contains_boolean);
+                                    let type_annotation =
+                                        publication.terminal_display().text().map(str::to_string);
                                     verter_semantic::analysis::AnalyzedPropDefinition {
                                         name: prop.name,
-                                        type_annotation: prop.raw_type,
+                                        callable_role: prop.callable_role,
+                                        type_annotation,
                                         has_default: prop.has_default,
                                         is_required: prop.required,
                                         is_boolean,
@@ -215,21 +229,33 @@ impl DocumentRegistry {
                             .get_public_api_projection(&work_canonical)
                             .ok()
                             .flatten()
-                            .and_then(|projection| projection.contract)
+                            .and_then(|projection| match projection.contract {
+                                verter_session::framework::ComponentContractAvailability::Supported(
+                                    contract,
+                                ) => Some(contract),
+                                verter_session::framework::ComponentContractAvailability::Unsupported(
+                                    _,
+                                ) => None,
+                            })
                             .map(|contract| {
                                 contract
                                     .props
-                                    .into_iter()
+                                    .iter()
                                     .map(|prop| {
+                                        let materialized = prop.ty.publication.materialized_type();
                                         verter_semantic::analysis::AnalyzedPropDefinition {
-                                            name: prop.name,
-                                            type_annotation: prop.type_annotation,
+                                            name: prop.name.to_string(),
+                                            callable_role:
+                                                verter_type_expr::PropCallableRole::default(),
+                                            type_annotation: materialized.and_then(|expression| {
+                                                verter_type_expr::render_type_expr_display(expression)
+                                                    .ok()
+                                                    .map(|rendered| rendered.text)
+                                            }),
                                             has_default: prop.has_default,
                                             is_required: !prop.optional,
-                                            // This compatibility sidecar exposes
-                                            // display text only. Do not recover
-                                            // semantic meaning from that string.
-                                            is_boolean: false,
+                                            is_boolean: materialized
+                                                .is_some_and(type_expr_contains_boolean),
                                             used_in_template: false,
                                             used_in_script: false,
                                             span: verter_span::Span::new(0, 0),
@@ -249,38 +275,157 @@ impl DocumentRegistry {
                         analysis.template = Some(Arc::new(template));
                     }
                 }
-                Some(analysis)
+                let semantic_structure = is_framework_carrier
+                    .then(|| host.registered_file_structure_snapshot(&work_canonical))
+                    .flatten();
+                Some((analysis, semantic_structure))
             })
             .await
             .ok()
             .flatten();
 
-            if let Some(analysis) = analysis {
-                if registry.semantic_analysis_enabled()
-                    && registry.document_snapshot_is_current(&uri_key, version, &source)
-                {
-                    registry.semantic_snapshots.insert(
-                        canonical_id.clone(),
-                        SemanticSnapshot {
-                            version,
-                            source,
-                            analysis,
-                        },
-                    );
-                    let _ = registry.semantic_ready_tx.send(SemanticReady {
-                        canonical_id,
-                        uri: uri_key,
-                        version,
-                    });
+            if let Some((analysis, semantic_structure)) = analysis {
+                #[cfg(test)]
+                let semantic_structure = {
+                    let mut semantic_structure = semantic_structure;
+                    if let Some(hook) = registry.before_semantic_publish_hook.lock().take() {
+                        let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                        if let Some(planted_structure) = hook(&registry, &hook_uri) {
+                            semantic_structure =
+                                semantic_structure.map(|(_, semantic_host_revision)| {
+                                    (planted_structure, semantic_host_revision)
+                                });
+                        }
+                    }
+                    semantic_structure
+                };
+
+                if !registry.semantic_analysis_enabled() {
+                    return;
                 }
+                let analysis = Arc::new(analysis);
+                let Some(mut document) = registry.documents.get_mut(&uri_key) else {
+                    return;
+                };
+                if document.document_revision != document_revision {
+                    return;
+                }
+                if is_framework_carrier {
+                    let (Some(feature), Some((structure, semantic_host_revision))) =
+                        (document.feature_snapshot.as_ref(), semantic_structure)
+                    else {
+                        return;
+                    };
+                    if structure.artifact_id() != feature.structure.artifact_id() {
+                        return;
+                    }
+                    let same_envelope =
+                        Arc::ptr_eq(structure.envelope(), feature.structure.envelope());
+                    debug_assert!(
+                        same_envelope,
+                        "validated semantic and document artifact IDs must retain one sealed envelope"
+                    );
+                    if !same_envelope {
+                        return;
+                    }
+                    document.feature_snapshot = Some(Arc::new(DocumentFeatureSnapshot {
+                        document_revision,
+                        client_version: document.version,
+                        line_index: Arc::clone(&document.line_index),
+                        structure: feature.structure.clone(),
+                        projection_host_revision: feature.projection_host_revision,
+                        analysis: Some(SemanticAnalysisEnvelope {
+                            document_revision,
+                            semantic_host_revision,
+                            structure,
+                            analysis: Arc::clone(&analysis),
+                        }),
+                    }));
+                }
+                #[cfg(test)]
+                if let Some(hook) = registry.after_semantic_admission_hook.lock().take() {
+                    let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                    hook(&registry, &hook_uri);
+                }
+                #[cfg(test)]
+                if let Some(hook) = registry
+                    .before_semantic_cache_publication_hook
+                    .lock()
+                    .take()
+                {
+                    let hook_uri: Uri = uri_key.parse().expect("scheduled URI remains valid");
+                    hook(&registry, &hook_uri);
+                }
+                registry.semantic_snapshots.insert(
+                    canonical_id.clone(),
+                    SemanticSnapshot {
+                        document_revision,
+                        analysis,
+                    },
+                );
+                let _ = registry.semantic_ready_tx.send(SemanticReady {
+                    canonical_id,
+                    uri: uri_key,
+                    version,
+                });
+                drop(document);
             }
-        });
+        }))
     }
 
-    fn document_snapshot_is_current(&self, uri: &str, version: i32, source: &Arc<str>) -> bool {
+    #[cfg(test)]
+    pub(super) fn set_before_semantic_publish_hook_for_test(
+        &self,
+        hook: super::BeforeSemanticPublishHook,
+    ) {
+        *self.before_semantic_publish_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_after_early_semantic_invalidation_window_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.after_early_semantic_invalidation_window_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_change_document_reacquire_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.before_change_document_reacquire_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_after_semantic_admission_hook_for_test(&self, hook: super::AfterCompileHook) {
+        *self.after_semantic_admission_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_semantic_cache_publication_hook_for_test(
+        &self,
+        hook: super::AfterCompileHook,
+    ) {
+        *self.before_semantic_cache_publication_hook.lock() = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn schedule_semantic_analysis_for_test(
+        self: &Arc<Self>,
+        uri: &Uri,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        self.spawn_semantic_analysis(uri)
+    }
+
+    fn document_snapshot_is_current(
+        &self,
+        uri: &str,
+        document_revision: DocumentRevisionId,
+    ) -> bool {
         self.documents
             .get(uri)
-            .is_some_and(|document| document.version == version && document.source == *source)
+            .is_some_and(|document| document.document_revision == document_revision)
     }
 
     /// Return optional full enrichment when current, otherwise the bounded BUILD
@@ -289,8 +434,8 @@ impl DocumentRegistry {
         let canonical_id = self.get_canonical_id(uri)?;
         if let Some(document) = self.documents.get(uri.as_str()) {
             if let Some(snapshot) = self.semantic_snapshots.get(&canonical_id) {
-                if snapshot.version == document.version && snapshot.source == document.source {
-                    return Some(snapshot.analysis.clone());
+                if snapshot.document_revision == document.document_revision {
+                    return Some(snapshot.analysis.as_ref().clone());
                 }
             }
         }
@@ -311,7 +456,7 @@ impl DocumentRegistry {
         self.semantic_analysis_enabled()
             .then(|| self.semantic_snapshots.get(canonical_id))
             .flatten()
-            .map(|snapshot| snapshot.analysis.clone())
+            .map(|snapshot| snapshot.analysis.as_ref().clone())
     }
 }
 
@@ -375,6 +520,7 @@ mod tests {
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: Some("string".to_string()),
             has_default: false,
             is_required: false,
@@ -393,8 +539,18 @@ mod tests {
             prop("enabled", authored_span),
             prop("nativeOnly", untouched_span),
         ];
+        let role = verter_type_expr::PropCallableRole::SvelteSnippet {
+            symbol: verter_type_expr::ResolvedSymbolIdentity {
+                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("Snippet"),
+            },
+            exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        };
         let semantic = vec![AnalyzedPropDefinition {
             name: "enabled".to_string(),
+            callable_role: role.clone(),
             type_annotation: Some("boolean".to_string()),
             has_default: true,
             is_required: true,
@@ -410,6 +566,7 @@ mod tests {
         assert_eq!(native[0].span, authored_span);
         assert!(native[0].used_in_template && native[0].used_in_script);
         assert!(native[0].is_boolean && native[0].has_default && native[0].is_required);
+        assert_eq!(native[0].callable_role, role);
         assert_eq!(native[1].name, "nativeOnly");
         assert_eq!(native[1].span, untouched_span);
     }

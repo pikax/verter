@@ -10,7 +10,7 @@
 //! pointer-identity sharing on a token-stable hit and a fresh snapshot
 //! on a token change. All FAIL against the pre-change tree, where
 //! `HostStoreView` had no Arc-shared snapshot and `from_host` rebuilt
-//! the full workspace sweep on every call (no token-keyed cache, no
+//! the base snapshot on every call (no token-keyed cache, no
 //! pointer identity to assert, no `validation_token` to compare).
 
 use std::sync::Arc;
@@ -512,7 +512,7 @@ fn from_host_reuses_cached_arc_when_token_stable() {
     assert_eq!(
         ptr1, ptr2,
         "token-stable resolver_store_view MUST reuse the cached Arc snapshot \
-         (pointer identity), not rebuild the workspace sweep"
+         (pointer identity), not rebuild the root-backed snapshot"
     );
     assert_eq!(
         view1.validation_token_for_tests(),
@@ -800,18 +800,18 @@ fn cold_compute_artifact_publication_does_not_self_supersede_publish() {
     );
 }
 
-// ── Singleflight: concurrent token-miss callers share ONE cold sweep ──
+// ── Singleflight: concurrent token-miss callers share ONE cold build ──
 
 #[test]
 fn cold_store_view_build_is_singleflighted_across_concurrent_callers() {
     // PERF SOUNDNESS: on a token miss the manager must NOT let
-    // N concurrent callers each run `build_coherent` (N full-workspace
-    // sweeps). Exactly one caller sweeps; the rest WAIT on the condvar and
+    // N concurrent callers each run `build_coherent`. Exactly one caller
+    // captures roots; the rest WAIT on the condvar and
     // clone the winner's `Arc<StoreViewSnapshot>`.
     //
     // Discrimination: spin N threads that all request the base view after
     // a fresh token (the cache is cold). With singleflight only ONE thread
-    // sweeps; the rest WAIT on the condvar and clone the winner's Arc.
+    // builds; the rest WAIT on the condvar and clone the winner's Arc.
     //
     // The sweep count is measured PER-THREAD (each spawned thread reports
     // its `COHERENT_BUILD_SWEEPS_THIS_THREAD`, summed by the test) rather
@@ -1502,8 +1502,8 @@ fn woken_waiter_recaptures_live_token_and_warm_hits_instead_of_resweeping() {
 fn mid_build_env_change_without_epoch_forces_retry_not_torn_view() {
     // SOUNDNESS: `build` reads the token-relevant
     // env-hash / project-identity / project-generation dimensions. If it
-    // read env LATE (after the per-canonical snapshot maps were already
-    // populated), a mid-build env mutation that advances `resolve_env_hash`
+    // read env LATE (after the immutable roots were already captured), a
+    // mid-build env mutation that advances `resolve_env_hash`
     // WITHOUT bumping `store_view_epoch` would leave the view's reconstructed
     // token reflecting the NEW env while the snapshot maps were captured
     // under the OLD env, and the post-build coherence check (comparing a
@@ -2071,8 +2071,8 @@ fn final_fallback_under_churn_does_not_run_parallel_unclaimed_sweeps() {
     // `resolver_store_view_read` after a forced cold miss. Each thread ENROLLS
     // in the concurrent-sweep gauge so the global peak counts ONLY these
     // threads' concurrency (an unrelated parallel store-view test's sweeper
-    // threads never enroll, so they cannot perturb it). With per-sweep overlap
-    // held open, the PEAK number of concurrent full-workspace sweeps is
+    // threads never enroll, so they cannot perturb it). With per-build overlap
+    // held open, the PEAK number of concurrent coherent builds is
     // measured. Post-fix every build runs under the singleflight claim
     // (`building`), which admits exactly ONE sweeper at a time → peak == 1.
     // Pre-fix the exhausted no-claim waiters each run an UNCLAIMED
@@ -2154,8 +2154,8 @@ fn final_fallback_under_churn_does_not_run_parallel_unclaimed_sweeps() {
 
     assert!(
         peak <= 1,
-        "REGRESSION (final-fallback unclaimed sweep): the peak number of CONCURRENT \
-         full-workspace sweeps was {peak} (> 1) under sustained churn — exhausted \
+        "REGRESSION (final-fallback unclaimed build): the peak number of CONCURRENT \
+         coherent builds was {peak} (> 1) under sustained churn — exhausted \
          no-claim waiters each ran an UNCLAIMED build_coherent in parallel instead of \
          rejoining the singleflight lane. With the claim-or-rejoin fallback exactly \
          one sweep runs at a time (peak == 1)."
@@ -2290,8 +2290,8 @@ fn manager_cached_view_misses_after_edge_stale_wildcard_file_set_change() {
         ptr1,
         view2.snapshot_ptr_for_tests(),
         "the manager MUST rebuild the snapshot after the wildcard target \
-         appears — the build-time edge-currency gate must re-run so the \
-         barrel's stale Route/ImportRoute derived hashes are suppressed"
+         appears — the base view must capture the advanced source and \
+         resolution roots"
     );
     assert!(
         token1.externally_superseded_by(&token2),
@@ -2389,4 +2389,147 @@ fn schema_mismatch_sweep_advances_artifact_generation_token() {
         token_before, token_after,
         "the manager reuse token must move with the sweep",
     );
+}
+
+// ── Self-await: a re-entrant read on the claim-holding thread must never park ──
+
+#[test]
+fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
+    // SOUNDNESS: `CLAUDE.md`'s completion-fence rule — "Waiters on
+    // in-flight work block cooperatively, never busy-spin; SAME-PATH
+    // RECURSION NEVER SELF-AWAITS". The O(1) production build enumerates no
+    // owners and reopens no routing, but the manager must still fail closed if
+    // any future claim-holding path re-enters `StoreViewManager::base_view` on
+    // the same thread. That thread observes its OWN claim; the `built`
+    // condvar it would park on can only ever be signalled by its own
+    // `BuildClaimGuard::drop`. Parking is therefore a wait-for cycle of
+    // length ONE: a permanent deadlock at zero CPU that takes the host's
+    // whole store-view path with it. The invariant used to be held by a
+    // rustdoc sentence; it is now structural (`build_claim`'s privately-held
+    // `ClaimFlag` + the guard's private field make claim-taking and
+    // owner-registration the same act) and enforced at the manager's single
+    // park chokepoint `park_for_build`.
+    //
+    // Discrimination: arm ONE nested `resolver_store_view_read()` from
+    // inside the next `build_coherent` claim region on this thread, then
+    // drive a cold (token-miss) read. The nested read misses the warm probe
+    // — that is WHY the outer call claimed a build — so it reaches the
+    // would-park arm with `building` set to its own claim.
+    //
+    //   * WITHOUT the backstop the nested read parks forever: the worker
+    //     never reports, `recv_timeout` fires, and the test FAILS PROMPTLY
+    //     (it never hangs the suite). This is the discriminating assertion,
+    //     and it was verified RED against a tree carrying the seam but not
+    //     the backstop.
+    //   * WITH the backstop the park is refused, the nested read is handed
+    //     a fail-closed `ReturnOnly { ReentrantBuildClaim }`, and the
+    //     refusal is loud: `tracing::error!` always, plus a `debug_assert!`
+    //     that in any debug build unwinds the re-entrant caller at the
+    //     exact frame. Both modes are asserted below.
+    //
+    // Anti-vacuity: the per-thread refusal counter MUST be exactly 1. A 0
+    // would mean the nested read never reached the park arm (a fixture that
+    // silently stopped arming the re-entrancy), which is precisely the
+    // "passes regardless" failure this assertion exists to prevent.
+    use crate::resolver_store::{HostStoreView, StoreViewReturnOnlyReason};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (host, _canonical) = host_with_one_file();
+
+    // Warm the manager, then advance the live token so the next read is a
+    // guaranteed cold miss (claim-then-build), and so the NESTED read inside
+    // the claim region also misses the warm probe and reaches the park arm.
+    let _ = host.resolver_store_view_read().into_owned_view();
+    host.bump_store_view_epoch();
+
+    let (tx, rx) = mpsc::channel();
+    let worker_host = Arc::clone(&host);
+    let worker = std::thread::spawn(move || {
+        HostStoreView::arm_reentrant_store_view_read_for_tests();
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            let _ = worker_host.resolver_store_view_read();
+        }));
+        let panic_message = outer.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|text| (*text).to_string())
+                })
+                .unwrap_or_default()
+        });
+        let refusal = HostStoreView::self_await_refusal_evidence_for_tests();
+        let nested = HostStoreView::reentrant_store_view_read_observed_for_tests();
+        let _ = tx.send((panic_message, refusal, nested));
+    });
+
+    let (panic_message, (refusals, last_reason), nested) =
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(observed) => {
+                worker
+                    .join()
+                    .expect("the worker thread must not itself panic");
+                observed
+            }
+            Err(_) => panic!(
+                "REGRESSION: base_view PARKED on the `built` condvar while the CURRENT \
+             thread already held the singleflight build claim. Only that same thread's \
+             BuildClaimGuard::drop can signal that condvar, so nothing can ever wake \
+             it — a one-thread deadlock at zero CPU. The park arm must consult claim \
+             ownership (StoreViewManager::park_for_build + build_claim)."
+            ),
+        };
+
+    // The re-entrancy was genuinely ARMED and genuinely REFUSED.
+    assert_eq!(
+        refusals, 1,
+        "the nested read MUST have reached base_view's would-park arm and been refused \
+         exactly ONCE; 0 means this test never armed the re-entrancy and proves nothing"
+    );
+    // Fail-closed, never a view advertised as current.
+    assert_eq!(
+        last_reason,
+        Some(StoreViewReturnOnlyReason::ReentrantBuildClaim),
+        "a refused self-await MUST degrade to ReturnOnly{{ReentrantBuildClaim}} — \
+         ReturnOnly can never publish an entry, reverse-index metadata or a persistent \
+         artifact, and `current()` yields None so no warm validator can use it"
+    );
+
+    if cfg!(debug_assertions) {
+        // Debug/dev/test: the bug is an immediate, fully-symbolised failure
+        // at the exact frame, not a silent degradation.
+        let message = panic_message.expect(
+            "in a debug build a refused self-await MUST fire its debug_assert! so the \
+             latent re-entrancy surfaces immediately instead of degrading silently",
+        );
+        assert!(
+            message.contains("STORE-VIEW SELF-AWAIT"),
+            "the debug failure must name the invariant it caught, got: {message}"
+        );
+        // The assertion unwinds before the fail-closed read can propagate
+        // back to the nested caller, which is exactly why the chokepoint
+        // records the refusal evidence asserted above.
+        assert_eq!(
+            nested, None,
+            "the debug_assert! unwinds the re-entrant caller, so the nested read never \
+             returns a value; the refusal evidence is the observable instead"
+        );
+    } else {
+        // Release: no panic on a user-facing path — the read degrades
+        // fail-closed and the caller declines.
+        assert!(
+            panic_message.is_none(),
+            "a release build must NOT panic on a user-facing store-view read; it \
+             degrades fail-closed instead, got panic: {panic_message:?}"
+        );
+        assert_eq!(
+            nested,
+            Some((false, Some(StoreViewReturnOnlyReason::ReentrantBuildClaim))),
+            "the re-entrant caller must RECEIVE the non-current fail-closed read"
+        );
+    }
 }

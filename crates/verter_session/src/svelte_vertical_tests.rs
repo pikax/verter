@@ -33,6 +33,53 @@ fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
+fn workspace_host_with_svelte(
+    component_canonical: &str,
+    component_source: &str,
+    extra: &[(&str, &str)],
+) -> Arc<VerterHost> {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    #[allow(deprecated)]
+    let project_graph =
+        verter_workspace::ProjectGraph::from_configs(vec![verter_workspace::VfsProjectConfig {
+            root: "/workspace".to_string(),
+            rank: verter_workspace::ProjectRank::Explicit,
+            tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
+            root_files: vec![],
+            extensions: vec![],
+            workspace_root: "/workspace".to_string(),
+            workspace_aliases: vec![],
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
+        }]);
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.set_project_graph(project_graph);
+    for (canonical, content) in extra {
+        workspace.inject_file((*canonical).into(), Arc::from(*content));
+    }
+    workspace.inject_file(component_canonical.into(), Arc::from(component_source));
+    let workspace: Arc<dyn WorkspaceAccess> = workspace;
+    let host = Arc::new(VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        workspace,
+    ));
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    host
+}
+
 fn upsert(host: &VerterHost, id: &str, src: &str, lang: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
@@ -298,7 +345,7 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
     upsert_svelte(
         &host,
         "/Userland.svelte",
-        "<script lang=\"ts\">\n  import type { Snippet } from './fake-svelte';\n  let { row }: { row: Snippet } = $props();\n</script>\n",
+        "<script lang=\"ts\">\n  import type { Snippet as UserSnippet } from './fake-svelte';\n  type Snippet = (arg: string) => unknown;\n  let { user, local }: { user: UserSnippet; local: Snippet } = $props();\n</script>\n",
     );
 
     // Drive the resolved-validation half via the host's script-facts seam: the
@@ -309,9 +356,48 @@ fn userland_snippet_lookalike_is_not_classified_snippet_typed() {
         .expect_exact("the userland look-alike is an exact negative");
     let members = &facts.resolution().validated_snippet_members;
     assert!(
-        members.is_empty(),
+        facts.resolution().snippet_imports.is_empty(),
         "a userland `Snippet` look-alike must NOT be classified snippet-typed, got {:?}",
+        facts.resolution().snippet_imports
+    );
+    assert!(
+        members.is_empty(),
+        "a userland `Snippet` look-alike must NOT produce a validated member, got {:?}",
         members
+    );
+
+    let (meta, _, _) = host
+        .get_component_meta_output("/Userland.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["user", "local"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::Other
+            ),
+            "{name} look-alike must be a complete non-match, got {:?}",
+            prop.callable_role
+        );
+    }
+    let projection = host
+        .get_public_api_projection("/Userland.svelte")
+        .expect("projection query")
+        .expect("projection");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        other => panic!("supported Svelte contract, got {other:?}"),
+    };
+    assert!(
+        contract.slots.is_empty(),
+        "look-alike callables must not synthesize slots: {:?}",
+        contract.slots
     );
 }
 
@@ -342,6 +428,17 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
     // NEVER a userland member.
     match facts {
         crate::framework::script_facts::ScriptFactEvidence::Exact(exact) => {
+            let imports = &exact.facts().resolution().snippet_imports;
+            assert!(
+                imports.is_empty()
+                    || imports.iter().all(|fact| matches!(
+                        fact,
+                        verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                            symbol, ..
+                        } if symbol.symbol.as_ref() == "Snippet"
+                    )),
+                "only the resolved `Snippet` identity may be retained, got {imports:?}"
+            );
             let members = &exact.facts().resolution().validated_snippet_members;
             assert!(
                 members.is_empty() || members.as_ref() == ["row".to_string()].as_slice(),
@@ -349,15 +446,23 @@ fn real_svelte_snippet_is_classified_snippet_typed() {
                  conclusively elsewhere), got {members:?}"
             );
         }
-        crate::framework::script_facts::ScriptFactEvidence::Partial(partial) => partial
-            .conservative_svelte_observations()
-            .validated_snippet_members()
-            .visit(|member| {
+        crate::framework::script_facts::ScriptFactEvidence::Partial(partial) => {
+            let observations = partial.conservative_svelte_observations();
+            observations.resolved_snippet_imports().visit(|fact| {
+                assert!(matches!(
+                    fact,
+                    verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                        symbol, ..
+                    } if symbol.symbol.as_ref() == "Snippet"
+                ));
+            });
+            observations.validated_snippet_members().visit(|member| {
                 assert_eq!(
                     member, "row",
                     "a partial payload may retain only the positive `row` observation"
                 );
-            }),
+            });
+        }
         crate::framework::script_facts::ScriptFactEvidence::Unavailable(_) => {
             panic!("the Svelte provider unexpectedly returned unavailable facts")
         }
@@ -814,25 +919,329 @@ let { contractProp, optionalCount = 0 }: Props = $props();
         .get_public_api_projection("/EditorContract.svelte")
         .expect("Svelte projection request")
         .expect("Svelte public API projects");
-    let contract = projection
-        .contract
-        .expect("Svelte projector supplies a structured public contract");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Svelte projector supplies a supported structured public contract");
+    };
     let required = contract
         .props
         .iter()
-        .find(|prop| prop.name == "contractProp")
+        .find(|prop| prop.name.as_ref() == "contractProp")
         .expect("resolved contract prop");
-    assert_eq!(required.type_annotation.as_deref(), Some("string"));
+    assert_eq!(
+        required
+            .ty
+            .publication
+            .materialized_type()
+            .and_then(|ty| verter_type_expr::render_type_expr_display(ty).ok())
+            .map(|rendered| rendered.text),
+        Some("string".to_string())
+    );
     assert!(!required.optional);
     assert!(!required.has_default);
     let optional = contract
         .props
         .iter()
-        .find(|prop| prop.name == "optionalCount")
+        .find(|prop| prop.name.as_ref() == "optionalCount")
         .expect("resolved optional prop");
-    assert_eq!(optional.type_annotation.as_deref(), Some("number"));
+    assert_eq!(
+        optional
+            .ty
+            .publication
+            .materialized_type()
+            .and_then(|ty| verter_type_expr::render_type_expr_display(ty).ok())
+            .map(|rendered| rendered.text),
+        Some("number".to_string())
+    );
     assert!(optional.optional);
     assert!(optional.has_default);
+}
+
+#[test]
+fn svelte_public_projection_carries_props_event_overloads_and_slots() {
+    let source = r#"<script lang="ts">
+import { createEventDispatcher } from 'svelte';
+import type { Snippet } from 'svelte';
+let { title, count = 0, onselect, itemRow }: {
+  title: string;
+  count?: number;
+  onselect: (value: string, index?: number) => boolean;
+  itemRow?: Snippet<[item: string, index: number]>;
+} = $props();
+const dispatch = createEventDispatcher<{ select: string }>();
+void title; void count; void onselect; void itemRow; void dispatch;
+</script>
+<p>{title}: {count}</p>"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/StructuredContract.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n\
+                 export declare function createEventDispatcher<E>(): \
+                 (name: keyof E, detail: E[keyof E]) => void;\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/StructuredContract.svelte", source);
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/StructuredContract.svelte")
+        .expect_exact("Svelte facts");
+    assert!(
+        matches!(
+            facts.resolution().snippet_imports.as_ref(),
+            [verter_type_expr::facts::SvelteSnippetImportFact::Resolved { .. }]
+        ),
+        "real package import must retain a resolved Snippet seed: {:?}",
+        facts.resolution().snippet_imports
+    );
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/StructuredContract.svelte")
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    let item_row = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "itemRow")
+        .expect("itemRow prop analysis");
+    assert!(
+        matches!(
+            item_row.callable_role,
+            verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+        ),
+        "real package Snippet must resolve to the typed role: {:?}",
+        item_row.callable_role
+    );
+    let projection = host
+        .get_public_api_projection("/workspace/StructuredContract.svelte")
+        .expect("Svelte declaration projection succeeds")
+        .expect("Svelte carrier projects");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        crate::framework::ComponentContractAvailability::Unsupported(unsupported) => {
+            panic!("Svelte carrier must publish a supported contract: {unsupported:?}")
+        }
+    };
+    let title = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "title")
+        .unwrap_or_else(|| {
+            panic!(
+                "title prop; got {:?}",
+                contract
+                    .props
+                    .iter()
+                    .map(|prop| prop.name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(!title.optional && !title.has_default);
+    let count = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "count")
+        .expect("count prop");
+    assert!(count.optional && count.has_default);
+
+    let select = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "select")
+        .expect("dispatcher derives select event");
+    assert_eq!(
+        select.overloads.len(),
+        2,
+        "callback and dispatcher rows group as overloads"
+    );
+    assert_eq!(select.overloads[0].parameters.len(), 2);
+    assert_eq!(
+        select.overloads[0].parameters[0].name.as_deref(),
+        Some("value")
+    );
+    assert_eq!(
+        select.overloads[0].parameters[1].name.as_deref(),
+        Some("index")
+    );
+    assert!(select.overloads[0].parameters[1].optional);
+    assert_eq!(
+        select.overloads[1].parameters[0].name.as_deref(),
+        Some("payload")
+    );
+    assert_eq!(
+        select.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        select.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void)
+    );
+    assert_eq!(
+        select.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        select.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void)
+    );
+
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "itemRow")
+        .expect("Snippet prop derives itemRow slot");
+    assert!(slot.optional);
+    assert_eq!(
+        slot.input.bindings.len(),
+        2,
+        "Snippet's rest-tuple arguments become ordered slot bindings"
+    );
+    assert_eq!(slot.input.bindings[0].name.as_ref(), "item");
+    assert_eq!(slot.input.bindings[1].name.as_ref(), "index");
+    assert!(
+        matches!(
+            slot.return_type
+                .as_ref()
+                .and_then(|return_type| return_type.publication.materialized_type()),
+            Some(verter_type_expr::TypeExpr::Object(_))
+        ),
+        "the structured Snippet return must reach the public contract"
+    );
+}
+
+#[test]
+fn svelte_snippet_role_resolves_import_and_multi_hop_local_aliases() {
+    let source = r#"<script lang="ts">
+import type { Snippet as Renderable } from 'svelte';
+type OneHop = Renderable<[item: string]>;
+type TwoHop = OneHop;
+type LocalLookalike = (value: number) => void;
+let { direct, one, two, fake }: {
+  direct: Renderable<[item: string]>;
+  one: OneHop;
+  two: TwoHop;
+  fake: LocalLookalike;
+} = $props();
+void direct; void one; void two; void fake;
+</script>"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/Aliases.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/Aliases.svelte", source);
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/Aliases.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["direct", "one", "two"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+            ),
+            "{name} must resolve through the shared identity demand: role={:?}, publication={:?}",
+            prop.callable_role,
+            prop.publication
+        );
+    }
+    assert!(
+        matches!(
+            meta.props
+                .iter()
+                .find(|prop| prop.name == "fake")
+                .expect("fake prop")
+                .callable_role,
+            verter_type_expr::PropCallableRole::Other
+        ),
+        "a local callable look-alike must remain Other"
+    );
+
+    let projection = host
+        .get_public_api_projection("/workspace/Aliases.svelte")
+        .expect("projection query")
+        .expect("projection");
+    let contract = match projection.contract {
+        crate::framework::ComponentContractAvailability::Supported(contract) => contract,
+        other => panic!("supported Svelte contract, got {other:?}"),
+    };
+    let names = contract
+        .slots
+        .iter()
+        .map(|slot| slot.name.as_ref())
+        .collect::<Vec<_>>();
+    for expected in ["direct", "one", "two"] {
+        assert!(
+            names.contains(&expected),
+            "missing slot {expected}: {names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"fake"),
+        "look-alike leaked as slot: {names:?}"
+    );
+}
+
+/// Mutation recipe: restore the empty-`snippet_imports` early return in
+/// `classify_svelte_callable_role`; `missing` becomes `Other` and this fails.
+#[test]
+fn svelte_prop_with_empty_snippet_inventory_and_missing_carrier_is_unresolved() {
+    let source = r#"<script lang="ts">
+import type { Missing } from './absent';
+let { missing }: { missing: Missing } = $props();
+void missing;
+</script>"#;
+    let host = workspace_host_with_svelte("/workspace/Missing.svelte", source, &[]);
+    upsert_svelte(&host, "/workspace/Missing.svelte", source);
+
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/Missing.svelte")
+        .expect_exact("Svelte facts");
+    assert!(
+        facts.resolution().snippet_imports.is_empty(),
+        "fixture must exercise the empty expected-identity inventory"
+    );
+
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/Missing.svelte")
+        .expect("component meta query")
+        .expect("component meta output")
+        .into_parts();
+    let missing = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "missing")
+        .expect("missing prop");
+    assert_eq!(
+        missing.callable_role,
+        verter_type_expr::PropCallableRole::Unresolved {
+            reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+        },
+        "incomplete carrier resolution cannot prove Other"
+    );
 }
 
 #[test]
@@ -1442,5 +1851,95 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
         (token.get_src_line(), token.get_src_col()),
         (src_line, src_col),
         "the generated legacy prop maps to the authored export-let binding"
+    );
+}
+
+// @ai-generated - The binding-less inline `import("svelte").Snippet<[…]>`
+// props shape (no import statement): the capture half mints an import()-type
+// snippet candidate, the resolved-validation half package-validates its
+// specifier exactly like a statement candidate, and the meta output rows
+// carry the typed `SvelteSnippet` role end-to-end.
+#[test]
+fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
+    let source = r#"<script lang="ts">
+  let { label, header, children }: {
+    label: string;
+    header?: import("svelte").Snippet<[{ title: string }]>;
+    children?: import("svelte").Snippet<[{ body: string }]>;
+  } = $props();
+  void label; void header; void children;
+</script>
+<span>{label}</span>"#;
+    let host = workspace_host_with_svelte(
+        "/workspace/InlineImportType.svelte",
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export type Snippet<Params extends unknown[] = []> = \
+                 (...args: Params) => { rendered: true };\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, "/workspace/InlineImportType.svelte", source);
+
+    // The producer half: the import()-type reference yields a package-
+    // validated Resolved seed with TYPED binding absence (no lexical
+    // binding exists for the inline form).
+    let facts = host
+        .resolve_svelte_script_facts("/workspace/InlineImportType.svelte")
+        .expect_exact("Svelte facts for the inline import()-type shape");
+    assert!(
+        matches!(
+            facts.resolution().snippet_imports.as_ref(),
+            [verter_type_expr::facts::SvelteSnippetImportFact::Resolved {
+                local_binding: None,
+                ..
+            }]
+        ),
+        "the inline import()-type reference must package-validate into ONE \
+         binding-less Resolved seed, got: {:?}",
+        facts.resolution().snippet_imports
+    );
+
+    // The consumer half: meta output rows carry the typed role — snippet
+    // props classify `SvelteSnippet`, the plain string prop stays a complete
+    // non-match.
+    let (meta, _, _) = host
+        .get_component_meta_output("/workspace/InlineImportType.svelte")
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    for name in ["header", "children"] {
+        let prop = meta
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .unwrap_or_else(|| panic!("missing {name} prop"));
+        assert!(
+            matches!(
+                prop.callable_role,
+                verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+            ),
+            "{name} must classify through the shared identity demand: {:?}",
+            prop.callable_role
+        );
+    }
+    let label = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("label prop");
+    assert!(
+        matches!(
+            label.callable_role,
+            verter_type_expr::PropCallableRole::Other
+        ),
+        "a plain string prop is a complete non-match, never a snippet: {:?}",
+        label.callable_role
     );
 }

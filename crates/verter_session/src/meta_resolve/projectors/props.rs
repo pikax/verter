@@ -3,9 +3,9 @@
 //! Resolves the macro's parsed type argument to a payload node through
 //! `ResolveMacroPayload`, then enumerates the prop surface via an
 //! empty-path `ProjectPath` in `Shallow` mode. Each surface member
-//! becomes one `ExpandedField` with its `raw_type` populated from the
-//! parser-side `AnalyzedPropField.type_annotation` when available
-//! (preserves §7.4b parity).
+//! becomes one `ExpandedField` with bundled authored evidence populated
+//! from the parser-side payload locator and type annotation when available
+//! (preserves section 7.4b parity).
 
 use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
 use verter_semantic::analysis::type_expand::ExpandedField;

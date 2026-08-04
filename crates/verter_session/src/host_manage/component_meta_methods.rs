@@ -763,6 +763,7 @@ impl VerterHost {
                 // host's scheduler and caches stay untouched).
                 let template_inputs = crate::types::VueTemplateInputs {
                     source: Arc::clone(&facts.raw_source),
+                    whole_hash: facts.whole_hash,
                     framework_parse: facts.framework_parse.clone(),
                     store_published: false,
                     // Overlay artifact read — no scheduler node
@@ -1328,6 +1329,7 @@ impl VerterHost {
                 queued_names: &mut RegistryQueuedNames,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
                 producer_scope: &RegistryProducerScope,
+                member_ref_policy: crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy,
                 cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
             ) {
                 let mut local_queue = std::collections::VecDeque::new();
@@ -1339,7 +1341,7 @@ impl VerterHost {
                     &mut local_names,
                     &mut local_queue,
                     producer_scope,
-                    crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
+                    member_ref_policy,
                     cursor,
                 );
                 for pending in local_queue {
@@ -1370,6 +1372,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1385,6 +1388,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1396,6 +1400,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                         collect_one_filtered_node(
@@ -1405,6 +1410,7 @@ impl VerterHost {
                             queued_names,
                             output,
                             producer_scope,
+                            crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::DemandedOwnerLocalSurface,
                             cursor,
                         );
                     }
@@ -1417,6 +1423,7 @@ impl VerterHost {
                         queued_names,
                         output,
                         producer_scope,
+                        crate::resolver_core::component_meta_registry::RegistryMemberRefPolicy::PublicationBoundary,
                         cursor,
                     );
                 }
@@ -1614,7 +1621,7 @@ impl VerterHost {
                 // workspace type alias — the typed SOURCE-variant identity is
                 // the refuse-to-enqueue signal.
                 if matches!(
-                    field.r#type.present(),
+                    field.authority.source(),
                     Some(verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(_))
                 ) {
                     continue;
@@ -2409,6 +2416,7 @@ impl VerterHost {
             // no-op there. No hardcoded `.vue` extension gate.
             let template_inputs = crate::types::VueTemplateInputs {
                 source: Arc::clone(&facts.raw_source),
+                whole_hash: facts.whole_hash,
                 framework_parse: facts.framework_parse.clone(),
                 store_published: serve.store_published,
                 // Artifact-serve read — no scheduler node

@@ -572,7 +572,7 @@ fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
 
 #[test]
 fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
-    use crate::semantic_query::{IndexSignature, SemanticNodeData, SurfaceView};
+    use crate::semantic_query::{IndexSignature, SemanticNodeData};
     use verter_span::Span;
 
     const FILE: &str = "/src/idx_decl.ts";
@@ -622,7 +622,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         // at production time; the only correct span anchor.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
     };
-    let view = SurfaceView {
+    let view = crate::test_surface_view! {
         members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
@@ -676,7 +676,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
 
 #[test]
 fn member_build_uses_declaration_origin_for_scopeless_value() {
-    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember};
     use verter_span::Span;
 
     const FILE: &str = "/src/member_decl.ts";
@@ -727,7 +727,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         )
         .stamp_role(MemberMergeRole::OwnBody),
     };
-    let view = SurfaceView {
+    let view = crate::test_surface_view! {
         members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),

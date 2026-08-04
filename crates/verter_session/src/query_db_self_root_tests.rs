@@ -3445,10 +3445,10 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
 /// across a scope edit and the only shifting fact is the scope's
 /// `FileWholeHash`).
 fn intern_global_object(host: &VerterHost) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::{SemanticNodeData, SurfaceView};
+    use crate::semantic_query::SemanticNodeData;
     host.project_type_store()
         .semantic_graph()
-        .intern_node(SemanticNodeData::Object(SurfaceView {
+        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -5126,7 +5126,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             models: Vec::new(),
             exposed: Vec::new(),
             public_instance: None,
-            sfc_blocks: None,
+            ordered_sfc_structure: None,
             type_registry: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),

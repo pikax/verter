@@ -40,6 +40,66 @@ export interface RemappedSpan {
 
 const parsedMapCache = new Map<string, TraceMap | null>();
 
+export interface CarrierSourceStructureStamp {
+  schemaVersion: 1;
+  artifactToken: string;
+  /** UTF-8 BYTE offset spans (Rust inventory geometry). Consumers comparing
+   * against UTF-16 provider positions MUST convert first. */
+  scriptContentRanges: readonly (readonly [number, number])[];
+  /** Parser-identified markup opening-tag spans, UTF-8 BYTE offsets (empty
+   * for stamps written before the field existed — consumers then fail
+   * closed). Convert before comparing against UTF-16 positions. */
+  markupOpeningRanges: readonly (readonly [number, number])[];
+}
+
+/** Content-free inventory facts stamped into the exact published source map. */
+export function carrierSourceStructure(
+  reader: CarrierStoreReader,
+  providerPath: string,
+): CarrierSourceStructureStamp | null {
+  const ready = reader.readyFile(providerPath);
+  const value = ready?.structure as Record<string, unknown> | undefined;
+  if (value === undefined) return null;
+  if (value.schema_version !== 1) return null;
+  if (
+    typeof value.artifact_token !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value.artifact_token)
+  ) {
+    return null;
+  }
+  const parseRanges = (raw: unknown): [number, number][] | null => {
+    if (!Array.isArray(raw)) return null;
+    const ranges: [number, number][] = [];
+    for (const range of raw) {
+      if (
+        !Array.isArray(range) ||
+        range.length !== 2 ||
+        !Number.isSafeInteger(range[0]) ||
+        !Number.isSafeInteger(range[1]) ||
+        range[0] < 0 ||
+        range[0] > range[1]
+      ) {
+        return null;
+      }
+      ranges.push([range[0], range[1]]);
+    }
+    return ranges;
+  };
+  const ranges = parseRanges(value.script_content_ranges);
+  if (ranges === null) return null;
+  // Additive field: absent in older stamps (never a hard reject); malformed
+  // payloads reject the whole stamp exactly like the script ranges.
+  const markupOpeningRanges =
+    value.markup_opening_ranges === undefined ? [] : parseRanges(value.markup_opening_ranges);
+  if (markupOpeningRanges === null) return null;
+  return {
+    schemaVersion: 1,
+    artifactToken: value.artifact_token,
+    scriptContentRanges: ranges,
+    markupOpeningRanges,
+  };
+}
+
 function storePathKey(reader: CarrierStoreReader, fileName: string): string {
   return reader.canonicalPath?.(fileName) ?? normalizePath(fileName);
 }
@@ -195,6 +255,25 @@ export function mapCarrierSourceOffsetToGeneratedAll(
   return mapper
     .mapSourceOffsetToGeneratedAll(sourceOffset, normalizePath(publishedSource))
     .map((position) => position.offset);
+}
+
+/** Earliest authored source offset carried by the ready companion's sealed map. */
+export function carrierMappedSourceAnchor(
+  reader: CarrierStoreReader,
+  providerPath: string,
+  sourcePath: string,
+  readCompanionText: (providerPath: string) => string | undefined,
+  readSourceText: (sourcePath: string) => string | undefined,
+): number | null {
+  const mapper = carrierMapperForSourceRequest(
+    reader,
+    providerPath,
+    readCompanionText,
+    readSourceText,
+  );
+  if (mapper === null) return null;
+  const publishedSource = reader.ownedSourceFor(sourcePath)?.source_uri ?? sourcePath;
+  return mapper.firstMappedSourceOffset(normalizePath(publishedSource));
 }
 
 function carrierMapperForSourceRequest(

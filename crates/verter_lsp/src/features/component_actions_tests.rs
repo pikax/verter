@@ -1,11 +1,10 @@
-﻿use super::*;
+use super::*;
+use crate::documents::carrier_structure::{test_carrier_blocks, test_structure};
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
 use verter_semantic::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_semantic::analysis::types::AnalyzedMacro;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_session::FileAnalysisSnapshot;
 
@@ -40,7 +39,7 @@ fn make_component(
         v_models: vec![],
         bindings: vec![],
         events: vec![],
-        span: verter_span::Span::new(0, 50),
+        span: verter_span::Span::new(13, 50),
     }
 }
 
@@ -58,13 +57,22 @@ fn make_prop(name: &str) -> TemplatePropUsage {
     }
 }
 
+/// Macros (with their edit anchors) minted by the REAL analyzer over `source`.
+fn producer_backed_macros(
+    source: &str,
+) -> std::sync::Arc<Vec<verter_semantic::analysis::types::AnalyzedMacro>> {
+    crate::features::macro_fixture::analyze_sfc_script(source)
+        .macros
+        .into()
+}
+
 fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     ChildComponentContext {
         canonical_id: "/project/src/Child.vue".to_string(),
         uri: "file:///project/src/Child.vue".parse().unwrap(),
-        source: source.to_string(),
+        source: source.into(),
         analysis,
         inherited_attrs: std::collections::HashSet::new(),
         blocks,
@@ -87,6 +95,7 @@ fn add_prop_to_type_based_define_props() {
             (TemplateAnalysisSnapshot {
                 prop_definitions: vec![AnalyzedPropDefinition {
                     name: "msg".into(),
+                    callable_role: verter_type_expr::PropCallableRole::default(),
                     type_annotation: Some("string".into()),
                     has_default: false,
                     is_required: true,
@@ -99,26 +108,12 @@ fn add_prop_to_type_based_define_props() {
             })
             .into(),
         ),
-        macros: (vec![AnalyzedMacro {
-            kind: AnalyzedMacroKind::DefineProps,
-            owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            is_type_based: true,
-            type_references: vec![],
-            binding_name: None,
-            model_name: None,
-            has_inherit_attrs_false: false,
-            prop_fields: vec![],
-            emit_fields: vec![],
-            slot_fields: vec![],
-            default_keys: vec![],
-            expose_fields: vec![],
-            default_values: Vec::new(),
-            resolved_local_types: Vec::new(),
-            parsed_type_argument: None,
-            parsed_type_argument_scope: None,
-            span: verter_span::Span::new(24, 56),
-        }])
-        .into(),
+        // Macros AND edit anchors from the real analyzer over the child's own
+        // source, stamped with that source's revision — the shape
+        // `resolve_component_context` produces. A hand-forged anchor could not
+        // discriminate a mint bug.
+        macros: producer_backed_macros(child_source),
+        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -241,26 +236,8 @@ fn no_action_for_runtime_based_define_props() {
 
     let child_source = "<script setup>\ndefineProps(['msg'])\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        macros: (vec![AnalyzedMacro {
-            kind: AnalyzedMacroKind::DefineProps,
-            owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            is_type_based: false,
-            type_references: vec![],
-            binding_name: None,
-            model_name: None,
-            has_inherit_attrs_false: false,
-            prop_fields: vec![],
-            emit_fields: vec![],
-            slot_fields: vec![],
-            default_keys: vec![],
-            expose_fields: vec![],
-            default_values: Vec::new(),
-            resolved_local_types: Vec::new(),
-            parsed_type_argument: None,
-            parsed_type_argument_scope: None,
-            span: verter_span::Span::new(15, 35),
-        }])
-        .into(),
+        macros: producer_backed_macros(child_source),
+        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -472,6 +449,7 @@ fn make_child_with_props(source: &str, prop_names: &[&str]) -> ChildComponentCon
                     .iter()
                     .map(|name| AnalyzedPropDefinition {
                         name: name.to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::default(),
                         type_annotation: Some("unknown".to_string()),
                         has_default: false,
                         is_required: false,
@@ -506,7 +484,10 @@ fn suggest_matching_props_single_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: produces action(s) with `:title`
     assert!(!actions.is_empty(), "should produce at least one action");
@@ -550,7 +531,10 @@ fn suggest_matching_props_multiple_matches() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: should have a bulk action (3 matches) + 3 individual actions = 4 total
     assert!(
@@ -587,7 +571,10 @@ fn suggest_matching_props_no_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "no matching bindings → no actions");
 }
@@ -612,7 +599,10 @@ fn suggest_matching_props_already_passed() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(
         actions.is_empty(),
@@ -635,7 +625,7 @@ fn suggest_matching_props_no_child_analysis() {
 
     let actions = suggest_matching_props(
         &parent,
-        source,
+        &test_structure(source, false),
         &li,
         &uri,
         &|_| None, // unresolvable child
@@ -660,7 +650,10 @@ fn suggest_matching_props_no_script_setup_child() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(
         actions.is_empty(),
@@ -698,7 +691,10 @@ fn suggest_matching_props_from_imports() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(!actions.is_empty(), "import-provided binding should match");
 }
@@ -733,7 +729,10 @@ fn suggest_matching_props_type_only_import_excluded() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "type-only import must not be offered");
 }
@@ -753,7 +752,10 @@ fn suggest_matching_props_spread_present_skips() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     assert!(actions.is_empty(), "spread present → skip suggestions");
 }
@@ -775,7 +777,10 @@ fn suggest_matching_props_self_closing() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Positive: should still produce actions for self-closing tags
     assert!(
@@ -815,7 +820,10 @@ fn suggest_matching_props_partial_match() {
     let li = LineIndex::new_utf16(source);
     let uri: Uri = "file:///project/src/App.vue".parse().unwrap();
 
-    let actions = suggest_matching_props(&parent, source, &li, &uri, &|_| Some(child_ctx.clone()));
+    let actions =
+        suggest_matching_props(&parent, &test_structure(source, false), &li, &uri, &|_| {
+            Some(child_ctx.clone())
+        });
 
     // Should produce 1 individual action (no bulk since only 1 match)
     assert_eq!(
@@ -830,25 +838,33 @@ fn suggest_matching_props_partial_match() {
     }
 }
 
-// ── find_opening_tag_end helper tests ──────────────────────────────
+// ── inventory attribute-anchor tests ──────────────────────────────
 
 #[test]
 fn find_tag_end_normal() {
-    let source = "<Child class=\"x\">";
-    assert_eq!(find_opening_tag_end(source, 0), Some(16));
+    let source = "<template><Child class=\"x\"></Child></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
+    assert_eq!(
+        component_attribute_anchor(&test_structure(source, false), child_start),
+        Some(source.find('>').unwrap() as u32 + 1 + 16)
+    );
 }
 
 #[test]
 fn find_tag_end_self_closing() {
-    let source = "<Child class=\"x\" />";
-    // Should find `/` at position 17
-    assert_eq!(find_opening_tag_end(source, 0), Some(17));
+    let source = "<template><Child class=\"x\" /></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
+    assert_eq!(
+        component_attribute_anchor(&test_structure(source, false), child_start),
+        Some(source.find("/>").unwrap() as u32)
+    );
 }
 
 #[test]
 fn find_tag_end_with_quotes() {
-    let source = "<Child title=\"a > b\" />";
+    let source = "<template><Child title=\"a > b\" /></template>";
+    let child_start = source.find("<Child").unwrap() as u32;
     // The `>` inside quotes should be ignored
-    let offset = find_opening_tag_end(source, 0).unwrap();
-    assert!(offset > 15, "should skip > inside quotes, got {}", offset);
+    let offset = component_attribute_anchor(&test_structure(source, false), child_start).unwrap();
+    assert_eq!(offset, source.find("/>").unwrap() as u32);
 }

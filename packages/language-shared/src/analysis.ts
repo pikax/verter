@@ -284,8 +284,42 @@ export interface IfChain {
   conditions: [string, number, number][];
 }
 
+export interface ResolvedSymbolIdentity {
+  canonicalId: string;
+  owner: {
+    kind: "Module" | "Instance" | "Frontmatter";
+    ordinal: number;
+  };
+  symbol: string;
+}
+
+export type PropCallableRoleUnresolvedReason =
+  | "analysisUnavailable"
+  | "missingDependency"
+  | "cycle"
+  | "budgetExceeded"
+  | "workLimitExceeded"
+  | "unsupported"
+  | "fault";
+
+export type PropCallableRole =
+  | {
+      kind: "svelteSnippet";
+      symbol: ResolvedSymbolIdentity;
+      exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+      provenance:
+        | "semanticEvaluator"
+        | "sessionProjector"
+        | "frameworkSurface"
+        | "fallthroughInheritance"
+        | "schema";
+    }
+  | { kind: "other" }
+  | { kind: "unresolved"; reason: PropCallableRoleUnresolvedReason };
+
 export interface AnalyzedPropDefinition {
   name: string;
+  callableRole: PropCallableRole;
   typeAnnotation?: string | null;
   hasDefault: boolean;
   isRequired: boolean;

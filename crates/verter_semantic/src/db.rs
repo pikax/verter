@@ -663,6 +663,7 @@ mod tests {
         // Create a script analysis with defineProps
         let mut snapshot = ScriptAnalysisSnapshot::default();
         snapshot.macros = vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -728,6 +729,7 @@ mod tests {
         // Child component with a prop
         let mut child_snap = ScriptAnalysisSnapshot::default();
         child_snap.macros = vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -1079,6 +1081,7 @@ mod tests {
         // Child: defineProps<{ color: string }>
         let mut child_snap = ScriptAnalysisSnapshot::default();
         child_snap.macros = vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,

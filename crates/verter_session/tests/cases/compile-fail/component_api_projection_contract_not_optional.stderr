@@ -1,0 +1,18 @@
+warning: unreachable expression
+ --> tests/cases/compile-fail/component_api_projection_contract_not_optional.rs:8:19
+  |
+7 |         response: loop {},
+  |                   ------- any code following this expression is unreachable
+8 |         contract: None,
+  |                   ^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+ --> tests/cases/compile-fail/component_api_projection_contract_not_optional.rs:8:19
+  |
+8 |         contract: None,
+  |                   ^^^^ expected `ComponentContractAvailability`, found `Option<_>`
+  |
+  = note: expected enum `ComponentContractAvailability`
+             found enum `std::option::Option<_>`

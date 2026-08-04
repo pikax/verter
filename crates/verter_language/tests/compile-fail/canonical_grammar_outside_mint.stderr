@@ -1,0 +1,19 @@
+error[E0451]: fields `authority`, `adapter_id`, `adapter_semantic_version`, `language_id`, `parser_grammar_version`, `canonical_config` and `fingerprint` of struct `CanonicalCarrierGrammar` are private
+  --> tests/compile-fail/canonical_grammar_outside_mint.rs:17:9
+   |
+16 |     let _ = CanonicalCarrierGrammar {
+   |             ----------------------- in this type
+17 |         authority,
+   |         ^^^^^^^^^ private field
+18 |         adapter_id,
+   |         ^^^^^^^^^^ private field
+19 |         adapter_semantic_version,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+20 |         language_id,
+   |         ^^^^^^^^^^^ private field
+21 |         parser_grammar_version,
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field
+22 |         canonical_config,
+   |         ^^^^^^^^^^^^^^^^ private field
+23 |         fingerprint,
+   |         ^^^^^^^^^^^ private field

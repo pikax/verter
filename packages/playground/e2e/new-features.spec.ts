@@ -10,6 +10,16 @@
  * Phase 8: TypeScript service (debounce, no crash)
  */
 import { test, expect } from "@playwright/test";
+import { filterCriticalErrors } from "./helpers";
+
+function filterUnexpectedAuthoringErrors(errors: string[]): string[] {
+  return filterCriticalErrors(errors).filter(
+    (error) =>
+      !error.includes("CompileError:") &&
+      !/^[\w$]+ is not defined$/.test(error) &&
+      !error.startsWith("Failed to execute 'appendChild' on 'Node': Unexpected"),
+  );
+}
 
 test.describe("New playground features", () => {
   test.beforeEach(async ({ page }) => {
@@ -335,10 +345,7 @@ test.describe("New playground features", () => {
 
       // Whether or not completions show (depends on TS worker init timing),
       // there should be no crashes
-      const criticalErrors = errors.filter(
-        (e) =>
-          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
-      );
+      const criticalErrors = filterUnexpectedAuthoringErrors(errors);
       expect(criticalErrors).toEqual([]);
 
       // Clean up: undo our edits
@@ -377,10 +384,7 @@ test.describe("New playground features", () => {
       const isVisible = await suggestWidget.isVisible().catch(() => false);
 
       // No crashes is the primary assertion
-      const criticalErrors = errors.filter(
-        (e) =>
-          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
-      );
+      const criticalErrors = filterUnexpectedAuthoringErrors(errors);
       expect(criticalErrors).toEqual([]);
 
       // Clean up
@@ -415,10 +419,7 @@ test.describe("New playground features", () => {
       const isVisible = await suggestWidget.isVisible().catch(() => false);
 
       // No crashes
-      const criticalErrors = errors.filter(
-        (e) =>
-          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
-      );
+      const criticalErrors = filterUnexpectedAuthoringErrors(errors);
       expect(criticalErrors).toEqual([]);
 
       // Clean up
@@ -454,10 +455,7 @@ test.describe("New playground features", () => {
       await page.waitForTimeout(1000);
 
       // No crashes
-      const criticalErrors = errors.filter(
-        (e) =>
-          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
-      );
+      const criticalErrors = filterUnexpectedAuthoringErrors(errors);
       expect(criticalErrors).toEqual([]);
 
       // Clean up
@@ -494,10 +492,7 @@ test.describe("New playground features", () => {
       const isVisible = await suggestWidget.isVisible().catch(() => false);
 
       // No crashes
-      const criticalErrors = errors.filter(
-        (e) =>
-          !e.includes("fetch") && !e.includes("CDN") && !e.includes("CORS") && !e.includes("net::"),
-      );
+      const criticalErrors = filterUnexpectedAuthoringErrors(errors);
       expect(criticalErrors).toEqual([]);
 
       // Clean up

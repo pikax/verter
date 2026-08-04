@@ -90,6 +90,7 @@ pub(crate) fn style_override_hash(overrides: &FxHashMap<usize, StyleOverrideEntr
 }
 
 /// Hash the content of template/script overrides for cache invalidation.
+#[allow(dead_code)] // B4 owns physical retirement of the now fail-closed splice helper.
 pub(crate) fn content_override_hash(
     template: Option<&ContentOverride>,
     script: Option<&ContentOverride>,

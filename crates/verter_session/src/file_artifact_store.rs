@@ -299,7 +299,16 @@ impl FileArtifactKey {
 /// Bumped 2 → 3: parse facts and declaration inventories now retain exact
 /// top-level lexical owners. An artifact produced under version 2 cannot
 /// distinguish same-name module and instance declarations.
-pub const CURRENT_PARSER_VERSION: u32 = 3;
+///
+/// Bumped 3 to 4: analyzed call-signature emit fields retain the declaration
+/// span used for exact occurrence joins. Version 3 artifacts carry only the
+/// event-name span and cannot prove the call-signature JSDoc join.
+///
+/// Bumped 4 to 5: shallow import targets retain only authored specifiers,
+/// imported names, and namespace-ness. Version 4 artifacts may retain a
+/// resolved canonical and therefore cannot remain warm beside the live
+/// import-resolution authority.
+pub const CURRENT_PARSER_VERSION: u32 = 5;
 
 /// Parser version stamped on the canonical-keyed legacy surface that
 /// builds [`FileArtifactKey`] inline (the env-hash-threading entry
@@ -318,7 +327,14 @@ pub const CURRENT_PARSER_VERSION: u32 = 3;
 /// Bumped 3 → 4: carrier script facts and declaration inventories retain exact
 /// top-level lexical owners. Version 3 candidates can alias same-name module
 /// and instance bindings and therefore cannot remain warm.
-pub const LEGACY_PARSER_VERSION: u32 = 4;
+///
+/// Bumped 4 to 5: carrier analysis retains the call-signature emit declaration
+/// span required by the exact occurrence JSDoc join.
+///
+/// Bumped 5 to 6: carrier-backed shallow import targets retain only authored
+/// specifiers, imported names, and namespace-ness. Version 5 artifacts may
+/// retain a resolved canonical and must miss the live resolution authority.
+pub const LEGACY_PARSER_VERSION: u32 = 6;
 
 /// `parse_env_hash` sentinel marking a BASE artifact key
 /// ([`FileArtifactKey::base`]) — used by the canonical-keyed surface
@@ -671,9 +687,10 @@ impl FileArtifacts {
     }
 }
 
-/// `true` when `prev` and `next` are indistinguishable in EVERY dimension
-/// a base [`crate::resolver_store::HostStoreView`] snapshots BY VALUE — so
-/// replacing `prev` with `next` cannot change any base snapshot and the
+/// `true` when `prev` and `next` are indistinguishable in every dimension a
+/// base [`crate::resolver_store::HostStoreView`] point lookup can observe
+/// through its captured artifact root — so replacing `prev` with `next`
+/// cannot change any base view answer and the
 /// folded `artifact_generation` (hence the `StoreViewValidationToken`)
 /// MUST NOT advance for it.
 ///
@@ -681,16 +698,16 @@ impl FileArtifacts {
 ///
 /// This is the bump-iff-actually-changed gate for an artifact REPLACE. It
 /// is deliberately CONSERVATIVE: it returns `true` only when the precise
-/// by-value snapshot dimensions are bit-identical, so any real change to a
+/// root-visible dimensions are bit-identical, so any real change to a
 /// base-visible value still bumps the token (the mandatory no-under-bump
-/// guarantee). The dimensions a base `HostStoreView::build` reads from a
-/// `FileArtifacts` value are exactly:
+/// guarantee). `HostStoreView::build` captures the root in O(1); later point
+/// lookups can observe these `FileArtifacts` dimensions:
 ///
-/// - `indexed.whole_hash` — seeds `whole_hashes` (via `snapshot_all`).
+/// - `indexed.whole_hash` — answers the root-backed content lookup.
 /// - the file's route surface (`shallow_state.has_resolvable_surface()`
 ///   gates whether a `Route` derived fact is emitted at all, and
 ///   `hash_route_surface(&shallow_state)` is the fact's hash content).
-/// - `facts` — snapshotted into `file_facts` (`FileFacts` is `PartialEq`).
+/// - `facts` — answers parse-fact lookups (`FileFacts` is `PartialEq`).
 /// - `indexed.parse_env_hash` — the reuse gate
 ///   (`indexed_surface_is_current`) is exactly parse-env equality, so an
 ///   artifact built under a different parse environment is a different
@@ -699,15 +716,14 @@ impl FileArtifacts {
 /// - `indexed.built_at_content_generation` — the artifact-only serving
 ///   gate (`artifact_only_candidate_is_fresh`) compares it against the
 ///   canonical's last recorded content transition, so a fresher stamp
-///   can flip a canonical from EXCLUDED to INCLUDED in the base
-///   snapshot.
+///   can flip a canonical from excluded to included in the base view.
 ///
 /// There is no route- or edge-currency dimension: `IndexedReady` retains
-/// no resolved target, so a base snapshot's view of a canonical is a
+/// no resolved target, so a base view's answer for a canonical is a
 /// pure function of the by-value dimensions above.
 ///
 /// `parse_stable_hash` and `augmentations` are NOT read by the base view's
-/// per-canonical snapshot maps (the augmentation INDEX is a separate,
+/// per-canonical point lookups (the augmentation INDEX is a separate,
 /// lazily-populated structure with its own bump sites), so they are not
 /// part of this comparison.
 ///
@@ -1898,8 +1914,8 @@ impl FileArtifactStore {
     /// `expected_content_hash`; any stale candidate yields `None`.
     ///
     /// The correctness-sensitive read surface. Callers feeding a
-    /// cache-validation oracle (route-hash / import-route-hash fact
-    /// production, materialisation fence seeding, component-meta proof
+    /// cache-validation oracle (parse-domain route-fact production,
+    /// materialisation fence seeding, component-meta proof
     /// producers) MUST use this — or the host-level
     /// `current_content_pinned_indexed` wrapper that resolves the hash
     /// from the scheduler — instead of the permissive [`Self::get_any`].
@@ -2335,9 +2351,9 @@ impl FileArtifactStore {
     /// [`FileArtifactKey::is_base`] entries. The `(canonical,
     /// indexed)` shape discards the key, so a consumer cannot tell a
     /// base artifact from a session-overlay one — filtering to base
-    /// keys keeps the consumer (`HostStoreView::build`, which derives
-    /// base `Route` / `ImportRoute` facts from `indexed`) off
-    /// session-specific overlay routes. Diagnostics that need every
+    /// keys keeps legacy diagnostics off session-specific overlay routes.
+    /// `HostStoreView::build` does not use this scan; it captures immutable
+    /// roots in O(1). Diagnostics that need every
     /// keyed entry use [`Self::snapshot_artifacts`] (which returns the
     /// full [`FileArtifactKey`]) instead.
     #[must_use]
@@ -2737,9 +2753,8 @@ impl FileArtifactStore {
     /// registry, so the `parse_env_hash` discriminator is irrelevant to
     /// a parse-fact lookup. Returns the first matching candidate; for
     /// `.facts` recovery any candidate at the content hash is
-    /// equivalent. A reader that needs the import-route-bearing
-    /// `IndexedReady` (which DOES diverge between base and overlay)
-    /// must NOT use this — it must use [`Self::get`] /
+    /// equivalent. A reader that needs the full base- or overlay-specific
+    /// `IndexedReady` must use [`Self::get`] or
     /// [`Self::get_overlay_scoped`] with the right key.
     #[must_use]
     pub fn get_artifacts_for_content(

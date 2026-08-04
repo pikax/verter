@@ -289,6 +289,7 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                     Some(AnalyzedEmitField {
                         name: s.value.to_string(),
                         span: Span::from(s.span),
+                        call_signature_span: None,
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
@@ -314,6 +315,7 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                 Some(AnalyzedEmitField {
                     name,
                     span: key_span(&p.key),
+                    call_signature_span: None,
                     payload_type,
                     description: None,
                     tags: Vec::new(),

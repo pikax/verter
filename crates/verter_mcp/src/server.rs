@@ -324,6 +324,19 @@ fn public_api_projection_mcp_error(
 
 // ── Tool implementations ───────────────────────────────────────────
 
+/// Ordered SFC block facts projected from the registered carrier inventory —
+/// the sole geometry source for block-structure lint rules and block-anchored
+/// code-action edits. Empty when the file has no registered structure (fail
+/// closed).
+fn registered_block_facts(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+) -> Vec<verter_diagnostics::SfcBlockFact> {
+    host.registered_file_structure_snapshot(canonical_or_alias)
+        .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+        .unwrap_or_default()
+}
+
 #[tool_router]
 impl VerterMcpServer {
     pub fn new(host: Arc<VerterHost>, linter: Arc<Linter>, config: McpServerConfig) -> Self {
@@ -862,11 +875,13 @@ impl VerterMcpServer {
         };
 
         let script_snapshot = build_script_snapshot(&analysis);
+        let block_facts = registered_block_facts(&self.host, &canonical);
         let diags = linter.lint_with_source(
             Some(&script_snapshot),
             analysis.template.as_deref(),
             &analysis.styles,
             source_str,
+            &block_facts,
         );
 
         let mut diag_vec = diags.into_diagnostics();
@@ -944,11 +959,13 @@ impl VerterMcpServer {
             let source_str = source.as_deref();
 
             let script_snapshot = build_script_snapshot(analysis);
+            let block_facts = registered_block_facts(&self.host, canonical);
             let diags = linter.lint_with_source(
                 Some(&script_snapshot),
                 analysis.template.as_deref(),
                 &analysis.styles,
                 source_str,
+                &block_facts,
             );
 
             let errors_only = params.errors_only.unwrap_or(false);
@@ -1024,11 +1041,13 @@ impl VerterMcpServer {
             .ok_or_else(|| mcp_err("No source available"))?;
 
         let script_snapshot = build_script_snapshot(&analysis);
+        let block_facts = registered_block_facts(&self.host, &canonical);
         let diags = self.linter.lint_with_source(
             Some(&script_snapshot),
             analysis.template.as_deref(),
             &analysis.styles,
             Some(&source),
+            &block_facts,
         );
 
         let ctx = verter_actions::ActionContext {
@@ -1038,6 +1057,7 @@ impl VerterMcpServer {
             template: analysis.template.as_deref(),
             script: Some(&script_snapshot),
             styles: &analysis.styles,
+            blocks: &[],
         };
 
         let actions = self.action_engine.actions_at(params.offset, &ctx);
@@ -1492,11 +1512,13 @@ impl VerterMcpServer {
         let script_snapshot = build_script_snapshot(&analysis);
 
         // Quality score
+        let block_facts = registered_block_facts(&self.host, &canonical);
         let quality = scoring::compute_quality_score(
             Some(&script_snapshot),
             analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
+            &block_facts,
         );
 
         // Template metrics
@@ -1511,6 +1533,7 @@ impl VerterMcpServer {
             analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
+            &block_facts,
         );
         let diag_vec = diags.into_diagnostics();
         let diag_errors = diag_vec
@@ -1685,11 +1708,13 @@ impl VerterMcpServer {
             let source = self.host.get_source(canonical);
             let script_snapshot = build_script_snapshot(analysis);
 
+            let block_facts = registered_block_facts(&self.host, canonical);
             let quality = scoring::compute_quality_score(
                 Some(&script_snapshot),
                 analysis.template.as_deref(),
                 &analysis.styles,
                 source.as_deref(),
+                &block_facts,
             );
             quality_scores.push((canonical.clone(), quality.score));
 
@@ -1698,6 +1723,7 @@ impl VerterMcpServer {
                 analysis.template.as_deref(),
                 &analysis.styles,
                 source.as_deref(),
+                &block_facts,
             );
             for d in diags.into_diagnostics() {
                 match d.severity {
@@ -1796,11 +1822,13 @@ impl VerterMcpServer {
         let source = self.host.get_source(&canonical);
         let script_snapshot = build_script_snapshot(&analysis);
 
+        let block_facts = registered_block_facts(&self.host, &canonical);
         let quality = scoring::compute_quality_score(
             Some(&script_snapshot),
             analysis.template.as_deref(),
             &analysis.styles,
             source.as_deref(),
+            &block_facts,
         );
 
         let json = serde_json::to_string_pretty(&quality).map_err(|e| mcp_err(e.to_string()))?;
@@ -2526,11 +2554,13 @@ impl VerterMcpServer {
             let source_str = source.as_deref();
 
             let script_snapshot = build_script_snapshot(analysis);
+            let block_facts = registered_block_facts(&self.host, canonical);
             let diags = linter.lint_with_source(
                 Some(&script_snapshot),
                 analysis.template.as_deref(),
                 &analysis.styles,
                 source_str,
+                &block_facts,
             );
 
             let diag_vec = diags.into_diagnostics();
@@ -3855,6 +3885,7 @@ const count = ref(0)
         let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
             macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -3948,7 +3979,7 @@ const count = ref(0)
             style_vbind_roots: Vec::new(),
         };
 
-        let quality = scoring::compute_quality_score(Some(&script), None, &[], None);
+        let quality = scoring::compute_quality_score(Some(&script), None, &[], None, &[]);
 
         // With 12 type_references (>10), current code penalizes API surface dim: (12-10)*2 = 4 points → score 96.
         // With only 3 prop_fields (<15), correct code should NOT penalize → score 100.

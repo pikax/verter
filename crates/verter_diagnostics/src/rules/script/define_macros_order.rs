@@ -81,6 +81,7 @@ mod tests {
 
     fn make_macro(kind: AnalyzedMacroKind, start: u32, end: u32) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,

@@ -1575,9 +1575,12 @@ fn set_type_hover_at_vue_position(
         &ctx.tsx_path,
         tsx_offset,
         Some(HoverInfo {
+            // What a real provider returns: the structured display signature
+            // (the render source) plus the rendered blob for whole-blob
+            // consumers.
             contents: contents.to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(contents)),
+            ..Default::default()
         }),
     );
 }
@@ -2044,6 +2047,20 @@ async fn make_definition_test_server_with_config(
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace dir");
     std::fs::write(workspace.join("tsconfig.json"), "{}").expect("write tsconfig");
+
+    // The harness models a real workspace: Svelte fixtures reference the
+    // `svelte` package (statement imports AND binding-less inline
+    // `import("svelte").…` type references), and the typed package-provenance
+    // chain (snippet-role classification, dispatcher validation) requires the
+    // specifier to resolve to the INSTALLED svelte package — a workspace
+    // without it honestly degrades to `Unresolved` roles. Vendor the same
+    // hermetic minimal Svelte 5 surface the real-provider fixtures vendor.
+    let svelte_dir = workspace.join("node_modules").join("svelte");
+    std::fs::create_dir_all(&svelte_dir).expect("vendored svelte dir");
+    for (name, contents) in crate::test_harness::VENDORED_SVELTE_PACKAGE {
+        std::fs::write(svelte_dir.join(name), contents)
+            .unwrap_or_else(|e| panic!("write vendored svelte {name}: {e}"));
+    }
 
     for (relative_path, _language_id, source) in files {
         let file_path = relative_path
@@ -10002,7 +10019,7 @@ import MyComp from './MyComp.vue'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        "(alias) import MyComp\nimport MyComp",
     );
 
     let text = hover_text(
@@ -10297,8 +10314,10 @@ async fn projectionless_carrier_heals_on_the_first_interactive_request() {
             tsx_offset,
             Some(HoverInfo {
                 contents: "(property) String.length: number".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "(property) String.length: number",
+                )),
+                ..Default::default()
             }),
         );
 
@@ -10399,8 +10418,10 @@ async fn projectionless_svelte_carrier_heals_on_the_first_interactive_request() 
         tsx_offset,
         Some(HoverInfo {
             contents: "(property) String.length: number".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "(property) String.length: number",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -10566,11 +10587,8 @@ async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
         .host()
         .provenance_snapshot()
         .compile_cold_runs;
-    // What ONE admitted repair of a revision whose compile fails costs in cold
-    // compiles. The repair drives `ensure_ide_compiled` once; a failing compile
-    // caches no surface, so the surface read behind it finds nothing and the
-    // repair returns without a second host round trip.
-    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 1;
+    // B2 rejects missing external block content before compiler admission.
+    const COLD_RUNS_PER_ADMITTED_REPAIR: u64 = 0;
 
     // Hold all four callers after they capture the repair sequence and before
     // any can acquire the lane. This makes the concurrent cohort structural,
@@ -10608,11 +10626,7 @@ async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
     assert_eq!(
         cold_after - cold_before,
         COLD_RUNS_PER_ADMITTED_REPAIR,
-        "one broken revision owes ONE repair across all concurrent requests — \
-         a higher cold-compile count means the waiters did not join the \
-         completed sequence under the lane lock and each recompiled the same broken \
-         bytes (four requests raced here, so an unbounded lane would show \
-         four repairs' worth)"
+        "external-content deferral must reject before any cold compile"
     );
     let hover_calls = provider
         .calls()
@@ -10996,19 +11010,17 @@ async fn a_later_rename_retries_a_failed_projectionless_revision() {
     let cold_after_first = cold_runs();
     assert_eq!(
         cold_after_first - cold_before_first,
-        1,
-        "rename is an interactive consistency boundary: the first rename on an \
-         unattempted revision must drive the repair. Zero here means rename no \
-         longer repairs the current file before capturing its surface"
+        0,
+        "B2 external-content deferral must reject before compiler admission"
     );
+    assert!(server.current_file_needs_inline_type_provider_sync(&uri));
     rename_once().await;
     assert_eq!(
         cold_runs() - cold_after_first,
-        1,
-        "a later request must retry the projection-less carrier even when its \
-         bytes are unchanged: cancellation is transient but advances no host \
-         generation, so a cross-request failure memo would decline forever"
+        0,
+        "a retryable B2 deferral must remain outside compiler admission"
     );
+    assert!(server.current_file_needs_inline_type_provider_sync(&uri));
 }
 
 /// W02 feature-set consistency (signature help): signature help is a
@@ -11759,7 +11771,7 @@ import MyComp from './MyComp.vue'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(alias) import MyComp\nimport MyComp\n```",
+        "(alias) import MyComp\nimport MyComp",
     );
 
     let text = hover_text(
@@ -11849,7 +11861,7 @@ import { Overlay } from './components'
         &provider,
         &app_uri,
         position,
-        "```typescript\n(const) const Overlay: __OmitNew<DefineComponent<{}, {}>>\n```",
+        "(const) const Overlay: __OmitNew<DefineComponent<{}, {}>>",
     );
 
     let text = hover_text(
@@ -11915,7 +11927,7 @@ function handleCustom(payload: string) {
         &provider,
         &app_uri,
         position,
-        "```typescript\n(property) onCustom: (payload: string) => void\n```",
+        "(property) onCustom: (payload: string) => void",
     );
 
     let text = hover_text(
@@ -13472,12 +13484,22 @@ function handleCustom(payload: string) {
         character: 29,
     };
 
-    set_type_hover_at_vue_position(
+    // Structured seeding: the provider's display signature is the PLAIN
+    // quick-info line; the rendered blob keeps the fence (what a real
+    // tsserver-family producer returns).
+    set_structured_hover_at_vue_position(
         server,
         &provider,
         &app_uri,
         position,
-        "```typescript\n(property) onAlert?: (payload: string) => void\n```",
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\n(property) onAlert?: (payload: string) => void\n```"
+                .to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "(property) onAlert?: (payload: string) => void",
+            )),
+            ..Default::default()
+        },
     );
 
     let text = hover_text(
@@ -20011,7 +20033,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_sync() {
+async fn sync_pending_carrier_provider_file_defers_external_content_before_b3() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -20056,13 +20078,12 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
             version: 1,
             text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
         });
-    // With filesystem-backed host and configure_projects, the VFS resolver
-    // resolves @/ aliases during compilation. The external template should be
-    // loaded eagerly during did_open.
+    // B2 resolves the authored link but does not ingest external block bytes;
+    // B3 owns the typed content broker.
     assert!(
         host.get_source(&format!("{workspace_id}/src/partials/panel.html"))
-            .is_some(),
-        "external src files should be loaded via VFS resolution during compilation"
+            .is_none(),
+        "external src bytes must remain deferred before B3"
     );
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
@@ -20123,34 +20144,22 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
-    assert_eq!(
-        synced,
-        SyncOutcome::FullyReconciled,
-        "pending Vue sync should fully reconcile with resolved deps (both kinds synced)"
-    );
+    assert_eq!(synced, SyncOutcome::FullyReconciled);
 
     let profile = documents.tsx_profile.read().clone();
     assert!(
-        host.get_ide(&app_id, &profile).is_some(),
-        "IDE output should be available after sync"
+        host.get_ide(&app_id, &profile).is_none(),
+        "external-content deferral must not publish an IDE success"
     );
 
     let calls = provider.file_sync_calls();
     assert!(
-        calls.iter().any(|call| matches!(
-            call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".vue.verter.ts")
-        )),
-        "pending sync should push the provider-facing Vue API file"
-    );
-    assert!(
-        calls.iter().any(|call| matches!(
+        !calls.iter().any(|call| matches!(
             call,
             MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
                 if path.ends_with(".tsx")
         )),
-        "pending sync should push the hydrated TSX output"
+        "deferred external content must not push a TSX success"
     );
 }
 
@@ -21595,8 +21604,10 @@ async fn plain_script_features_answer_on_every_provider_route() {
             provider_offset,
             Some(HoverInfo {
                 contents: "const utilValue: number".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "const utilValue: number",
+                )),
+                ..Default::default()
             }),
         );
         let hover = super::nav_features::handle_hover(server, hover_params(&uri, position))
@@ -27889,6 +27900,255 @@ async fn hover_fails_closed_when_surface_retired_mid_request() {
     );
 }
 
+// =========================================================================
+// $/verter/getBindingTypes — structured provider display_signature
+// (P1-01 / P1-02 / P1-04) + the co-migrated v-bind completion detail (S2)
+// =========================================================================
+
+/// Seed a FULL structured provider hover at a Vue position. The P1 fixtures
+/// control every structured field independently of the rendered `contents`
+/// blob — that independence is exactly what P1-02 asserts.
+fn set_structured_hover_at_vue_position(
+    server: &VerterLanguageServer,
+    provider: &MockTypeProvider,
+    uri: &Uri,
+    position: Position,
+    info: crate::type_provider::protocol::HoverInfo,
+) {
+    let ctx = synced_type_provider_context_surface_only(server, uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("vue position should map to tsx");
+    provider.set_hover(&ctx.tsx_path, tsx_offset, Some(info));
+}
+
+/// P1-01 (mock): `getBindingTypes` derives its per-binding value SOLELY from
+/// the provider's structured `display_signature` — never from the rendered
+/// `contents` blob. The seeded `contents` is deliberately garbage that names
+/// the binding with a WRONG type; a scrape would surface it, the structured
+/// read cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_read_provider_display_signature_directly() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const msg", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            // A scrape of this blob would yield `WRONG_SCRAPED_TYPE` for `msg`.
+            contents: "```typescript\nmsg: WRONG_SCRAPED_TYPE\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const msg: \"hello\"",
+            )),
+            ..Default::default()
+        },
+    );
+
+    let value = server
+        .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+            uri: uri.as_str().to_string(),
+        })
+        .await
+        .expect("getBindingTypes request should succeed");
+
+    assert_eq!(
+        value.get("msg"),
+        Some(&serde_json::json!({ "displaySignature": "const msg: \"hello\"" })),
+        "the wire value must be the provider's display signature verbatim, got: {value}"
+    );
+    // Forbidden result: nothing derived from the rendered blob may surface.
+    assert!(
+        !value.to_string().contains("WRONG_SCRAPED_TYPE"),
+        "no consumer may recover the value from `contents`, got: {value}"
+    );
+}
+
+/// P1-02 (mock): perturbing `HoverInfo.contents` — the NEUTRAL protocol's
+/// rendered blob — changes NOTHING in the `getBindingTypes` response.
+///
+/// SCOPE (ruling Q2, recorded verbatim): this guarantee is scoped to the
+/// neutral protocol's rendered blob. Perturbing the tsgo ENGINE's own hover
+/// TEXT does change `display_signature` on that engine — the engine text is
+/// the producer's input, and that is irreducible without a second provider
+/// round trip, which is forbidden (F-03). Engine-text changes are therefore
+/// OUT of P1-02's claim; protocol-blob changes are IN.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_ignore_perturbed_hover_markdown() {
+    // Three perturbations of the rendered blob against ONE fixed structured
+    // signature: empty; non-markdown garbage; a well-formed fence naming a
+    // DIFFERENT binding with a different type. Byte-equal responses required.
+    let perturbations = [
+        "",
+        "@@@ not markdown @@@",
+        "```typescript\nother: PERTURBED_OTHER_TYPE\n```",
+    ];
+
+    let mut responses: Vec<String> = Vec::new();
+    for contents in perturbations {
+        let (service, provider, uri) = make_request_surface_carrier().await;
+        let server = service.inner();
+
+        let decl_pos = find_document_position(server, &uri, "const msg", 6);
+        set_structured_hover_at_vue_position(
+            server,
+            &provider,
+            &uri,
+            decl_pos,
+            crate::type_provider::protocol::HoverInfo {
+                contents: contents.to_string(),
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "const msg: string",
+                )),
+                ..Default::default()
+            },
+        );
+
+        let value = server
+            .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+                uri: uri.as_str().to_string(),
+            })
+            .await
+            .expect("getBindingTypes request should succeed");
+        assert_eq!(
+            value.get("msg"),
+            Some(&serde_json::json!({ "displaySignature": "const msg: string" })),
+            "perturbation {contents:?} must not affect the wire value, got: {value}"
+        );
+        responses.push(serde_json::to_string(&value).expect("response serializes"));
+    }
+
+    // BYTE-EQUAL across all three perturbations — not merely non-null.
+    assert_eq!(
+        responses[0], responses[1],
+        "empty vs garbage contents must serialize byte-equal"
+    );
+    assert_eq!(
+        responses[1], responses[2],
+        "garbage vs wrong-binding-fence contents must serialize byte-equal"
+    );
+}
+
+/// P1-04 (mock): a provider hover arriving AFTER its captured surface is
+/// superseded still yields `null` — the post-await, pre-use
+/// `provider_context_still_valid` gate stays exactly where it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn binding_types_drop_hover_from_superseded_surface() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const msg", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\nconst msg: \"hello\"\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const msg: \"hello\"",
+            )),
+            ..Default::default()
+        },
+    );
+
+    // Mid-request seam: a concurrent re-sync lands a NEW surface generation
+    // with drifted content between the handler's capture and its use of the
+    // provider response.
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let value = server
+        .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+            uri: uri.as_str().to_string(),
+        })
+        .await
+        .expect("getBindingTypes request should succeed");
+
+    assert_eq!(
+        value.get("msg"),
+        Some(&serde_json::Value::Null),
+        "a hover produced against a superseded surface must fail closed to null, got: {value}"
+    );
+}
+
+/// S2 co-migration (mock): the v-bind completion `detail` renders through the
+/// SAME shared boundary formatter — `(kind) display_signature` where the
+/// structured kind exists. A bare-signature read would silently drop the
+/// `(kind) ` prefix the pre-migration first-non-fence-line scrape carried.
+#[tokio::test]
+async fn v_bind_completion_detail_carries_kind_prefixed_signature() {
+    let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(); }\n</style>\n";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
+
+    let uri = workspace_uri(&workspace_id, "src/App.vue");
+    let server = service.inner();
+
+    let decl_pos = find_document_position(server, &uri, "const width", 6);
+    set_structured_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        decl_pos,
+        crate::type_provider::protocol::HoverInfo {
+            contents: "```typescript\n(const) const width: Ref<number>\n```".to_string(),
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const width: Ref<number>",
+            )),
+            kind: Some(crate::type_provider::protocol::QuickInfoKind::Const),
+            ..Default::default()
+        },
+    );
+
+    let pos = find_document_position(server, &uri, "v-bind()", 7);
+    let response = server
+        .completion(completion_params(&uri, pos, None))
+        .await
+        .expect("completion request should succeed")
+        .expect("v-bind completion must offer setup bindings");
+
+    let items = match response {
+        CompletionResponse::List(list) => list.items,
+        CompletionResponse::Array(items) => items,
+    };
+    let width = items
+        .iter()
+        .find(|i| i.label == "width")
+        .expect("setup binding offered by bare name");
+    assert_eq!(
+        width.detail.as_deref(),
+        Some("(const) const width: Ref<number>"),
+        "detail must render (kind) + display_signature through the shared boundary formatter"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// BOOTSTRAP-DRAIN reproduction: the editor opens a carrier during bootstrap so
 /// the file is queued (never interactively synced); the background drain then
 /// direct-opens its IDE surface (tsgo). The drain MUST record the `CarrierIde`
@@ -27950,13 +28210,7 @@ async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
     // End-to-end: hover captures the drain-recorded surface and serves the
     // provider contribution (no silent drop before the next did_change).
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
     let text = hover_text(
         server
             .hover(hover_params(&uri, position))
@@ -28285,8 +28539,10 @@ async fn virtual_file_query_fails_closed_when_virtual_buffer_is_stale() {
         stale_offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28336,8 +28592,10 @@ async fn virtual_file_query_drops_provider_result_when_surface_advances_mid_requ
         offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28400,8 +28658,10 @@ async fn virtual_file_query_serves_provider_result_from_stable_matched_surface()
         offset,
         Some(crate::type_provider::protocol::HoverInfo {
             contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "VIRTUAL_HOVER_SENTINEL",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -28672,13 +28932,7 @@ async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
 
     // And it SERVES end-to-end (hover through the captured surface).
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
     let text = hover_text(
         server
             .hover(hover_params(&uri, position))
@@ -28868,13 +29122,7 @@ async fn hover_serves_provider_result_from_stable_captured_surface() {
     let server = service.inner();
 
     let position = find_document_position(server, &uri, "{{ msg", 3);
-    set_type_hover_at_vue_position(
-        server,
-        &provider,
-        &uri,
-        position,
-        "```typescript\nconst msg: string\n```",
-    );
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const msg: string");
 
     let text = hover_text(
         server
@@ -29142,8 +29390,10 @@ async fn contract_svelte_transition_family_names_hover_typed_without_shim_leak()
             tsx_offset,
             Some(HoverInfo {
                 contents: "function fade(config: FadeParams): TransitionConfig".to_string(),
-                range_start: None,
-                range_end: None,
+                display_signature: Some(crate::type_provider::mock::test_display_signature(
+                    "function fade(config: FadeParams): TransitionConfig",
+                )),
+                ..Default::default()
             }),
         );
         let text = hover_text(
@@ -29209,7 +29459,7 @@ async fn contract_svelte_transition_family_keyword_definition_fails_closed() {
 /// must still fire from the typed element tree (D6 — built-in docs AND
 /// custom directives in the scanner dead zones).
 #[tokio::test]
-async fn contract_directive_hovers_survive_sfc_scanner_dead_zones() {
+async fn contract_directive_hovers_survive_carrier_structure_dead_zones() {
     let source = "<script setup lang=\"ts\">\nfunction vMyThing(el: HTMLElement, binding: { value: string }) {\n  void el;\n  void binding;\n}\nconst label = \"x\";\n</script>\n<template>\n  <div>\n    <template #unused=\"{ row }\">\n      <span>{{ row }}</span>\n    </template>\n    <div v-if=\"label\">\n      <span>{{ label }}</span>\n    </div>\n    <b v-my-thing=\"label\">directive</b>\n  </div>\n</template>\n";
     let (_temp, service, drain_handle, _provider, workspace_id) =
         make_definition_test_server(&[("src/App.vue", "vue", source)]).await;
@@ -32425,4 +32675,129 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
          projection the failed open never built — otherwise this path leaves the \
          document stranded with no IDE features"
     );
+}
+
+/// R3-B-01: the style-override token validation and the host apply must be
+/// ONE freshness transaction under the document-commit fence
+/// (`did_change_mutex`). Pre-fix the handler validated the tokens against
+/// the registry, dropped the guard, and only then mutated the host — a
+/// `did_change` commit could land INSIDE that window, so revision A's
+/// compiled CSS was applied onto revision B's host state.
+///
+/// The registry seam fires between validation and the host apply; the
+/// committer runs the production commit discipline (the did_change fence
+/// held across the registry commit + host upsert, exactly what
+/// `handle_did_change` does). GREEN: the fenced committer cannot commit
+/// inside the window. RED pre-fix: it committed there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn style_override_apply_is_atomic_with_document_commits() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let v1 = "<template><div class=\"x\"/></template>\n<style>.x { color: red }</style>\n";
+    let v2 = "<template><div class=\"y\"/></template>\n<style>.y { color: blue }</style>\n";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server(&[("src/Styled.vue", "vue", v1)]).await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, "src/Styled.vue");
+
+    let (revision_token, artifact_token) = {
+        let doc = server.documents.get(&uri).expect("open doc");
+        (
+            doc.document_revision.public_token(),
+            doc.feature_snapshot
+                .as_ref()
+                .expect("carrier snapshot")
+                .structure()
+                .public_artifact_token()
+                .as_str()
+                .to_string(),
+        )
+    };
+
+    let committed = Arc::new(AtomicBool::new(false));
+    let interleaved = Arc::new(AtomicBool::new(false));
+    let (fire_tx, fire_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let committed = Arc::clone(&committed);
+        let interleaved = Arc::clone(&interleaved);
+        server
+            .documents
+            .set_before_style_override_host_apply_hook(Box::new(move |_, _| {
+                let _ = fire_tx.send(());
+                // Bounded observation window: an UNfenced concurrent commit
+                // lands here quickly; a fenced one stays blocked for the
+                // whole window.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+                while std::time::Instant::now() < deadline {
+                    if committed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                interleaved.store(committed.load(Ordering::SeqCst), Ordering::SeqCst);
+            }));
+    }
+
+    let handle = tokio::runtime::Handle::current();
+    let response = tokio::task::block_in_place(|| {
+        std::thread::scope(|scope| {
+            let committer = scope.spawn({
+                let committed = Arc::clone(&committed);
+                let uri = uri.clone();
+                let handle = handle.clone();
+                move || {
+                    fire_rx
+                        .recv_timeout(std::time::Duration::from_secs(20))
+                        .expect("the apply must reach the validation-to-apply window");
+                    handle.block_on(async {
+                        let document_commit_guard = server.did_change_mutex.lock().await;
+                        let _ = server.documents.did_change(&uri, 2, v2);
+                        drop(document_commit_guard);
+                    });
+                    committed.store(true, Ordering::SeqCst);
+                }
+            });
+            let apply = scope.spawn({
+                let handle = handle.clone();
+                let uri = uri.clone();
+                let revision_token = revision_token.clone();
+                let artifact_token = artifact_token.clone();
+                move || {
+                    handle.block_on(server.apply_style_overrides(
+                        crate::server::protocol_types::ApplyStyleOverridesParams {
+                            uri: uri.as_str().to_string(),
+                            overrides: vec![crate::server::protocol_types::StyleOverrideParam {
+                                index: 0,
+                                code: ".compiled { color: green }".to_string(),
+                                source_map: None,
+                            }],
+                            document_revision_token: Some(revision_token),
+                            artifact_token: Some(artifact_token),
+                        },
+                    ))
+                }
+            });
+            let response = apply.join().expect("apply thread");
+            committer.join().expect("committer thread");
+            response
+        })
+    });
+
+    assert!(
+        !interleaved.load(Ordering::SeqCst),
+        "a document commit landed between style-override token validation and the host \
+         apply - the validate-and-apply window is not fenced against did_change"
+    );
+    let response = response.expect("apply response");
+    assert!(
+        response.success,
+        "the current-revision fenced apply must succeed, got {response:?}"
+    );
+    assert!(
+        committed.load(Ordering::SeqCst),
+        "the concurrent commit must land after the apply completes"
+    );
+
+    drain_handle.abort();
+    drop(service);
 }

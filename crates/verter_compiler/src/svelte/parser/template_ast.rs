@@ -875,6 +875,8 @@ pub struct SvelteStyle {
     pub tag_close: Option<Span>,
     /// The raw attribute spans on the open tag.
     pub attributes: Vec<SvelteAttribute>,
+    /// The parser-owned `lang` attribute text value, if present.
+    pub lang: Option<String>,
 }
 
 /// One template node.
@@ -989,6 +991,14 @@ pub struct SvelteAttribute {
     pub kind: SvelteAttributeKind,
     /// The full attribute span (name + value).
     pub span: Span,
+    /// Parser-owned ordered chunks for a mixed quoted value.
+    pub mixed_parts: Vec<SvelteMixedAttributePart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteMixedAttributePart {
+    Text(Span),
+    Expression(Span),
 }
 
 /// The closed family of attribute / directive kinds.
@@ -1039,6 +1049,8 @@ pub enum SvelteAttributeValue {
 /// A directive attribute.
 #[derive(Debug, Clone)]
 pub struct SvelteDirective {
+    /// Authored directive family prefix before `:`.
+    pub prefix: String,
     /// The directive kind.
     pub kind: SvelteDirectiveKind,
     /// The directive's local name (the part after the `:`, before any
@@ -1046,6 +1058,8 @@ pub struct SvelteDirective {
     pub local: String,
     /// The `|modifier` list (e.g. `|important`, `|local`, `|stop`).
     pub modifiers: Vec<String>,
+    /// Parser-owned spans of each modifier name, excluding `|`.
+    pub modifier_spans: Vec<Span>,
     /// The value expression span (`{expr}` inner or quoted body), if present.
     /// A two-expression function binding `bind:x={get, set}` records the whole
     /// inner span (both expressions); the projector splits it.
@@ -1119,6 +1133,10 @@ pub struct SvelteBlock {
     pub children: Vec<SvelteNode>,
     /// Branch clauses (`{:else if}` / `{:else}` / `{:then}` / `{:catch}`).
     pub clauses: Vec<SvelteBlockClause>,
+    /// The consumed `{/keyword}` close-tag span. `None` when the close marker
+    /// was missing (the parser recovered) — downstream projections must not
+    /// fabricate a closed termination or a closing span in that case.
+    pub close_tag: Option<Span>,
 }
 
 /// The closed family of block kinds.
@@ -1143,6 +1161,8 @@ pub enum SvelteBlockKind {
         then_binding: Option<Span>,
         /// The `{:catch <pattern>}` binding span, if present.
         catch_binding: Option<Span>,
+        /// Parser-owned evidence for an inline `then`/`catch` in the opening head.
+        inline_branch: SvelteAwaitInline,
     },
     /// `{#key expr}` … `{/key}`.
     Key,
@@ -1155,6 +1175,28 @@ pub enum SvelteBlockKind {
         name_text: String,
         /// The `(params)` span (excludes the parens), if present.
         params: Option<Span>,
+    },
+    /// An unrecognised `{#keyword}` block. Records the authored keyword span so
+    /// downstream projections classify it as an UNKNOWN node instead of
+    /// reshaping it into a known block family.
+    Unknown {
+        /// The authored block keyword span (the `wat` in `{#wat}`).
+        keyword: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteAwaitInline {
+    None,
+    Then {
+        marker_span: Span,
+        head_span: Span,
+        binding: Option<Span>,
+    },
+    Catch {
+        marker_span: Span,
+        head_span: Span,
+        binding: Option<Span>,
     },
 }
 
@@ -1199,6 +1241,10 @@ pub struct SvelteTag {
     /// The tag's inner expression / declaration span (excludes the braces and
     /// the leading keyword).
     pub inner: Span,
+    /// The authored keyword span — `@keyword` (sigil included) for `{@...}`
+    /// tags, `const` / `let` for declaration tags. Parser-owned so downstream
+    /// projections never re-lex the tag head to name it.
+    pub keyword: Span,
 }
 
 /// The closed family of standalone-tag kinds.

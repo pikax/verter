@@ -51,7 +51,7 @@ Host-backed type/import resolution must treat the canonical file ID as cache ide
 - Prepared declarations are host-owned warm artifacts. Once `(canonical_id, symbol_name, whole_hash)` is prepared, later lookups from other owners and later distinct queries on the same host reuse that prepared declaration until invalidation.
 - `ResolverContext::prepared_type_decl` preserves `Result<Option<Arc<PreparedTypeDecl>>, PreparationFailure>` end to end. `MissingExternalOwner` and `AuthoredOrdinalOverflow` are typed failures, never declaration absence: the prepared slot stays vacant, and an Option-shaped semantic boundary may serve them only through the single ReturnOnly adapter that marks the enclosing derivation non-cacheable. `LeaseMiss` remains the distinct recoverable `Ok(None)` + non-cacheable rail.
 - Prepared import canonicalization is DEMAND-DRIVEN. Bundle build (`build_prepared_import_canonicalization`) walks NO import chain: it records each resolvable binding's DIRECT hop as `(local owner, local name) → (direct target canonical, ordinary-file owner, imported name)` — the `ordinary_file()` owner is the provisional final-resolution-owed marker. The FINAL `(canonical, owner, symbol)` resolves at the first decl-prepare / ref-head demand through the shared route authority (the type-export rail `resolve_imported_type_root_with_facts*`, memoized in `ImportedRootDb` under an R6 content-free key; the graph-native value-export rail with the terminal alias peel for value demands), and every demand site observes the chain hops' `FileWholeHash` + `Route` facts into the ACTIVE fact tracer AT DEMAND TIME — so the CONSUMING query's read-set (a `LowerLocator` shape memo, an `Instantiate` memo, a component-meta proof) invalidates on a barrel retarget or leaf edit anywhere on the chain. Chain facts are never pinned on the bundle's fact rail. Never default the target owner, substitute the source owner, or recover by name/span; an UNRESOLVABLE specifier records no entry and remains `MissingExternalOwner` and non-cacheable at prepare.
-- A member-value-position reference to an unresolved AUTHORED IMPORT stays an honest `BareRef` carrier — it never poisons the root object's completeness (authored-partial preparation is declaration-wide, Instantiate completeness is demand-local; the member consumer that actually demands the value degrades it member-locally, e.g. the Vue runtime constructor's per-member `null` degradation). The unresolved-head site observes the owner's `ImportRoute` derived fact into the active tracer (the demand-time recovery rail, same as `build_typeof`'s import-miss arm), so carrier-bearing surfaces stay COMPLETE + cacheable and every consuming warm entry invalidates the moment the missing dependency appears. Root-alias / heritage / authored intersection-union-arm reaches remain authoritative missing-dependency debt (typed partial + ReturnOnly).
+- A member-value-position reference to an unresolved AUTHORED IMPORT stays an honest `BareRef` carrier — it never poisons the root object's completeness (authored-partial preparation is declaration-wide, Instantiate completeness is demand-local; the member consumer that actually demands the value degrades it member-locally, e.g. the Vue runtime constructor's per-member `null` degradation). The unresolved-head site observes the owner's request-bound path-precise resolution witness into the active tracer (the demand-time recovery rail, same as `build_typeof`'s import-miss arm), so carrier-bearing surfaces stay COMPLETE + cacheable and every consuming warm entry invalidates the moment the missing dependency appears. Root-alias / heritage / authored intersection-union-arm reaches remain authoritative missing-dependency debt (typed partial + ReturnOnly).
 - A traced compute observes a consumed file's `DerivedFactHash{Route}` fact at the `ensure_indexed_ready_serve` demand point — content-pinned from the served artifact's `route_hash` under the exact store-view publish predicate (store-published + edge-current + resolvable surface), so warm validation round-trips by construction. This is how a cross-file dep's Route fact reaches the published component-meta signature even though the direct-import fast path resolves the dep before it is indexed (a get, never an ensure).
 - Reuse the current host-owned route/barrel cache path: `RouteDb` for barrel/export route facts and `ImportedRootDb` for imported-root proofs. Do not add a second route-cache subsystem for the same work without explicit proof it is needed.
 - Route discovery stays lazy and demand-driven. First-hit discovery may follow barrel/reexport hops only until the symbol is found (or proven absent under the current negative-cache policy). Do not require a full scan of all barrel exports on every first hit.
@@ -198,6 +198,23 @@ The `DeclBodyMemo::whole_env()` whole-file env product has exactly four consumer
 
 ## Semantic Query Identity Target Contract
 
+### Exact symbol-identity demand for typed feature roles
+
+`ProjectSemanticDispatch::demand_symbol_identity` is the shared adapter for
+feature facts that require declaration identity. It walks existing graph
+carriers and delegates declaration bodies to the canonical `ResolveDecl` and
+`Instantiate` queries; it must not grow a parallel alias/import resolver or
+parse terminal text. Direct, imported-alias, and multi-hop local-alias subjects
+therefore retain the dispatcher's fixed view, dependency signatures,
+cycle/budget/work limits, and cache-suppression behavior.
+
+The outcome is closed: complete match/non-match returns an optional
+`ResolvedSymbolIdentity`; partial returns only a typed
+`PropCallableRoleUnresolvedReason`, never a graph node. Every partial outcome
+folds into cold-compute completeness and is ineligible for exact warm
+admission. Svelte `Snippet` role classification compares this identity only
+with the package-validated `svelte` import fact.
+
 Architectural target for the project-global cache cutover:
 
 - Type expansion has one authoritative semantic query path.
@@ -220,6 +237,16 @@ Concrete expectation:
 - If one larger expression references `C`, `C['foo']`, `C['bar']`, and `B`, and `B` itself references `C` again, the resolver should converge those onto one shared semantic query graph rather than recomputing each path ad hoc.
 
 ### Vue Runtime Surface And Broad Runtime Classification
+
+Framework event projection uses Canonical Resolved Emit Occurrences (CREO).
+The resolver walks one ordered `SurfaceEntry` stream spanning members, call
+signatures, construct signatures, and index signatures, and derives kind
+indexes from it. Event-producing entries expand directly into complete
+`ResolvedEmitOccurrence` rows. Identity is the exact authored origin plus the
+instantiated semantic subject and event-name arm: identical diamonds dedup,
+different generic instantiations and distinct declarations remain distinct.
+Consumers must not reconstruct membership or order from kind arrays, names,
+analyzer rows, or positional counters.
 
 Vue runtime props/emits uses the canonical semantic-query graph, never a
 request-local aggregate cache. Its internal
@@ -827,7 +854,7 @@ When resolving cross-file macro types (`defineProps<T>()`, `defineEmits<T>()`, a
 **Macro resolution is one shared path — `shared_resolve(type) + normalise`.** Every macro (`defineProps` / `defineEmits` / `defineOptions` / `defineSlots` / `withDefaults`) and every imported `.vue` component surface resolves through exactly TWO steps:
 
 1. **Resolve ONE type via the shared resolver** — the generic-parameter type (`define*<T>()`) OR the object-argument type (`define*({ ... })`). `withDefaults` resolves the props payload type plus the defaults-object type and merges. `.vue`-component imports resolve the imported component's synthesized `$props` / `$emit` / `$slots` / expose surface recursively through the same dispatch (the hardest case — apply EXTRA caution: it is exactly where rule violations cause the worst hangs). Resolution is ALWAYS the shared typed-IR five-mode dispatch — no macro-specific engine, no per-surface walker, no eager element resolver.
-2. **Normalise per kind (a thin transform, NOT a resolver)** — props: defaults / optionality / readonly / declaration provenance / `declared_in_macro_type_arg`; emits: the UNION of call-signature emits and property-style emits, de-duped by event name with call-signature precedence, deterministic order (signature order, then member order); a resolved concrete property payload must be tuple/function-shaped, while an incompatible concrete payload closes the macro as `MacroInvalidReason::InvalidEmitsShape` on both Runtime and TSC demands (`{}` remains a valid empty emits surface, and open/opaque payloads retain conservative projection); the call-signature payload strips the leading event-name parameter; slots: function-like members only, first-parameter object becomes bindings, return type preserved; options/expose: pass-through object surface.
+2. **Normalize from the stored stream (a thin transform, NOT a resolver)** — props: defaults / optionality / readonly / declaration provenance / `declared_in_macro_type_arg`; emits: walk the canonical `SurfaceEntry` stream once and expand each call-signature or property producer directly into a complete occurrence without a kind-array merge, name join, ordinal join, or post-hoc reorder; a resolved concrete property payload must be tuple/function-shaped, while an incompatible concrete payload closes the macro as `MacroInvalidReason::InvalidEmitsShape` on both Runtime and TSC demands (`{}` remains a valid empty emits surface, and open/opaque payloads retain conservative projection); the call-signature payload strips the leading event-name parameter; slots: function-like members only, first-parameter object becomes bindings, return type preserved; options/expose: pass-through object surface.
 
 A macro/import that resolves its surface through anything other than the shared resolver, or flattens a full surface eagerly before the consumer demands it, is a rule violation — collapse it into `shared_resolve(type) + normalise`.
 
@@ -917,11 +944,64 @@ Guards: `no_verter_semantic_to_verter_session_dep`, `synthetic_binding_identity_
 
 ### Macro Hot Mirror (Stage 5A, LANDED)
 
-The **macro hot mirror** (`crate::structural_carrier_producer::macro_arg_producer`, the single private producer module) is the SOLE production producer of a macro type-argument's structural carrier graph. `MacroHotMirror` lives on `IndexedReady`, keyed `(owner, whole_hash, macro_index)` → `HotTypeRef` (lazy / singleflight / content-addressed `OnceLock<Option<HotTypeRef>>` per macro index). `macro_type_arg_hot_ref(ctx, file, macro_index)` is the sole production entry. The mirror is PURE: it performs NO host route lookup and emits NO dependency facts — it only produces the UNRESOLVED structural carrier graph (the `BareRef` / `ImportType` / operator-shell carriers, resolved on demand at the consuming dispatch) via the mode-neutral `lower_type_expr_structural`. Script-setup `generic="T"` binders are SEEDED at build (lower to the `SemanticNodeData::TypeParam` binder, not `BareRef(T)`); macro-own-body provenance (`declared_in_macro_type_arg`) is baked at production time. Direct dispatch lowering of an authored SFC macro shell must likewise use `lower_type_expr_in_owner_scope_with_mode` with the macro's recorded owner. The owner-agnostic convenience entry denotes the ordinary/module owner; it cannot infer that a synthetic test expression came from `<script setup>`, and callers must not compensate with file-wide or get-any owner matching.
+**Authored-route sidecar widening.** The historical `HotTypeRef` cell
+shorthand below now means the `hot` field of one `MacroHotProduct`. Each lazy,
+singleflight cell commits that handle together with graph-free per-prop
+`AuthoredReferenceHeadFact` values projected from the same transient typed-IR
+borrow. Requested prop classification can therefore retain an exact authored
+route without a payload/body reread; the sidecar never changes semantic-node
+or query identity. `macro_type_arg_hot_ref` remains the sole producer entry.
+
+**Authored-reference-head positions (the closed producer inventory).** Three
+positions mint the graph-free `AuthoredReferenceHeadFact`, all from a transient
+typed-IR borrow the producer already holds, all zero extra parse / lowering /
+resolution:
+
+| Position | Fact field | Minter |
+| --- | --- | --- |
+| Value annotation | `ValueTypeAnnotationFact.reference_head` | `fact_projection::value_type_annotation_fact` |
+| Macro prop payload | `MacroHotProduct.prop_reference_heads` | `fact_projection::macro_payload_reference_head_fact` |
+| Value-space signature RETURN | `FunctionSignatureFact.return_reference_head` | `fact_projection::signature_return_reference_head_fact`, called from `type_eval_build::signature_fact` |
+
+The return position carries an **authorship mint gate**: the head mints only
+when `LoweredSignatureParts.has_authored_return` is true. `return_ty` mints its
+content-free replay locator whenever the lowering produced a return carrier —
+*including an inferred return* — so an ungated mint would publish authored route
+evidence for a return the author never wrote (an inferred
+`return x as Ref<number>` lowers to literally `Ref<number>`). Every
+non-authored return position publishes `AuthoredReferenceHeadFact::Unavailable`:
+inferred returns, synthesized constructors, and every OBJECT-MEMBER signature
+(`member_signature_fact` passes `has_authored_return: false`). That gate is what
+makes the member-position boundary structural rather than disciplinary — no
+member position can mint or read a head. An authored annotation that is not a
+type reference publishes `NotReference`, which the demand side treats as a
+COMPLETE non-wrapper proof.
+
+Signature locators rebase with their overload group. `EvalEnv::add_value` →
+`rebase_value_signature_ordinals` (`type_eval.rs`) re-points the leading
+`ValueSignature { ordinal }` step of THREE locator families when a declaration
+joins a merged overload group: the parameter slots, the return slot, and the
+return head's `TypeArgLocator` argument paths. The head's locator is a
+`TypeArgLocator`, not a `TypeBodySlot`, so the repointer is generalized over the
+`path` position; a rebase typed to the slot alone leaves every contributor's
+head addressing overload ordinal 0 — the wrong overload
+(`overload_group_signature_locators_take_group_ordinals`).
+
+The head participates in the deep producer-local anchor walks:
+`TypeArgLocator::absolutize` (`locators.rs`) plus
+`AuthoredReferenceArgLocator::absolutize` /
+`AuthoredReferenceHeadFact::absolutize` and
+`authored_reference_head_scope_relative` (`facts.rs`), both written generically
+over the head fact so every head-bearing position shares one walk. Only the
+ARGUMENT anchors decide scope-relativity; the authored local spelling is route
+evidence the demand resolves against the route's recorded owner, and is never
+rewritten.
+
+The **macro hot mirror** (`crate::structural_carrier_producer::macro_arg_producer`, the single private producer module) is the SOLE production producer of a macro type-argument's structural carrier graph. `MacroHotMirror` lives on `IndexedReady`, keyed `(owner, whole_hash, macro_index)` → `MacroHotProduct` (lazy / singleflight / content-addressed `OnceLock<Option<Arc<MacroHotProduct>>>` per macro index); its `hot` field is the historical graph handle. `macro_type_arg_hot_ref(ctx, file, macro_index)` is the sole production entry. The mirror is PURE: it performs NO host route lookup and emits NO dependency facts — it only produces the UNRESOLVED structural carrier graph (the `BareRef` / `ImportType` / operator-shell carriers, resolved on demand at the consuming dispatch) via the mode-neutral `lower_type_expr_structural`, plus the graph-free authored-head sidecar described above. Script-setup `generic="T"` binders are SEEDED at build (lower to the `SemanticNodeData::TypeParam` binder, not `BareRef(T)`); macro-own-body provenance (`declared_in_macro_type_arg`) is baked at production time. Direct dispatch lowering of an authored SFC macro shell must likewise use `lower_type_expr_in_owner_scope_with_mode` with the macro's recorded owner. The owner-agnostic convenience entry denotes the ordinary/module owner; it cannot infer that a synthetic test expression came from `<script setup>`, and callers must not compensate with file-wide or get-any owner matching.
 
 **Single-producer guarantee — TWO confinement regimes + bounded same-module policing.** The producer-capable code is COLLAPSED into ONE private module, `crate::structural_carrier_producer::macro_arg_producer`, declared as a private `mod macro_arg_producer;` that re-exports EXACTLY `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`. The THREE producer-capable builders — `lower_type_expr_structural`, the macro hot-mirror builder `build_macro_hot_ref`, and the `<script setup generic="…">` binder-seed builder `build_script_setup_seed_frames` — are EACH a BARE module-private fn (no visibility modifier) inside that one file. (1) The FOREIGN case is COMPILER-CONFINED: no module outside `macro_arg_producer` can NAME any of the three builders — a foreign reference is a compile error (E0603 / E0433), so a second producer in a foreign file is unrepresentable by construction. (2) The SAME-MODULE case is NOT compiler-confined — Rust privacy is module-scoped, so a SECOND producer written INSIDE `macro_arg_producer.rs` CAN name the module-private builders, and the collapse to one file does not make that a compile error. That same-module residual is POLICED by the strengthened single-producer architecture guards, which together cover the 8-category same-module exposure surface: `structural_carrier_producer_lowerer_is_module_private` pins ALL THREE builders bare-private + single-defined + not re-exported; `macro_hot_mirror_exposes_single_crate_visible_producer_entry` is the producer-EXPOSURE collector — `macro_type_arg_hot_ref` is the ONLY crate-visible producer entry, covering module-level FREE fns AND INHERENT-impl associated fns under a cfg-SATISFIABILITY test-gate classifier (an item is test-only ONLY when its `#[cfg]` ENTAILS test — `#[cfg(any(test, debug_assertions))]` / `#[cfg(any(test, feature = "x"))]` are PRODUCTION-satisfiable and COUNTED, closing the prior over-exclusion), PLUS crate-visible VALUE exposure (`const`/`static`/associated-const fn-pointers of a builder), PLUS TRAIT exposure (only the hand-written `Debug`/`Clone` for `MacroHotMirror`; any other trait impl / trait def/alias reds), PLUS the EXACT `mod.rs` re-export-shape pin (private module decl + exactly the two-leaf `pub(crate) use`, no alias/glob/extra leaf/widened decl); `macro_arg_producer_has_no_production_expansion_surface` bans ALL production bang-macro invocations (a denylist is incomplete because a macro defined elsewhere and invoked here is invisible to `syn`; the one `matches!` and the one `vec!` are de-sugared to keep the file bang-macro-free) plus `macro_rules!` / proc-macro attributes / `#[macro_use]` / out-of-line-or-`#[path]` child mods (only `#[cfg(test)] #[path] mod *_tests;` wiring is allowed) plus the SCOPED derive rules — derive paths must be single-segment built-ins (a qualified `evil::Debug` reds) and NO production import / glob / `#[macro_use]` may shadow a built-in-derive name into scope (the module KEEPS its `#[derive(Debug, Clone, …)]`); `session_graph_lowerer_makes_no_query` + `macro_hot_mirror_producer_is_pure_no_route_resolution` ban the QUERY/DISPATCH route (`.dispatch(`, `lower_type_expr_in_scope_with_`, `ProjectSemanticDispatch`, `SemanticQueryKey`, the route-resolving `ensure_indexed_ready(` — DISTINCT from the allowed route-free `ensure_indexed_ready_serve`, prepared-decl/route helpers) — a producer that route-resolves would be a SECOND query-time resolution engine; and `no_production_macro_arg_eager_lowering_outside_mirror` is the file-scope ordering tripwire. The IRREDUCIBLE residual NOT covered by either regime is trust in the one sanctioned producer implementation plus compiler bugs / build-time substitution / out-of-tree proc-macros — by design. The FOUR production graph-lowering uses of a macro `parsed_type_argument` all read the ONE mirror handle and re-enter the shared dispatch from it for their TERMINAL demand (no site lowers the macro arg a second time): the `resolve_macro_payload` projector + silent-miss probe (`meta_resolve/projectors/mod.rs`), the slot-binding extractor (`meta_resolve/slot_binding_graph.rs`), the `vue_exec` `defineSlots<mapped>` / graph-native indexed-access decompose (`typeinfo/framework_surface/vue_exec/mod.rs`), and `eval_env` `expand_macro_types` + `defineModel` (`host_manage/eval_env.rs`).
 
-**Demand-site carrier resolution + dep recording (codex-ruled "A/C, not B").** The mirror is query-free, so it DEFERS the resolution eager lowering did eagerly (TypeOf value-root execution, Pick/utility source resolution, cross-file `ImportRoute` dep recording). Per the architecture ruling, resolution + dep recording happen at the resolving DEMAND, never as a side-band dep preflight on the mirror accessor (a second traversal policy is forbidden). The demand sites: `resolve_carrier_subject_node` (`carrier.rs`) resolves a `TypeOf` carrier subject (the empty-path `typeof config` macro payload — the walker's per-segment `TypeOf` arm never fires for an empty path) via `typeof_key_for` → `build_typeof` (resolve → project the carrier path in `Navigate` → apply `type_args`); a NON-empty `ProjectPath` path leaves the TypeOf base for the walker's mid-walk arm. The deferred-shell evaluator (`evaluate.rs`) resolves a `BareRef`/`ImportType` source carrier (Pick/Omit source, mapped source) one hop under `StructuralTransit(Navigate)`. `resolve_member_value_for_classification` (the exactness path) resolves a bare/import carrier so `type MyStr = string` classifies `ExactConcrete`. **`ImportRoute` dep recording:** `build_typeof`'s import-miss (a `typeof <unresolved import>`) observes the owner's `DerivedFactKind::ImportRoute` fact (`generation_current_import_route_hash`) into the active tracer AND marks `result_is_partial` + `cache_suppress` + the request materialization-suppress sticky — a genuine `MissingDependency` is `ReturnOnly`; the field materializer refuses the `ShapeCacheDb` admission of a `TypeOf`-rooted semanticMiss so the next request after the dependency appears recomputes cold and recovers.
+**Demand-site carrier resolution + dep recording (codex-ruled "A/C, not B").** The mirror is query-free, so it DEFERS the resolution eager lowering did eagerly (TypeOf value-root execution, Pick/utility source resolution, cross-file resolution-witness recording). Per the architecture ruling, resolution + dep recording happen at the resolving DEMAND, never as a side-band dep preflight on the mirror accessor (a second traversal policy is forbidden). The demand sites: `resolve_carrier_subject_node` (`carrier.rs`) resolves a `TypeOf` carrier subject (the empty-path `typeof config` macro payload — the walker's per-segment `TypeOf` arm never fires for an empty path) via `typeof_key_for` → `build_typeof` (resolve → project the carrier path in `Navigate` → apply `type_args`); a NON-empty `ProjectPath` path leaves the TypeOf base for the walker's mid-walk arm. The deferred-shell evaluator (`evaluate.rs`) resolves a `BareRef`/`ImportType` source carrier (Pick/Omit source, mapped source) one hop under `StructuralTransit(Navigate)`. `resolve_member_value_for_classification` (the exactness path) resolves a bare/import carrier so `type MyStr = string` classifies `ExactConcrete`. **Resolution-witness recording:** `build_typeof`'s import miss (a `typeof <unresolved import>`) observes the owner's path-precise resolution witness into the active tracer and marks `result_is_partial` + `cache_suppress` + the request materialization-suppress sticky. A genuine `MissingDependency` is `ReturnOnly`; the field materializer refuses `ShapeCacheDb` admission of a `TypeOf`-rooted semantic miss so the next request after the dependency appears recomputes cold and recovers.
 
 **Macro-surface partiality carries typed completeness; warm dispatch hits are NOT budget-debited (codex decider).** A macro surface that resolves through the shared dispatch carries a typed `ResultCompleteness` (`semantic_query.rs`). `vue_macro_dtos_with_ctx` (`vue_exec/mod.rs`) returns `MacroDtosRead { dtos, completeness }`, wraps its cold compute in a `ColdComputeCompletenessScope`, and admits the bundle into `vue_surface_store` ONLY when `completeness == Complete` AND `finalise == Ok` — a GENUINE partial DTO bundle is returned to the caller but never enters the surface store (no laundered warm replay). All DTO consumers (`define_shapes`, `slot_binding_graph::typeinfo_macro_dtos`, `resolver_core::component_meta`) fold the surface's partiality into the request-result completeness via `MacroDtosRead::observe_partial()`; the framework-surface executor surfaces `ResolvedOutcome::Partial`. `ResolvedComponentMetaState.completeness` is the authoritative per-result partial signal; `synthesis_should_suppress` is its compatibility projection (`= completeness.is_partial()`), preserved across the `ComponentMetaResultDb` `ResolutionTemplate` round-trip. The decider EXPLICITLY forbids charging warm cache hits to re-trip the projection budget (the budget is a runaway FUSE, not a semantic-complexity quota; charging warm hits risks false partials for complete-warmed work). **Per-result no-poison (LANDED):** the discriminating fixture `batch_partial_returned_never_admitted_while_complete_sibling_warms` (32 non-overlapping interfaces = 96 distinct props, `projection_op_budget = 6`, an unbounded oracle host) pins the invariant by typed completeness + admission-refusal, NOT a prop-count threshold: a result OBSERVED `Partial` (batch 1's budget-tripped cold compute) is REFUSED at the fixed-view cache boundary and never warmed (the primary discriminator); a genuine `Complete` recompute after warm resolver memos heal MAY admit (valid healing, not laundering — the partial result itself is never promoted). The discrimination is pinned by a `store_stable`-gate flip (`component_meta_request.rs:372`) that reddens the batch-1 `!result_admitted` witness. (The earlier 13-prop `<18` fixture rested on a non-deterministic budget re-trip the content-addressed mirror legitimately removed; it was corrected, not weakened — no rule exception, no carve-out. See `docs/arch/parselower-design.md` Stage 5A residual.)
 
@@ -932,3 +1012,124 @@ The **macro hot mirror** (`crate::structural_carrier_producer::macro_arg_produce
 ## Frontier Engine Tests
 
 Tests in `crates/verter_session/src/frontier_tests.rs` cover diamond dedup, barrel ordering, cycle termination, budget enforcement, export routing, and store-view consistency. Run with `cargo test --package verter_session frontier_tests`.
+
+## Template class fact demand
+
+Dynamic `:class` type decisions belong to
+`project_semantic_dispatch/template_class_facts.rs`, never to display text or
+eager script-analysis DTOs. Select subjects from `RawTemplateData`, join them
+to exact prepared binding keys or macro-payload locators, and classify every
+union arm through the shared graph. Preserve wrapper carriers until the
+requested value's producer-authored `AuthoredReferenceHeadFact` resolves
+through shared import/export and local-alias facts to a package-backed terminal
+whose final import edge is exactly `vue`. Terminal-instantiation demand
+supplies fully substituted wrapper arguments; never classify an outer alias's
+positional arguments. Any open or partial arm produces no class members.
+
+The neutral artifact is revision-stamped and dependency-signed. Consumers use
+the opaque session `TemplateClassDomainIndex`; do not reintroduce raw
+`(binding, classes)` projections or type-annotation parsing.
+
+## Reactive-wrapper demand (shared vocabulary)
+
+`project_semantic_dispatch/reactive_wrapper.rs` is the ONE owner of the question
+"does this authored reference head resolve to a reactive wrapper exported by the
+`vue` package?". It owns `WrapperCandidate`, the exact route gate
+`wrapper_candidate_for_route` (terminal import source is exactly `vue` **and**
+`ResolverContext::workspace_is_package_backed`), and the closed vocabulary
+`wrapper_role_for_vue_export` (`Ref` / `ShallowRef` / `ComputedRef` — with
+`WritableComputedRef` normalizing onto it — / `ModelRef` / `Reactive` /
+`ShallowReactive`). Template-class classification and the value-signature return
+position both consume those items; a second copy is a one-engine violation.
+
+`wrapper_role_for_value_signature_return(dispatch, canonical, owner, symbol,
+signature_ordinal)` is the return-position demand entry. It composes only landed
+machinery: `prepared_value_decl` (a fact COPY — no locator deref, no resolution)
+→ `signatures[ordinal].return_reference_head` →
+`resolve_authored_reference_route` → `wrapper_candidate_for_route` →
+`raise_semantic_type_source_to_hot` over
+`SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(signature.return_ty))`
+→ `demand_terminal_symbol_instantiation` (`ProjectionMode::Navigate`). It is
+NOT `typeof_key_for`, which yields the function's own type rather than its
+return. Demand begins only for the requested subject; there is no owner-wide
+wrapper-candidate scan, and the entry publishes nothing of its own.
+
+Published states are exact: a proven package-backed `vue` terminal publishes its
+role plus a complete `ReactiveWrapperImportProvenance`; a resolved non-Vue
+terminal (or an authored `NotReference` return) publishes
+`ReactiveWrapperRole::None` — a COMPLETE non-wrapper proof; every partial
+(cycle, missing dependency, unsupported head, unavailable prepared declaration,
+tripped work/budget envelope, or a terminal the graph did not reach) publishes
+`Unresolved { reason }` with the exact typed reason and no provenance. `None` is
+never used for a partial, and `Unresolved { AnalysisUnavailable }` is never used
+as "not a wrapper".
+
+Two landed boundaries, both fail-closed and both asserted rather than implied:
+an OBJECT-MEMBER method typed `(): Ref<number>` never classifies (the
+`has_authored_return` gate publishes `Unavailable`), and a package wrapper
+authored as a TRANSPARENT ALIAS (`type Reactive<T> = Unwrapped<T>`) routes past
+its own name to the alias terminal, which is outside the closed vocabulary, so
+it publishes `None`.
+
+**The consumer entry is `wrapper_role_for_sole_value_signature_return(dispatch,
+canonical, owner, symbol)`** — the same composition, plus one closed rule: a
+declaration carrying MORE THAN ONE signature is a merged overload group, and
+which overload a call site selects requires argument-based overload resolution,
+so it fails closed with `Unresolved { Unsupported }` rather than guessing ordinal
+0. No signature at all is `AnalysisUnavailable`. It DELEGATES to the
+ordinal-bearing entry, so there is exactly one composition.
+
+**Production consumer: component-meta's script-binding surface.**
+`host_manage/component_meta_extract.rs::resolved_binding_reactivity(ctx,
+snapshot)` demands the role from inside `extract_component_meta_from_inputs`,
+where every property the mechanism requires already holds: the caller's `ctx` is
+request-bound (`is_request_bound() == true`, so a session overlay is visible to
+the demand and the projection fuse is armed), the enclosing cold compute runs
+under `with_fact_tracer`, and the `ColdComputeCompletenessScope` is already open.
+It is NOT reachable from any context-free snapshot accessor — `get_analysis`,
+`get_analysis_batch`, `get_analysis_all`, `eval_env`, and
+`enrich_destructured_bindings` are all untouched, so LSP/MCP snapshot consumers
+still read the value-space `reactivity_kind` only.
+
+Demand is per requested subject with no owner-wide or workspace-wide scan. A
+binding is demanded only when it is still `ReactivityKind::MaybeRef` (the
+analyzer's undecided-composable state), its initializer is a `FunctionCall` that
+binds the call's WHOLE result (`BindingInitializer::FunctionCall
+{ binds_whole_call_result: true, .. }` — the parse-domain discriminator
+`classify_initializer` sets and `extract_destructured_bindings` clears), and the
+owner's own import row for that local name carries both a resolved canonical id
+and an imported name. The imported ROOT is resolved through
+`ResolverContext::resolve_imported_type_root_with_facts` (barrels and re-exports
+included) and its route facts are recorded onto the active tracer, so a barrel
+retarget misses the enclosing warm component-meta entry. One shared
+`ProjectSemanticDispatch` serves the whole loop; each top-level route walk is its
+own connected-demand root.
+
+**Authority order is MONOTONE refinement, never override.** The value-space walk
+runs first and unmodified; anything it decided keeps its answer. An exact role
+maps onto the collapsed decoration kind (`Ref`/`ShallowRef`/`ModelRef` → `Ref`;
+`ComputedRef` → `Computed`; `Reactive`/`ShallowReactive` → `Reactive`).
+`ReactiveWrapperRole::None` refines NOTHING: it is a proof about the wrapper
+FAMILY of the whole return type, and Vue's `reactive<T>()` returns
+`UnwrapNestedRefs<T>` rather than `Reactive<T>`, so a proven non-wrapper return
+type never downgrades a value-space `reactive` fact. A typed degradation refines
+nothing either and additionally folds
+`ResultCompleteness::partial(PROPAGATED)` into the cold-compute completeness, so
+the component-meta result is refused warm admission — per-row and fail-closed:
+one degraded binding never drops its own row and never suppresses a sibling's
+exact role.
+
+The exactness carrier is the add-only
+`BindingAnalysis.return_wrapper_role: Option<ReactiveWrapperRole>` (absent = not
+demanded, distinct from the `None` proof). Route PROVENANCE never crosses FFI —
+`ReactiveWrapperImportProvenance` embeds `TypeArgLocator`s and stays
+session-internal; only the closed role vocabulary crosses, as
+`FfiBindingMeta.return_wrapper_role` + `.return_wrapper_unresolved_reason` and
+proto `BindingMeta` fields 7/8 (`COMPONENT_META_SCHEMA_VERSION` 7).
+
+The capability's product justification is a BODILESS declaration: the value path
+(`build_composable_info`) is gated on a function body, so `declare function
+useCounter(): Ref<number>` in a `.d.ts` can never be classified by it and today
+publishes the undecided `MaybeRef`. Acceptance:
+`component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed` plus its
+siblings in `crates/verter_session/src/host_manage_tests.rs`.

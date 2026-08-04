@@ -332,7 +332,11 @@ onMounted(() => {
     if (!model || !position) return;
 
     const offset = model.getOffsetAt(position);
-    const closeTagText = computeAutoCloseTagText(model.getValue(), offset);
+    const closeTagText = computeAutoCloseTagText(
+      model.getValue(),
+      props.store.activeFile?.structure ?? null,
+      offset,
+    );
     if (!closeTagText) return;
 
     monacoEditor.executeEdits("template-auto-close", [

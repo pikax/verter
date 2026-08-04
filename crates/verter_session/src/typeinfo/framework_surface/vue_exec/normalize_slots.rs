@@ -136,15 +136,82 @@ pub(crate) fn slots_from_typeinfo_surface(
                 is_required: !member.optional,
                 span: verter_span::Span::default(),
                 bindings,
+                // A resolved-surface slot has no authored props-object member
+                // list at an addressable position in the consuming file — the
+                // honest typed miss, paired with the `None` payload below.
+                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
+                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                ),
                 return_type,
                 // A resolved-surface slot has no flat authored macro-payload
                 // position — the honest locator-less form, paired with a
                 // `None` scope; typed demand is host-raised.
                 payload: None,
-                return_expr_scope: None,
+                return_expr_scope: Some(scope),
                 description,
                 tags,
             })
+        })
+        .collect()
+}
+
+/// Build the producer-owned return publication aligned with every normalized
+/// slot row. The replay address is the stamped macro type argument plus the
+/// slot member name; a missing base is a typed required-source failure.
+pub(crate) fn slot_return_publications_from_typeinfo_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    resolved: &impl ResolvedSurfaceAccess,
+    slots: &[AnalyzedSlotField],
+) -> Vec<Option<verter_type_expr::TypePublication>> {
+    use verter_type_expr::facts::{
+        ProjectedTypeFact, SemanticSourceFailure, SemanticTypeSource, SourcePosition,
+    };
+    use verter_type_expr::locators::AuthoredBodyLocator;
+    use verter_type_expr::{
+        PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypePublication,
+    };
+
+    let macro_surface = resolved.macro_surface();
+    let indexed = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed);
+    let base = indexed
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.as_ref());
+
+    slots
+        .iter()
+        .map(|slot| {
+            let member = macro_surface
+                .surface
+                .members
+                .iter()
+                .find(|member| member.name.as_ref() == slot.name);
+            let position = base.zip(member).map_or_else(
+                || SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredPayload),
+                |(base, member)| {
+                    SourcePosition::Present(SemanticTypeSource::Projected(
+                        ProjectedTypeFact::CallableOccurrence {
+                            base: AuthoredBodyLocator::MacroPayload(base.clone()),
+                            occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
+                                member.value.0,
+                                Arc::from([slot.name.clone()]),
+                            ),
+                            projection:
+                                verter_type_expr::facts::CallableOccurrenceProjection::Return,
+                        },
+                    ))
+                },
+            );
+            Some(TypePublication::from_source_position(
+                &position,
+                ResolutionExactness::ExactConcrete,
+                ResolutionProvenance::FrameworkSurface,
+                Arc::from([]),
+                None,
+                &PublicationPolicy::exact_only(),
+            ))
         })
         .collect()
 }

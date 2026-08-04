@@ -1,14 +1,10 @@
 //! Marginal-admit cost of the base store-view builder, and the warm-reuse
 //! contract that currently pays for it.
 //!
-//! Build Philosophy #5 — "the builder/solver reads only from cached
-//! lookup state; it does not reopen file loading or routing" — says
-//! [`crate::resolver_store::HostStoreView::build`] must not re-open a
-//! file when it snapshots it. Any content change bumps the workspace
-//! `content_generation`, and `route_surface_is_edge_current` compares an
-//! artifact's baked `edge_generation` against exactly that counter, so
-//! ONE mutation makes EVERY file carrying a cross-file edge edge-stale at
-//! once. The scaling tests below measure the per-owner cost of that.
+//! Build Philosophy #5 says [`crate::resolver_store::HostStoreView::build`]
+//! captures immutable roots in O(1): it must not enumerate owners, reopen
+//! files, or perform routing. The scaling tests below pin that absence of
+//! per-owner work while separately accounting for legitimate admission cost.
 //!
 //! Every measured window is split so it contains ONLY builder work. A
 //! newly-admitted file's own cold resolution during `upsert` is legitimate
@@ -122,8 +118,7 @@ const MEMBER_SRC: &str =
 
 /// A host holding `n` already-materialised `.ts` files, each carrying a
 /// real cross-file import edge (so each artifact's `import_routes` is
-/// non-empty and its edge currency is decided by the workspace
-/// `content_generation` stamp).
+/// non-empty, making accidental eager route refresh observable).
 fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_ts(&host, DEP_ID, DEP_SRC);

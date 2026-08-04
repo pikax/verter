@@ -51,6 +51,8 @@ Bug or slowdown in one surface → fix in shared substrate so other consumers be
 
 Lightweight byte-level scanner (no external CSS parser dependency). Extracts selectors, classes, IDs, custom properties, and at-rules from `<style>` blocks. The scanner is dialect-aware (`CssScanDialect::{Css, Scss, Less}` via `build_scanned_style_analysis`): SCSS/Less get `//` line-comment awareness and SCSS `#{...}` interpolation fails closed (no partial class names, no structure); `&`-selectors keep literal class extraction but drop unsound structure; indented Sass/Stylus stay `css: None`. Each `AnalyzedCssClass` carries `selector_index` (exact class → comma-part selector join) and each `AnalyzedSelector` carries `rule_body_span` (brace-inclusive declaration block, for rule-description hover). The scanner also records `:deep()/:global()/:slotted()` (+ `::v-*` forms) as `special_pseudos` with exact spans; a class is GLOBAL when declared in a non-scoped, non-module block or inside `:global(...)` (`verter_lsp::css::global_classes` gates workspace-wide references/definition on that fact — scoped classes never cross files, and `<style module>` classes are FAIL-CLOSED across the css-native class legs: hashed-local, addressable only via the TS-owned `$style.*` surface, with `:global(...)` as the only opt-out). Svelte carriers reuse the same scanner (scoped-by-default) via `verter_session::parse::build_svelte_style_analyses`, and their markup class usage sites (`class="a b"` entries + `class:x` directives) are typed `MarkupClassToken` facts on `FileAnalysisSnapshot.markup_class_tokens`. Style `v-bind()` facts carry real expression spans plus OXC-derived `expr_roots`/`roots_complete` (the single owning style-usage fact consumed by `mark_bindings_used_in_style` and compile-input assembly).
 
+`verter_css_syntax` is the intended single token/event substrate, but the runtime scanner replacement campaign is unfinished. The legacy scanner remains inventoried migration debt, and the inverse replacement contracts intentionally stay red behind `scanners-replacement-red` until the cutover is real.
+
 **Module structure:**
 
 ```
@@ -169,7 +171,7 @@ Primary output of `build_script_analysis()`. Produced by a single OXC parse + AS
 | `macros` | `Vec<AnalyzedMacro>` | Vue macro calls (defineProps, defineEmits, etc.) |
 | `macro_type_deps` | `Vec<MacroTypeDep>` | Cross-file type references used by macros, tiered by structural position (`usage: MacroTypeDepUsage` — `Surface` = argument root / intersection-union arms / extends heritage / alias chains, missing ⇒ error; `Member` = top-level member annotation, missing ⇒ warning + `null` degrade). References nested deeper are never collected (runtime codegen does not need them) |
 | `flags` | `AnalysisFlags` | Bitwise flags for O(1) queries |
-| `exported_functions` | `Vec<AnalyzedExportedFunction>` | Non-SFC exported functions (composable analysis) |
+| `exported_functions` | `Vec<AnalyzedExportedFunction>` | Non-SFC exported functions (composable analysis). Carries `name` / `is_default` / `params` / `is_async` / `composable` only. It carries NO return-type field: the declared return type's reactive-wrapper identity is a resolution decision answered at demand time from the lowered typed IR plus a package-backed route proof (`/type-resolution` → Reactive-wrapper demand), never from annotation text on this DTO |
 
 **ReactivityKind**: None | Ref | Computed | Reactive | MaybeRef | Mutable
 

@@ -27,9 +27,10 @@ pub use template_ast::{
     forced_runes_option, validate_custom_element_tag, CloseTagViolation, CloseTagViolationKind,
     OptionsCustomElementProbe, OptionsCustomElementTextTag, ParsedSvelte, ScriptBodyGrammar,
     ScriptBodyProbe, StyleBodyProbe, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
-    SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective,
-    SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic,
-    SvelteParseRejectFact, SvelteParseRejectKind, SvelteScript, SvelteSpecialKind,
-    SvelteStrictParseError, SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
+    SvelteAwaitInline, SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind,
+    SvelteDirective, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
+    SvelteMixedAttributePart, SvelteNode, SvelteParseDiagnostic, SvelteParseRejectFact,
+    SvelteParseRejectKind, SvelteScript, SvelteSpecialKind, SvelteStrictParseError,
+    SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
 };
 pub use tokenizer::parse_svelte;

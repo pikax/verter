@@ -74,7 +74,7 @@ fn run_policy(
 /// structural macro-participation classifier hook: any name in the
 /// list will resolve to a `ResolvedRootIdentity` that the policy
 /// treats as role-bearing (kept symbolic per Rules 2 / 4 + the
-/// raw-restoration helpers).
+/// authored-publication selectors).
 ///
 /// Production code paths build the set from `snapshot.macros` via
 /// `build_policy_macro_role_identities` — see
@@ -130,7 +130,7 @@ fn empty_meta() -> ComponentMetaAnalysis {
         models: vec![],
         exposed: vec![],
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: vec![],
         components: vec![],
         template_refs: vec![],
@@ -157,10 +157,14 @@ fn empty_meta() -> ComponentMetaAnalysis {
 fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
     PropAnalysis {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(type_source),
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            None,
+            None,
+        ),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: false,
         has_default: false,
         default_value: None,
@@ -172,6 +176,31 @@ fn prop(name: &str, type_source: SemanticTypeSource) -> PropAnalysis {
 
 /// The shallow named-reference SOURCE (`Closed(Leaf(Ref(name)))`) — the
 /// same seed shape the production registry publishes.
+fn symbolic_prop_with_evidence(
+    name: &str,
+    resolved: SemanticTypeSource,
+    authored: SemanticTypeSource,
+    text: &str,
+) -> PropAnalysis {
+    PropAnalysis {
+        name: name.to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(resolved),
+            verter_type_expr::ResolutionExactness::ExactSymbolic,
+            Some(text.to_string()),
+            Some(authored),
+        ),
+        type_expansion: None,
+        required: false,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: vec![],
+        declared_in_macro_type_arg: false,
+    }
+}
+
 fn ref_source(name: &str) -> SemanticTypeSource {
     SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Ref(name.to_string())))
 }
@@ -263,18 +292,6 @@ fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNode
     out
 }
 
-/// The raised node's object member names (empty when not an object root).
-fn object_member_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> {
-    match node_data(host, node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => surface
-            .members
-            .iter()
-            .map(|member| member.name.to_string())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// The node's reference head (name, arg count), read through the shared
 /// node-domain extractor.
 fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> {
@@ -284,6 +301,101 @@ fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> 
             ctx, node,
         )
         .map(|(name, args)| (name, args.len()));
+    });
+    out
+}
+
+fn bare_ref_scope_and_resolved_decl(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> (
+    Arc<str>,
+    Option<crate::semantic_query::NodeScopeId>,
+    crate::semantic_query::DeclIdentity,
+) {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        let data = crate::project_semantic_dispatch::node_data_for(ctx, node)
+            .expect("reference node data");
+        let (name, scope, identity) = match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => {
+                (Arc::clone(&identity.decl_name), None, identity.clone())
+            }
+            SemanticNodeData::InstantiationRef { base, .. } => {
+                (Arc::clone(&base.decl_name), None, base.clone())
+            }
+            SemanticNodeData::BareRef(_) => {
+                let (name, scope) = data.bare_ref_head().expect("BareRef identity");
+                let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+                let resolved = dispatch.resolve_carrier_subject_node(
+                    node,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                );
+                let identity = match crate::project_semantic_dispatch::node_data_for(ctx, resolved)
+                    .as_deref()
+                {
+                    Some(SemanticNodeData::DeclRef { identity }) => identity.clone(),
+                    Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
+                    other => panic!("BareRef must resolve to declaration identity; got {other:?}"),
+                };
+                (Arc::clone(name), Some(scope.clone()), identity)
+            }
+            other => panic!("expected reference identity; got {other:?}"),
+        };
+        out = Some((name, scope, identity));
+    });
+    out.expect("resolver context must produce reference identity")
+}
+
+fn symbolic_projection_eq_for_test(
+    host: &VerterHost,
+    left: SemanticNodeId,
+    right: SemanticNodeId,
+) -> Option<bool> {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |resolver_ctx| {
+        let registry = super::core::PolicyRegistry::build(&[], &[]);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx);
+        let participating = rustc_hash::FxHashSet::default();
+        let policy_ctx = super::core::PolicyCtx {
+            registry: &registry,
+            engine: &mut engine,
+            owner_canonical: "/owner.vue",
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            host,
+            macro_participating_idents: &participating,
+            active_refs: rustc_hash::FxHashSet::default(),
+            active_refs_max_depth: 0,
+        };
+        out = super::type_publication::symbolic_projection_equivalent(left, right, &policy_ctx);
+    });
+    out
+}
+
+fn proof_reference_maps_match_for_test(
+    host: &VerterHost,
+    left: SemanticNodeId,
+    right: SemanticNodeId,
+) -> Option<bool> {
+    let mut out = None;
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |resolver_ctx| {
+        let registry = super::core::PolicyRegistry::build(&[], &[]);
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx);
+        let participating = rustc_hash::FxHashSet::default();
+        let policy_ctx = super::core::PolicyCtx {
+            registry: &registry,
+            engine: &mut engine,
+            owner_canonical: "/owner.vue",
+            owner: verter_type_expr::TopLevelOwnerId::instance(0),
+            host,
+            macro_participating_idents: &participating,
+            active_refs: rustc_hash::FxHashSet::default(),
+            active_refs_max_depth: 0,
+        };
+        out =
+            super::type_publication::proof_reference_maps_match_for_test(left, right, &policy_ctx);
     });
     out
 }
@@ -302,7 +414,7 @@ fn source_is_bare_ref(source: Option<&SemanticTypeSource>, name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rule3_resolves_project_local_non_props_to_object() {
+fn exact_authority_is_not_rewritten_to_a_located_object_body() {
     let host = empty_host();
     upsert_ts(
         &host,
@@ -319,26 +431,22 @@ fn rule3_resolves_project_local_non_props_to_object() {
 
     // Rule 3 publishes the located declaration's authored body SOURCE; the
     // raised node is the concrete object surface with the `id` member.
-    let published = meta.props[0].type_source.present().expect("typed prop");
+    let published = meta.props[0]
+        .publication
+        .result()
+        .selected_source()
+        .expect("typed prop");
     assert!(
-        matches!(published, SemanticTypeSource::Authored(_)),
-        "Rule 3 must publish the authored declaration-body source; got {published:?}",
-    );
-    let node = raise(&host, published).expect("published source must raise");
-    assert_eq!(
-        object_member_names(&host, node),
-        vec!["id".to_string()],
-        "the raised body must be the object surface with the `id` member",
-    );
-    // Negative: the published source is no longer the bare seed.
-    assert!(
-        !source_is_bare_ref(meta.props[0].type_source.present(), "ImportedUser"),
-        "Rule 3 must replace the bare named-reference seed",
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "ImportedUser"
+        ),
+        "declaration lookup must not overwrite exact resolved authority; got {published:?}",
     );
 }
 
 #[test]
-fn rule3_resolves_project_local_alias_union_literal() {
+fn exact_union_reference_is_not_replaced_without_evidence_and_proof() {
     let host = empty_host();
     upsert_ts(
         &host,
@@ -353,30 +461,14 @@ fn rule3_resolves_project_local_alias_union_literal() {
 
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    let published = meta.props[0].type_source.present().expect("typed prop");
+    let published = meta.props[0]
+        .publication
+        .result()
+        .selected_source()
+        .expect("typed prop");
     assert!(
-        matches!(published, SemanticTypeSource::Authored(_)),
-        "Rule 3 must publish the authored declaration-body source; got {published:?}",
-    );
-    let node = raise(&host, published).expect("published source must raise");
-    let arms = match node_data(&host, node).as_deref() {
-        Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
-        other => panic!("published body must raise to the union of literals; got {other:?}"),
-    };
-    let mut literals: Vec<String> = arms
-        .iter()
-        .filter_map(|arm| match node_data(&host, *arm).as_deref() {
-            Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text))) => {
-                Some(text.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    literals.sort();
-    assert_eq!(
-        literals,
-        vec!["busy".to_string(), "idle".to_string()],
-        "publication policy must resolve the project-local alias body to its literal union",
+        source_is_bare_ref(Some(published), "Status"),
+        "a registry body alone cannot substitute for authored evidence and typed proof",
     );
 }
 
@@ -396,14 +488,17 @@ fn rule3_does_not_fire_when_registry_body_is_just_another_ref() {
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "AliasA"),
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "AliasA"
+        ),
         "Rule 3 must NOT publish a half-chased alias spine; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
 #[test]
-fn rule3_alias_spine_descends_to_the_resolvable_body() {
+fn alias_spine_lookup_does_not_mutate_exact_authority() {
     // AliasA → AliasB → { x: 1 }: the alias-spine descent (guarded per
     // declaration) adopts the first structurally-resolvable body on the
     // spine.
@@ -421,17 +516,19 @@ fn rule3_alias_spine_descends_to_the_resolvable_body() {
 
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    let published = meta.props[0].type_source.present().expect("typed prop");
-    let node = raise(&host, published).expect("published source must raise");
-    assert_eq!(
-        object_member_names(&host, node),
-        vec!["x".to_string()],
-        "the alias spine must chase through AliasB to the object body",
+    let published = meta.props[0]
+        .publication
+        .result()
+        .selected_source()
+        .expect("typed prop");
+    assert!(
+        source_is_bare_ref(Some(published), "AliasA"),
+        "an alias spine cannot replace the resolved authority",
     );
 }
 
 #[test]
-fn rule3_publishes_nested_refs_shallow() {
+fn nested_declaration_lookup_does_not_replace_exact_authority() {
     // `Container = { first: First }` — Rule 3 publishes Container's body;
     // the nested `First` member VALUE stays a shallow reference carrier
     // (consumers re-resolve it on demand). Eagerly inlining `First`'s body
@@ -457,28 +554,14 @@ fn rule3_publishes_nested_refs_shallow() {
 
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    let published = meta.props[0].type_source.present().expect("typed prop");
-    let node = raise(&host, published).expect("published source must raise");
-    let member_value = match node_data(&host, node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => {
-            assert_eq!(
-                surface
-                    .members
-                    .iter()
-                    .map(|m| m.name.to_string())
-                    .collect::<Vec<_>>(),
-                vec!["first".to_string()],
-                "Container's body must surface the `first` member",
-            );
-            surface.members[0].value
-        }
-        other => panic!("published body must raise to Container's object; got {other:?}"),
-    };
-    // Shallow-by-default: the member value is a reference carrier to
-    // `First`, NOT an eagerly-inlined object body.
+    let published = meta.props[0]
+        .publication
+        .result()
+        .selected_source()
+        .expect("typed prop");
     assert!(
-        matches!(ref_head(&host, member_value), Some((ref name, _)) if name == "First"),
-        "the nested member value must stay the shallow `First` reference carrier",
+        source_is_bare_ref(Some(published), "Container"),
+        "registry traversal is not a publication selector input",
     );
 }
 
@@ -509,14 +592,17 @@ fn rule4_keeps_macro_participating_ref_symbolic() {
     );
 
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "ButtonProps"),
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "ButtonProps"
+        ),
         "Rule 4: macro-participating reference must stay the symbolic seed; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
 #[test]
-fn fixture_non_participating_props_suffix_name_gets_expanded() {
+fn fixture_non_participating_props_suffix_does_not_mint_authored_selection() {
     // §3.4: role classification is STRUCTURAL, not nominal — a name ending
     // in "Props" that no macro consumes expands like any project-local
     // alias. The owner SFC is a REAL upserted file whose import makes
@@ -556,22 +642,147 @@ fn fixture_non_participating_props_suffix_name_gets_expanded() {
     // symbolic.
     run_policy_with_macro_participation(&host, &mut meta, &registry, &registry_meta, &[]);
 
-    let published = meta.props[0].type_source.present().expect("typed prop");
+    let published = meta.props[0]
+        .publication
+        .result()
+        .selected_source()
+        .expect("typed prop");
     assert!(
-        matches!(published, SemanticTypeSource::Authored(_)),
-        "a non-participating *Props name must expand (nominal suffix must not classify); got {published:?}",
+        source_is_bare_ref(Some(published), "XyzProps"),
+        "a nominal suffix and declaration lookup cannot mint authored evidence/proof",
     );
-    let node = raise(&host, published).expect("published source must raise");
-    assert_eq!(
-        object_member_names(&host, node),
-        vec!["value".to_string()],
-        "the published body must be XyzProps' object surface",
-    );
-    // Negative: the published source must not remain the bare seed.
-    assert!(
-        !source_is_bare_ref(meta.props[0].type_source.present(), "XyzProps"),
-        "the bare seed must have been replaced",
-    );
+}
+
+#[test]
+fn authored_evidence_negatives_vary_only_local_bare_or_non_participating_structure() {
+    {
+        let host = empty_host();
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: "/owner.vue".to_string(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">type LocalConfig = { value: string }; defineProps<LocalConfig>();</script>",
+                ),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        upsert_ts(
+            &host,
+            "/workspace/local-annos.ts",
+            "export type LocalAnno = LocalConfig[];",
+        );
+        upsert_ts(
+            &host,
+            "/workspace/local-resolved.ts",
+            "export type LocalResolved = LocalConfig[];",
+        );
+        let resolved = decl_body_source("/workspace/local-resolved.ts", "LocalResolved");
+        let authored = decl_body_source("/workspace/local-annos.ts", "LocalAnno");
+        let mut meta = empty_meta();
+        meta.props.push(symbolic_prop_with_evidence(
+            "local",
+            resolved.clone(),
+            authored,
+            "LocalConfig[]",
+        ));
+        let registry = vec![registry_entry("LocalConfig", ref_source("LocalConfig"))];
+        let registry_meta = vec![meta_entry("LocalConfig", "/owner.vue")];
+        run_policy_with_macro_participation(
+            &host,
+            &mut meta,
+            &registry,
+            &registry_meta,
+            &["LocalConfig"],
+        );
+        assert_eq!(
+            meta.props[0].publication.result().selected_source(),
+            Some(&resolved),
+            "owner-local compound evidence is not eligible"
+        );
+    }
+
+    {
+        let host = empty_host();
+        upsert_ts(
+            &host,
+            "/workspace/button.ts",
+            "export type ButtonProps = { label: string };",
+        );
+        upsert_ts(
+            &host,
+            "/workspace/bare-annos.ts",
+            "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type BareAnno = ButtonProps;",
+        );
+        upsert_ts(
+            &host,
+            "/workspace/bare-resolved.ts",
+            "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type BareResolved = ButtonProps;",
+        );
+        let resolved = decl_body_source("/workspace/bare-resolved.ts", "BareResolved");
+        let authored = decl_body_source("/workspace/bare-annos.ts", "BareAnno");
+        let mut meta = empty_meta();
+        meta.props.push(symbolic_prop_with_evidence(
+            "bare",
+            resolved.clone(),
+            authored,
+            "ButtonProps",
+        ));
+        let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+        let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+        run_policy_with_macro_participation(
+            &host,
+            &mut meta,
+            &registry,
+            &registry_meta,
+            &["ButtonProps"],
+        );
+        assert_eq!(
+            meta.props[0].publication.result().selected_source(),
+            Some(&resolved),
+            "bare participating evidence is not eligible"
+        );
+    }
+
+    {
+        let host = empty_host();
+        upsert_ts(
+            &host,
+            "/workspace/external.ts",
+            "export type ExternalConfig = { value: string };",
+        );
+        upsert_ts(
+            &host,
+            "/workspace/nonpart-annos.ts",
+            "import type { ExternalConfig } from \"/workspace/external.ts\";\nexport type NonPartAnno = ExternalConfig[];",
+        );
+        upsert_ts(
+            &host,
+            "/workspace/nonpart-resolved.ts",
+            "import type { ExternalConfig } from \"/workspace/external.ts\";\nexport type NonPartResolved = ExternalConfig[];",
+        );
+        let resolved = decl_body_source("/workspace/nonpart-resolved.ts", "NonPartResolved");
+        let authored = decl_body_source("/workspace/nonpart-annos.ts", "NonPartAnno");
+        let mut meta = empty_meta();
+        meta.props.push(symbolic_prop_with_evidence(
+            "nonpart",
+            resolved.clone(),
+            authored,
+            "ExternalConfig[]",
+        ));
+        let registry = vec![registry_entry(
+            "ExternalConfig",
+            ref_source("ExternalConfig"),
+        )];
+        let registry_meta = vec![meta_entry("ExternalConfig", "/workspace/external.ts")];
+        run_policy_with_macro_participation(&host, &mut meta, &registry, &registry_meta, &[]);
+        assert_eq!(
+            meta.props[0].publication.result().selected_source(),
+            Some(&resolved),
+            "non-participating compound evidence is not eligible"
+        );
+    }
 }
 
 #[test]
@@ -599,9 +810,12 @@ fn fixture_macro_participating_non_props_suffix_name_stays_symbolic() {
     );
 
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "WidgetConfig"),
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "WidgetConfig"
+        ),
         "a macro-participating non-*Props name must stay symbolic; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
@@ -628,9 +842,12 @@ fn fixture_macro_participating_props_suffix_baseline_stays_symbolic() {
     );
 
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "AvatarProps"),
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "AvatarProps"
+        ),
         "macro-participating *Props baseline must stay symbolic; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
@@ -660,7 +877,7 @@ fn rule4_keeps_array_of_macro_participating_symbolic() {
     let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    let before = meta.props[0].type_source.clone();
+    let before = meta.props[0].publication.source_position().clone();
     run_policy_with_macro_participation(
         &host,
         &mut meta,
@@ -670,7 +887,8 @@ fn rule4_keeps_array_of_macro_participating_symbolic() {
     );
 
     assert_eq!(
-        meta.props[0].type_source, before,
+        meta.props[0].publication.source_position(),
+        before,
         "an array-of-participating composition must stay the authored source",
     );
 }
@@ -696,11 +914,12 @@ fn rule2_keeps_indexed_access_on_non_participating_symbolic() {
         decl_body_source("/workspace/routes.ts", "Route"),
     ));
 
-    let before = meta.props[0].type_source.clone();
+    let before = meta.props[0].publication.source_position().clone();
     run_policy(&host, &mut meta, &[], &[]);
 
     assert_eq!(
-        meta.props[0].type_source, before,
+        meta.props[0].publication.source_position(),
+        before,
         "IndexedAccess stays unchanged when the root is not macro-participating and has no body",
     );
 }
@@ -730,7 +949,7 @@ fn rule2_indexed_access_on_macro_participating_stays_symbolic() {
     let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
     let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
 
-    let before = meta.props[0].type_source.clone();
+    let before = meta.props[0].publication.source_position().clone();
     run_policy_with_macro_participation(
         &host,
         &mut meta,
@@ -740,7 +959,8 @@ fn rule2_indexed_access_on_macro_participating_stays_symbolic() {
     );
 
     assert_eq!(
-        meta.props[0].type_source, before,
+        meta.props[0].publication.source_position(),
+        before,
         "Rule 2: IndexedAccess on macro-participating root stays symbolic",
     );
 }
@@ -773,9 +993,12 @@ fn rule1_keeps_package_backed_refs_symbolic() {
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
     assert!(
-        source_is_bare_ref(meta.props[0].type_source.present(), "VNode"),
+        source_is_bare_ref(
+            meta.props[0].publication.result().selected_source(),
+            "VNode"
+        ),
         "Rule 1: package-backed reference stays symbolic; got {:?}",
-        meta.props[0].type_source,
+        meta.props[0].publication.source_position(),
     );
 }
 
@@ -784,7 +1007,7 @@ fn rule1_keeps_package_backed_refs_symbolic() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn pass_recomputes_public_instance_after_rewrite() {
+fn pass_does_not_recompute_public_instance_for_registry_lookup_alone() {
     let host = empty_host();
     upsert_ts(
         &host,
@@ -799,11 +1022,9 @@ fn pass_recomputes_public_instance_after_rewrite() {
 
     run_policy(&host, &mut meta, &registry, &registry_meta);
 
-    // The rewrite fired (Rule 3), so the public-instance sidecar is
-    // repopulated.
     assert!(
-        meta.public_instance.is_some(),
-        "a fired rewrite must repopulate the public-instance sidecar",
+        meta.public_instance.is_none(),
+        "an immutable publication result leaves the sidecar untouched",
     );
 }
 
@@ -831,7 +1052,219 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object() {
+fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
+    let host = empty_host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let scope_a = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from("/workspace/a.ts"),
+        owner,
+        whole_hash: [1; 16],
+        local_scope: Some(1),
+    };
+    let scope_b = crate::semantic_query::NodeScopeId::File {
+        canonical_id: Arc::from("/workspace/b.ts"),
+        owner,
+        whole_hash: [2; 16],
+        local_scope: Some(2),
+    };
+    let bare_a = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Same"),
+            scope_a,
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        crate::semantic_query::NodeScopeId::Global,
+    );
+    let bare_b = graph.intern_node_with_scope(
+        SemanticNodeData::new_bare_ref(
+            Arc::from("Same"),
+            scope_b,
+            Arc::from(Vec::new().into_boxed_slice()),
+        ),
+        crate::semantic_query::NodeScopeId::Global,
+    );
+    let bare_array_a = graph.intern_node(SemanticNodeData::Array {
+        element: bare_a,
+        readonly: false,
+    });
+    let bare_array_b = graph.intern_node(SemanticNodeData::Array {
+        element: bare_b,
+        readonly: false,
+    });
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, bare_array_a, bare_array_b),
+        Some(false),
+        "same-spelled BareRefs in distinct lexical scopes are not equivalent"
+    );
+
+    let decl_a = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("/workspace/a.ts"),
+            owner,
+            whole_hash: [1; 16],
+            decl_name: Arc::from("Same"),
+        },
+    });
+    let decl_b = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("/workspace/b.ts"),
+            owner,
+            whole_hash: [2; 16],
+            decl_name: Arc::from("Same"),
+        },
+    });
+    let indexed_a = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: decl_a,
+        index: crate::semantic_query::IndexKey::String(Arc::from("value")),
+    });
+    let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: decl_b,
+        index: crate::semantic_query::IndexKey::String(Arc::from("value")),
+    });
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, indexed_a, indexed_b),
+        Some(false),
+        "same-spelled DeclRefs from distinct canonical declarations are not equivalent"
+    );
+}
+
+#[test]
+fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/a.ts",
+        "export type Same = { value: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/b.ts",
+        "export type Same = { value: string };",
+    );
+
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let decl_ref = |canonical: &str| {
+        let whole_hash = host
+            .shallow_file_state(canonical)
+            .expect("fixture must be indexed")
+            .whole_hash;
+        graph.intern_node(SemanticNodeData::DeclRef {
+            identity: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash,
+                decl_name: Arc::from("Same"),
+            },
+        })
+    };
+    let a = decl_ref("/workspace/a.ts");
+    let b = decl_ref("/workspace/b.ts");
+    let tuple = |values: &[crate::semantic_query::SemanticNodeId]| {
+        graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(
+                values
+                    .iter()
+                    .map(|value| crate::semantic_query::TupleElement {
+                        label: None,
+                        value: *value,
+                        optional: false,
+                        rest: false,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            readonly: false,
+        })
+    };
+    let resolved = tuple(&[a, b, b, a]);
+    let authored = tuple(&[b, a, b, a]);
+
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, resolved, authored),
+        Some(false),
+        "every repeated DeclRef occurrence must retain its structural position"
+    );
+}
+
+#[test]
+fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/shared.ts",
+        "export type Same = { value: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/scope-a.ts",
+        "import type { Same } from \"/workspace/shared.ts\"; export type Use = Same;",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/scope-b.ts",
+        "import type { Same } from \"/workspace/shared.ts\"; export type Use = Same;",
+    );
+
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let bare_ref = |canonical: &str| {
+        let whole_hash = host
+            .shallow_file_state(canonical)
+            .expect("fixture must be indexed")
+            .whole_hash;
+        let scope = crate::semantic_query::NodeScopeId::File {
+            canonical_id: Arc::from(canonical),
+            owner,
+            whole_hash,
+            local_scope: None,
+        };
+        graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(
+                Arc::from("Same"),
+                scope.clone(),
+                Arc::from(Vec::new().into_boxed_slice()),
+            ),
+            scope,
+        )
+    };
+    let a = bare_ref("/workspace/scope-a.ts");
+    let b = bare_ref("/workspace/scope-b.ts");
+    let tuple = |values: &[crate::semantic_query::SemanticNodeId]| {
+        graph.intern_node(SemanticNodeData::Tuple {
+            elements: Arc::from(
+                values
+                    .iter()
+                    .map(|value| crate::semantic_query::TupleElement {
+                        label: None,
+                        value: *value,
+                        optional: false,
+                        rest: false,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            readonly: false,
+        })
+    };
+    let resolved = tuple(&[a, b, b, a]);
+    let authored = tuple(&[b, a, b, a]);
+
+    assert_eq!(
+        proof_reference_maps_match_for_test(&host, resolved, authored),
+        Some(false),
+        "the raw proof rail must record every repeated BareRef scope occurrence"
+    );
+    assert_eq!(
+        symbolic_projection_eq_for_test(&host, resolved, authored),
+        Some(false),
+        "every repeated BareRef occurrence must retain its lexical scope"
+    );
+}
+
+#[test]
+fn w2_4_restore_macro_participating_from_equivalent_typed_annotation() {
     // The resolved source is the eagerly-expanded object body (the
     // evaluator inlined `ButtonProps` away); the authored annotation
     // source is the symbolic `ButtonProps[]` the user wrote. The policy
@@ -848,22 +1281,28 @@ fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object(
         "/workspace/annos.ts",
         "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type ActionsAnno = ButtonProps[];",
     );
+    upsert_ts(
+        &host,
+        "/workspace/resolved.ts",
+        "export type ActionsResolved = { label: string }[];",
+    );
 
-    let eager = synthesized_object(&[(
-        "label",
-        LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
-    )]);
+    let resolved = decl_body_source("/workspace/resolved.ts", "ActionsResolved");
     let authored = decl_body_source("/workspace/annos.ts", "ActionsAnno");
 
     let mut meta = empty_meta();
     meta.props.push(PropAnalysis {
         name: "actions".to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::Present(eager),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(resolved),
+            verter_type_expr::ResolutionExactness::ExactSymbolic,
+            Some("ButtonProps[]".to_string()),
+            Some(authored.clone()),
+        ),
         type_expansion: None,
-        raw_type: None,
         // The authored annotation source — the analyzer's payload
         // position for the user's own `ButtonProps[]` text.
-        raw_type_source: Some(authored.clone()),
         required: false,
         has_default: false,
         default_value: None,
@@ -884,14 +1323,21 @@ fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object(
     );
 
     assert_eq!(
-        meta.props[0].type_source.present(),
+        meta.props[0].publication.result().selected_source(),
         Some(&authored),
-        "restore_props_suffix_from_raw must publish the authored annotation source",
+        "macro compound policy must publish the authored annotation source",
     );
     // Negative: the raised published node is the symbolic array over the
     // `ButtonProps` reference carrier — not an inlined object body.
-    let node = raise(&host, meta.props[0].type_source.present().unwrap())
-        .expect("restored source must raise");
+    let node = raise(
+        &host,
+        meta.props[0]
+            .publication
+            .result()
+            .selected_source()
+            .unwrap(),
+    )
+    .expect("restored source must raise");
     let element = match node_data(&host, node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
         other => panic!("restored annotation must raise to an array; got {other:?}"),
@@ -899,6 +1345,144 @@ fn w2_4_restore_macro_participating_from_typed_annotation_replaces_eager_object(
     assert!(
         matches!(ref_head(&host, element), Some((ref name, _)) if name == "ButtonProps"),
         "the array element must be the symbolic ButtonProps reference, not an inlined object",
+    );
+}
+
+#[test]
+fn same_spelled_distinct_macro_compound_refs_cannot_mint_symbolic_equivalence() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/a/button.ts",
+        "export type ButtonProps = { label: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/b/button.ts",
+        "export type ButtonProps = { label: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import type { ButtonProps } from \"/workspace/a/button.ts\";\nexport type ActionsAnno = ButtonProps[];",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/resolved.ts",
+        "import type { ButtonProps } from \"/workspace/b/button.ts\";\nexport type ActionsResolved = ButtonProps[];",
+    );
+
+    let resolved = decl_body_source("/workspace/resolved.ts", "ActionsResolved");
+    let authored = decl_body_source("/workspace/annos.ts", "ActionsAnno");
+    let resolved_root = raise(&host, &resolved).expect("resolved compound source");
+    let authored_root = raise(&host, &authored).expect("authored compound source");
+    let resolved_element = match node_data(&host, resolved_root).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => *element,
+        other => panic!("resolved collision fixture must be an array; got {other:?}"),
+    };
+    let authored_element = match node_data(&host, authored_root).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => *element,
+        other => panic!("authored collision fixture must be an array; got {other:?}"),
+    };
+    let (resolved_name, resolved_scope, resolved_decl) =
+        bare_ref_scope_and_resolved_decl(&host, resolved_element);
+    let (authored_name, authored_scope, authored_decl) =
+        bare_ref_scope_and_resolved_decl(&host, authored_element);
+    assert_eq!(resolved_name, authored_name, "collision is same-spelled");
+    assert_eq!(resolved_scope, None, "fixture lowers to canonical DeclRef");
+    assert_eq!(authored_scope, None, "fixture lowers to canonical DeclRef");
+    assert_ne!(
+        resolved_decl.canonical_id, authored_decl.canonical_id,
+        "resolved declaration canonicals must be distinct"
+    );
+    let mut meta = empty_meta();
+    meta.props.push(PropAnalysis {
+        name: "actions".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
+            verter_type_expr::ResolutionExactness::ExactSymbolic,
+            Some("ButtonProps[]".to_string()),
+            Some(authored),
+        ),
+        type_expansion: None,
+        required: false,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: vec![],
+        declared_in_macro_type_arg: false,
+    });
+
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/a/button.ts")];
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
+    );
+
+    assert_eq!(
+        meta.props[0].publication.result().selected_source(),
+        Some(&resolved),
+        "same-spelled array element references from distinct canonical declarations are not equivalent"
+    );
+}
+
+#[test]
+fn mismatched_macro_compound_shape_cannot_mint_symbolic_equivalence() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/button.ts",
+        "export type ButtonProps = { label: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import type { ButtonProps } from \"/workspace/button.ts\";\nexport type ActionsAnno = ButtonProps[];",
+    );
+
+    let resolved = synthesized_object(&[(
+        "label",
+        LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
+    )]);
+    let authored = decl_body_source("/workspace/annos.ts", "ActionsAnno");
+    let mut meta = empty_meta();
+    meta.props.push(PropAnalysis {
+        name: "actions".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
+            verter_type_expr::ResolutionExactness::ExactSymbolic,
+            Some("ButtonProps[]".to_string()),
+            Some(authored),
+        ),
+        type_expansion: None,
+        required: false,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: vec![],
+        declared_in_macro_type_arg: false,
+    });
+
+    let registry = vec![registry_entry("ButtonProps", ref_source("ButtonProps"))];
+    let registry_meta = vec![meta_entry("ButtonProps", "/workspace/button.ts")];
+    run_policy_with_macro_participation(
+        &host,
+        &mut meta,
+        &registry,
+        &registry_meta,
+        &["ButtonProps"],
+    );
+
+    assert_eq!(
+        meta.props[0].publication.result().selected_source(),
+        Some(&resolved),
+        "object authority and authored array are not structurally equivalent"
     );
 }
 
@@ -926,10 +1510,13 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         "/workspace/annos.ts",
         "import type { AppProps } from \"/workspace/app.ts\";\nexport type AvatarAnno = AppProps['avatar'];",
     );
+    upsert_ts(
+        &host,
+        "/workspace/resolved.ts",
+        "export type AvatarResolved = { url: string };",
+    );
 
-    let widened = SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
-        verter_type_expr::PrimitiveName::Unknown,
-    )));
+    let resolved = decl_body_source("/workspace/resolved.ts", "AvatarResolved");
     let authored = decl_body_source("/workspace/annos.ts", "AvatarAnno");
 
     let mut meta = empty_meta();
@@ -938,15 +1525,18 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
         is_scoped: true,
         bindings: vec![SlotBindingAnalysis {
             name: "avatar".to_string(),
-            type_source: verter_type_expr::facts::SourcePosition::Present(widened.clone()),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
+                verter_type_expr::ResolutionExactness::ExactSymbolic,
+                Some("AppProps['avatar']".to_string()),
+                Some(authored.clone()),
+            ),
             type_expansion: None,
-            raw_type: None,
-            raw_type_source: Some(authored.clone()),
         }],
         is_required: false,
         return_type: None,
-        return_source: None,
-        return_source_scope: None,
+        return_publication: None,
+        return_publication_scope: None,
         description: None,
         tags: vec![],
         declared_in_macro_type_arg: true,
@@ -965,14 +1555,114 @@ fn w2_4_slot_binding_preserve_typed_indexed_access_via_imported_root() {
 
     let binding = &meta.slots[0].bindings[0];
     assert_eq!(
-        binding.type_source.present(),
+        binding.publication.result().selected_source(),
         Some(&authored),
-        "slot_binding_should_preserve_symbolic_raw_type must restore the authored indexed-access source",
+        "indexed-access policy must publish the authored source",
     );
-    // Negative: the binding must not stay the widened leaf.
+    // Negative: the binding must not stay on the equivalent resolved locator.
     assert_ne!(
-        binding.type_source.present(),
-        Some(&widened),
-        "the widened published source must have been replaced",
+        binding.publication.result().selected_source(),
+        Some(&resolved),
+        "the equivalent resolved representation must have been replaced",
+    );
+}
+
+#[test]
+fn same_spelled_distinct_indexed_roots_cannot_mint_symbolic_equivalence() {
+    let host = empty_host();
+    upsert_ts(
+        &host,
+        "/workspace/a/avatar.ts",
+        "export type Avatar = { url: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/b/avatar.ts",
+        "export type Avatar = { url: string };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/a/app.ts",
+        "import type { Avatar } from \"/workspace/a/avatar.ts\";\nexport type AppProps = { avatar: Avatar };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/b/app.ts",
+        "import type { Avatar } from \"/workspace/b/avatar.ts\";\nexport type AppProps = { avatar: Avatar };",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/annos.ts",
+        "import type { AppProps } from \"/workspace/a/app.ts\";\nexport type AvatarAnno = AppProps['avatar'];",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/resolved.ts",
+        "import type { AppProps } from \"/workspace/b/app.ts\";\nexport type AvatarResolved = AppProps['avatar'];",
+    );
+
+    let resolved = decl_body_source("/workspace/resolved.ts", "AvatarResolved");
+    let authored = decl_body_source("/workspace/annos.ts", "AvatarAnno");
+    let resolved_root = raise(&host, &resolved).expect("resolved indexed source");
+    let authored_root = raise(&host, &authored).expect("authored indexed source");
+    let resolved_object = match node_data(&host, resolved_root).as_deref() {
+        Some(SemanticNodeData::IndexedAccess { object, .. }) => *object,
+        other => panic!("resolved collision fixture must be indexed; got {other:?}"),
+    };
+    let authored_object = match node_data(&host, authored_root).as_deref() {
+        Some(SemanticNodeData::IndexedAccess { object, .. }) => *object,
+        other => panic!("authored collision fixture must be indexed; got {other:?}"),
+    };
+    let (resolved_name, resolved_scope, resolved_decl) =
+        bare_ref_scope_and_resolved_decl(&host, resolved_object);
+    let (authored_name, authored_scope, authored_decl) =
+        bare_ref_scope_and_resolved_decl(&host, authored_object);
+    assert_eq!(resolved_name, authored_name, "collision is same-spelled");
+    assert_eq!(resolved_scope, None, "fixture lowers to canonical DeclRef");
+    assert_eq!(authored_scope, None, "fixture lowers to canonical DeclRef");
+    assert_ne!(
+        resolved_decl.canonical_id, authored_decl.canonical_id,
+        "resolved declaration canonicals must be distinct"
+    );
+    let mut meta = empty_meta();
+    meta.slots.push(SlotAnalysis {
+        name: "default".to_string(),
+        is_scoped: true,
+        bindings: vec![SlotBindingAnalysis {
+            name: "avatar".to_string(),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::Present(resolved.clone()),
+                verter_type_expr::ResolutionExactness::ExactSymbolic,
+                Some("AppProps['avatar']".to_string()),
+                Some(authored),
+            ),
+            type_expansion: None,
+        }],
+        is_required: false,
+        return_type: None,
+        return_publication: None,
+        return_publication_scope: None,
+        description: None,
+        tags: vec![],
+        declared_in_macro_type_arg: true,
+    });
+
+    let registry = vec![
+        registry_entry("AppProps", ref_source("AppProps")),
+        registry_entry("Avatar", ref_source("Avatar")),
+    ];
+    let registry_meta = vec![
+        meta_entry("AppProps", "/workspace/a/app.ts"),
+        meta_entry("Avatar", "/workspace/a/avatar.ts"),
+    ];
+    run_policy_with_macro_participation(&host, &mut meta, &registry, &registry_meta, &["AppProps"]);
+
+    assert_eq!(
+        meta.slots[0].bindings[0]
+            .publication
+            .result()
+            .selected_source(),
+        Some(&resolved),
+        "same-spelled indexed roots from distinct canonical declarations are not equivalent"
     );
 }

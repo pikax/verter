@@ -49,11 +49,11 @@ test.describe("Playground UI rendering", () => {
   // @ai-generated - Output tabs must be visible
   test("output tabs are visible", async ({ page }) => {
     const previewTab = page.locator(".output-tabs button", { hasText: "Preview" });
-    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
-    const cssTab = page.getByRole("button", { name: "CSS", exact: true });
+    const filesTab = page.locator(".output-tabs button", { hasText: "Files" });
+    const analysisTab = page.locator(".output-tabs button", { hasText: "Analysis" });
     await expect(previewTab).toBeVisible({ timeout: 5000 });
-    await expect(jsTab).toBeVisible({ timeout: 5000 });
-    await expect(cssTab).toBeVisible({ timeout: 5000 });
+    await expect(filesTab).toBeVisible({ timeout: 5000 });
+    await expect(analysisTab).toBeVisible({ timeout: 5000 });
   });
 });
 

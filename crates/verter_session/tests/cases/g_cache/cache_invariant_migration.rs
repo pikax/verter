@@ -547,28 +547,55 @@ use verter_session::cache_schema::{CacheSchemaVersioned, CACHE_CLUSTER_SCHEMA_VE
 const STALE_SCHEMA_VERSION: u32 = CACHE_CLUSTER_SCHEMA_VERSION - 1;
 
 #[test]
-fn owner_identity_schema_v3_artifacts_are_rejected_by_v4() {
+fn pre_call_signature_span_schema_v6_artifacts_are_rejected_by_v7() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
-    const OWNER_IDENTITY_PREVIOUS_SCHEMA: u32 = 3;
-    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 4);
-    assert_eq!(STALE_SCHEMA_VERSION, OWNER_IDENTITY_PREVIOUS_SCHEMA);
+    const PRE_CALL_SIGNATURE_SPAN_SCHEMA: u32 = 6;
+    const CALL_SIGNATURE_SPAN_SCHEMA: u32 = 7;
 
-    let stale = FileArtifactStore::new_with_schema_version_for_test(OWNER_IDENTITY_PREVIOUS_SCHEMA);
-    stale.insert_synthetic_for_schema_test("/workspace/owner-v3.ts");
+    let stale = FileArtifactStore::new_with_schema_version_for_test(PRE_CALL_SIGNATURE_SPAN_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/pre-call-signature-span-v6.ts");
+    assert_eq!(
+        stale.evict_if_schema_mismatch(CALL_SIGNATURE_SPAN_SCHEMA),
+        1,
+        "a v6 artifact cannot be read under the call-signature-span-aware v7 schema"
+    );
+    assert_eq!(stale.len(), 0);
+
+    let current = FileArtifactStore::new_with_schema_version_for_test(CALL_SIGNATURE_SPAN_SCHEMA);
+    current.insert_synthetic_for_schema_test("/workspace/call-signature-span-v7.ts");
+    assert_eq!(
+        current.evict_if_schema_mismatch(CALL_SIGNATURE_SPAN_SCHEMA),
+        0,
+        "a v7 artifact survives a matching-schema roundtrip"
+    );
+    assert_eq!(current.len(), 1);
+}
+
+// @ai-generated - Pins rejection of cached import targets carrying a resolved canonical.
+#[test]
+fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v8() {
+    use verter_session::file_artifact_store::FileArtifactStore;
+
+    const RESOLVED_IMPORT_TARGET_SCHEMA: u32 = 7;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 8);
+    assert_eq!(STALE_SCHEMA_VERSION, RESOLVED_IMPORT_TARGET_SCHEMA);
+
+    let stale = FileArtifactStore::new_with_schema_version_for_test(RESOLVED_IMPORT_TARGET_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/resolved-import-target-v7.ts");
     assert_eq!(
         stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         1,
-        "a v3 artifact cannot be read under the owner-exact v4 schema"
+        "a v7 artifact cannot be read under the authored-import-only v8 schema"
     );
     assert_eq!(stale.len(), 0);
 
     let current = FileArtifactStore::new();
-    current.insert_synthetic_for_schema_test("/workspace/owner-v4.ts");
+    current.insert_synthetic_for_schema_test("/workspace/authored-import-only-v8.ts");
     assert_eq!(
         current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         0,
-        "a v4 artifact survives a matching-schema roundtrip"
+        "a v8 artifact survives a matching-schema roundtrip"
     );
     assert_eq!(current.len(), 1);
 }

@@ -249,8 +249,6 @@ pub fn host_virtual_file_to_ffi(
         meta: FfiVirtualMeta {
             scope_id: input.meta.scope_id,
             block_type: input.meta.block_type,
-            style_index: input.meta.style_index.map(|i| i as u32),
-            custom_index: input.meta.custom_index.map(|i| i as u32),
         },
         cache_hit: input.cache_hit,
         requested_mode: input.requested_mode.to_string(),

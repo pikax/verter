@@ -741,7 +741,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 owner_canonical,
                 macro_index,
             ) {
-                Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+                Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
                 None => continue,
             };
         // Carrier-fact propagation: walk the lowered macro arg and
@@ -1599,104 +1599,84 @@ pub(crate) fn publish_merged_bindings(
             continue;
         }
 
-        // Consult the parser-path index BEFORE deciding publication
-        // shape — the parser-lowered annotation is the syntactic
-        // truth. Removing here also drives the parser-only fallback
-        // loop below (which iterates the residual).
+        // Remove the matching parser row so its locator/text can accompany
+        // the graph-owned authority as atomic authored evidence. Residual
+        // parser-only rows are handled by the fallback loop below.
         let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
 
-        let (r#type, shallow_source, is_session_raised) = match parser_path
-            .and_then(|pb| pb.payload.as_ref())
-        {
-            Some(payload) => {
-                // Parser-path branch — the authored payload position is the
-                // typed authority; the demand side re-raises it through the
-                // one shared dispatch.
-                let locator =
-                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload.clone());
+        let (r#type, is_session_raised) = {
+            // Graph-authority branch — a SESSION-RAISED binding row (the graph
+            // walk off the macro payload's Shallow surface produced
+            // `gb.value_node`). Differentiated source selection:
+            //
+            //   - A CLOSED symbolic indexed-access route (a literal
+            //     string index path over a named declaration body slot)
+            //     publishes the honest closed fact
+            //     (`Closed(IndexedAccess)`), so the shallow view shows
+            //     the concrete member-path form (`AppProps['avatar']`)
+            //     consumers re-resolve on demand — no body expansion,
+            //     path-precise per the shallow-by-default rule.
+            //
+            //   - Everything else (open generic, non-indexed,
+            //     unrepresentable, concrete-inline) publishes the
+            //     FIRST-CLASS synthetic binding carrier: the
+            //     content-free `(scope, slot, binding)` identity plus
+            //     the value-side `value_node` provenance seed.
+            //     Publishing the whole macro TYPE-ARGUMENT position here
+            //     discarded the `(slot, binding)` precision the graph
+            //     walk already had — the raise could only return the
+            //     whole `defineSlots<T>` payload. A consumer deepening
+            //     THIS binding's value routes through the content-free
+            //     synthetic-binding identity
+            //     (`ShapeCacheKey::synthetic_binding_whole_with_context`
+            //     through `ShapeCacheDb`), cold-reducing from the
+            //     same-generation `value_node` seed. Downstream
+            //     publication loops recognise the synthetic-source
+            //     identity and never reduce a parent shell per row.
+            if let Some(closed) =
+                closed_member_path_route_source(dispatch, owner_canonical, gb.value_node)
+            {
+                (closed, true)
+            } else if let Some(slot) = gb.value_use_site.as_ref() {
+                // An ARGUMENT-BEARING named-reference value (`message:
+                // MessageBase<string>`) publishes the arg-preserving
+                // authored USE-SITE carrier staged by the walk: the
+                // declaring decl's member-value slot, whose deref
+                // replays the instantiation WITH its type arguments
+                // through the one shared dispatch (`Instantiate`
+                // re-derives the substitution on demand). Content-free
+                // and NON-EXECUTED — never a serialized graph node,
+                // never an eager expansion. The argument-less
+                // `Closed(Leaf(Ref))` fallback below would destroy
+                // both the substitution and the declaring scope.
                 (
-                    verter_type_expr::facts::SemanticTypeSource::Authored(locator.clone()),
-                    Some(locator),
-                    false,
+                    verter_type_expr::facts::SemanticTypeSource::Authored(
+                        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+                    ),
+                    true,
                 )
-            }
-            None => {
-                // No-parser branch — a SESSION-RAISED binding row (the graph
-                // walk off the macro payload's Shallow surface produced
-                // `gb.value_node`). Differentiated source selection:
-                //
-                //   - A CLOSED symbolic indexed-access route (a literal
-                //     string index path over a named declaration body slot)
-                //     publishes the honest closed fact
-                //     (`Closed(IndexedAccess)`), so the shallow view shows
-                //     the concrete member-path form (`AppProps['avatar']`)
-                //     consumers re-resolve on demand — no body expansion,
-                //     path-precise per the shallow-by-default rule.
-                //
-                //   - Everything else (open generic, non-indexed,
-                //     unrepresentable, concrete-inline) publishes the
-                //     FIRST-CLASS synthetic binding carrier: the
-                //     content-free `(scope, slot, binding)` identity plus
-                //     the value-side `value_node` provenance seed.
-                //     Publishing the whole macro TYPE-ARGUMENT position here
-                //     discarded the `(slot, binding)` precision the graph
-                //     walk already had — the raise could only return the
-                //     whole `defineSlots<T>` payload. A consumer deepening
-                //     THIS binding's value routes through the content-free
-                //     synthetic-binding identity
-                //     (`ShapeCacheKey::synthetic_binding_whole_with_context`
-                //     through `ShapeCacheDb`), cold-reducing from the
-                //     same-generation `value_node` seed. Downstream
-                //     publication loops recognise the synthetic-source
-                //     identity and never reduce a parent shell per row.
-                if let Some(closed) =
-                    closed_member_path_route_source(dispatch, owner_canonical, gb.value_node)
-                {
-                    (closed, None, true)
-                } else if let Some(slot) = gb.value_use_site.as_ref() {
-                    // An ARGUMENT-BEARING named-reference value (`message:
-                    // MessageBase<string>`) publishes the arg-preserving
-                    // authored USE-SITE carrier staged by the walk: the
-                    // declaring decl's member-value slot, whose deref
-                    // replays the instantiation WITH its type arguments
-                    // through the one shared dispatch (`Instantiate`
-                    // re-derives the substitution on demand). Content-free
-                    // and NON-EXECUTED — never a serialized graph node,
-                    // never an eager expansion. The argument-less
-                    // `Closed(Leaf(Ref))` fallback below would destroy
-                    // both the substitution and the declaring scope.
-                    (
-                        verter_type_expr::facts::SemanticTypeSource::Authored(
-                            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
-                        ),
-                        None,
-                        true,
-                    )
-                } else if let Some(named) = named_reference_carrier_source(dispatch, gb.value_node)
-                {
-                    // A NAMED reference value (`message: MessageBase<T>` — a
-                    // `DeclRef` / `InstantiationRef` / bare-ref head) publishes
-                    // the shallow named-reference carrier: the published
-                    // shallow shape is the re-resolvable `Ref` (shallow-by-
-                    // default), never the synthetic stand-in and never a
-                    // flattened surface.
-                    (named, None, true)
-                } else {
-                    let carrier = verter_type_expr::SyntheticCarrierKey {
-                        scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
-                        surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                        slot_name: Some(Arc::clone(&slot_name)),
-                        binding_name: Arc::clone(&binding_name),
-                        value_node: gb.value_node.0,
-                    };
-                    (
-                        verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-                            Arc::new(carrier),
-                        ),
-                        None,
-                        true,
-                    )
-                }
+            } else if let Some(named) = named_reference_carrier_source(dispatch, gb.value_node) {
+                // A NAMED reference value (`message: MessageBase<T>` — a
+                // `DeclRef` / `InstantiationRef` / bare-ref head) publishes
+                // the shallow named-reference carrier: the published
+                // shallow shape is the re-resolvable `Ref` (shallow-by-
+                // default), never the synthetic stand-in and never a
+                // flattened surface.
+                (named, true)
+            } else {
+                let carrier = verter_type_expr::SyntheticCarrierKey {
+                    scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
+                    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                    slot_name: Some(Arc::clone(&slot_name)),
+                    binding_name: Arc::clone(&binding_name),
+                    value_node: gb.value_node.0,
+                };
+                (
+                    verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(Arc::new(
+                        carrier,
+                    )),
+                    true,
+                )
             }
         };
 
@@ -1713,22 +1693,36 @@ pub(crate) fn publish_merged_bindings(
             "publish_slot_binding",
         );
 
-        expanded.slot_bindings.push(ExpandedField {
-            name: field_name,
-            r#type: verter_type_expr::facts::SourcePosition::Present(r#type),
-            raw_type,
-            optional: gb.optional,
-            exactness,
-            execution_status: ExpansionExecutionStatus::Completed,
-            diagnostics: Vec::new(),
-            shallow_source,
-            // Slot bindings are positional parameters of a slot's
-            // function signature, not declared members of the macro
-            // T's own body. The fact applies at the slot level (the
-            // slot's name in `defineSlots<T>`'s T), not the binding
-            // level — `false` is the structural truth.
-            declared_in_macro_type_arg: false,
-        });
+        let authored_evidence = parser_path
+            .and_then(|binding| binding.payload.as_ref())
+            .zip(raw_type.as_deref())
+            .map(|(locator, text)| {
+                // SAFETY: both values come from this parser-produced binding.
+                let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
+                verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
+                    &mint,
+                    locator,
+                    Arc::from(text),
+                )
+            });
+        expanded
+            .slot_bindings
+            .push(ExpandedField::from_source_position(
+                field_name,
+                verter_type_expr::facts::SourcePosition::Present(r#type),
+                authored_evidence,
+                gb.optional,
+                exactness,
+                ExpansionExecutionStatus::Completed,
+                Vec::new(),
+                // Slot bindings are positional parameters of a slot's
+                // function signature, not declared members of the macro
+                // T's own body. The fact applies at the slot level (the
+                // slot's name in `defineSlots<T>`'s T), not the binding
+                // level — `false` is the structural truth.
+                false,
+                verter_type_expr::ResolutionProvenance::SessionProjector,
+            ));
     }
 
     // Publish parser-path-only bindings (those without a graph-native
@@ -1768,21 +1762,36 @@ pub(crate) fn publish_merged_bindings(
             .map(verter_type_expr::facts::SemanticTypeSource::Authored)
             .map(verter_type_expr::facts::SourcePosition::Present)
             .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
-        expanded.slot_bindings.push(ExpandedField {
-            name: field_name,
-            r#type: published_source,
-            raw_type,
-            optional: false,
-            exactness: ExpansionExactness::ExactConcrete,
-            execution_status: ExpansionExecutionStatus::Completed,
-            diagnostics: Vec::new(),
-            shallow_source,
-            // Slot bindings are positional parameters of a slot's
-            // function signature, not declared members of the macro
-            // T's own body — `false` is the structural truth (see
-            // companion comment in `graph_native` push above).
-            declared_in_macro_type_arg: false,
-        });
+        let authored_evidence =
+            shallow_source
+                .as_ref()
+                .zip(raw_type.as_deref())
+                .map(|(locator, text)| {
+                    // SAFETY: both values come from this projected member row.
+                    let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
+                    verter_type_expr::AuthoredTypeEvidence::from_authored_body(
+                        &mint,
+                        locator,
+                        Arc::from(text),
+                    )
+                });
+        expanded
+            .slot_bindings
+            .push(ExpandedField::from_source_position(
+                field_name,
+                published_source,
+                authored_evidence,
+                false,
+                ExpansionExactness::ExactConcrete,
+                ExpansionExecutionStatus::Completed,
+                Vec::new(),
+                // Slot bindings are positional parameters of a slot's
+                // function signature, not declared members of the macro
+                // T's own body — `false` is the structural truth (see
+                // companion comment in `graph_native` push above).
+                false,
+                verter_type_expr::ResolutionProvenance::SessionProjector,
+            ));
     }
 }
 

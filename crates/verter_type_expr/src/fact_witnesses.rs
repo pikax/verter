@@ -22,7 +22,12 @@ use crate::facts::*;
 use crate::intrinsics::*;
 use crate::locators::*;
 use crate::span_origins::*;
-use crate::{MemberSpans, MemberVisibility, PrimitiveName};
+use crate::{
+    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, MemberSpans, MemberVisibility,
+    PrimitiveName, PropCallableRole, PropCallableRoleUnresolvedReason,
+    ReactiveWrapperImportProvenance, ReactiveWrapperRole, ReactiveWrapperUnresolvedReason,
+    ResolutionExactness, ResolutionProvenance, ResolvedSymbolIdentity,
+};
 
 /// Assert every listed type is a fully-witnessed closed fact carrier.
 macro_rules! assert_fact_carriers {
@@ -126,6 +131,8 @@ assert_fact_carriers!(
     MemberDependencyEdge,
     ShallowRouteFacts,
     ValueAnnotationClass,
+    AuthoredReferenceArgLocator,
+    AuthoredReferenceHeadFact,
     ValueTypeAnnotationFact,
     NarrowTypeParam,
     TypeParamDeclFact,
@@ -200,8 +207,86 @@ assert_fact_carriers!(
     ProjectedSurfaceFact,
     SvelteLegacyPropFact,
     SvelteModuleExportFact,
+    SvelteSnippetImportFact,
     SvelteScriptFactsFact,
+    ResolvedSymbolIdentity,
+    PropCallableRole,
+    ClosedLiteralDomain,
+    ReactiveWrapperRole,
+    ReactiveWrapperImportProvenance,
 );
+
+#[test]
+fn prop_callable_role_defaults_fail_closed_and_round_trips() {
+    let defaulted = PropCallableRole::default();
+    assert_eq!(
+        defaulted,
+        PropCallableRole::Unresolved {
+            reason: PropCallableRoleUnresolvedReason::AnalysisUnavailable,
+        },
+        "an absent producer must never silently classify a prop as Other"
+    );
+
+    let role = PropCallableRole::SvelteSnippet {
+        symbol: ResolvedSymbolIdentity {
+            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
+            symbol: std::sync::Arc::from("Snippet"),
+        },
+        exactness: ResolutionExactness::ExactSymbolic,
+        provenance: ResolutionProvenance::FrameworkSurface,
+    };
+    let encoded = serde_json::to_string(&role).expect("role serializes");
+    let decoded: PropCallableRole = serde_json::from_str(&encoded).expect("role deserializes");
+    assert_eq!(
+        decoded, role,
+        "typed callable role must round-trip losslessly"
+    );
+}
+
+#[test]
+fn template_class_roles_round_trip_without_display_authority() {
+    let domain = ClosedLiteralDomain::Strings(std::sync::Arc::from([
+        std::sync::Arc::<str>::from("a"),
+        std::sync::Arc::<str>::from("b"),
+    ]));
+    let json = serde_json::to_string(&domain).expect("domain serializes");
+    let decoded: ClosedLiteralDomain = serde_json::from_str(&json).expect("domain deserializes");
+    assert_eq!(decoded, domain);
+    assert_eq!(
+        ClosedLiteralDomain::default(),
+        ClosedLiteralDomain::Unresolved {
+            reason: ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+            exactness: ResolutionExactness::Incomplete,
+        }
+    );
+    assert_eq!(
+        ReactiveWrapperRole::default(),
+        ReactiveWrapperRole::Unresolved {
+            reason: ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+        }
+    );
+    let route = ReactiveWrapperImportProvenance {
+        authored_head: AuthoredReferenceHeadFact::Qualified {
+            local_root: std::sync::Arc::from("Vue"),
+            member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+            args: std::sync::Arc::from([]),
+        },
+        package: std::sync::Arc::from("vue"),
+        import_source: std::sync::Arc::from("vue"),
+        local_binding: std::sync::Arc::from("Vue"),
+        owner_canonical: std::sync::Arc::from("/ws/App.vue"),
+        imported_name: std::sync::Arc::from("Ref"),
+        terminal_import_source: std::sync::Arc::from("vue"),
+        local_alias_hops: std::sync::Arc::from([]),
+        exactness: ResolutionExactness::ExactSymbolic,
+        provenance: ResolutionProvenance::FrameworkSurface,
+    };
+    let encoded = serde_json::to_string(&route).expect("route serializes");
+    let decoded: ReactiveWrapperImportProvenance =
+        serde_json::from_str(&encoded).expect("route deserializes");
+    assert_eq!(decoded, route);
+}
 
 // --- Four-source SemanticTypeSource + expansion-result wrapper + intrinsics ---
 assert_fact_carriers!(
@@ -304,6 +389,7 @@ fn empty_fn() -> FunctionSignatureFact {
         parameters: std::sync::Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
         return_ty: None,
         return_inference: ReturnInferenceCompleteness::NotInferred,
+        return_reference_head: AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {
@@ -426,6 +512,267 @@ fn member_visibility_participates_in_fact_identity() {
     assert_ne!(protected, private);
     assert_ne!(public, private);
     assert_eq!(public, prop("x", false, MemberVisibility::Public));
+}
+
+/// The value-space signature return position's authored reference head is a
+/// producer-owned route-evidence FACT: two signatures that differ ONLY in the
+/// authored head are DISTINCT facts, so a cache slot can never collapse
+/// `(): Ref<T>` with `(): ShallowRef<T>` (or with an inferred return, whose
+/// head is `Unavailable`).
+#[test]
+fn return_reference_head_participates_in_signature_fact_identity() {
+    let with_head = |local_name: &str| FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Bare {
+            local_name: std::sync::Arc::from(local_name),
+            args: std::sync::Arc::from(
+                Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice(),
+            ),
+        },
+        ..empty_fn()
+    };
+    let referenced = with_head("Ref");
+    let shallow = with_head("ShallowRef");
+    assert_ne!(
+        referenced, shallow,
+        "the authored return head must discriminate signature fact identity"
+    );
+    assert_eq!(referenced, with_head("Ref"));
+    // The mint-gate states are distinct identities too: an INFERRED return
+    // (`Unavailable`) must never alias an authored non-reference return
+    // (`NotReference`) nor an authored reference head.
+    let inferred = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Unavailable,
+        ..empty_fn()
+    };
+    let authored_non_reference = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::NotReference,
+        ..empty_fn()
+    };
+    assert_ne!(inferred, authored_non_reference);
+    assert_ne!(inferred, referenced);
+    assert_ne!(authored_non_reference, referenced);
+    // Hash identity agrees on the recorded hash INPUT STREAM.
+    assert_ne!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&shallow),
+        "the authored return head must feed distinct hash input streams"
+    );
+    assert_ne!(
+        hash_input_stream(&inferred),
+        hash_input_stream(&authored_non_reference),
+        "Unavailable and NotReference heads must feed distinct hash input streams"
+    );
+    assert_eq!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&with_head("Ref")),
+        "equal signature facts must feed identical hash input streams"
+    );
+}
+
+/// A prepared type-decl MEMBER's authored reference head is producer-owned
+/// route evidence on the SAME footing as the signature-return head: two members
+/// that differ ONLY in the authored head are DISTINCT facts, so a cache slot can
+/// never collapse `variant: Ref<T>` with `variant: ShallowRef<T>`, nor either
+/// with a member that mints no head at all (a method's `Unavailable`, an
+/// authored non-reference annotation's `NotReference`).
+#[test]
+fn prepared_member_reference_head_participates_in_member_fact_identity() {
+    let with_head = |head: AuthoredReferenceHeadFact| PreparedMemberFact {
+        optional: false,
+        readonly: false,
+        is_method: false,
+        visibility: MemberVisibility::Public,
+        declaration_origin: DeclarationOrigin::Declared(std::sync::Arc::from("/ws/props.ts")),
+        ty: slot(),
+        span_origin: member_origin(0),
+        reference_head: head,
+    };
+    let bare = |local_name: &str| AuthoredReferenceHeadFact::Bare {
+        local_name: std::sync::Arc::from(local_name),
+        args: std::sync::Arc::from(Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice()),
+    };
+    let referenced = with_head(bare("Ref"));
+    let shallow = with_head(bare("ShallowRef"));
+    assert_ne!(
+        referenced, shallow,
+        "the authored member head must discriminate member fact identity"
+    );
+    assert_eq!(referenced, with_head(bare("Ref")));
+
+    // The two mint-gate absences are distinct identities too: a METHOD member
+    // (no authored member type annotation at all ⇒ `Unavailable`) must never
+    // alias an authored non-reference property annotation (`NotReference`), nor
+    // an authored reference head.
+    let method_member = with_head(AuthoredReferenceHeadFact::Unavailable);
+    let authored_non_reference = with_head(AuthoredReferenceHeadFact::NotReference);
+    assert_ne!(method_member, authored_non_reference);
+    assert_ne!(method_member, referenced);
+    assert_ne!(authored_non_reference, referenced);
+
+    // Hash identity agrees on the recorded hash INPUT STREAM.
+    assert_ne!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&shallow),
+        "the authored member head must feed distinct hash input streams"
+    );
+    assert_ne!(
+        hash_input_stream(&method_member),
+        hash_input_stream(&authored_non_reference),
+        "Unavailable and NotReference member heads must feed distinct hash input streams"
+    );
+    assert_eq!(
+        hash_input_stream(&referenced),
+        hash_input_stream(&with_head(bare("Ref"))),
+        "equal member facts must feed identical hash input streams"
+    );
+
+    // A previously persisted member fact carries no head key at all, and "no
+    // head was produced" is exactly `Unavailable` — never a fabricated head.
+    let json = serde_json::to_value(&referenced).expect("serialize member fact");
+    let mut without_head = json.as_object().expect("object").clone();
+    assert!(
+        without_head.remove("reference_head").is_some(),
+        "the member head must be part of the persisted schema"
+    );
+    let restored: PreparedMemberFact =
+        serde_json::from_value(serde_json::Value::Object(without_head))
+            .expect("an absent head key must deserialize");
+    assert_eq!(
+        restored.reference_head,
+        AuthoredReferenceHeadFact::Unavailable,
+        "an absent persisted head must default to Unavailable, never a fabricated head"
+    );
+}
+
+/// Deep-walk completeness of the producer-local anchor absolutization family:
+/// a return head's ARGUMENT locators sit at a nesting depth the family had no
+/// arm for, so a producer-local (empty-`canonical_id`) argument anchor would
+/// have survived a cross-owner re-anchor unrewritten. Already-absolute
+/// argument anchors are never rewritten.
+#[test]
+fn authored_reference_head_absolutizes_producer_local_arg_anchors() {
+    const OWNER: &str = "/ws/owner.ts";
+    let arg = |canonical: &str| {
+        AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: AuthoredAnchor {
+                canonical_id: std::sync::Arc::from(canonical),
+                owner: crate::TopLevelOwnerId::ordinary_file(),
+                symbol: std::sync::Arc::from("getRef"),
+                space: LocatorSymbolSpace::Value,
+            },
+            path: std::sync::Arc::from(
+                vec![
+                    TypeBodyPathStep::ValueSignature { ordinal: 0 },
+                    TypeBodyPathStep::FunctionReturn,
+                ]
+                .into_boxed_slice(),
+            ),
+            arg_index: 0,
+        })
+    };
+    let signature = FunctionSignatureFact {
+        return_reference_head: AuthoredReferenceHeadFact::Bare {
+            local_name: std::sync::Arc::from("Ref"),
+            args: std::sync::Arc::from(vec![arg(""), arg("/lib/keep.ts")].into_boxed_slice()),
+        },
+        ..empty_fn()
+    };
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::Function(signature));
+    let normalized = source.absolutized_against(OWNER);
+    let SemanticTypeSource::Closed(ClosedTypeFact::Function(rewritten)) = &normalized else {
+        panic!("the normalizer must preserve the closed function arm, got {normalized:?}");
+    };
+    let AuthoredReferenceHeadFact::Bare { local_name, args } = &rewritten.return_reference_head
+    else {
+        panic!(
+            "the normalizer must preserve the head arm, got {:?}",
+            rewritten.return_reference_head
+        );
+    };
+    assert_eq!(
+        local_name.as_ref(),
+        "Ref",
+        "the authored local spelling is never rewritten"
+    );
+    let canonical_of = |arg: &AuthoredReferenceArgLocator| match arg {
+        AuthoredReferenceArgLocator::Value(locator) => locator.anchor.canonical_id.to_string(),
+        AuthoredReferenceArgLocator::MacroPayload { payload, .. } => {
+            payload.anchor.canonical_id.to_string()
+        }
+    };
+    assert_eq!(
+        canonical_of(&args[0]),
+        OWNER,
+        "a producer-local return-head argument anchor must absolutize to the owning canonical"
+    );
+    assert_eq!(
+        canonical_of(&args[1]),
+        "/lib/keep.ts",
+        "an already-absolute return-head argument anchor must NOT be rewritten"
+    );
+    // The anchor-free head arms are pass-through: nothing to rewrite, and the
+    // arm is preserved rather than collapsed.
+    for head in [
+        AuthoredReferenceHeadFact::NotReference,
+        AuthoredReferenceHeadFact::Unavailable,
+    ] {
+        let source = SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
+            return_reference_head: head.clone(),
+            ..empty_fn()
+        }));
+        let normalized = source.absolutized_against(OWNER);
+        let SemanticTypeSource::Closed(ClosedTypeFact::Function(rewritten)) = &normalized else {
+            panic!("the normalizer must preserve the closed function arm");
+        };
+        assert_eq!(rewritten.return_reference_head, head);
+    }
+}
+
+/// The scope-relative predicate is the deep-walk companion of the
+/// absolutization family: a signature whose return head carries a
+/// producer-local argument anchor is scope-relative (two equal values from
+/// different origins may name different declarations), and a fully-anchored
+/// one is not.
+#[test]
+fn function_fact_scope_relative_sees_a_scope_relative_return_head() {
+    let head_with = |canonical: &str| AuthoredReferenceHeadFact::Bare {
+        local_name: std::sync::Arc::from("Ref"),
+        args: std::sync::Arc::from(
+            vec![AuthoredReferenceArgLocator::Value(TypeArgLocator {
+                anchor: AuthoredAnchor {
+                    canonical_id: std::sync::Arc::from(canonical),
+                    owner: crate::TopLevelOwnerId::ordinary_file(),
+                    symbol: std::sync::Arc::from("getRef"),
+                    space: LocatorSymbolSpace::Value,
+                },
+                path: std::sync::Arc::from(
+                    vec![TypeBodyPathStep::FunctionReturn].into_boxed_slice(),
+                ),
+                arg_index: 0,
+            })]
+            .into_boxed_slice(),
+        ),
+    };
+    let source_for = |head: AuthoredReferenceHeadFact| {
+        SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
+            return_reference_head: head,
+            ..empty_fn()
+        }))
+    };
+    assert!(
+        source_for(head_with("")).is_scope_relative(),
+        "a producer-local return-head argument anchor makes the source scope-relative"
+    );
+    assert!(
+        !source_for(head_with("/ws/owner.ts")).is_scope_relative(),
+        "a fully-anchored return head must NOT be reported scope-relative"
+    );
+    // The anchor-free arms carry no scope dependence of their own.
+    assert!(!source_for(AuthoredReferenceHeadFact::NotReference).is_scope_relative());
+    assert!(!source_for(AuthoredReferenceHeadFact::Unavailable).is_scope_relative());
+    // Control: `empty_fn()` has no scope-relative position at all, so the
+    // predicate is not simply always-true for a function fact.
+    assert!(!source_for(AuthoredReferenceHeadFact::NotReference).is_scope_relative());
 }
 
 #[test]
@@ -1385,6 +1732,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
             LeafTypeFact::Primitive(PrimitiveName::Number),
         ))),
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     // An authored TS annotation rides the SAME field under the `Authored` source
     // — proving the field widened to accept BOTH authored locators and closed
@@ -1396,6 +1744,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         annotation: Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             slot(),
         ))),
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     assert_ne!(
         inferred, authored,
@@ -1413,7 +1762,36 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         }),
         classification: ValueAnnotationClass::TypeOfAlias,
         annotation: None,
+        reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());
+}
+
+#[test]
+fn authored_reference_head_fact_discriminates_exact_route_and_arguments() {
+    let first = AuthoredReferenceHeadFact::Qualified {
+        local_root: std::sync::Arc::from("Vue"),
+        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor(),
+            path: std::sync::Arc::from([]),
+            arg_index: 0,
+        })]),
+    };
+    let other_root = AuthoredReferenceHeadFact::Qualified {
+        local_root: std::sync::Arc::from("Other"),
+        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
+        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+            anchor: anchor(),
+            path: std::sync::Arc::from([]),
+            arg_index: 0,
+        })]),
+    };
+    assert_ne!(first, other_root);
+    assert_ne!(hash_input_stream(&first), hash_input_stream(&other_root));
+    let encoded = serde_json::to_string(&first).expect("reference head serializes");
+    let decoded: AuthoredReferenceHeadFact =
+        serde_json::from_str(&encoded).expect("reference head deserializes");
+    assert_eq!(decoded, first);
 }

@@ -201,7 +201,7 @@ defineExpose({
 </i18n>`;
 
     const absPath = resolve((checker as any).projectRoot ?? "", "BreadthButton.vue");
-    // The sfcBlocks sidecar reads the host-side base parse state
+    // The ordered structure reads the host-side base parse state
     // (`current_eval_state`), so the SFC must be resident in the shared base
     // project — the same route the Rust `upsert_base` fixtures use. A
     // session-overlay-only file leaves the host base view empty and the
@@ -218,39 +218,12 @@ defineExpose({
       "focus",
     ]);
     expect(compatMeta.exposed.map((member) => member.name)).toEqual(["focus"]);
-    expect(nativeMeta?.sfcBlocks).toMatchObject({
-      script: {
-        lang: "ts",
-      },
-      scriptSetup: {
-        lang: "ts",
-        generic: "T extends string = string",
-        attrsType: "ButtonAttrs",
-      },
-      template: {
-        lang: "html",
-      },
-      styles: [
-        {
-          index: 0,
-          lang: "scss",
-          scoped: true,
-          isModule: true,
-          moduleName: "theme",
-        },
-      ],
-      custom: [
-        {
-          index: 0,
-          blockType: "i18n",
-          lang: "json",
-        },
-      ],
+    expect(nativeMeta?.orderedSfcStructure).toMatchObject({
+      schemaVersion: 1,
+      artifactToken: expect.any(String),
     });
-    expect(nativeMeta?.sfcBlocks?.template?.attributes).toContainEqual({
-      name: "data-layout",
-      value: "stack",
-    });
+    expect(nativeMeta?.orderedSfcStructure.blocks).toHaveLength(5);
+    expect(nativeMeta?.orderedSfcStructure).not.toHaveProperty("source");
   });
 
   it("evaluates union literal props with schema", async () => {

@@ -51,6 +51,10 @@ fn link_pnpm_typescript(workspace: &Path, package: &Path, version: &str) -> Path
     lib.join("tsserver.js").canonicalize().unwrap()
 }
 
+/// Every caller is a `#[cfg(unix)]` test (the pnpm-symlink fixtures), so the
+/// helper is gated to match — on Windows it would otherwise be dead code and
+/// fail the `-D warnings` clippy gate.
+#[cfg(unix)]
 fn write_tsconfig(project: &Path) {
     std::fs::create_dir_all(project).unwrap();
     std::fs::write(project.join("tsconfig.json"), r#"{ "include": ["src"] }"#).unwrap();

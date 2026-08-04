@@ -13,21 +13,13 @@ use rustc_hash::FxHashMap;
 // measure parse durations via the scheduler executor.
 
 use crate::cache::sorted_nodes;
-use crate::hash::{compile_profile_hash, content_override_hash, style_override_hash};
+use crate::hash::{compile_profile_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
-use crate::parse::parse_vue_snapshot;
 use crate::types::*;
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
-
-/// Synthetic-source SFC block splicing behind the override upsert paths —
-/// pure text helpers with no host/cache/scheduler access (all
-/// upsert/eviction-relevant logic stays in THIS file, the single file the
-/// `host_upsert_performs_no_reverse_dependent_eviction` guard scans).
-mod block_splice;
-use block_splice::build_synthetic_source;
 
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
@@ -199,6 +191,38 @@ impl VerterHost {
             .host_upsert_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.upsert_with_priority(req, Priority::Interactive)
+    }
+
+    /// Ingest an already registered carrier envelope at the Source stage.
+    /// Canonical identity, exact bytes, and resolved language are validated
+    /// before the scheduler can observe the handoff.
+    #[doc(hidden)]
+    pub fn upsert_registered_envelope(
+        &self,
+        req: UpsertRequest,
+        structure: crate::carrier_publication_store::RegisteredFileStructure,
+    ) -> Result<HostUpdateResult, HostError> {
+        let canonical_id = Self::resolve_upsert_canonical(&req);
+        let registered = structure.envelope().source();
+        if registered.canonical().as_str() != canonical_id
+            || registered.bytes() != req.source.as_ref()
+            || registered.resolved_file_language() != &req.file_language
+        {
+            return Err(HostError::InvalidQuery);
+        }
+        let expected_artifact = Arc::clone(structure.artifact());
+        self.registered_envelope_ingest
+            .lock()
+            .insert(canonical_id.clone(), structure);
+        let result = self.upsert(req);
+        let mut pending = self.registered_envelope_ingest.lock();
+        if pending
+            .get(&canonical_id)
+            .is_some_and(|value| Arc::ptr_eq(value.artifact(), &expected_artifact))
+        {
+            pending.remove(&canonical_id);
+        }
+        result
     }
 
     /// Insert or update a file with caller-configured scheduler priority.
@@ -1054,6 +1078,22 @@ impl VerterHost {
                     .map(|ad| Arc::clone(&ad.style_analyses))
                     .unwrap_or_default();
 
+            // External-`src` blocks defer their content (B-23): an override
+            // targeting a deferred block would rebuild an `Inline` CSS
+            // analysis and virtual style bytes for content the framework
+            // never uses. Refuse the whole request typed, before any cache
+            // mutation — never fabricate inline state for a deferred block.
+            for &idx in by_index.keys() {
+                if raw_style_analyses
+                    .get(idx)
+                    .is_some_and(|analysis| analysis.is_external_src_deferred())
+                {
+                    return Err(HostError::ExternalBlockContentDeferred(
+                        crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+                    ));
+                }
+            }
+
             // Check previous hash
             let previous_hash = self
                 .compile_cache()
@@ -1068,6 +1108,40 @@ impl VerterHost {
 
             let source = &source_snap.source;
             let meta = &hd.parse.meta;
+
+            // Inventory-owned geometry: the ORIGINAL content handed to
+            // source-map remapping is the SELECTED style block's
+            // `content_span`, read from the registered inventory. The
+            // parser already owns block geometry (raw-text termination,
+            // case-insensitive close tags), so a raw delimiter search over
+            // the source bytes is forbidden here — it diverges from the
+            // parser on exactly the inputs that matter (`</style`-prefixed
+            // literals inside a style body, `</STYLE>` closes). Override
+            // indices are style ordinals, so the projection filters the
+            // inventory to style sections in source order — the same
+            // ordinal domain the style analyses are built from.
+            let style_content_slices: Vec<&str> = hd
+                .structure
+                .as_ref()
+                .map(|structure| {
+                    use verter_language::parse_artifact::carrier_inventory::{
+                        CarrierBlock, SectionRole,
+                    };
+                    let inventory = structure.inventory();
+                    inventory
+                        .blocks()
+                        .iter()
+                        .filter_map(|block| match block {
+                            CarrierBlock::Section {
+                                role: SectionRole::Style { .. },
+                                syntax,
+                                ..
+                            } => Some(inventory.slice_span(syntax.content_span).unwrap_or("")),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             // Re-analyze compiled CSS and remap spans
             let mut analyses_vec: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>> =
@@ -1087,21 +1161,16 @@ impl VerterHost {
                         existing.module_name.as_deref(),
                         content_offset,
                     );
+                    new_analysis.block_ref = existing.block_ref.clone();
+                    new_analysis.block_token = existing.block_token.clone();
 
                     if let (Some(sm_json), Some(ref mut css)) =
                         (&ov.source_map, &mut new_analysis.css)
                     {
-                        let content_start = content_offset as usize;
-                        let original_content = if content_start < source.len() {
-                            let rest = &source[content_start..];
-                            if let Some(end) = rest.find("</style") {
-                                &rest[..end]
-                            } else {
-                                rest
-                            }
-                        } else {
-                            ""
-                        };
+                        // Fail-closed: no inventory entry for this ordinal
+                        // ⇒ empty original content (the remap degrades to
+                        // identity), never a raw-source scan.
+                        let original_content = style_content_slices.get(idx).copied().unwrap_or("");
                         crate::source_map_remap::remap_css_analysis_spans(
                             css,
                             &ov.code,
@@ -1185,32 +1254,26 @@ impl VerterHost {
 
     /// Apply preprocessed block overrides for template, script, style, and custom blocks.
     ///
-    /// Unified API that replaces the single-purpose `apply_style_overrides`.
-    /// Template/script overrides build a synthetic SFC source with the block
-    /// content replaced, then invalidate the compile slot so the next
-    /// `get_virtual_file` recompiles from the synthetic source. Style overrides
-    /// delegate to the existing style override logic.
+    /// The interim contract of this surface (see
+    /// `docs/arch/scanners-replacement-preprocessor-interim.md`):
     ///
-    /// **A `lang` attribute is stripped only when it names a PREPROCESSOR
-    /// language** — one whose override content has already been compiled to
-    /// something the compiler reads, so a tag still claiming `coffee` would be
-    /// lying. A NATIVE script dialect (`ts`/`tsx`/`js`/`jsx`) is KEPT: the
-    /// override of a `<script lang="ts">` block is still TypeScript, and that
-    /// attribute is the only thing on the synthetic source that says so.
-    /// Stripping it changes both how the body is PARSED (`defineProps<T>()` and
-    /// every type annotation stop being syntax, so the macro is silently not
-    /// found) and how the generated companion is LABELLED (`.jsx`, which is
-    /// never typechecked). See `block_splice::build_synthetic_source`.
-    ///
-    /// This is a PUBLIC surface, reachable from the NAPI and WASM bindings'
-    /// `applyBlockOverrides`, so both behaviours are user-visible.
+    /// - **Template/script CONTENT overrides refuse with the typed
+    ///   [`HostError::ExternalBlockContentDeferred`] (acceptance `B-23`).**
+    ///   Recompiling from a spliced synthetic carrier source is
+    ///   unrepresentable; the typed refusal is the sole result until the
+    ///   typed block-content admission path lands.
+    /// - **Style overrides (and custom blocks routed through style
+    ///   analysis) stay LIVE**: they delegate to
+    ///   [`Self::apply_style_overrides`], which layers the compiled CSS into
+    ///   the per-profile compile slot WITHOUT reparsing the carrier.
+    /// - **The surface itself remains reachable** from the NAPI and WASM
+    ///   bindings' `applyBlockOverrides` (and the unplugin
+    ///   `BlockPreprocessor`), so both behaviours are user-visible.
     pub fn apply_block_overrides(
         &self,
         req: BlockOverrideRequest,
     ) -> Result<HostUpdateResult, HostError> {
         let canonical = self.resolve_alias_or_canonical(&req.canonical_id);
-        let profile_hash = compile_profile_hash(&req.compile_profile);
-
         // Separate overrides into template/script vs style buckets
         let mut template_override: Option<ContentOverride> = None;
         let mut script_override: Option<ContentOverride> = None;
@@ -1275,118 +1338,8 @@ impl VerterHost {
             }
         }
 
-        let override_hash =
-            content_override_hash(template_override.as_ref(), script_override.as_ref());
-
-        // Scheduler path: read raw source+meta from scheduler, store override in compile_cache
-        {
-            use crate::host_executor::HostSourceData;
-            let source_snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
-                HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                }
-            })?;
-            let hd = source_snap
-                .downcast_data::<HostSourceData>()
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-
-            let previous_hash = self
-                .compile_cache()
-                .get(&canonical)
-                .and_then(|cc| {
-                    cc.content_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.hash)
-                })
-                .unwrap_or(0);
-
-            if override_hash == previous_hash {
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = hd.parse.external_requests.clone();
-                return Ok(result);
-            }
-
-            // Build synthetic source from raw scheduler source
-            let synthetic_source = build_synthetic_source(
-                &source_snap.source,
-                &hd.parse.meta,
-                template_override.as_ref(),
-                script_override.as_ref(),
-            );
-            let synthetic_arc: Arc<str> = Arc::from(synthetic_source.as_str());
-
-            let (new_snapshot, new_artifact) = parse_vue_snapshot(
-                &canonical,
-                &synthetic_source,
-                self.config.effective_scope(),
-                &self.provenance,
-            );
-
-            let layer = ContentOverrideLayer {
-                hash: override_hash,
-                template: template_override.clone(),
-                script: script_override.clone(),
-            };
-
-            // Store ContentOverrideWithParse in compile_cache
-            if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-                cc.content_overrides.insert(
-                    profile_hash,
-                    ContentOverrideWithParse {
-                        layer: layer.clone(),
-                        parse: new_snapshot.clone(),
-                        framework_parse: Some(new_artifact),
-                        source: synthetic_arc,
-                    },
-                );
-                let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                session_node.remove(&mut cc, profile_hash);
-            }
-
-            let meta = &new_snapshot.meta;
-            let mut changed_nodes = Vec::new();
-            if meta.has_template {
-                changed_nodes.push(VirtualNodeKind::Main);
-                changed_nodes.push(VirtualNodeKind::Template);
-            }
-            if meta.has_script {
-                changed_nodes.push(VirtualNodeKind::Script);
-            }
-            changed_nodes = sorted_nodes(changed_nodes);
-
-            let mut changed_virtual_ids = Vec::new();
-            let mut changed_lsp_ids = Vec::new();
-            for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, meta);
-                changed_virtual_ids.push(b);
-                changed_lsp_ids.push(l);
-            }
-
-            let result = HostUpdateResult {
-                canonical_id: canonical,
-                changed: true,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: changed_nodes,
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids,
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids,
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: hd.parse.external_requests.clone(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
-                parse_duration_ms: 0.0,
-            };
-            self.bump_store_view_epoch();
-            Ok(result)
-        }
-
-        // Legacy path (WASM)
+        Err(HostError::ExternalBlockContentDeferred(
+            crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+        ))
     }
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, provide, ref } from "vue";
+import { onMounted, provide, reactive, ref } from "vue";
 import type { ProvenanceChain } from "@verter/types/audit.generated";
 import { useStore } from "./core/store";
 import Header from "./components/Header.vue";
@@ -10,7 +10,7 @@ import FileSelector from "./editor/FileSelector.vue";
 import Editor from "./editor/Editor.vue";
 import Output from "./output/Output.vue";
 
-const store = useStore();
+const store = reactive(useStore());
 
 provide("store", store);
 

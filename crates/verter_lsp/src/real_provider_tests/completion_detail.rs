@@ -11,6 +11,8 @@
 //! contract directly. Reverting TSGO's `get_completion_details` to the trait
 //! default makes the detail assertion fail under TSGO (discriminating).
 
+use tower_lsp_server::LanguageServer;
+
 use crate::test_harness::{real_provider_test, RealProviderTestSession};
 
 /// Pull completions at a `.`-member boundary in an open provider file, retrying
@@ -155,6 +157,117 @@ export const out = obj.;
             doc_for("label"),
             doc_for("compute"),
         );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// v-bind(|) completion detail — the co-migrated structured-signature source
+// ---------------------------------------------------------------------------
+
+// The `v-bind(|)` completion enricher reads the provider's STRUCTURED
+// quick-info (`kind` + `display_signature`) through the shared boundary
+// formatter — never the first non-fence line of the rendered hover blob (that
+// scraper is deleted). tsserver supplies a structured kind, so its detail
+// carries the `(kind) ` prefix; tsgo's LSP hover has no kind (accepted
+// asymmetry), so its detail is the bare display signature. Both must carry the
+// binding's real resolved type and never markdown artifacts.
+real_provider_test!(
+    v_bind_completion_detail_renders_kind_and_signature,
+    fixture = "single-project",
+    async fn run(session) {
+        // Warm the fixture project through the committed App.vue first (the
+        // known-good warm gate), then open the in-memory carrier and wait for
+        // ITS typed readiness — the same two-step pattern as
+        // `hover_secondary_files`.
+        let app_uri = session.open_fixture_file("src/App.vue").await;
+        if !session
+            .require_or_skip_ready(&app_uri, "action.disabled", 7, "disabled")
+            .await
+        {
+            return;
+        }
+
+        let source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst width = ref(10)\n</script>\n<template><div>x</div></template>\n<style scoped>\n.x { width: v-bind(); }\n</style>\n";
+        let uri = session.open_virtual("src/__VBindDetail.vue", source).await;
+        let pos = session.find_position(&uri, "v-bind()", 7);
+
+        // The enricher queries the provider at the DECLARATION position, so
+        // poll the FEATURE under test itself (the same retry budget the other
+        // virtual-carrier probes use) until the provider-typed detail lands.
+        let mut width_detail: Option<Option<String>> = None;
+        for attempt in 0..8 {
+            session.ensure_synced(&uri).await;
+            let response = session
+                .server()
+                .completion(tower_lsp_server::ls_types::CompletionParams {
+                    text_document_position:
+                        tower_lsp_server::ls_types::TextDocumentPositionParams {
+                            text_document: tower_lsp_server::ls_types::TextDocumentIdentifier {
+                                uri: uri.clone(),
+                            },
+                            position: pos,
+                        },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: None,
+                })
+                .await
+                .expect("completion request should succeed");
+
+            let items = match response {
+                Some(tower_lsp_server::ls_types::CompletionResponse::List(list)) => list.items,
+                Some(tower_lsp_server::ls_types::CompletionResponse::Array(items)) => items,
+                None => Vec::new(),
+            };
+            if let Some(width) = items.iter().find(|i| i.label == "width") {
+                width_detail = Some(width.detail.clone());
+                if width.detail.as_deref().is_some_and(|d| d.contains("Ref")) {
+                    break;
+                }
+            }
+            if attempt < 7 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+
+        let Some(detail_slot) = width_detail else {
+            if session.allow_empty_result_skip(
+                "v-bind completion offered no `width` setup binding",
+            ) {
+                return;
+            }
+            unreachable!("allow_empty_result_skip panics under require-mode");
+        };
+        let Some(detail) = detail_slot.as_deref() else {
+            if session.allow_empty_result_skip(
+                "v-bind `width` item carried no provider-typed detail",
+            ) {
+                return;
+            }
+            unreachable!("allow_empty_result_skip panics under require-mode");
+        };
+
+        assert!(
+            detail.contains("width") && detail.contains("number"),
+            "detail must carry the provider's resolved signature, got: {detail}"
+        );
+        assert!(
+            !detail.contains("```") && !detail.contains("typescript"),
+            "detail is a signature line, never rendered markdown: {detail}"
+        );
+        if session.is_tsgo() {
+            assert!(
+                !detail.starts_with('('),
+                "tsgo supplies no quick-info kind (accepted asymmetry) — no \
+                 fabricated `(kind) ` prefix, got: {detail}"
+            );
+        } else {
+            assert!(
+                detail.starts_with('('),
+                "tsserver's structured kind renders the `(kind) ` prefix \
+                 through the shared boundary formatter, got: {detail}"
+            );
+        }
     }
 );
 

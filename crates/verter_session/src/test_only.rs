@@ -8,6 +8,50 @@
 //! `test_only_module_is_only_consumed_by_test_files` (see
 //! `tests/cases/architecture_guards.rs`) pins this contract.
 
+#[cfg(any(test, feature = "test-support", feature = "test-util"))]
+use std::sync::Arc;
+
+#[cfg(any(test, feature = "test-support", feature = "test-util"))]
+use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
+#[cfg(any(test, feature = "test-support", feature = "test-util"))]
+use verter_type_expr::{
+    AuthoredTypeEvidence, PublicationPolicy, ResolutionExactness, ResolutionProvenance,
+    TypePublication,
+};
+
+/// Construct a publication carrier for tests migrating pre-publication
+/// fixtures. Authored evidence is admitted only when the fixture supplies the
+/// real authored locator and its exact text as one atomic row.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-support", feature = "test-util"))]
+pub fn type_publication_fixture(
+    position: SourcePosition,
+    exactness: ResolutionExactness,
+    raw_text: Option<String>,
+    raw_source: Option<SemanticTypeSource>,
+) -> TypePublication {
+    let evidence = match (raw_text, raw_source) {
+        (Some(text), Some(SemanticTypeSource::Authored(locator))) => {
+            // SAFETY: the fixture supplies one atomic locator/text row.
+            let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
+            Some(AuthoredTypeEvidence::from_authored_body(
+                &mint,
+                &locator,
+                Arc::from(text),
+            ))
+        }
+        _ => None,
+    };
+    TypePublication::from_source_position(
+        &position,
+        exactness,
+        ResolutionProvenance::SemanticEvaluator,
+        Arc::from([]),
+        evidence,
+        &PublicationPolicy::exact_only(),
+    )
+}
+
 /// Test-only probe for the content-addressed `MapperFingerprint`
 /// primitive. The wrapper exposes the minimal surface needed by
 /// `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs` without

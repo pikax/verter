@@ -35,6 +35,90 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+#[test]
+fn creo_is_the_only_emit_occurrence_identity_path() {
+    // Static defense-in-depth behind the behavioral cross-kind heritage and
+    // runtime-origin identity tests: the CREO cutover deletes every
+    // analyzer/ordinal/parallel-lane identity seam from production.
+    use walkdir::WalkDir;
+
+    let crates = workspace_root().join("crates");
+    let forbidden = [
+        "EmitProducerKind",
+        "EmitProducerIdentity",
+        "producer_identity",
+        "merged_emit_fields",
+        "ProjectedTypeFact::CallableParams",
+        "ProjectedTypeFact::CallableReturn",
+        "pub event_payloads:",
+        "pub event_publications:",
+        "pub event_returns:",
+        "ordered_surface_entries",
+        "((macro_index as u64) << 32)",
+    ];
+    let mut violations = Vec::new();
+    for entry in WalkDir::new(crates).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+            || !path
+                .components()
+                .any(|component| component.as_os_str() == "src")
+        {
+            continue;
+        }
+        let src = fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!("read {}: {error}", path.display());
+        });
+        for needle in forbidden {
+            if src.contains(needle) {
+                violations.push(format!("{}: {needle}", path.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "retired emit identity path reintroduced:\n{}",
+        violations.join("\n")
+    );
+
+    let query = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let results =
+        read_workspace_file("crates/verter_session/src/typeinfo/framework_surface/results.rs");
+    let output = read_workspace_file("crates/verter_session/src/meta_resolve/output.rs");
+    assert!(query.contains("pub enum SurfaceEntry"));
+    assert!(results.contains("pub struct ResolvedEmitOccurrence"));
+    assert!(results.contains("pub payload_publication: verter_type_expr::TypePublication"));
+    assert!(output.contains("pub struct MaterializedEventOccurrence"));
+
+    let normalize = read_workspace_file(
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/normalize.rs",
+    );
+    let emit_projection = normalize
+        .split("pub(crate) fn emits_from_typeinfo_surface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(in crate::typeinfo").next())
+        .expect("Vue emit projection function");
+    assert!(emit_projection.contains("macro_surface.surface.entries.iter()"));
+    assert!(
+        !emit_projection.contains(".call_signatures")
+            && !emit_projection.contains(".members")
+            && !emit_projection.contains(".position("),
+        "Vue emit projection must walk only the canonical stored stream"
+    );
+
+    let semantic = read_workspace_file("crates/verter_semantic/src/analysis/component_meta.rs");
+    let event_extraction = semantic
+        .split("fn extract_events_from_macro")
+        .nth(1)
+        .and_then(|tail| tail.split("fn extract_slots_from_macro").next())
+        .expect("event extraction function");
+    assert!(
+        !event_extraction.contains(".find(") && !event_extraction.contains("evaluated"),
+        "event extraction must project complete occurrences without a name/evaluator join"
+    );
+}
+
 /// Relative paths (forward-slash, workspace-rooted) of GENERATED DATA
 /// modules under `crates/*/src/**`. These files are rendered by a
 /// generator script (each carries an "auto-generated" / "GENERATED ...
@@ -2837,6 +2921,10 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
+        (
+            "registered_envelope_ingest",
+            "T-B R5 §2: one-shot validated cross-host envelope handoff into the scheduled Source stage. NOT a cache; entries are removed on intake.",
+        ),
         // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
         // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
         // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
@@ -5105,6 +5193,14 @@ mod foundations_guards {
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/tsconfig.rs",
+            // Trusted-processor broker substrate — executable attestation,
+            // denial probes, and namespace/AppContainer profile staging are
+            // real-OS process security duties, never workspace source. A VFS
+            // route would attest or probe different authority.
+            "crates/verter_processor_broker/src/attestation.rs",
+            "crates/verter_processor_broker/src/lifecycle.rs",
+            "crates/verter_processor_broker/src/platform/linux.rs",
+            "crates/verter_processor_broker/src/platform/windows.rs",
             // tsgo toolchain provisioning (the 4-tier resolver) — real-OS
             // walks of PATH dirs, project `node_modules` (flat + pnpm store),
             // the update cache, and the bundled sidecar to locate a supported
@@ -5547,6 +5643,11 @@ mod foundations_guards {
         // ─── public modules: cited consumers ────────────────────────
         // tests/cases/g_misc0/audited_request_e2e.rs
         "pub mod audited_request",
+        // Frozen eight-field carrier-owned compatibility cohort consumed by
+        // B2 persistence/adoption and exercised by its owning module tests.
+        "pub mod carrier_artifact_cohort",
+        // T-B R5 §2 carrier-only publication identity/store and typed interim outcomes.
+        "pub mod carrier_publication_store",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
         // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)
@@ -9180,9 +9281,25 @@ mod foundations_guards {
             "crates/verter_svelte_conformance/src/generate.rs",
             "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
-            (
+        (
             "crates/verter_vue_conformance/src/lib.rs",
             "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
+        ),
+        (
+            "crates/verter_processor_broker/src/attestation.rs",
+            "trusted-processor executable attestation hashes the exact real-OS worker image the kernel launches before dispatch and admission. This is security evidence over an executable, never workspace/semantic/VFS source; WorkspaceAccess would attest different authority.",
+        ),
+        (
+            "crates/verter_processor_broker/src/lifecycle.rs",
+            "private denied-worker conformance performs a real ambient filesystem escape attempt inside the sandbox. Direct OS access is the mutation under test; WorkspaceAccess would bypass the OS sandbox and make the proof non-discriminating. No workspace content is admitted or published.",
+        ),
+        (
+            "crates/verter_processor_broker/src/platform/linux.rs",
+            "Linux namespace sandbox launch owns a private tmpfs/chroot staging directory and removes the parent-side scratch directory on teardown. These are kernel sandbox artifacts for an external process, never workspace/semantic/VFS state.",
+        ),
+        (
+            "crates/verter_processor_broker/src/platform/windows.rs",
+            "Windows AppContainer launch copies the attested worker into its private profile storage and removes that sandbox artifact on teardown. AppContainer profile storage is real-OS process substrate and cannot route through WorkspaceAccess.",
         ),
 ];
 

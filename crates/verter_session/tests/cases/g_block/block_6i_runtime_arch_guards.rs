@@ -298,8 +298,9 @@ fn demand_prop_type(
     prop: &verter_semantic::analysis::component_meta::PropAnalysis,
 ) -> TypeExpr {
     let source = prop
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
     verter_session::test_only::semantic_source_probe::demand_type_expr(
         project.host(),

@@ -816,7 +816,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "layout_checker_discriminates_stray_and_stale",
             // Allowlist parity: exactly the two known process-isolated
             // exceptions, agreeing with the Node guard's expectation.
-            "allowlist_is_the_two_known_process_isolated_targets",
+            "allowlist_is_the_known_standalone_targets",
         ],
     ),
     (

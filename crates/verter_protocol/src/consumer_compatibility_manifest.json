@@ -1,0 +1,13 @@
+{
+  "block_content_artifact_schema_version": 1,
+  "qualified_source_map_schema_version": 1,
+  "cache_cluster_schema_version": 8,
+  "component_meta_schema_version": 8,
+  "structure_protocol_version": 1,
+  "provider_protocol_version": 12,
+  "napi_schema_version": 1,
+  "wasm_schema_version": 1,
+  "native_api_version": 1,
+  "unplugin_api_version": 1,
+  "generated_binding_manifest_hash": "sha256:d0884f3070be543a1bb7b16364ac4facfd229ddacb61f7d116a0ea2de575edce"
+}

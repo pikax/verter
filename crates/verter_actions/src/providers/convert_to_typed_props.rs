@@ -164,6 +164,7 @@ mod tests {
 
     fn make_macro_struct(prop_fields: Vec<AnalyzedPropField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: false,
@@ -202,6 +203,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not offer fix for empty props");
@@ -226,6 +228,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not fix when spans do not match");
@@ -250,6 +253,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not handle unrelated rules");
@@ -275,6 +279,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1, "should produce one fix");
@@ -305,6 +310,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -347,6 +353,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -381,6 +388,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -420,6 +428,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedProps.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);

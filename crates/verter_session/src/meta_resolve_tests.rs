@@ -87,7 +87,7 @@ fn emit_names_from_resolved(
     )
     .iter()
     .flat_map(|dtos| dtos.emit_fields().iter())
-    .map(|e| e.analysis.name.clone())
+    .map(|e| e.name.clone())
     .collect()
 }
 
@@ -3887,7 +3887,8 @@ const len = computed(() => props.text.length)
         project.host(),
         "/Shimmer.vue",
         ui_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("ui prop must publish a typed source"),
     )
@@ -4447,7 +4448,7 @@ const emitB = defineEmits<Events>()
                 })
                 .emit_fields()
                 .iter()
-                .any(|emit| emit.analysis.name == "save")
+                .any(|emit| emit.name == "save")
         }),
         "each macro should materialize its imported emit payload through the shared path"
     );
@@ -5820,6 +5821,7 @@ defineEmits<Emits>()
             vue_api_calls: &fallthrough.snapshot.vue_api_calls,
             store_usages: &fallthrough.snapshot.store_usages,
             resolved_macros: &resolved_macros,
+            resolved_binding_reactivity: &[],
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
@@ -5925,6 +5927,7 @@ defineEmits<Emits>()
             vue_api_calls: &fallthrough.snapshot.vue_api_calls,
             store_usages: &fallthrough.snapshot.store_usages,
             resolved_macros: &resolved_macros,
+            resolved_binding_reactivity: &[],
             resolved_type_registry: &resolved_type_registry,
             evaluated_types: fallthrough.evaluated_types.as_ref(),
             file_path: "/src/Child.vue",
@@ -7306,14 +7309,14 @@ defineEmits<Emits>()
     let emit = define_emits_dtos
         .emit_fields()
         .iter()
-        .find(|emit| emit.analysis.name == "update:modelValue")
+        .find(|emit| emit.name == "update:modelValue")
         .unwrap_or_else(|| {
             panic!(
                 "update:modelValue emit should be present on resolved define-emits, got {:?}",
                 define_emits_dtos
                     .emit_fields()
                     .iter()
-                    .map(|emit| emit.analysis.name.as_str())
+                    .map(|emit| emit.name.as_str())
                     .collect::<Vec<_>>(),
             )
         });
@@ -7325,11 +7328,11 @@ defineEmits<Emits>()
     // paired with its resolution scope: the call signature's
     // declaration-origin file (value⇔scope pairing).
     assert!(
-        emit.analysis.payload.is_none(),
+        emit.payload.is_none(),
         "a synthesized call-signature emit payload publishes no authored locator"
     );
     assert!(
-        emit.analysis.payload_expr_scope.is_some(),
+        emit.payload_expr_scope.is_some(),
         "the emit payload display is paired with the signature's declaration-origin scope"
     );
     // The display payload_type is rendered from the REALIZED signature, so
@@ -7337,10 +7340,10 @@ defineEmits<Emits>()
     // post-event-name element AND the `T := string | number` substitution —
     // an unsubstituted signature would render `[payload: T]`.
     assert_eq!(
-        emit.analysis.payload_type.as_deref(),
+        emit.payload_type.as_deref(),
         Some("[payload: string | number]"),
         "the emit payload display renders the substituted labelled tuple, got {:?}",
-        emit.analysis.payload_type,
+        emit.payload_type,
     );
     // The session-resolved payload SOURCE mirrors the same realized params as
     // the closed tuple whose single labelled element carries the instantiated
@@ -7415,14 +7418,13 @@ defineEmits<{ save: [id: number] }>()
     let emit = dtos
         .emit_fields()
         .iter()
-        .find(|emit| emit.analysis.name == "save")
+        .find(|emit| emit.name == "save")
         .expect("the authored property event is published");
 
     // The analysis row carries the EXACT analyzer-stamped authored payload
     // locator (macro ordinal 0, field ordinal 0, the analyzer's
     // producer-local `default` value anchor).
     let locator = emit
-        .analysis
         .payload
         .as_ref()
         .expect("an authored property event carries its authored payload locator");
@@ -7440,7 +7442,7 @@ defineEmits<{ save: [id: number] }>()
     assert_eq!(locator.anchor.space, LocatorSymbolSpace::Value);
     // Pairing invariant: a locator-bearing row carries a resolution scope.
     assert!(
-        emit.analysis.payload_expr_scope.is_some(),
+        emit.payload_expr_scope.is_some(),
         "payload.is_some() => payload_expr_scope.is_some()"
     );
 
@@ -7505,19 +7507,19 @@ defineEmits<ImportedEmits>()
     let emit = dtos
         .emit_fields()
         .iter()
-        .find(|emit| emit.analysis.name == "save")
+        .find(|emit| emit.name == "save")
         .expect("the imported property event is published");
 
     // No LOCAL authored position exists for a cross-file member — the
     // analysis locator stays the honest `None` (never fabricated).
     assert!(
-        emit.analysis.payload.is_none(),
+        emit.payload.is_none(),
         "a cross-file property event has no flat authored macro-payload position"
     );
 
     // The published payload SOURCE is the graph-native complete closed
-    // TUPLE over the member's value node — the fallback `define_emits_shape`
-    // publishes when the evaluated-field match is withheld.
+    // TUPLE over the member's value node — `define_emits_shape` publishes the
+    // complete occurrence directly, without a secondary table join.
     let source = emit
         .payload_source
         .present()
@@ -8162,7 +8164,7 @@ mod node_predicates_tests {
     use verter_type_expr::LiteralValue;
 
     fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
-        SurfaceView {
+        crate::test_surface_view! {
             members: StdArc::from(members.into_boxed_slice()),
             call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),

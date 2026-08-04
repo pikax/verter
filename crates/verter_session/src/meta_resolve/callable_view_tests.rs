@@ -21,7 +21,7 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, InstantiateKey, LiteralValue, PartialReasonSet,
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
-    SurfaceView, TupleElement,
+    TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -116,7 +116,7 @@ fn object_surface(
             merge_role: Default::default(),
         })
         .collect();
-    let view = SurfaceView {
+    let view = crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),

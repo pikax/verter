@@ -126,14 +126,213 @@ pub(super) fn expansion_stop_reason_to_string(
         }
     }
 }
+
+pub(super) fn materialized_publication_to_ffi(
+    lane: verter_session::meta_resolve::MaterializedTypePublication,
+) -> (
+    Option<verter_type_expr::TypeExpr>,
+    FfiTypePublication,
+    FfiTerminalTypeDisplay,
+) {
+    let (publication, materialized_type, display) = lane.into_parts();
+    let failed = matches!(
+        &publication,
+        verter_type_expr::PublicationResult::Failed { .. }
+    );
+    let publication = match publication {
+        verter_type_expr::PublicationResult::Failed {
+            failure,
+            provenance,
+        } => FfiTypePublication::Failed {
+            failure: typed_resolution_failure_to_ffi(failure),
+            provenance: resolution_provenance_to_ffi(provenance),
+        },
+        verter_type_expr::PublicationResult::Absent {
+            absence,
+            provenance,
+        } => FfiTypePublication::Absent {
+            absence: schema_absence_to_ffi(absence),
+            provenance: resolution_provenance_to_ffi(provenance),
+        },
+        verter_type_expr::PublicationResult::Published {
+            semantic_authority,
+            exactness,
+            reason,
+            provenance,
+            ..
+        } => FfiTypePublication::Published {
+            semantic_authority: semantic_authority_to_ffi(semantic_authority),
+            exactness: resolution_exactness_to_ffi(exactness),
+            reason: match *reason {
+                verter_type_expr::PublicationReason::ResolvedExactConcrete => {
+                    FfiPublicationReason::ResolvedExactConcrete
+                }
+                verter_type_expr::PublicationReason::ResolvedExactSymbolic => {
+                    FfiPublicationReason::ResolvedExactSymbolic
+                }
+                verter_type_expr::PublicationReason::ResolvedIncomplete => {
+                    FfiPublicationReason::ResolvedIncomplete
+                }
+                verter_type_expr::PublicationReason::AuthoredForIncomplete { policy } => {
+                    FfiPublicationReason::AuthoredForIncomplete {
+                        policy: publication_policy_reason_to_ffi(
+                            policy
+                                .incomplete_reason()
+                                .expect("authored-incomplete reason carries its permit"),
+                        ),
+                    }
+                }
+                verter_type_expr::PublicationReason::AuthoredSymbolicRepresentation { proof } => {
+                    FfiPublicationReason::AuthoredSymbolicRepresentation {
+                        proof: symbolic_equivalence_kind_to_ffi(proof.kind()),
+                    }
+                }
+            },
+            provenance: publication_provenance_to_ffi(provenance),
+        },
+    };
+    (
+        if failed { None } else { materialized_type },
+        publication,
+        FfiTerminalTypeDisplay {
+            text: if failed { None } else { display.into_text() },
+        },
+    )
+}
+
+fn typed_resolution_failure_to_ffi(
+    failure: verter_type_expr::TypedResolutionFailure,
+) -> FfiTypePublicationFailure {
+    match failure {
+        verter_type_expr::TypedResolutionFailure::SourceConstruction(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ) => FfiTypePublicationFailure::UnrepresentableRequiredMemberValue,
+        verter_type_expr::TypedResolutionFailure::SourceConstruction(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
+        ) => FfiTypePublicationFailure::UnrepresentableRequiredPayload,
+    }
+}
+
+fn schema_absence_to_ffi(
+    absence: verter_type_expr::facts::SchemaAbsence,
+) -> FfiTypePublicationAbsence {
+    match absence {
+        verter_type_expr::facts::SchemaAbsence::Unannotated => {
+            FfiTypePublicationAbsence::Unannotated
+        }
+        verter_type_expr::facts::SchemaAbsence::BranchDivergent => {
+            FfiTypePublicationAbsence::BranchDivergent
+        }
+    }
+}
+
+fn resolution_provenance_to_ffi(
+    provenance: verter_type_expr::ResolutionProvenance,
+) -> FfiResolutionProvenance {
+    match provenance {
+        verter_type_expr::ResolutionProvenance::SemanticEvaluator => {
+            FfiResolutionProvenance::SemanticEvaluator
+        }
+        verter_type_expr::ResolutionProvenance::SessionProjector => {
+            FfiResolutionProvenance::SessionProjector
+        }
+        verter_type_expr::ResolutionProvenance::FrameworkSurface => {
+            FfiResolutionProvenance::FrameworkSurface
+        }
+        verter_type_expr::ResolutionProvenance::FallthroughInheritance => {
+            FfiResolutionProvenance::FallthroughInheritance
+        }
+        verter_type_expr::ResolutionProvenance::Schema => FfiResolutionProvenance::Schema,
+    }
+}
+
+fn publication_provenance_to_ffi(
+    provenance: verter_type_expr::PublicationProvenance,
+) -> FfiPublicationProvenance {
+    match provenance {
+        verter_type_expr::PublicationProvenance::Resolved { provenance } => {
+            FfiPublicationProvenance::Resolved(resolution_provenance_to_ffi(provenance))
+        }
+        verter_type_expr::PublicationProvenance::Authored { provenance } => {
+            FfiPublicationProvenance::Authored(match provenance {
+                verter_type_expr::AuthoredProvenance::MacroPayload => {
+                    FfiAuthoredProvenance::MacroPayload
+                }
+                verter_type_expr::AuthoredProvenance::DeclarationBody => {
+                    FfiAuthoredProvenance::DeclarationBody
+                }
+                verter_type_expr::AuthoredProvenance::AugmentationBody => {
+                    FfiAuthoredProvenance::AugmentationBody
+                }
+                verter_type_expr::AuthoredProvenance::JsdocTypedefBody => {
+                    FfiAuthoredProvenance::JsdocTypedefBody
+                }
+            })
+        }
+    }
+}
+
+fn semantic_authority_to_ffi(
+    authority: verter_type_expr::SemanticAuthority,
+) -> FfiPublicationSemanticAuthority {
+    match authority {
+        verter_type_expr::SemanticAuthority::Resolved => FfiPublicationSemanticAuthority::Resolved,
+        verter_type_expr::SemanticAuthority::AuthoredFallback => {
+            FfiPublicationSemanticAuthority::AuthoredFallback
+        }
+    }
+}
+
+fn resolution_exactness_to_ffi(
+    exactness: verter_type_expr::ResolutionExactness,
+) -> FfiPublicationExactness {
+    match exactness {
+        verter_type_expr::ResolutionExactness::ExactConcrete => {
+            FfiPublicationExactness::ExactConcrete
+        }
+        verter_type_expr::ResolutionExactness::ExactSymbolic => {
+            FfiPublicationExactness::ExactSymbolic
+        }
+        verter_type_expr::ResolutionExactness::Incomplete => FfiPublicationExactness::Incomplete,
+    }
+}
+
+fn publication_policy_reason_to_ffi(
+    reason: verter_type_expr::PublicationPolicyReason,
+) -> FfiPublicationPolicyReason {
+    match reason {
+        verter_type_expr::PublicationPolicyReason::ImportedMacroCompound => {
+            FfiPublicationPolicyReason::ImportedMacroCompound
+        }
+        verter_type_expr::PublicationPolicyReason::ImportedIndexedAccess => {
+            FfiPublicationPolicyReason::ImportedIndexedAccess
+        }
+    }
+}
+
+fn symbolic_equivalence_kind_to_ffi(
+    kind: verter_type_expr::SymbolicEquivalenceKind,
+) -> FfiSymbolicEquivalenceKind {
+    match kind {
+        verter_type_expr::SymbolicEquivalenceKind::ImportedMacroCompound => {
+            FfiSymbolicEquivalenceKind::ImportedMacroCompound
+        }
+        verter_type_expr::SymbolicEquivalenceKind::ImportedIndexedAccess => {
+            FfiSymbolicEquivalenceKind::ImportedIndexedAccess
+        }
+    }
+}
+
 pub(super) fn accepted_prop_to_ffi(
     prop: verter_semantic::analysis::component_meta::AcceptedPropAnalysis,
-    r#type: verter_type_expr::TypeExpr,
+    lane: verter_session::meta_resolve::MaterializedTypePublication,
 ) -> FfiAcceptedPropMeta {
+    let (r#type, publication, terminal_display) = materialized_publication_to_ffi(lane);
     FfiAcceptedPropMeta {
         name: prop.name,
         r#type,
-        raw_type: prop.raw_type,
+        publication,
+        terminal_display,
         required: prop.required,
         provenance: member_provenance_to_ffi(prop.provenance),
         availability: member_availability_to_ffi(prop.availability),
@@ -288,6 +487,60 @@ pub(super) fn reactivity_kind_to_string(
         verter_semantic::analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
         verter_semantic::analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
     }
+}
+
+/// The CLOSED wrapper-role vocabulary as it crosses the FFI boundary.
+///
+/// Exhaustive over [`verter_type_expr::ReactiveWrapperRole`] so a new role
+/// variant fails to compile rather than degrading silently. `Unresolved` maps to
+/// the single `"unresolved"` discriminant; its exact reason travels on the
+/// SEPARATE reason field ([`reactive_wrapper_unresolved_reason_to_string`]) so
+/// the two are independently observable and cannot collapse onto one another.
+pub(super) fn reactive_wrapper_role_to_string(
+    role: &verter_type_expr::ReactiveWrapperRole,
+) -> String {
+    match role {
+        verter_type_expr::ReactiveWrapperRole::Ref => "ref".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ShallowRef => "shallowRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ComputedRef => "computedRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ModelRef => "modelRef".to_string(),
+        verter_type_expr::ReactiveWrapperRole::Reactive => "reactive".to_string(),
+        verter_type_expr::ReactiveWrapperRole::ShallowReactive => "shallowReactive".to_string(),
+        verter_type_expr::ReactiveWrapperRole::None => "none".to_string(),
+        verter_type_expr::ReactiveWrapperRole::Unresolved { .. } => "unresolved".to_string(),
+    }
+}
+
+/// The exact typed degradation reason, present only for an `Unresolved` role.
+/// Exhaustive over the closed reason vocabulary — no `format!("{:?}")`.
+pub(super) fn reactive_wrapper_unresolved_reason_to_string(
+    role: &verter_type_expr::ReactiveWrapperRole,
+) -> Option<String> {
+    let verter_type_expr::ReactiveWrapperRole::Unresolved { reason } = role else {
+        return None;
+    };
+    Some(
+        match reason {
+            verter_type_expr::ReactiveWrapperUnresolvedReason::AnalysisUnavailable => {
+                "analysisUnavailable"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::RevisionMismatch => {
+                "revisionMismatch"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::MissingDependency => {
+                "missingDependency"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle => "cycle",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::BudgetExceeded => "budgetExceeded",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::WorkLimitExceeded => {
+                "workLimitExceeded"
+            }
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Cancelled => "cancelled",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported => "unsupported",
+            verter_type_expr::ReactiveWrapperUnresolvedReason::Fault => "fault",
+        }
+        .to_string(),
+    )
 }
 
 pub(super) fn vue_api_to_string(

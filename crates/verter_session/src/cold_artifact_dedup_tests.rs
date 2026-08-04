@@ -3813,14 +3813,15 @@ fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
 /// re-derive them with a second `parse_vue_snapshot` over the same
 /// source.
 #[test]
-fn artifact_backed_get_analysis_parses_the_sfc_once() {
+fn artifact_only_carrier_analysis_fails_closed_without_registered_structure() {
     let host = make_host(&[(VUE_OWNER, VUE_FIXTURE)]);
     seed_artifact_only_vue(&host, VUE_OWNER, VUE_FIXTURE);
 
     host.provenance().reset();
-    let snapshot = host
-        .get_analysis(VUE_OWNER)
-        .expect("the artifact-backed .vue must produce an analysis snapshot");
+    assert!(
+        host.get_analysis(VUE_OWNER).is_none(),
+        "an unregistered carrier artifact must not construct analysis from raw retained bytes",
+    );
     // Anti-vacuity: the read must have stayed artifact-backed. If a
     // future change ingresses the canonical into the scheduler, every
     // scheduler read on the lane starts HITTING and the parse-once
@@ -3831,27 +3832,15 @@ fn artifact_backed_get_analysis_parses_the_sfc_once() {
          the scheduler — scheduler presence vacates this test's \
          artifact-only lane coverage",
     );
-    // The template analysis must still be computed on this lane — the
-    // parse-once contract must not be satisfied by skipping the
-    // template computation.
-    assert!(
-        snapshot.template.is_some(),
-        "the artifact-backed read must carry template analysis",
-    );
     let provenance = snap(&host);
     assert_eq!(
-        provenance.sfc_parses, 1,
-        "artifact-backed get_analysis: exactly one SFC structure parse \
-         per logical read — the template-analysis computation consumes \
-         the snapshot build's parse products instead of re-parsing \
-         (got {})",
+        provenance.sfc_parses, 0,
+        "artifact-only registered carrier parsing must remain unreachable (got {})",
         provenance.sfc_parses,
     );
     assert_eq!(
-        provenance.vue_script_snapshot_parses, 1,
-        "artifact-backed get_analysis: exactly one script-program parse \
-         per logical read — a second one means the template-analysis \
-         computation re-ran the full snapshot parse (got {})",
+        provenance.vue_script_snapshot_parses, 0,
+        "artifact-only script parsing must remain unreachable (got {})",
         provenance.vue_script_snapshot_parses,
     );
 }

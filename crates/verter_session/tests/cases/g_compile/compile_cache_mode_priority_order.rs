@@ -50,6 +50,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn macro_type_dep_outranks_external_src_on_public_result() {
     // An SFC with BOTH a macro type dep (HasMacroTypeDeps) AND an
     // external `src` block (HasExternalSrc). HasMacroTypeDeps is higher

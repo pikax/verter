@@ -143,13 +143,19 @@ describe("binary candidate ordering", () => {
     expect(ordered.map((candidate) => candidate.source)).toEqual(["bundled"]);
   });
 
-  it("uses the .exe binary name on win32", () => {
-    expect(bundledMcpBinaryCandidate("/ext", "win32").path.endsWith("verter-mcp.exe")).toBe(true);
-    expect(bundledMcpBinaryCandidate("/ext", "darwin").path.endsWith("verter-mcp")).toBe(true);
+  // @ai-generated - Pins target-platform path semantics independently of the host OS.
+  it("uses the requested platform's exact path dialect", () => {
+    expect(bundledMcpBinaryCandidate("C:\\ext", "win32").path).toBe("C:\\ext\\bin\\verter-mcp.exe");
+    expect(bundledMcpBinaryCandidate("/ext", "darwin").path).toBe("/ext/bin/verter-mcp");
+    expect(bundledMcpBinaryCandidate("/ext", "linux").path).toBe("/ext/bin/verter-mcp");
   });
 });
 
-describe("startMcpServerProcess", () => {
+// Every test here spawns a real node child whose readiness/exit bounds
+// (`readyTimeoutMs`) are the discriminators; the suite timeout sits above
+// them so a loaded parallel test run cannot fire the 5s framework default
+// while a healthy child is still starting.
+describe("startMcpServerProcess", { timeout: 30_000 }, () => {
   const fakeServer = (script: string) => ({
     command: process.execPath,
     args: ["-e", script],

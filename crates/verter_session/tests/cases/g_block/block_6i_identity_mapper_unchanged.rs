@@ -89,8 +89,9 @@ fn readonly_mapped_publishes_source_member_types_unchanged() {
     //       member's value should have been used directly.
     let demand = |prop: &verter_semantic::analysis::component_meta::PropAnalysis| -> TypeExpr {
         let source = prop
-            .type_source
-            .present()
+            .publication
+            .result()
+            .selected_source()
             .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name));
         verter_session::test_only::semantic_source_probe::demand_type_expr(
             &host,

@@ -68,6 +68,7 @@ fn file(provider: &str, source: &str, content: &str, v: u64) -> SnapshotFile {
         content_hash: h16(content),
         map_hash: [0u8; 16],
         map_json: None,
+        structure: None,
         version: v,
         open_state: OpenState::Closed,
     }

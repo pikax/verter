@@ -686,7 +686,8 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
     let user_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         host,
         canonical,
-        user.type_source
+        user.publication
+            .source_position()
             .present()
             .expect("`user` prop must publish a typed source"),
     )
@@ -1058,7 +1059,8 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         project.host(),
         "/workspace/src/runtime/components/ClosedPick.vue",
         closed_obj
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("`closedObj` prop must publish a typed source"),
     )
@@ -1106,7 +1108,8 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         project.host(),
         "/workspace/src/runtime/components/ClosedPick.vue",
         closed_simple_inst
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("`closedSimpleInst` prop must publish a typed source"),
     )
@@ -1168,7 +1171,8 @@ fn closed_pick_sources_still_materialize_path_precisely() {
         project.host(),
         "/workspace/src/runtime/components/ClosedPick.vue",
         closed_inst
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("`closedInst` prop must publish a typed source"),
     )
@@ -1831,7 +1835,8 @@ fn pick_over_instantiated_generic_direct_macro_materializes_members() {
     let a_type = crate::test_only::semantic_source_probe::demand_type_expr(
         project.host(),
         "/workspace/src/components/PickInst.vue",
-        a.type_source
+        a.publication
+            .source_position()
             .present()
             .expect("`a` must publish a typed source"),
     )

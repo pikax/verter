@@ -57,6 +57,7 @@ mod tests {
 
     fn make_expose_macro(start: u32, end: u32) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineExpose,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,

@@ -4,7 +4,7 @@
  * Usage: npx tsx scripts/generate-vue-language.ts
  *
  * This script reads the vue.tmLanguage.json and vue-language-configuration.json
- * from extensions/vscode and generates a Monarch tokenizer for Monaco editor.
+ * from packages/vue-vscode and generates a Monarch tokenizer for Monaco editor.
  */
 
 import { readFileSync, writeFileSync } from "fs";
@@ -15,10 +15,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "../../..");
 
 // Paths to source files
-const VUE_TM_GRAMMAR = resolve(ROOT, "extensions/vscode/syntaxes/vue.tmLanguage.json");
+const VUE_TM_GRAMMAR = resolve(ROOT, "packages/vue-vscode/syntaxes/vue.tmLanguage.json");
 const VUE_LANG_CONFIG = resolve(
   ROOT,
-  "extensions/vscode/languages/vue-language-configuration.json",
+  "packages/vue-vscode/languages/vue-language-configuration.json",
 );
 const OUTPUT_FILE = resolve(__dirname, "../src/editor/vueLanguage.ts");
 
@@ -128,7 +128,7 @@ function generateMonarchLanguage(): string {
 
 /**
  * Vue SFC Monarch language definition
- * Auto-generated from extensions/vscode/syntaxes/vue.tmLanguage.json
+ * Auto-generated from packages/vue-vscode/syntaxes/vue.tmLanguage.json
  * Run: pnpm run generate:vue-language
  */
 const vueLanguage: monaco.languages.IMonarchLanguage = {

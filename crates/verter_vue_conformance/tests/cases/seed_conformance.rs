@@ -28,6 +28,8 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+
 use verter_compiler::compile::{CodegenOptions, CompileDiagnosticSeverity, VerterCompileOptions};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_vue_conformance::compare::{compare_modules, Comparison, DiagnosticRow, ModuleInput};
@@ -141,7 +143,6 @@ struct VerterCell {
 
 fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> VerterCell {
     let sfc = case_sfc_source(case_id);
-    let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some(format!("cases/{case_id}.vue")),
         // Inline cells compile Verter in the inline topology (the render is
@@ -168,7 +169,12 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
     // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons
     // nothing we reuse — the allocator is dropped right after.)
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        verter_compiler::compile::compile(&sfc, &options, &verter_options, &macro_semantics, &alloc)
+        StandaloneCompiler.compile_source(
+            &StandaloneSourceBytes::copied_from(&sfc),
+            &options,
+            &verter_options,
+            &macro_semantics,
+        )
     }));
     let result = match result {
         Ok(result) => result,

@@ -31,10 +31,10 @@
 use oxc_sourcemap::SourceMapBuilder;
 use tower_lsp_server::ls_types::TextEdit;
 
+use verter_lsp::documents::carrier_structure::test_carrier_blocks;
 use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_lsp::documents::provider_projection::ProviderPositionMapper;
-use verter_lsp::documents::sfc_scanner::scan_sfc_blocks;
 use verter_lsp::type_provider::auto_import::{
     resolve_script_import_anchor, translate_completion_import_edits, AutoImportEditMappingError,
     ProviderImportEdit, ScriptImportInsertionAnchor,
@@ -243,7 +243,7 @@ fn auto_import_at_synthetic_offset_is_reanchored_into_script_setup() {
 /// returned `AnalyzedImport.span`s are therefore SFC-absolute exactly as production produces them,
 /// so a test can pin the real span source instead of a hand-built `vue.find` offset.
 fn analyze_setup_import_spans(vue: &str) -> Vec<(u32, u32)> {
-    let blocks = scan_sfc_blocks(vue);
+    let blocks = test_carrier_blocks(vue);
     let setup = blocks
         .iter()
         .find(|b| b.is_setup())

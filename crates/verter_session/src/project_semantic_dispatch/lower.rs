@@ -29,8 +29,8 @@ use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, HashValue, IndexSignature, NodeScopeId, PathSegment, PrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
-    SurfaceView, TupleElement, ValueRootKey,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceEntry,
+    SurfaceMember, SurfaceView, TupleElement, ValueRootKey,
 };
 
 /// The scalar → projected-`TypeExpr` mapping for a stored enum member fact —
@@ -492,10 +492,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             TypeExpr::Object(obj) => {
-                let mut members: Vec<SurfaceMember> = Vec::new();
-                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut index_signatures: Vec<IndexSignature> = Vec::new();
+                let mut entries = Vec::with_capacity(obj.properties.len());
                 for member in &obj.properties {
                     match member {
                         ObjectMember::Property(prop) => {
@@ -529,7 +526,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // This is the canonical typed-IR producer of the
                             // macro-root provenance bit consumed by terminal
                             // projections.
-                            members.push(SurfaceMember {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
                                 name: Arc::from(prop.name.as_str()),
                                 value,
                                 optional: prop.optional,
@@ -554,7 +551,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // `OwnBody`, a heritage reference arm flows
                                 // `Heritage`, everything else stays `Authored`.
                                 merge_role: reduction_context.role_stamp(),
-                            });
+                            }));
                         }
                         ObjectMember::Method(method) => {
                             // Mapped+conditional infer closure: lower
@@ -592,7 +589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // `ObjectMember::Property` arm: a method
                             // literally written in the macro type
                             // argument's own body is author-declared.
-                            members.push(SurfaceMember {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
                                 name: Arc::from(method.name.as_str()),
                                 value,
                                 optional: method.optional,
@@ -610,7 +607,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // Leaf stamping of the surface-merge role —
                                 // mirrors the `Property` arm.
                                 merge_role: reduction_context.role_stamp(),
-                            });
+                            }));
                         }
                         ObjectMember::CallSignature(func) => {
                             // Lower call signatures as canonical `Function`
@@ -635,7 +632,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 substitutions,
                                 reduction_context,
                             );
-                            call_signatures.push(fn_id);
+                            entries.push(SurfaceEntry::CallSignature(fn_id));
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
@@ -649,7 +646,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 substitutions,
                                 reduction_context,
                             );
-                            construct_signatures.push(fn_id);
+                            entries.push(SurfaceEntry::ConstructSignature(fn_id));
                         }
                         ObjectMember::IndexSignature(sig) => {
                             let key_type = self.shallow_lower_type_expr_with_context(
@@ -672,7 +669,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 substitutions,
                                 reduction_context,
                             );
-                            index_signatures.push(IndexSignature {
+                            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                                 key_type,
                                 value_type,
                                 readonly: sig.readonly,
@@ -682,19 +679,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // from the object's lowering scope, not the
                                 // (possibly scope-less) value-type node.
                                 declaration_origin: scope.canonical_file(),
-                            });
+                            }));
                         }
                     }
                 }
-                let has_index_signature = !index_signatures.is_empty();
-                let view = SurfaceView {
-                    members: Arc::from(members.into_boxed_slice()),
-                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature,
-                };
+                let has_index_signature = entries
+                    .iter()
+                    .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+                let view = SurfaceView::from_entries(entries, None, has_index_signature);
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
             // Arrays publish through the dedicated

@@ -1,14 +1,12 @@
 //! `VerterHost::compile_with_audit` — single-file audited compile entry-point.
 //!
-//! VUE-ONLY: this entry drives the hardcoded Vue SFC runtime compiler
-//! ([`verter_compiler::compile::compile`]) directly — it is NOT the
-//! framework-neutral carrier path. It fails closed on a non-Vue framework
+//! VUE-ONLY: this entry compiles the Vue artifact elected by the host's
+//! registered publication store. It fails closed on a non-Vue framework
 //! carrier (a `.svelte` file) with a typed `VerterE001` diagnostic rather than
 //! silently Vue-compiling it. Routing this audited path through the carrier
-//! registry so it compiles every registered carrier is a tracked follow-up
-//! (docs/arch/svelte-native-compiler-plan.md §11).
+//! registry so it compiles every registered carrier is a tracked follow-up.
 //!
-//! Wraps one [`verter_compiler::compile::compile`] call in the same
+//! Wraps one registered-artifact compile call in the same
 //! audit-registration / TLS-observer machinery the component-meta entry-point
 //! uses. The producer crate (`verter_compiler`) emits `record_phase_timing`
 //! at phase boundaries (parse / transform / codegen / css_analysis /
@@ -41,9 +39,9 @@ use verter_audit::{
     RequestKind, RequestKindPayload,
 };
 use verter_compiler::compile::{
-    compile as compile_sfc, CodegenOptions, CompileTarget, VerterCompileOptions,
-    VerterCompileResult, VueMacroSemanticInput,
+    CodegenOptions, CompileTarget, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
 };
+use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
 
 use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
 use crate::instant::Instant;
@@ -77,9 +75,9 @@ fn target_to_tag(target: CompileTarget, force_vapor: bool) -> CompileTargetTag {
 impl VerterHost {
     /// Compile a single canonical SFC with full audit capture.
     ///
-    /// Looks up the source through the workspace, calls
-    /// [`verter_compiler::compile::compile`] with `target` driving the
-    /// codegen flags, and returns the typed result plus an
+    /// Looks up the source through the workspace and compiles the exact
+    /// scheduler-owned registered artifact with `target` driving the codegen
+    /// flags. Returns the typed result plus an
     /// [`RequestAuditRecord`] when capture is enabled. The record
     /// carries a `RequestKind::Compile { target: <tag> }` discriminant
     /// and a [`CompilePayload`] populated with per-phase timings and
@@ -232,6 +230,43 @@ impl VerterHost {
             return AuditedResult::ok(unsupported, record);
         }
 
+        let framework_parse = self.ensure_loaded(canonical_id).then(|| {
+            self.scheduler
+                .try_get_source(canonical_id)
+                .filter(|snapshot| snapshot.source.as_ref() == source)
+                .and_then(|snapshot| {
+                    snapshot
+                        .downcast_data::<crate::host_executor::HostSourceData>()
+                        .and_then(|data| data.framework_parse.as_ref().map(Arc::clone))
+                })
+        });
+        let Some(framework_parse) = framework_parse.flatten() else {
+            let rejected = registered_compile_rejected(
+                "VerterE002",
+                format!(
+                    "registered source artifact unavailable for audited compile: {canonical_id}"
+                ),
+            );
+            let request_id = self.next_request_id();
+            let state = if self.config.audit_enabled {
+                verter_audit::AuditCaptureState::FilteredNoop
+            } else {
+                verter_audit::AuditCaptureState::AuditDisabled
+            };
+            let parent_request_id =
+                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+            return AuditedResult::ok(
+                rejected,
+                noop_compile_record(
+                    request_id,
+                    canonical_id,
+                    parent_request_id,
+                    request_tag,
+                    state,
+                ),
+            );
+        };
+
         let codegen_options = CodegenOptions {
             target,
             ..CodegenOptions::default()
@@ -246,13 +281,20 @@ impl VerterHost {
         //    marked `AuditDisabled`.
         if !self.config.audit_enabled {
             let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
-            let result = compile_sfc(
+            let result = compile_registered_vue_artifact(
                 source,
+                &framework_parse,
                 &codegen_options,
                 &verter_options,
                 &macro_semantics,
                 &allocator,
-            );
+            )
+            .unwrap_or_else(|_| {
+                registered_compile_rejected(
+                    "VerterE003",
+                    "registered Vue artifact rejected by its adapter".to_string(),
+                )
+            });
             let request_id = self.next_request_id();
             let parent_request_id =
                 verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
@@ -316,13 +358,20 @@ impl VerterHost {
         ) {
             let _noop_guard = verter_audit::install_noop_observer();
             let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
-            let result = compile_sfc(
+            let result = compile_registered_vue_artifact(
                 source,
+                &framework_parse,
                 &codegen_options,
                 &verter_options,
                 &macro_semantics,
                 &allocator,
-            );
+            )
+            .unwrap_or_else(|_| {
+                registered_compile_rejected(
+                    "VerterE003",
+                    "registered Vue artifact rejected by its adapter".to_string(),
+                )
+            });
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -342,13 +391,20 @@ impl VerterHost {
         //    block runs.
         let total_start = Instant::now();
         let macro_semantics = self.vue_macro_compile_input(canonical_id, target);
-        let result = compile_sfc(
+        let result = compile_registered_vue_artifact(
             source,
+            &framework_parse,
             &codegen_options,
             &verter_options,
             &macro_semantics,
             &allocator,
-        );
+        )
+        .unwrap_or_else(|_| {
+            registered_compile_rejected(
+                "VerterE003",
+                "registered Vue artifact rejected by its adapter".to_string(),
+            )
+        });
         let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
         // 10. Read accumulators off the active request context.
@@ -498,6 +554,35 @@ impl VerterHost {
             code_transform_ops: ct_ops as u32,
         }
     }
+}
+
+fn registered_compile_rejected(code: &str, message: String) -> VerterCompileResult {
+    let mut result = VerterCompileResult {
+        script: None,
+        template: None,
+        styles: Vec::new(),
+        custom_blocks: Vec::new(),
+        scope_id: String::new(),
+        errors: Vec::new(),
+        parse_duration_ms: 0.0,
+        total_duration_ms: 0.0,
+        tsx: None,
+        tsc: None,
+        template_data: None,
+        inline: false,
+        requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+        actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
+        downgrade_reason: None,
+    };
+    result
+        .errors
+        .push(verter_compiler::compile::CompileDiagnostic {
+            severity: verter_compiler::compile::CompileDiagnosticSeverity::Error,
+            code: code.to_string(),
+            message,
+            span: None,
+        });
+    result
 }
 
 /// Build the cheap default-filled [`RequestAuditRecord`] returned on

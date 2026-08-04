@@ -55,6 +55,7 @@ mod tests {
 
     fn make_emit_macro(is_type_based: bool) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based,

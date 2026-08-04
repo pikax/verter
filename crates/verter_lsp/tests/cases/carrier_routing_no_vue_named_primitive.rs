@@ -96,7 +96,7 @@ const VUE_INTRINSIC_ALLOWLIST: &[&str] = &[
     "is_vue",
     // The Vue SFC root-block RCDATA rule (owned by `verter_parser`'s SFC
     // tokenizer and shared with the LSP block scanner's
-    // `CustomBlockContentKind::RawText` arm): at a Vue SFC root only
+    // `TestCarrierKind::RawText` arm): at a Vue SFC root only
     // `<template>` hosts markup; custom blocks are raw text. It is the VUE
     // carrier's semantics, not a carrier-generic primitive — the Svelte arm
     // uses its own `Markup` rule.

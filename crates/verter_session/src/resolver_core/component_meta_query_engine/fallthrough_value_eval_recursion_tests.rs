@@ -34,7 +34,7 @@ fn open_project() -> Arc<MetaProject> {
 }
 
 fn empty_surface() -> SurfaceView {
-    SurfaceView {
+    crate::test_surface_view! {
         members: Arc::from(Vec::new()),
         call_signatures: Arc::from(Vec::new()),
         construct_signatures: Arc::from(Vec::new()),
@@ -306,7 +306,13 @@ defineProps<{ root: Tree }>()
         .iter()
         .find(|prop| prop.name == "root")
         .expect("root prop should be present");
-    let rendered = root.raw_type.clone().unwrap_or_default();
+    let rendered = format!(
+        "{:?}",
+        root.publication
+            .result()
+            .selected_source()
+            .expect("root prop publishes a semantic source")
+    );
     assert!(
         rendered.len() < 100_000,
         "the recursive alias must publish a bounded leaf, not an unbounded expansion \

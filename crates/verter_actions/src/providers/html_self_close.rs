@@ -138,6 +138,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = HtmlSelfClose.fixes_for_diagnostic(&diag, &ctx);
@@ -165,6 +166,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = HtmlSelfClose.fixes_for_diagnostic(&diag, &ctx);
@@ -192,6 +194,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = HtmlSelfClose.fixes_for_diagnostic(&diag, &ctx);
         assert!(

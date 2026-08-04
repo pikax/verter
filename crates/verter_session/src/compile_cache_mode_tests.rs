@@ -73,6 +73,7 @@ fn empty_input() -> CompileInput {
     CompileInput {
         canonical_id: "/a.vue".to_string(),
         source: Arc::<str>::from(""),
+        whole_hash: [0; 16],
         meta: empty_file_meta(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
         src_blocks: Vec::new(),

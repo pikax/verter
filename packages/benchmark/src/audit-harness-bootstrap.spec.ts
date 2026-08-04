@@ -216,14 +216,18 @@ function runAudit(
   }
 }
 
-function resolvedRouteEventCount(bundle: AuditBundle): number {
+function resolvedTypeRootEventCount(bundle: AuditBundle): number {
   const events = bundle.record?.footprint?.structured_events ?? [];
   return events.filter((e) => {
-    if (e?.Custom?.name !== "authoritative_import_route_result") {
+    if (e?.Custom?.name !== "resolve_imported_type_root_result") {
       return false;
     }
     const detail = e.Custom?.detail ?? "";
-    return detail.includes("target=") && !detail.includes("target=<none>");
+    return (
+      detail.includes("target_canonical=") &&
+      !detail.includes("target_canonical=<miss>") &&
+      !detail.includes("target_symbol=<miss>")
+    );
   }).length;
 }
 
@@ -248,12 +252,15 @@ describe("audit-harness — VFS bootstrap discriminator (Phase Y1)", () => {
     const absoluteBundle = runAudit(uiRoot, componentFile, "absolute");
     const rootRelativeBundle = runAudit(uiRoot, componentFile, "root-relative");
 
-    const absoluteResolved = resolvedRouteEventCount(absoluteBundle);
-    const rootRelativeResolved = resolvedRouteEventCount(rootRelativeBundle);
+    const absoluteResolved = resolvedTypeRootEventCount(absoluteBundle);
+    const rootRelativeResolved = resolvedTypeRootEventCount(rootRelativeBundle);
 
     // Discriminator: the absolute canonical MUST resolve at least
-    // one import; pre-fix the root-relative canonical resolved
-    // ZERO. If a future change collapses the two paths into
+    // one imported type root; pre-fix the root-relative canonical resolved
+    // ZERO. The current single-authority resolver deliberately leaves the
+    // earlier import-route cache probe empty, so this observes the authoritative
+    // `resolve_imported_type_root_result` rather than that retired cache path.
+    // If a future change collapses the two paths into
     // equivalent behavior, this assertion fails and the regression
     // surfaces immediately.
     expect(

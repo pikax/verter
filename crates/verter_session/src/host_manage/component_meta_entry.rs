@@ -121,8 +121,8 @@ impl ColdSeedFence {
 ///
 /// The filter is deliberately narrow:
 ///
-/// - Only `kind == Route` is dropped. `ImportRoute` and `DirectSource`
-///   derived facts round-trip and stay.
+/// - Only `kind == Route` is dropped. `DirectSource` derived facts and
+///   request-bound resolution witnesses round-trip and stay.
 /// - Only the OWNER's own Route fact is dropped (`canonical_id ==
 ///   owner_canonical`). Cross-file route facts — Route facts for the
 ///   route DEPS the cold compute walked — round-trip correctly and

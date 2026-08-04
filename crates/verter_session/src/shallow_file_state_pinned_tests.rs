@@ -359,7 +359,8 @@ fn imported_prop_type_edit_misses_warm_component_meta() {
         &host,
         "/workspace/src/Comp.vue",
         a_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("recomputed prop `a` must publish a typed source"),
     )

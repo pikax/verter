@@ -123,6 +123,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             bindings: vec![make_binding("data")],
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,

@@ -47,10 +47,78 @@ impl VerterHost {
         }
     }
 
+    /// Select a base or cold-seed resolver context, then delegate the semantic
+    /// demand to the resolver-tier builder.
+    ///
+    /// The `indexed()` probe below decides the CONTEXT (base host vs a
+    /// cold-seed session context) and nothing else. It must never reach the
+    /// publication scope: `FileArtifactStore::get` is a pure cache-presence
+    /// probe, and "no `IndexedReady` is cached at this content hash yet" is
+    /// neither an overlay, nor a fenced input, nor any enumerated `ReturnOnly`
+    /// trigger. Folding it into the caller's attestation relabelled a
+    /// store-published lane as non-store-published whenever its artifact
+    /// merely was not cached yet — which made cache WARMTH decide publication
+    /// SCOPE (the same bytes publishing or not depending on the entry point)
+    /// and cost a file with zero `:class` subjects its raw-template persist.
+    ///
+    /// The cold branch instead composes the caller's own attestation with the
+    /// seed's own currentness proof, which the fixed view carries as an
+    /// explicit typed fact
+    /// ([`crate::resolver_store::ColdSeedHostStoreView::is_current`]).
+    pub(crate) fn build_template_class_semantic_facts(
+        &self,
+        canonical: &str,
+        whole_hash: verter_semantic::analysis::Hash16,
+        source: Arc<str>,
+        script: crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs<
+            '_,
+        >,
+        raw: &verter_compiler::compile::template_data::RawTemplateData,
+        scope: crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope,
+    ) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts
+    {
+        if scope.is_base_publishable()
+            && self
+                .project_type_store()
+                .indexed()
+                .get(canonical, whole_hash)
+                .is_some()
+        {
+            return crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+                self,
+                canonical,
+                whole_hash,
+                script,
+                raw,
+                scope,
+            );
+        }
+
+        let mut sources = rustc_hash::FxHashMap::default();
+        sources.insert(canonical.to_string(), source);
+        let mut hashes = rustc_hash::FxHashMap::default();
+        hashes.insert(canonical.to_string(), whole_hash);
+        let tombstones = std::collections::HashSet::new();
+        let view = crate::session_view::OverlaidViewRef::new(self, &sources, &hashes, &tombstones);
+        let fixed = self.capture_batch_fixed_view(&view);
+        let scope = scope.narrowed_by_seed(fixed.cold_seed());
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
+            self,
+            &view,
+            fixed.cold_seed(),
+            overlay,
+        );
+        crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
+            &ctx, canonical, whole_hash, script, raw, scope,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
+        whole_hash: verter_semantic::analysis::Hash16,
         file_language: &FileLanguage,
         source: &Arc<str>,
         framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
@@ -61,43 +129,38 @@ impl VerterHost {
         let imports = &script_analysis.imports;
         let macros = &script_analysis.macros;
         let bindings = &script_analysis.bindings;
-        let ext_map = if !src_blocks.is_empty() {
-            let mut map = rustc_hash::FxHashMap::default();
-            for req in external_requests {
-                let dep_source =
-                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier);
-                if let Some(source) = dep_source {
-                    map.insert(req.resolved_canonical_id.clone(), source);
-                }
-            }
-            map
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
-
-        for req in external_requests {
-            if !ext_map.contains_key(&req.resolved_canonical_id) {
-                return None;
-            }
+        if !src_blocks.is_empty() || !external_requests.is_empty() {
+            return None;
         }
-
-        let merged_source = if !src_blocks.is_empty() {
-            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
-                source, src_blocks, &ext_map,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(source.as_ref())
-        };
 
         let raw = crate::parse::compile_template_data(
             file_language,
-            &merged_source,
+            source,
             framework_parse.as_deref(),
-            src_blocks.is_empty(),
+            true,
             &self.provenance,
         )?;
-        let (imports, unions, props_name) =
-            crate::host_resolve::template_converter_inputs(imports, macros, bindings);
+        let imports = crate::host_resolve::template_converter_inputs(imports, bindings);
+        let facts = self.build_template_class_semantic_facts(
+            canonical,
+            whole_hash,
+            Arc::clone(source),
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                macros: &script_analysis.macros,
+                bindings: &script_analysis.bindings,
+            },
+            &raw,
+            // This builder's only caller is the content-override lane
+            // (`compute_override_template_analysis`): the bytes are a
+            // compile-profile override layer the store never published.
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::ContentOverride,
+            ),
+        );
+        let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+            &facts, canonical, whole_hash,
+        )
+        .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
         let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
             macros,
             script_analysis.macro_usage.as_ref(),
@@ -108,18 +171,16 @@ impl VerterHost {
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
             &raw,
             &imports,
-            &unions,
-            props_name.as_deref(),
+            &class_domains,
             Some(&unused_ctx),
         )))
     }
 
     /// Lazily compute template analysis for a VueSfc file that hasn't been compiled.
     ///
-    /// Uses `CompileTarget::META` (= SCRIPT + TEMPLATE_DATA) via the core
-    /// `compile_from_parsed()` — bypassing the host `compile_entry()` which fails
-    /// on unresolved macro type deps. External-src blocks are merged using the
-    /// same `merge_external_sources()` helper. The computed template is served
+    /// Uses the scheduler-owned registered artifact. Missing artifacts and
+    /// external-src inputs fail closed; this lane never parses or merges carrier
+    /// source. The computed template is served
     /// on the caller's snapshot unconditionally; whether it ALSO persists into
     /// the shared raw-template slot is decided by the slot's write authority
     /// ([`Self::persist_raw_template_analysis`] →
@@ -171,6 +232,7 @@ impl VerterHost {
 
         let crate::types::VueTemplateInputs {
             source,
+            whole_hash,
             framework_parse,
             store_published,
             source_generation,
@@ -190,50 +252,16 @@ impl VerterHost {
         // its own (no caller ran one on this source). The Vue `<template src>`
         // inventory walks the typed Vue parse opened from the artifact; a
         // carrier with no src-block surface (Svelte) yields none.
-        let framework_parse = framework_parse.or_else(|| {
-            crate::parse::build_carrier_parse_artifact_from_source(
-                &file_language,
-                source.as_ref(),
-                &self.provenance,
-            )
-        });
+        let framework_parse = framework_parse;
         let (src_blocks, external_requests) = framework_parse
             .as_deref()
             .and_then(crate::typeinfo::adapters::vue::vue_parse)
             .map(|parsed| crate::parse::collect_vue_src_blocks(canonical, source.as_ref(), parsed))
             .unwrap_or_default();
 
-        // Resolve external src blocks (e.g., <template src="./tpl.html">)
-        let ext_map = if !src_blocks.is_empty() {
-            let mut map = rustc_hash::FxHashMap::default();
-            for req in &external_requests {
-                if let Some(dep_source) =
-                    self.resolve_dep_source(canonical, &req.resolved_canonical_id, &req.specifier)
-                {
-                    map.insert(req.resolved_canonical_id.clone(), dep_source);
-                }
-            }
-            map
-        } else {
-            rustc_hash::FxHashMap::default()
-        };
-
-        // Abort if any external src blocks are unresolved (same guard as compile_entry)
-        for req in &external_requests {
-            if !ext_map.contains_key(&req.resolved_canonical_id) {
-                return;
-            }
+        if !src_blocks.is_empty() || !external_requests.is_empty() {
+            return;
         }
-
-        let merged_source = if !src_blocks.is_empty() {
-            std::borrow::Cow::Owned(crate::compile::merge_external_sources(
-                &source,
-                &src_blocks,
-                &ext_map,
-            ))
-        } else {
-            std::borrow::Cow::Borrowed(source.as_ref())
-        };
 
         // Registry-dispatched template-data extraction: route through the file's
         // carrier compiler (Vue's bridge runs the META compile, Svelte walks the
@@ -241,9 +269,9 @@ impl VerterHost {
         // merged the source.
         let raw = crate::parse::compile_template_data(
             &file_language,
-            &merged_source,
+            &source,
             framework_parse.as_deref(),
-            src_blocks.is_empty(),
+            true,
             &self.provenance,
         );
 
@@ -251,11 +279,37 @@ impl VerterHost {
         if let Some(raw) = raw {
             // Converter inputs come from the ONE shared projection (type-only
             // imports excluded, static async-component carriers linked).
-            let (imports, unions, props_name) = crate::host_resolve::template_converter_inputs(
+            let imports = crate::host_resolve::template_converter_inputs(
                 &snapshot.imports,
-                &snapshot.macros,
                 &snapshot.bindings,
             );
+            let facts = self.build_template_class_semantic_facts(
+                canonical,
+                whole_hash,
+                Arc::clone(&source),
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                    macros: &snapshot.macros,
+                    bindings: &snapshot.bindings,
+                },
+                &raw,
+                // The lane's own bytes attestation, threaded in by the caller
+                // that captured them: a live scheduler/workspace read at one
+                // generation is store-published; the session-overlay entry
+                // point attests `false` for its own overlay bytes. The
+                // seed-currentness half is composed inside the wrapper.
+                if store_published {
+                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable
+                } else {
+                    crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
+                    )
+                },
+            );
+            let class_domains =
+                crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+                    &facts, canonical, whole_hash,
+                )
+                .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
 
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.macros,
@@ -267,8 +321,7 @@ impl VerterHost {
             let tpl = crate::template_convert::convert_raw_to_analysis(
                 &raw,
                 &imports,
-                &unions,
-                props_name.as_deref(),
+                &class_domains,
                 Some(&unused_ctx),
             );
             let tpl_arc = Arc::new(tpl);
@@ -287,6 +340,7 @@ impl VerterHost {
                     // This lane compiles with default `CodegenOptions`
                     // — no parse-affecting profile options reach it.
                     default_extraction: true,
+                    template_class_signature: crate::project_semantic_dispatch::template_class_facts::complete_dependency_signature(&facts),
                 },
             );
         }
@@ -322,6 +376,53 @@ impl VerterHost {
         derived_ref
             .value_mut()
             .install_raw_template_analysis(template, admission);
+    }
+
+    /// Serve the persisted profileless raw-template slot for `canonical`
+    /// ONLY when a proven-current store view still validates the exact
+    /// dynamic-class fact signature the entry was captured under.
+    ///
+    /// ## Ordering is load-bearing (two independent hazards)
+    ///
+    /// The `derived_raw_cache` short-circuits run FIRST and their shard
+    /// guard is RELEASED before the store-view read:
+    ///
+    /// 1. **Cost.** `resolver_store_view_read` can cost a token capture,
+    ///    and the manager lock. Paying it before discovering there is no entry
+    ///    to serve charges every analysis read for a slot that often cannot exist.
+    /// 2. **Lock discipline.** Fact validation may enter broader host/cache
+    ///    paths. No `derived_raw_cache` shard guard may cross that boundary or
+    ///    overlap a writer such as `persist_raw_template_analysis`.
+    fn validated_raw_template_analysis(
+        &self,
+        canonical: &str,
+        source_generation: u64,
+    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        // Cheap map short-circuits first; the shard guard ends with this
+        // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
+        // so cloning it out is a refcount bump, not a fact-set copy.
+        let (template, signature) = {
+            let derived = self.derived_raw_cache().get(canonical)?;
+            let entry = derived.raw_template_analysis()?;
+            if entry.source_generation != source_generation {
+                return None;
+            }
+            (
+                Arc::clone(&entry.template),
+                entry.template_class_signature.clone(),
+            )
+        };
+        let current = self.resolver_store_view_read().current()?;
+        use crate::resolver_core::StoreView;
+        if !signature
+            .facts
+            .iter()
+            .all(|fact| current.view().validates(fact))
+        {
+            return None;
+        }
+        crate::fact_signature_helpers::observe_fact_signature(&signature.facts);
+        Some(template)
     }
 
     /// Return source-stage import/re-export facts without triggering analysis
@@ -367,6 +468,13 @@ impl VerterHost {
             use crate::host_executor::HostSourceData;
 
             let Some(source_snap) = self.scheduler.try_get_source(canonical) else {
+                if self
+                    .language_classifier
+                    .classify(canonical)
+                    .is_framework_carrier()
+                {
+                    return None;
+                }
                 // Scheduler-missed lane: ONE snapshot build whose parse
                 // products are threaded into the template-analysis
                 // computation — the lane performs exactly one SFC
@@ -405,6 +513,7 @@ impl VerterHost {
                 // only this branch captures here.
                 let template_inputs = Some(crate::types::VueTemplateInputs {
                     source: source.clone(),
+                    whole_hash: hd.parse.whole_hash,
                     framework_parse: framework_parse.clone(),
                     // Live scheduler read — store-authoritative.
                     store_published: true,
@@ -429,12 +538,15 @@ impl VerterHost {
                 // at THIS branch's own source generation — a late
                 // persist stamped with a superseded generation must
                 // not serve as current.
-                let template = self.derived_raw_cache().get(canonical).and_then(|cc| {
-                    cc.raw_template_analysis()
-                        .filter(|entry| entry.source_generation == source_snap.generation)
-                        .map(|entry| Arc::clone(&entry.template))
-                });
+                let template =
+                    self.validated_raw_template_analysis(canonical, source_snap.generation);
                 let export_sigs = hd.parse.export_signatures.clone();
+                // The exact bytes this branch's analyzer observes, taken from
+                // the SAME held source read (`whole_hash` is already
+                // `hash_16` of the whole file — no re-hash here).
+                let anchor_revision =
+                    crate::types::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
+                let structure = hd.structure.clone();
                 drop(source_snap);
 
                 let mut script_analysis = if !scope.needs_script_analysis() {
@@ -452,12 +564,18 @@ impl VerterHost {
                     stored_script
                 };
                 let style_analyses = if !scope.needs_style_analysis() {
-                    Arc::new(crate::parse::build_style_analyses_for_artifact(
+                    let mut rebuilt = crate::parse::build_style_analyses_for_artifact(
                         framework_parse.as_deref(),
                         &source,
                         canonical,
                         &self.provenance,
-                    ))
+                    );
+                    // Rebuilt per serve (no shared Arc): attach the sealed
+                    // wire tokens against the record's own structure.
+                    if let Some(structure) = structure.as_ref() {
+                        crate::parse::attach_style_block_tokens(structure, &mut rebuilt);
+                    }
+                    Arc::new(rebuilt)
                 } else {
                     stored_styles
                 };
@@ -489,6 +607,7 @@ impl VerterHost {
                     store_usages: Arc::new(script_analysis.store_usages),
                     store_definitions: Arc::new(script_analysis.store_definitions),
                     is_typescript: script_analysis.is_typescript,
+                    anchor_revision,
                 };
                 return Some(self.finalize_analysis_snapshot(
                     canonical,
@@ -591,6 +710,45 @@ impl VerterHost {
             // mutated (R17 invariant).
             let source =
                 overlay_source.expect("overlay_covers true implies overlay_source is Some");
+            let file_language = self.language_classifier.classify(canonical.as_str());
+            if file_language.is_framework_carrier() {
+                let structure = self.registered_overlay_structure(
+                    canonical.as_str(),
+                    Arc::clone(&source),
+                    &file_language,
+                    view,
+                )?;
+                let parsed = Arc::clone(structure.artifact());
+                let parse = crate::parse::carrier_snapshot_from_artifact(
+                    canonical.as_str(),
+                    &source,
+                    self.config.effective_scope(),
+                    &file_language,
+                    &self.provenance,
+                    &parsed,
+                )?;
+                let template_inputs = crate::types::VueTemplateInputs {
+                    source: Arc::clone(&source),
+                    whole_hash: parse.whole_hash,
+                    framework_parse: Some(parsed),
+                    store_published: false,
+                    source_generation: Some(structure.envelope().source().generation().get()),
+                };
+                let mut snapshot = self.finalize_analysis_snapshot(
+                    canonical.as_str(),
+                    Self::build_snapshot_from_parse(parse),
+                    self.template_analysis_required(),
+                    Some(template_inputs),
+                    analysis_started,
+                );
+                // Overlay-served analysis binds tokens to the OVERLAY
+                // structure — the artifact its sealed refs were minted from.
+                // This snapshot is built per call, so mutating its own
+                // styles Arc never touches shared/stored state.
+                let overlay_styles: &mut Vec<_> = Arc::make_mut(&mut snapshot.styles);
+                crate::parse::attach_style_block_tokens(&structure, overlay_styles);
+                return Some(snapshot);
+            }
             // Snapshot AND template inputs from the SAME overlay read:
             // the template derives from the overlay's own bytes, in
             // the overlay snapshot's conversion context — one coherent
@@ -615,7 +773,9 @@ impl VerterHost {
             ));
         }
 
-        // Base path — no overlay coverage; existing flow.
+        // Base path — no overlay coverage; existing flow. Style block tokens
+        // were attached ONCE when the Source-stage record was built, so the
+        // served snapshot reuses the stored Arc unchanged.
         self.get_analysis_snapshot_internal(&canonical, analysis_started)
     }
 
@@ -752,11 +912,11 @@ impl VerterHost {
     /// Returns `None` when the canonical has no authoritative current
     /// content hash (unloaded / evicted / deleted) OR when the only
     /// cached artifact is a stale candidate for an older content hash.
-    /// Correctness-sensitive readers (route-hash / import-route-hash
-    /// fact production) MUST use this instead of the permissive
+    /// Correctness-sensitive artifact readers and parse-domain route-fact
+    /// production MUST use this instead of the permissive
     /// `get_any`: with eager `evict_canonical` retired a stale
     /// `IndexedReady` can coexist with the live content, and sampling
-    /// its `route_hash` / `import_route_hash` as "current" would
+    /// its route surface as "current" would
     /// confirm a stale cache entry to the fact validator. Deriving the
     /// pin from a `get_any`-backed hash would let the same stale
     /// artifact answer its own pin, so the hash source is restricted
@@ -789,22 +949,15 @@ impl VerterHost {
             .project_type_store
             .indexed()
             .get_for_current_content(analysis_canonical, current_hash)?;
-        // Edge-currency gate. The content pin keys only on the OWNER's content
-        // hash, but a wildcard `export *` surface bakes its edge `canonical_id`s
-        // from the dependency file set; a dependency appearing or retargeting
-        // (the file set changes, the owner's content does not) leaves those
-        // edges stale while the content pin still matches. Re-index from BASE
-        // content through `ensure_indexed_ready_serve` — whose reuse is itself
-        // edge-gated, so it re-resolves the edges against the live file set and
-        // republishes — and return the fresh artifact. A non-wildcard surface
-        // is always edge-current and returns directly. This base accessor is
-        // the choke point every base reader (`shallow_file_state`,
-        // `observe_materialize_scope`, `current_import_route_table`, the
-        // `HostStoreView` ImportRoute snapshot, …) funnels through.
+        // The content pin keys on the owner's content hash. Parse artifacts
+        // retain authored routing shape only; resolved canonicals and their
+        // currency live in the request's captured resolution world. This base
+        // accessor is the choke point for artifact readers such as
+        // `shallow_file_state` and `observe_materialize_scope`.
         if self.indexed_surface_is_current(analysis_canonical, &indexed) {
             return Some(indexed);
         }
-        // Re-index arm: a fenced rebuild is served bare here (the
+        // Reparse arm: a fenced rebuild is served bare here (the
         // accessor's contract is artifact-or-nothing), but the fenced
         // consumption is visible to every enclosing traced admission
         // point via the serve chokepoint flag, so it can no longer be
@@ -918,22 +1071,21 @@ impl VerterHost {
         ) {
             return None;
         }
-        // Edge-currency gate (same rationale as
+        // Parse-environment gate (same rationale as
         // `current_content_pinned_indexed`). A genuinely artifact-only
-        // canonical has no scheduler `DerivedRawState`, so re-indexing it
-        // through `ensure_indexed_ready_serve` re-reads the artifact source and
-        // re-resolves its wildcard `export *` edges against the live file set.
+        // canonical has no scheduler `DerivedRawState`, so rebuilding it
+        // through `ensure_indexed_ready_serve` re-reads and reparses the source.
         //
         // `ensure_indexed_ready_serve` MUST NOT route its own artifact fast-path back
         // through this method (it uses the non-recursing
         // [`Self::artifact_current_indexed_raw`] instead): this method calls
         // `ensure_indexed_ready_serve` on stale, so a back-edge would mutually
-        // recurse and overflow the stack for an artifact-only edge-stale
-        // wildcard barrel.
+        // recurse and overflow the stack for an artifact built under an old
+        // parse environment.
         if self.indexed_surface_is_current(analysis_canonical, &indexed) {
             return Some(indexed);
         }
-        // Re-index arm — same chokepoint-covered serve as
+        // Reparse arm — same chokepoint-covered serve as
         // `current_content_pinned_indexed` above.
         self.ensure_indexed_ready_serve(analysis_canonical)
             .map(|serve| serve.indexed)
@@ -972,11 +1124,11 @@ impl VerterHost {
     /// ([`Self::is_artifact_only_scope`]) AND its file is still present
     /// in the (possibly swapped) workspace. Every artifact-only read —
     /// the raw peek ([`Self::artifact_current_indexed_raw`]), the
-    /// re-indexing authority ([`Self::artifact_current_indexed`]), the
+    /// reparsing authority ([`Self::artifact_current_indexed`]), the
     /// `FileArtifacts` lane
     /// ([`Self::current_content_pinned_artifacts`]), the
-    /// `analysis_source_exists` probe, and the base
-    /// `HostStoreView::build` snapshot — gates here, so state the
+    /// `analysis_source_exists` probe, and the base store view's root-backed
+    /// artifact lookup — gates here, so state the
     /// accessors reject can never serve OR validate anywhere.
     ///
     /// The freshness leg (`ws().file_exists`) covers a deleted / closed /
@@ -997,9 +1149,8 @@ impl VerterHost {
     /// unrelated epoch bumps
     /// (`cached_import_route_resolution_reuses_untracked_current_version_across_epoch_bumps`
     /// pins this). The transition ledger is per-canonical, so it carries
-    /// none of that collateral; file-set sensitivity of baked edges is
-    /// the edge-currency oracle's job (`route_surface_is_edge_current` +
-    /// the known-miss generation sidecar), not this gate's.
+    /// none of that collateral. Resolution currency is independently owned by
+    /// the request's captured path-precise resolution facts, not this gate.
     ///
     /// Applies ONLY to the artifact-only lane — scheduler-tracked
     /// canonicals are content-pinned to the scheduler's authoritative
@@ -1429,6 +1580,7 @@ impl VerterHost {
                 }
                 Some(crate::types::VueTemplateInputs {
                     source: source_snap.source.clone(),
+                    whole_hash: hd.parse.whole_hash,
                     framework_parse: hd.framework_parse.clone(),
                     // Live scheduler reads at one generation —
                     // store-authoritative.
@@ -1453,11 +1605,25 @@ impl VerterHost {
         // generation-coherent with their source) — a late persist
         // stamped with a superseded generation must not serve as
         // current.
-        let template = self.derived_raw_cache().get(canonical).and_then(|cc| {
-            cc.raw_template_analysis()
-                .filter(|entry| entry.source_generation == analysis_snap.generation)
-                .map(|entry| Arc::clone(&entry.template))
-        });
+        let template = self.validated_raw_template_analysis(canonical, analysis_snap.generation);
+
+        // Same generation rail for the anchor revision: the identity is the
+        // source node's own `parse.whole_hash` (already `hash_16` of the whole
+        // file bytes — no re-hash here), accepted ONLY at this analysis
+        // snapshot's generation. A torn join leaves the revision UNSTAMPED, and
+        // an unstamped revision matches no live buffer, so an anchor consumer
+        // fails closed rather than editing from unpaired geometry.
+        let anchor_revision = self
+            .scheduler
+            .try_get_source(canonical)
+            .filter(|source_snap| source_snap.generation == analysis_snap.generation)
+            .and_then(|source_snap| {
+                let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
+                Some(crate::types::AnalysisSourceRevision::from_whole_hash(
+                    hd.parse.whole_hash,
+                ))
+            })
+            .unwrap_or_default();
 
         Some(FileAnalysisSnapshot {
             imports: ad.script_analysis.imports.clone(),
@@ -1480,6 +1646,7 @@ impl VerterHost {
             store_usages: Arc::clone(&ad.arcs.store_usages),
             store_definitions: Arc::clone(&ad.arcs.store_definitions),
             is_typescript: ad.script_analysis.is_typescript,
+            anchor_revision,
         })
     }
 
@@ -1488,6 +1655,7 @@ impl VerterHost {
     /// Tries scheduler (native) or files map (WASM) first, falling back to
     /// VFS resolution + disk read. Used by template analysis and external src
     /// block resolution.
+    #[allow(dead_code)] // Residual B4 helper retained by the scope freeze.
     pub(crate) fn resolve_dep_source(
         &self,
         owner_canonical: &str,
@@ -2213,6 +2381,7 @@ impl VerterHost {
         let file_language = self.language_classifier().classify(canonical);
         self.build_template_analysis(
             canonical,
+            override_with_parse.parse.whole_hash,
             &file_language,
             &override_with_parse.source,
             override_with_parse.framework_parse.clone(),

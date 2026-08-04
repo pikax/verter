@@ -219,6 +219,43 @@ impl VerterHost {
         // the host's provenance counters (`carrier_parses` / `sfc_parses`
         // are bumped on rayon workers where no capture-token TLS exists).
         let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let instance_id = next_host_instance_id();
+        let registered_source_authority = Arc::new(
+            verter_language::registered_source_authority::RegisteredSourceAuthority::new()
+                .expect("registered source authority"),
+        );
+        let carrier_grammar_authority = Arc::new(
+            verter_language::carrier_grammar::CarrierGrammarAuthority::new()
+                .expect("carrier grammar authority"),
+        );
+        use verter_language::carrier_grammar::{
+            CarrierGrammarConfig, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+        };
+        carrier_grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::vue(),
+                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
+                CarrierParserGrammarVersion::new(1).expect("grammar version"),
+                CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
+                    .expect("default Vue grammar"),
+            )
+            .expect("register Vue grammar");
+        carrier_grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::svelte(),
+                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
+                CarrierParserGrammarVersion::new(1).expect("grammar version"),
+                CarrierGrammarConfig::Svelte,
+            )
+            .expect("register Svelte grammar");
+        let carrier_publication_store = Arc::new(
+            crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
+                Arc::clone(&registered_source_authority),
+                Arc::clone(&carrier_grammar_authority),
+                Arc::clone(&provenance),
+            ),
+        );
+        let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
 
         // The host's language classification authority. The capability
         // snapshot is empty: no capability producer exists in the
@@ -245,6 +282,11 @@ impl VerterHost {
                 config.clone(),
                 Arc::clone(&workspace_lock),
                 Arc::clone(&provenance),
+                Arc::clone(&registered_source_authority),
+                Arc::clone(&carrier_grammar_authority),
+                Arc::clone(&carrier_publication_store),
+                crate::carrier_publication_store::HostInstanceId::new(instance_id),
+                Arc::clone(&registered_envelope_ingest),
             ));
             let loader = Arc::new(WorkspaceSourceLoader {
                 workspace: Arc::clone(&workspace_lock),
@@ -353,8 +395,11 @@ impl VerterHost {
             }
         };
         Self {
-            instance_id: next_host_instance_id(),
+            instance_id,
             config,
+            registered_source_authority,
+            carrier_grammar_authority,
+            carrier_publication_store,
             language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
@@ -366,6 +411,7 @@ impl VerterHost {
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
+            registered_envelope_ingest,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),

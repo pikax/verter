@@ -32,6 +32,21 @@ fn workspace_accessor_visibility() {
     t.compile_fail("tests/cases/compile-fail/workspace_accessor_visibility.rs");
 }
 
+/// Type publication accepts only typed authority/evidence/policy inputs;
+/// authored sources require locators and terminal display is sink-minted.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn type_publication_capability_boundary() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/type_publication_capability.rs");
+    t.compile_fail("tests/cases/compile-fail/authored_source_from_public_locator.rs");
+    t.compile_fail("tests/cases/compile-fail/authored_source_deserialize.rs");
+    t.compile_fail("tests/cases/compile-fail/symbolic_equivalence_direct_mint.rs");
+}
+
 /// Raw module-resolution entry points are private to the resolver's own unit
 /// tests. Production callers must cross the Engine-owned transaction boundary,
 /// whose tracked wrapper requires an unforgeable Engine capability.
@@ -57,6 +72,62 @@ fn raw_resolver_entry_points_are_private() {
 fn carrier_access_token_not_constructible_outside_verter_language() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/carrier_access_token_struct_literal.rs");
+}
+
+/// Raw registered-carrier parsing is an internal producer capability.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn raw_registered_carrier_parser_is_not_public() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs");
+}
+
+/// Whole-file carrier detection is not a public compiler capability. Carrier
+/// language is read from the registered parser inventory.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn whole_file_script_detector_is_not_public() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/scanners_replacement_script_detector_public.rs");
+}
+
+/// The registered-carrier projector is a module-private capability: callers
+/// outside its defining module can neither name the implementation module nor
+/// reach a parent-module facade path. B2 owns exposing the real projector to
+/// exactly the store-leader module; until then only the compiler's `cfg(test)`
+/// wrapper crosses this boundary.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn registered_carrier_projector_not_public_or_reexported() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail(
+        "tests/cases/compile-fail/registered_carrier_projector_not_public_or_reexported.rs",
+    );
+}
+
+/// The registered projection's carrier payload is an opaque in-process seal:
+/// it exposes neither a typed downcast nor its erased carrier, and it cannot be
+/// serialized into a reconstructible form.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn registered_carrier_payload_is_opaque_and_non_serializable() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_downcast.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_serialize.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_deserialize.rs");
+    t.compile_fail("tests/cases/compile-fail/registered_carrier_payload_no_raw_carrier.rs");
 }
 
 /// The `TscResponse` rendering-channel seal has NO inside: the two code
@@ -308,6 +379,23 @@ fn hot_materialize_and_script_fact_structural_rails_smoke() {
     t.compile_fail("tests/cases/compile-fail/script_fact_unavailable_not_deref.rs");
 }
 
+/// Focused always-on smoke for the hot-materialize structural rails.
+#[test]
+fn hot_materialize_structural_rails_smoke() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/no_typeexpr_direct_field.rs");
+    t.compile_fail("tests/cases/compile-fail/no_typeexpr_aliased_field.rs");
+    t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
+}
+
+/// A produced public-API projection must carry a closed contract availability;
+/// the old optional construction is rejected by the type system.
+#[test]
+fn component_api_projection_contract_not_optional_compile_fail() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/component_api_projection_contract_not_optional.rs");
+}
+
 /// The sealed `InstantiateBodySource` construction: the source-kind
 /// constructors `InstantiateContext::file_backed` / `::non_file` are
 /// `pub(crate)` AND require the `BodySourceWitness` mintable only inside
@@ -358,4 +446,20 @@ fn instantiate_key_shape_is_sealed_against_forgery_and_extraction() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/instantiate_key_seal_no_features.rs");
     t.compile_fail("tests/cases/compile-fail/instantiate_key_context_not_extractable.rs");
+}
+
+/// T-A7 Rail 2 witness (review-B P2-1): `MemberListAnchor` is analyzer-minted
+/// only — the ctor is `pub(crate)` to `verter_semantic` and the fields are
+/// private, so an external unit can neither call `new` nor build the struct
+/// literal. If either seal regressed (the ctor widened to `pub`, or a field
+/// made public), the corresponding line would COMPILE and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn member_list_anchor_is_sealed_against_forgery() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/member_list_anchor_forge.rs");
+    t.compile_fail("tests/cases/compile-fail/member_list_anchor_struct_literal.rs");
 }

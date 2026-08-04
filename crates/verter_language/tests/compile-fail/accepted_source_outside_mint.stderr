@@ -1,0 +1,9 @@
+error[E0451]: fields `source` and `grammar` of struct `AcceptedRegisteredCarrierSource` are private
+ --> tests/compile-fail/accepted_source_outside_mint.rs:8:9
+  |
+7 |     let _ = AcceptedRegisteredCarrierSource {
+  |             ------------------------------- in this type
+8 |         source,
+  |         ^^^^^^ private field
+9 |         grammar,
+  |         ^^^^^^^ private field

@@ -388,10 +388,11 @@ fn resolve_namespace_member_from_facts(
 /// import resolution would incorrectly probe the dependency for an export
 /// literally named `Ns` before the qualified member is known.
 ///
-/// The owner-qualified shallow import table is the sole authority. Its
-/// ambiguous-binding state is already fail-closed (`import_target_in` returns
-/// `None`), and `is_namespace` distinguishes a real module handle from a named
-/// or default import. The returned canonical remains the namespace MODULE;
+/// The shallow state's validated lexical visibility lookup is the sole
+/// authority. Its one-way Instance-to-Module parent relation lets a
+/// script-setup annotation see the module-owned import without admitting the
+/// reverse edge; `is_namespace` distinguishes a real module handle from a
+/// named or default import. The returned canonical remains the namespace MODULE;
 /// [`resolve_namespace_member_from_facts`] sends the member through the shared
 /// type/value export resolvers, which own final re-export identity.
 fn resolve_namespace_import_canonical_from_facts(
@@ -403,10 +404,14 @@ fn resolve_namespace_import_canonical_from_facts(
     let indexed = ctx
         .ensure_indexed_ready_serve(canonical_id)
         .map(|serve| serve.indexed)?;
-    let target = indexed
-        .shallow_state
-        .import_target_in(owner, prefix)
-        .filter(|target| target.is_namespace)?;
+    let target = match indexed.shallow_state.visible_value_binding(owner, prefix)? {
+        crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(target)
+            if target.is_namespace =>
+        {
+            target
+        }
+        _ => return None,
+    };
     ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)
 }
 

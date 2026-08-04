@@ -144,6 +144,7 @@ mod tests {
 
     fn type_based_props_macro() -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,

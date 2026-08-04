@@ -228,6 +228,7 @@ mod tests {
             script: None,
             styles: &[style],
             source: Some(source),
+            blocks: &[],
         };
 
         let diags = run_rule(&file);
@@ -296,6 +297,7 @@ mod tests {
             script: None,
             styles: &[style],
             source: Some(source),
+            blocks: &[],
         };
 
         let diags = run_rule(&file);
@@ -353,6 +355,7 @@ mod tests {
             script: None,
             styles: &[],
             source: Some(source),
+            blocks: &[],
         };
 
         let diags = run_rule(&file);
@@ -408,6 +411,7 @@ mod tests {
             script: None,
             styles: &[style],
             source: None, // No source available
+            blocks: &[],
         };
 
         let diags = run_rule(&file);

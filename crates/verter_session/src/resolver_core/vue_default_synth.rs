@@ -200,6 +200,7 @@ mod tests {
 
     fn type_based_macro(kind: AnalyzedMacroKind, macro_index: u32) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -222,6 +223,7 @@ mod tests {
 
     fn runtime_macro(kind: AnalyzedMacroKind) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,

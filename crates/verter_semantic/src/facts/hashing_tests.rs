@@ -825,6 +825,7 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
             ),
         }),
         return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+        return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {

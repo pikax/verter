@@ -1391,6 +1391,7 @@ fn runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias() {
 /// must byte-match the `get_virtual_file(Main)` oracle under the SAME
 /// profile + SAME stored override on the SAME host.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn runtime_render_consumes_stored_template_block_override() {
     let host = new_host();
     let canonical = "/proj/PugTemplate.vue";

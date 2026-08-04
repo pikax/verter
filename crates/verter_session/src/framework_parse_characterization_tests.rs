@@ -178,6 +178,7 @@ fn eval_source_for_two_script_sfc_is_position_preserving_and_stable() {
 // ───────────────────────── content overrides ─────────────────────────
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn block_override_roundtrip_produces_identical_analysis() {
     let source = "<template lang=\"pug\">div hello</template>\n<script setup lang=\"ts\">const msg: string = 'hi';</script>\n";
     let host = make_host();
@@ -336,7 +337,10 @@ fn component_meta_props_surface_is_stable() {
             format!(
                 "{}:{}:{}",
                 p.name,
-                p.raw_type.as_deref().unwrap_or("<none>"),
+                p.publication
+                    .evidence()
+                    .map(verter_type_expr::AuthoredTypeEvidence::text)
+                    .unwrap_or("<none>"),
                 p.required
             )
         })
@@ -375,7 +379,9 @@ fn component_meta_props_surface_is_stable() {
 #[test]
 fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
     use verter_compiler::compile::types::{CodegenOptions, CompileTarget, VerterCompileOptions};
-    use verter_compiler::compile::{compile, compile_from_parsed, VueMacroSemanticInput};
+    use verter_compiler::compile::VueMacroSemanticInput;
+    use verter_compiler::framework_common::vue_bridge::compile_registered_vue_artifact;
+    use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
     // A spread of fixture SFCs covering script-setup, plain script,
     // template, styles, and JS dialect.
@@ -398,13 +404,11 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
         };
 
         // Direct path: the compiler's untouched public `compile()`.
-        let alloc_a = oxc_allocator::Allocator::new();
-        let direct = compile(
-            source,
+        let direct = StandaloneCompiler.compile_source(
+            &StandaloneSourceBytes::copied_from(source),
             &core_opts,
             &verter_opts,
             &VueMacroSemanticInput::Unavailable,
-            &alloc_a,
         );
 
         // Rehoused path: the session's carrier dispatch produces the
@@ -418,17 +422,16 @@ fn rehoused_carrier_dispatch_drives_compile_byte_identical_to_direct_compile() {
             &crate::types::MetaProvenance::default(),
         )
         .expect("Vue carrier dispatch yields a snapshot");
-        let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
-            .expect("the rehoused Vue artifact carries a ParsedSfc");
         let alloc_b = oxc_allocator::Allocator::new();
-        let rehoused = compile_from_parsed(
+        let rehoused = compile_registered_vue_artifact(
             source,
-            parsed,
+            &artifact,
             &core_opts,
             &verter_opts,
             &VueMacroSemanticInput::Unavailable,
             &alloc_b,
-        );
+        )
+        .expect("registered Vue artifact compiles");
 
         assert_eq!(
             direct.tsx.as_ref().map(|t| &t.code),

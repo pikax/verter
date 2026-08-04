@@ -120,6 +120,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = UnwrapBinding.fixes_for_diagnostic(&diag, &ctx);
@@ -167,6 +168,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = UnwrapBinding.fixes_for_diagnostic(&diag, &ctx);
@@ -214,6 +216,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = UnwrapBinding.fixes_for_diagnostic(&diag, &ctx);

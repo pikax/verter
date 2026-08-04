@@ -1235,7 +1235,7 @@ impl VerterLanguageServer {
         if *doc.source != *snapshot.provider_content {
             return None;
         }
-        let line_index = doc.line_index.clone();
+        let line_index = doc.line_index.as_ref().clone();
 
         Some(VirtualFileContext {
             tsx_path,

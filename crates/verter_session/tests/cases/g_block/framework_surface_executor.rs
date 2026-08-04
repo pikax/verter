@@ -316,7 +316,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     let mut live_emit_names: Vec<String> = emits_dtos
         .emit_fields()
         .iter()
-        .map(|f| f.analysis.name.clone())
+        .map(|f| f.name.clone())
         .collect();
     live_emit_names.sort();
     let emits_entry = by_kind

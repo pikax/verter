@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
 use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
-use verter_type_expr::locators::AuthoredBodyLocator;
+use verter_type_expr::{
+    AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionExactness,
+    ResolutionProvenance, ResolvedTypeAuthority,
+};
 
 pub type ExpansionExactness = SolverExactness;
 pub type ExpansionExecutionStatus = ExecutionStatus;
@@ -281,9 +284,7 @@ impl<T> ExpansionResult<T> {
 // Component-level types
 // ---------------------------------------------------------------------------
 
-#[derive(
-    Debug, Clone, Default, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
-)]
+#[derive(Debug, Clone, Default, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedComponentTypes {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -316,7 +317,7 @@ pub struct ExpandedComponentTypes {
 /// the macro's position in the analyzer's macro list — the same ordinal
 /// every other per-macro lane (`ExpandedMacroProps` /
 /// `ExpandedMacroObjectShape`) keys on.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedMacroExposed {
     pub macro_index: usize,
@@ -324,35 +325,22 @@ pub struct ExpandedMacroExposed {
     pub fields: Vec<ExpandedField>,
 }
 
-#[derive(
-    Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr,
-)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, verter_no_typeexpr::NoTypeExpr)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedField {
     pub name: String,
-    /// The field value's three-state SOURCE POSITION (see
-    /// [`ExpandedProperty::ty`]). A REQUIRED payload position (an emit
-    /// field's payload) whose faithful source could not be constructed is
-    /// `Failed` — never a fabricated `unknown` success.
-    pub r#type: SourcePosition,
+    /// Immutable resolved authority for the field value. Authored spelling
+    /// never overwrites this outcome.
+    pub authority: ResolvedTypeAuthority,
+    /// Locator/text/provenance evidence emitted atomically by the producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_type: Option<String>,
+    pub authored_evidence: Option<AuthoredTypeEvidence>,
     #[serde(default)]
     pub optional: bool,
     pub exactness: ExpansionExactness,
     pub execution_status: ExpansionExecutionStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<ExpansionDiagnostic>,
-    /// The authored SHALLOW source of the field's annotation — the single
-    /// paired identity replacing the pre-expansion syntactic sidecar: the
-    /// producing-canonical scope is subsumed by the locator anchor.
-    /// Populated by the producer at `expand_macro_types_impl_with_expander`
-    /// from the analyzer-side `AnalyzedPropField.payload` /
-    /// `AnalyzedEmitField.payload` / `AnalyzedSlotFieldBinding.payload`
-    /// authored position. `None` when the analyzer's shallow source was
-    /// `None` (e.g. Options-API binding entries).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shallow_source: Option<AuthoredBodyLocator>,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
@@ -365,6 +353,79 @@ pub struct ExpandedField {
     /// macro provenance.
     #[serde(default)]
     pub declared_in_macro_type_arg: bool,
+}
+
+impl ExpandedField {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_source_position(
+        name: String,
+        source: SourcePosition,
+        authored_evidence: Option<AuthoredTypeEvidence>,
+        optional: bool,
+        exactness: ExpansionExactness,
+        execution_status: ExpansionExecutionStatus,
+        diagnostics: Vec<ExpansionDiagnostic>,
+        declared_in_macro_type_arg: bool,
+        provenance: ResolutionProvenance,
+    ) -> Self {
+        let publication_diagnostics: Arc<[ResolutionDiagnostic]> = diagnostics
+            .iter()
+            .map(|diagnostic| ResolutionDiagnostic {
+                kind: diagnostic.reason.into(),
+                context: Arc::from(diagnostic.context.as_str()),
+                property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let authority = ResolvedTypeAuthority::from_source_position(
+            &source,
+            exactness.into(),
+            provenance,
+            publication_diagnostics,
+        );
+        Self {
+            name,
+            authority,
+            authored_evidence,
+            optional,
+            exactness,
+            execution_status,
+            diagnostics,
+            declared_in_macro_type_arg,
+        }
+    }
+}
+
+impl From<ExpansionExactness> for ResolutionExactness {
+    fn from(exactness: ExpansionExactness) -> Self {
+        match exactness {
+            ExpansionExactness::ExactConcrete => Self::ExactConcrete,
+            ExpansionExactness::ExactSymbolic => Self::ExactSymbolic,
+            ExpansionExactness::Incomplete => Self::Incomplete,
+        }
+    }
+}
+
+impl From<ExpansionStopReason> for ResolutionDiagnosticKind {
+    fn from(reason: ExpansionStopReason) -> Self {
+        match reason {
+            ExpansionStopReason::BudgetExceeded => Self::BudgetExceeded,
+            ExpansionStopReason::ProjectionWorkLimit => Self::ProjectionWorkLimit,
+            ExpansionStopReason::ConnectedQueryDepthLimit => Self::ConnectedQueryDepthLimit,
+            ExpansionStopReason::MappedDepthExceeded => Self::MappedDepthExceeded,
+            ExpansionStopReason::UnresolvedReference => Self::UnresolvedReference,
+            ExpansionStopReason::IndeterminateConditional => Self::IndeterminateConditional,
+            ExpansionStopReason::InfiniteKeySpace => Self::InfiniteKeySpace,
+            ExpansionStopReason::UnsupportedOperator => Self::UnsupportedOperator,
+            ExpansionStopReason::ConditionalContextTruncated => Self::ConditionalContextTruncated,
+            ExpansionStopReason::IdempotentArm => Self::IdempotentArm,
+            ExpansionStopReason::CyclicReference => Self::CyclicReference,
+            ExpansionStopReason::CyclicInstantiation => Self::CyclicInstantiation,
+            ExpansionStopReason::InstantiationError => Self::InstantiationError,
+            ExpansionStopReason::EmptyUnionArm => Self::EmptyUnionArm,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, verter_no_typeexpr::NoTypeExpr)]

@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::{GotoDefinitionResponse, Hover, Location, Position, Range, Uri};
 
+use crate::documents::carrier_structure::project_carrier_blocks;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::{custom_block_content_kind, scan_sfc_blocks_with};
 use crate::documents::uri_to_canonical_id;
 use crate::features::hover;
 use crate::type_provider::merge;
@@ -1086,17 +1086,13 @@ impl VerterLanguageServer {
             .get_analysis(&child_canonical_id)
             .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
 
-        // Get the child's source
-        let child_source_arc = self.documents.host().get_source(&child_canonical_id)?;
-        let child_source = child_source_arc.to_string();
+        let (child_structure, _) = self
+            .documents
+            .host()
+            .registered_file_structure_snapshot(&child_canonical_id)?;
+        let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
-        // Host-loaded child: no editor language_id, so the canonical path
-        // classifies the carrier (a `.svelte` child balances its root
-        // components; a `.vue` child keeps raw-text custom blocks).
-        let blocks = scan_sfc_blocks_with(
-            &child_source,
-            custom_block_content_kind(None, &child_canonical_id),
-        );
+        let blocks = project_carrier_blocks(&child_structure);
         let line_index = LineIndex::new(&child_source, self.documents.encoding());
 
         let inherited_attrs = super::server_utils::resolved_fallthrough_attr_names(
@@ -1129,21 +1125,18 @@ impl VerterLanguageServer {
                 ) else {
                     return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
-                let projection = self
+                let Some(projection) = self
                     .documents
                     .host()
-                    .get_public_api_projection(&child.canonical_id)?;
+                    .get_public_api_projection(&child.canonical_id)?
+                else {
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
+                };
                 Ok(ChildHoverOutcome::Hover(
                     hover::build_child_component_hover(
                         &target.component_name,
                         &target.import_source,
-                        &child.analysis,
-                        projection
-                            .as_ref()
-                            .and_then(|projection| projection.contract.as_ref()),
-                        projection
-                            .as_ref()
-                            .map(|projection| projection.response.ts_labeled_code().as_ref()),
+                        &projection.contract,
                         &target.usage_props,
                     ),
                 ))
@@ -1161,21 +1154,18 @@ impl VerterLanguageServer {
                     return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
                 let child_canonical_id = crate::documents::uri_to_canonical_id(&child.uri);
-                let projection = self
+                let Some(projection) = self
                     .documents
                     .host()
-                    .get_public_api_projection(&child_canonical_id)?;
+                    .get_public_api_projection(&child_canonical_id)?
+                else {
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
+                };
                 Ok(ChildHoverOutcome::Hover(
                     hover::build_child_component_hover(
                         &target.binding_name,
                         &target.import_source,
-                        &child.analysis,
-                        projection
-                            .as_ref()
-                            .and_then(|projection| projection.contract.as_ref()),
-                        projection
-                            .as_ref()
-                            .map(|projection| projection.response.ts_labeled_code().as_ref()),
+                        &projection.contract,
                         &[],
                     ),
                 ))
@@ -1186,21 +1176,20 @@ impl VerterLanguageServer {
                 else {
                     return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
-                // The hover text-parses the TYPE surface (handler props off
-                // the published `$props`), so it reads the TS-labeled
-                // rendering — the same bytes the provider companion holds.
-                let public_api = self
+                // Public meaning crosses this boundary only as the structured
+                // contract projected beside the declaration under one view.
+                let Some(projection) = self
                     .documents
                     .host()
-                    .get_public_api(&child.canonical_id)?
-                    .map(|api| api.ts_labeled_code().to_string());
-                Ok(hover::build_child_event_hover(
-                    &target.vue_attr,
-                    &child.analysis,
-                    public_api.as_deref(),
+                    .get_public_api_projection(&child.canonical_id)?
+                else {
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
+                };
+                Ok(
+                    hover::build_child_event_hover(&target.vue_attr, &projection.contract)
+                        .map(ChildHoverOutcome::Hover)
+                        .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch),
                 )
-                .map(ChildHoverOutcome::Hover)
-                .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch))
             }
             hover::ChildHoverTarget::SlotAttribute(target) => {
                 let Some(child) =
@@ -1208,10 +1197,39 @@ impl VerterLanguageServer {
                 else {
                     return Ok(ChildHoverOutcome::SurfaceUnavailable);
                 };
+                let Some(projection) = self
+                    .documents
+                    .host()
+                    .get_public_api_projection(&child.canonical_id)?
+                else {
+                    return Ok(ChildHoverOutcome::SurfaceUnavailable);
+                };
+                // Hover-boundary terminal demand, path-precise: deepen the
+                // RANK-MATCHED slot's synthetic-carrier bindings only (other
+                // slots never deepen), through the one sanctioned session
+                // route. A binding that fails to deepen keeps its published
+                // form — the typed refusal (fail-closed, never fabricated).
+                let mut deepened =
+                    crate::features::hover_slot_deepen::SlotBindingDeepenView::default();
+                for (binding_name, key) in
+                    crate::features::hover_slot_deepen::matched_slot_carrier_bindings(
+                        &projection.contract,
+                        &target.slot_name,
+                    )
+                {
+                    if let Some(view) = self
+                        .documents
+                        .host()
+                        .deepen_synthetic_slot_binding(&child.canonical_id, key)
+                    {
+                        deepened.insert(std::sync::Arc::clone(binding_name), view);
+                    }
+                }
                 Ok(hover::build_child_slot_hover(
                     &target.vue_attr,
                     &target.slot_name,
-                    &child.analysis,
+                    &projection.contract,
+                    &deepened,
                 )
                 .map(ChildHoverOutcome::Hover)
                 .unwrap_or(ChildHoverOutcome::SurfaceAvailableNoMatch))

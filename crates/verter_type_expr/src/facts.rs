@@ -19,7 +19,7 @@ use verter_no_typeexpr::NoTypeExpr;
 
 use crate::locators::{
     AuthoredAnchor, AuthoredBodyLocator, AuthoredTypePayloadRef, MacroPayloadLocator,
-    SymbolBodyLocator, TypeArgLocator, TypeBodySlot,
+    SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
 };
 use crate::span_origins::{
     FunctionParamSpanOrigin, FunctionSpansOrigin, IndexSignatureSpansOrigin, MemberSpansOrigin,
@@ -1527,6 +1527,77 @@ pub struct ValueTypeAnnotationFact {
     /// is [`SemanticTypeSource::Authored`]. Absent for
     /// [`ValueAnnotationClass::Absent`].
     pub annotation: Option<SemanticTypeSource>,
+    /// Producer-owned authored reference head for exact route provenance.
+    pub reference_head: AuthoredReferenceHeadFact,
+}
+
+/// Locator for one authored reference argument. Macro payloads need the macro
+/// index/field position that a declaration-only [`TypeArgLocator`] cannot
+/// represent.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum AuthoredReferenceArgLocator {
+    Value(TypeArgLocator),
+    MacroPayload {
+        payload: MacroPayloadLocator,
+        arg_index: u32,
+    },
+}
+
+/// Graph-free authored reference-head evidence. This records syntax identity
+/// and locator-backed arguments only; resolution remains demand-driven.
+///
+/// The head is VALUE-SIDE EVIDENCE, never query or cache identity: it rides on
+/// the prepared/lowered declaration VALUE (neither `PreparedValueDecl` nor
+/// `LoweredValueDecl` derives `PartialEq`/`Hash`) and is published as the
+/// `authored_head` of a wrapper proof. `local_name` / `local_root` are authored
+/// LOCAL ALIASES, and no semantic query key, family slot, graph node identity,
+/// or cache key may include them — `Ref as A` and `Ref as B` are the same
+/// instantiation and must keep hash-consing to one node.
+///
+/// `args` addresses the OUTER authored argument positions. It is deliberately
+/// not read by any classifier: exact classification must use the TERMINAL
+/// SUBSTITUTED argument reached through the shared demand, so that a
+/// transforming or reordering alias cannot be classified from the outer authored
+/// argument. `args` exists as published route evidence (diagnostics and exact
+/// argument-position recovery), not as a classification input.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum AuthoredReferenceHeadFact {
+    NotReference,
+    Bare {
+        local_name: Arc<str>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    Qualified {
+        local_root: Arc<str>,
+        member_path: Arc<[Arc<str>]>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    ImportType {
+        specifier: Arc<str>,
+        member_path: Arc<[Arc<str>]>,
+        args: Arc<[AuthoredReferenceArgLocator]>,
+    },
+    Unavailable,
 }
 
 /// One narrowed type parameter: its name, ordinal, and constraint/default
@@ -1761,10 +1832,33 @@ pub struct FunctionSignatureFact {
     /// whether an implicit fallthrough return remains reachable.
     #[serde(default)]
     pub return_inference: ReturnInferenceCompleteness,
+    /// Producer-owned authored reference head of the AUTHORED return
+    /// annotation, for exact demand-time route provenance — the return-position
+    /// peer of [`ValueTypeAnnotationFact::reference_head`].
+    ///
+    /// Minted ONLY when the signature carried an explicit authored TS return
+    /// annotation. An INFERRED return still mints [`Self::return_ty`] (that
+    /// locator replays the retained lowering regardless of authorship), so
+    /// minting a head from that carrier would fabricate authored evidence for a
+    /// return the author never wrote: every non-authored return position —
+    /// inferred returns, object-shape member signatures, synthesized
+    /// constructors — publishes
+    /// [`AuthoredReferenceHeadFact::Unavailable`] instead. An authored
+    /// annotation that is not a type reference at all publishes
+    /// [`AuthoredReferenceHeadFact::NotReference`].
+    #[serde(default = "authored_reference_head_unavailable")]
+    pub return_reference_head: AuthoredReferenceHeadFact,
     /// Overload-visibility fact: hide the trailing implementation signature.
     pub has_implementation_body: bool,
     /// Origin locator recovering `FunctionSpans`.
     pub spans_origin: FunctionSpansOrigin,
+}
+
+/// Serde default for [`FunctionSignatureFact::return_reference_head`]: a
+/// previously persisted signature fact carries no head, and "no head was
+/// produced" is exactly `Unavailable` — never a fabricated authored head.
+fn authored_reference_head_unavailable() -> AuthoredReferenceHeadFact {
+    AuthoredReferenceHeadFact::Unavailable
 }
 
 /// A narrowed object property member. Carries the identity-participating
@@ -2043,6 +2137,22 @@ pub struct PreparedMemberFact {
     pub ty: TypeBodySlot,
     /// Origin locator recovering the member's `MemberSpans`.
     pub span_origin: MemberSpansOrigin,
+    /// Producer-owned authored reference head of this member's AUTHORED type
+    /// annotation, for exact demand-time route provenance — the member-position
+    /// peer of [`ValueTypeAnnotationFact::reference_head`] and
+    /// [`FunctionSignatureFact::return_reference_head`].
+    ///
+    /// Minted ONLY from a PROPERTY member's authored annotation, whose argument
+    /// locators are rooted at the member's own `[.., Member, MemberValue]` value
+    /// path so a deref addresses the authored annotation rather than the
+    /// declaration body root. A METHOD member has no authored member type
+    /// ANNOTATION at all — its surface is a function signature, whose authored
+    /// return head is the separate `return_reference_head` peer — so it
+    /// publishes [`AuthoredReferenceHeadFact::Unavailable`] rather than a head
+    /// fabricated from its shape. An authored annotation that is not a type
+    /// reference publishes [`AuthoredReferenceHeadFact::NotReference`].
+    #[serde(default = "authored_reference_head_unavailable")]
+    pub reference_head: AuthoredReferenceHeadFact,
 }
 
 /// The `PreparedValueMember.ty` narrowing (+ `is_method`).
@@ -2882,6 +2992,43 @@ pub struct SvelteModuleExportFact {
     pub binding_key: crate::DeclBindingKey,
 }
 
+/// One named Svelte `Snippet` import after session-side package validation.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SvelteSnippetImportFact {
+    /// The import resolved through the package-backed `svelte` route.
+    Resolved {
+        /// Local binding, including an authored import alias. `None` for a
+        /// binding-less inline `import("…").Snippet` type reference (no
+        /// lexical binding exists — typed absence, never a sentinel string).
+        local_binding: Option<String>,
+        /// Raw import specifier retained as route evidence.
+        import_source: String,
+        /// Package export identity to canonicalize through shared demand.
+        symbol: crate::ResolvedSymbolIdentity,
+    },
+    /// The import route could not resolve, so identity remains undecidable.
+    Unresolved {
+        /// Local binding, including an authored import alias. `None` for a
+        /// binding-less inline `import("…").Snippet` type reference.
+        local_binding: Option<String>,
+        /// Raw import specifier retained as route evidence.
+        import_source: String,
+        /// Typed fail-closed reason.
+        reason: crate::PropCallableRoleUnresolvedReason,
+    },
+}
+
 /// The narrowed persisted `SvelteScriptFacts`. `props_type` /
 /// `dispatcher_events` are authored-type payload refs: a content-free
 /// `MacroPayload` locator (the re-resolution address) plus a parse-stable
@@ -2904,7 +3051,10 @@ pub struct SvelteScriptFactsFact {
     pub props_type: Option<AuthoredTypePayloadRef>,
     /// MODEL binding names.
     pub bindable_members: Arc<[String]>,
-    /// svelte-package-validated snippet prop names.
+    /// Named `Snippet` imports with package-validated symbol identity.
+    pub snippet_imports: Arc<[SvelteSnippetImportFact]>,
+    /// Props members whose imported `Snippet` binding was validated through
+    /// the resolved symbol identities above.
     pub validated_snippet_members: Arc<[String]>,
     /// Legacy props.
     pub legacy_props: Arc<[SvelteLegacyPropFact]>,
@@ -3003,39 +3153,18 @@ pub enum ProjectedTypeFact {
         /// The ordered member-name path off the base.
         path: Arc<[String]>,
     },
-    /// A projected CALLABLE-PARAMS route: the content-free replay address
-    /// for a realized call-signature payload tuple the publication surface
-    /// synthesized from the signature's parameters — parameters richer than
-    /// the closed leaf / leaf-union element vocabulary (cross-file
-    /// references, composites, nested objects, arrays, callbacks,
-    /// instantiated generics), which no closed fact and no single
-    /// contributor locator can faithfully express. `base` is the authored
-    /// body whose projected surface carries the call signature (for a macro
-    /// payload: the macro's STAMPED type-argument locator);
-    /// `signature_ordinal` indexes the projected surface's call-signature
-    /// sequence (declaration order, BEFORE any event-name expansion /
-    /// deduplication); `first_param` is the index of the first PAYLOAD
-    /// parameter (a Vue emit signature strips the leading event-name
-    /// parameter, so its rows stamp `1`). Raising it replays the base's
-    /// surface projection, selects the signature at the ordinal in the node
-    /// domain, and synthesizes a TRANSIENT tuple from the signature's raw
-    /// parameters — labels / optionality / rest / order / nesting /
-    /// generic substitutions preserved — through the one shared dispatch;
-    /// never a second resolver, never a stored `TypeExpr` or graph node id.
-    /// Bounds drift, a missing surface, a non-callable ordinal, a
-    /// `first_param` past the parameter list, or an unresolvable payload
-    /// parameter FAILS the raise honestly — never an empty-tuple or
-    /// fabricated-element synthesis.
-    CallableParams {
-        /// The authored base body whose projected surface carries the call
-        /// signature.
+    /// A projected callable occurrence route. `occurrence` is minted by the
+    /// resolver from the exact instantiated semantic subject, so replay never
+    /// depends on a kind-local ordinal. `projection` selects either the
+    /// payload parameters or return of that same occurrence.
+    CallableOccurrence {
+        /// The authored base body whose fixed-view surface contains the
+        /// occurrence.
         base: AuthoredBodyLocator,
-        /// The call signature's ordinal in the projected surface's
-        /// call-signature sequence (declaration order, pre-expansion).
-        signature_ordinal: u32,
-        /// The first PAYLOAD parameter index (parameters before it are
-        /// address/name parameters, not payload).
-        first_param: u32,
+        /// Resolver-minted exact occurrence handle.
+        occurrence: CallableOccurrenceHandle,
+        /// Semantic position selected from the exact occurrence.
+        projection: CallableOccurrenceProjection,
     },
     /// A projected INDEX-POSITION route: the content-free replay address for
     /// an index signature's KEY or VALUE type position on the publication
@@ -3070,6 +3199,152 @@ pub enum ProjectedTypeFact {
 /// The addressed type position of a projected index signature — the KEY
 /// (`[key: K]`) or the VALUE (`: V`) slot of
 /// [`ProjectedTypeFact::IndexPosition`].
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct CallableOccurrenceHandle {
+    semantic_subject: u64,
+    path: Arc<[String]>,
+}
+
+impl CallableOccurrenceHandle {
+    /// Mint a root call-signature occurrence.
+    #[must_use]
+    pub fn root(semantic_subject: u64) -> Self {
+        Self {
+            semantic_subject,
+            path: Arc::from([]),
+        }
+    }
+
+    /// Mint a callable member occurrence.
+    #[must_use]
+    pub fn member(semantic_subject: u64, path: Arc<[String]>) -> Self {
+        Self {
+            semantic_subject,
+            path,
+        }
+    }
+
+    /// Test whether a replayed semantic subject is this exact occurrence.
+    #[must_use]
+    pub fn matches_subject(&self, semantic_subject: u64) -> bool {
+        self.semantic_subject == semantic_subject
+    }
+
+    /// Borrow the authored member path, empty for a root signature.
+    #[must_use]
+    pub fn path(&self) -> &[String] {
+        &self.path
+    }
+
+    /// Whether this occurrence addresses a root call signature.
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.path.is_empty()
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+enum ResolvedEmitProducer {
+    Callable(CallableOccurrenceHandle),
+    Runtime {
+        canonical_id: Arc<str>,
+        start: u32,
+        end: u32,
+        semantic_subject: Arc<str>,
+    },
+}
+
+/// Opaque identity for one canonical emit producer/name-arm occurrence.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct ResolvedEmitOccurrenceId {
+    producer: ResolvedEmitProducer,
+    name_arm: u32,
+}
+
+impl ResolvedEmitOccurrenceId {
+    /// Mint one event-name arm from an exact resolved producer.
+    #[must_use]
+    pub fn new(producer: CallableOccurrenceHandle, name_arm: u32) -> Self {
+        Self {
+            producer: ResolvedEmitProducer::Callable(producer),
+            name_arm,
+        }
+    }
+
+    /// Mint one runtime occurrence from its exact authored origin and semantic
+    /// event subject. Runtime identity never depends on row or macro ordinals.
+    #[must_use]
+    pub fn runtime(
+        canonical_id: impl Into<Arc<str>>,
+        start: u32,
+        end: u32,
+        semantic_subject: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            producer: ResolvedEmitProducer::Runtime {
+                canonical_id: canonical_id.into(),
+                start,
+                end,
+                semantic_subject: semantic_subject.into(),
+            },
+            name_arm: 0,
+        }
+    }
+}
+
+/// One semantic position projected from an exact callable occurrence.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum CallableOccurrenceProjection {
+    /// Payload parameters beginning at the given semantic parameter index.
+    Parameters {
+        /// Parameters before this index are address/name parameters.
+        first_param: u32,
+    },
+    /// Callable return position.
+    Return,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -3469,13 +3744,143 @@ impl FunctionParamFact {
     }
 }
 
+impl AuthoredReferenceArgLocator {
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        match self {
+            AuthoredReferenceArgLocator::Value(locator) => locator
+                .absolutize(canonical_id)
+                .map(AuthoredReferenceArgLocator::Value),
+            AuthoredReferenceArgLocator::MacroPayload { payload, arg_index } => payload
+                .absolutize(canonical_id)
+                .map(|payload| AuthoredReferenceArgLocator::MacroPayload {
+                    payload,
+                    arg_index: *arg_index,
+                }),
+        }
+    }
+}
+
+impl AuthoredReferenceHeadFact {
+    /// Prefix every VALUE argument locator's body path with `prefix`, leaving the
+    /// authored local spelling and every anchor untouched.
+    ///
+    /// The MERGED-declaration path is what needs this. A merged group's members
+    /// are indexed per contributor against that contributor's OWN body and then
+    /// re-rooted under a [`TypeBodyPathStep::MergedContributor`] step; a head
+    /// minted against the contributor body would otherwise address the merged
+    /// body's top level and deref the WRONG contributor — a silently wrong
+    /// authored argument rather than a typed miss.
+    ///
+    /// Macro-payload argument locators address a macro position rather than a
+    /// declaration body path, so they carry no prefixable path and pass through.
+    /// The head-shaped absences (`NotReference` / `Unavailable`) hold no
+    /// locators and are returned unchanged.
+    #[must_use]
+    pub fn with_arg_path_prefix(&self, prefix: &[TypeBodyPathStep]) -> Self {
+        if prefix.is_empty() {
+            return self.clone();
+        }
+        let prefixed = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+            args.iter()
+                .map(|arg| match arg {
+                    AuthoredReferenceArgLocator::Value(locator) => {
+                        let mut path = Vec::with_capacity(prefix.len() + locator.path.len());
+                        path.extend_from_slice(prefix);
+                        path.extend(locator.path.iter().cloned());
+                        AuthoredReferenceArgLocator::Value(TypeArgLocator {
+                            anchor: locator.anchor.clone(),
+                            path: path.into(),
+                            arg_index: locator.arg_index,
+                        })
+                    }
+                    AuthoredReferenceArgLocator::MacroPayload { .. } => arg.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        match self {
+            AuthoredReferenceHeadFact::Bare { local_name, args } => {
+                AuthoredReferenceHeadFact::Bare {
+                    local_name: Arc::clone(local_name),
+                    args: Arc::from(prefixed(args)),
+                }
+            }
+            AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                args,
+            } => AuthoredReferenceHeadFact::Qualified {
+                local_root: Arc::clone(local_root),
+                member_path: Arc::clone(member_path),
+                args: Arc::from(prefixed(args)),
+            },
+            AuthoredReferenceHeadFact::ImportType {
+                specifier,
+                member_path,
+                args,
+            } => AuthoredReferenceHeadFact::ImportType {
+                specifier: Arc::clone(specifier),
+                member_path: Arc::clone(member_path),
+                args: Arc::from(prefixed(args)),
+            },
+            AuthoredReferenceHeadFact::NotReference => AuthoredReferenceHeadFact::NotReference,
+            AuthoredReferenceHeadFact::Unavailable => AuthoredReferenceHeadFact::Unavailable,
+        }
+    }
+
+    /// Written generically over the head fact — every head-bearing position
+    /// (value annotation, value-signature return, and any future member
+    /// position) reuses this one walk rather than inlining an arm-specific copy.
+    /// The authored LOCAL SPELLING is never rewritten; only the argument
+    /// locators' anchors absolutize.
+    fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        let args = |args: &Arc<[AuthoredReferenceArgLocator]>| {
+            absolutize_fact_slice(args, |arg| arg.absolutize(canonical_id))
+        };
+        match self {
+            AuthoredReferenceHeadFact::Bare {
+                local_name,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::Bare {
+                local_name: Arc::clone(local_name),
+                args,
+            }),
+            AuthoredReferenceHeadFact::Qualified {
+                local_root,
+                member_path,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::Qualified {
+                local_root: Arc::clone(local_root),
+                member_path: Arc::clone(member_path),
+                args,
+            }),
+            AuthoredReferenceHeadFact::ImportType {
+                specifier,
+                member_path,
+                args: a,
+            } => args(a).map(|args| AuthoredReferenceHeadFact::ImportType {
+                specifier: Arc::clone(specifier),
+                member_path: Arc::clone(member_path),
+                args,
+            }),
+            AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => {
+                None
+            }
+        }
+    }
+}
+
 impl FunctionSignatureFact {
     fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         let type_parameters =
             absolutize_fact_slice(&self.type_parameters, |p| p.absolutize(canonical_id));
         let parameters = absolutize_fact_slice(&self.parameters, |p| p.absolutize(canonical_id));
         let return_ty = absolutize_slot_opt(&self.return_ty, canonical_id);
-        if type_parameters.is_none() && parameters.is_none() && return_ty.is_none() {
+        let return_reference_head = self.return_reference_head.absolutize(canonical_id);
+        if type_parameters.is_none()
+            && parameters.is_none()
+            && return_ty.is_none()
+            && return_reference_head.is_none()
+        {
             return None;
         }
         Some(Self {
@@ -3483,6 +3888,8 @@ impl FunctionSignatureFact {
             parameters: parameters.unwrap_or_else(|| Arc::clone(&self.parameters)),
             return_ty: return_ty.unwrap_or_else(|| self.return_ty.clone()),
             return_inference: self.return_inference,
+            return_reference_head: return_reference_head
+                .unwrap_or_else(|| self.return_reference_head.clone()),
             has_implementation_body: self.has_implementation_body,
             spans_origin: self.spans_origin.clone(),
         })
@@ -3652,16 +4059,16 @@ impl ProjectedTypeFact {
                         path: Arc::clone(path),
                     })
             }
-            ProjectedTypeFact::CallableParams {
+            ProjectedTypeFact::CallableOccurrence {
                 base,
-                signature_ordinal,
-                first_param,
+                occurrence,
+                projection,
             } => base
                 .absolutize(canonical_id)
-                .map(|base| ProjectedTypeFact::CallableParams {
+                .map(|base| ProjectedTypeFact::CallableOccurrence {
                     base,
-                    signature_ordinal: *signature_ordinal,
-                    first_param: *first_param,
+                    occurrence: occurrence.clone(),
+                    projection: *projection,
                 }),
             ProjectedTypeFact::IndexPosition {
                 base,
@@ -3801,9 +4208,9 @@ impl SemanticTypeSource {
                 // anchor decides (an empty producer-local anchor resolves
                 // under the raise scope).
                 ProjectedTypeFact::MemberPath { base, .. } => authored_locator_scope_relative(base),
-                // The ordinal addressing is scope-free; the base locator's
+                // Occurrence identity is scope-free; the base locator's
                 // anchor decides, exactly as for the member-path route.
-                ProjectedTypeFact::CallableParams { base, .. }
+                ProjectedTypeFact::CallableOccurrence { base, .. }
                 | ProjectedTypeFact::IndexPosition { base, .. } => {
                     authored_locator_scope_relative(base)
                 }
@@ -3872,6 +4279,33 @@ fn key_shape_scope_relative(key: &KeyTypeShape) -> bool {
     }
 }
 
+fn authored_reference_arg_scope_relative(arg: &AuthoredReferenceArgLocator) -> bool {
+    match arg {
+        AuthoredReferenceArgLocator::Value(locator) => anchor_scope_relative(&locator.anchor),
+        AuthoredReferenceArgLocator::MacroPayload { payload, .. } => {
+            anchor_scope_relative(&payload.anchor)
+        }
+    }
+}
+
+/// Deep-walk companion of [`AuthoredReferenceHeadFact::absolutize`], written
+/// generically over the head fact so every head-bearing position shares it.
+///
+/// Only the ARGUMENT anchors decide. The head's own `local_name` / `local_root`
+/// is authored route EVIDENCE that the demand side resolves against the owner
+/// recorded on the route, not a name the raise scope re-resolves — so it does
+/// not make the enclosing source scope-relative on its own.
+fn authored_reference_head_scope_relative(head: &AuthoredReferenceHeadFact) -> bool {
+    match head {
+        AuthoredReferenceHeadFact::Bare { args, .. }
+        | AuthoredReferenceHeadFact::Qualified { args, .. }
+        | AuthoredReferenceHeadFact::ImportType { args, .. } => {
+            args.iter().any(authored_reference_arg_scope_relative)
+        }
+        AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => false,
+    }
+}
+
 fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
     signature.type_parameters.iter().any(|param| {
         slot_opt_scope_relative(&param.constraint) || slot_opt_scope_relative(&param.default)
@@ -3880,6 +4314,7 @@ fn function_fact_scope_relative(signature: &FunctionSignatureFact) -> bool {
         .iter()
         .any(|param| slot_opt_scope_relative(&param.ty))
         || slot_opt_scope_relative(&signature.return_ty)
+        || authored_reference_head_scope_relative(&signature.return_reference_head)
 }
 
 fn object_member_scope_relative(member: &ObjectMemberFact) -> bool {
@@ -3924,5 +4359,22 @@ fn synthesized_shape_scope_relative(shape: &ResolvedLocalShape) -> bool {
         // canonical scope when anchored; an empty anchor is the
         // producer-local convention (resolved under the raise scope).
         ResolvedLocalShape::Ref(symbol) => anchor_scope_relative(&symbol.anchor),
+    }
+}
+
+#[cfg(test)]
+mod resolved_emit_identity_tests {
+    use super::ResolvedEmitOccurrenceId;
+
+    #[test]
+    fn runtime_emit_identity_is_authored_origin_plus_semantic_subject() {
+        let first = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "save");
+        let same = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "save");
+        let moved = ResolvedEmitOccurrenceId::runtime("/App.vue", 80, 84, "save");
+        let renamed = ResolvedEmitOccurrenceId::runtime("/App.vue", 40, 44, "cancel");
+
+        assert_eq!(first, same);
+        assert_ne!(first, moved);
+        assert_ne!(first, renamed);
     }
 }

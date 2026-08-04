@@ -24,10 +24,13 @@ pub mod hover;
 pub mod hover_directive_names;
 pub mod hover_event_tokens;
 pub mod hover_provenance;
+pub mod hover_slot_deepen;
 pub mod inlay_hints;
 pub mod linked_editing;
 pub mod macro_actions;
 pub mod macro_codegen;
+#[cfg(test)]
+pub(crate) mod macro_fixture;
 pub mod organize_imports;
 pub mod references;
 pub mod rename;

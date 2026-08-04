@@ -111,11 +111,36 @@ Compat schema notes:
 - `schema: true` keeps the default consumer-facing behavior.
 - `schema: { literalBooleanSchema: true }` enables benchmark/parity-focused `true | false` enum schema expansion without changing native types or compat display strings.
 
+### Descriptor and public component contract
+
+Component-meta response v6 makes native type descriptors the only semantic
+input to compat classification. Imported shallow refs remain symbolic, but the
+native `typeRegistry` includes demanded workspace-local declarations needed to
+interpret them, such as the callable target of `Fn | Fn[]`.
+
+`unknown` descriptors are unsupported even when `rawType` resembles a known
+type. `rawType` and `rawSignature` are terminal display/diagnostic fields only;
+they never establish a compat role, schema arm, event arity, or support status.
+Compat renders text only after structural classification and has no text-repair
+fallback.
+
+The full native response also carries mandatory
+`componentPublicContract` availability. A supported Vue or Svelte contract has
+source-ordered props, grouped event overloads with structured parameters and
+derived handler shapes, and scoped slots with typed inputs and meaningful
+returns. An unsupported contract carries a closed reason and typed diagnostics;
+it is never omitted or represented as supported-empty.
+
+Contract type references retain graph descriptors and A1 publication metadata.
+Their terminal display is separate and cannot determine contract meaning.
+Response v5 is rejected by the v6 decoder.
+
 ## Native Vs Compat Contract
 
 The official Verter metadata payload is the semantic source of truth. `./compat` is an interoperability projection for `vue-component-meta`, not a second semantic engine.
 
 - Native `_verter` metadata may include more information than Volar, including `models`, `publicInstance`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface`.
+- Native `_verter.componentPublicContract` is the mandatory structured Vue/Svelte public-contract availability.
 - Native type descriptors preserve TypeScript meaning. For example, native `boolean` stays `boolean`; any Volar-specific display or schema normalization belongs in compat formatting, not the native payload.
 - Benchmark comparisons against `vue-component-meta` should compare equivalent surfaces only. Native-only `_verter` fields are additional Verter metadata, not compat regressions by themselves.
 - Current parity totals explicitly exclude native-only `models` because `vue-component-meta` has no equivalent surface for them.
@@ -140,6 +165,7 @@ Compat `exposed` stays on the analysis `defineExpose` / Options API `expose` sur
 
 The `_verter` payload includes:
 
+- componentPublicContract (mandatory supported/unsupported availability)
 - props
 - events
 - slots

@@ -42,3 +42,37 @@ defineProps<{ value: Unsafe }>()
         }))
     );
 }
+
+#[test]
+fn child_hover_transport_preserves_typed_unsupported_and_authoritative_no_match() {
+    use crate::server::component_resolve::ChildHoverOutcome;
+    use verter_session::framework::{
+        ComponentContractAvailability, ComponentContractUnsupported,
+        ComponentContractUnsupportedReason, FrameworkAdapterId,
+    };
+
+    let unsupported = ComponentContractAvailability::Unsupported(ComponentContractUnsupported {
+        adapter_id: FrameworkAdapterId::vue(),
+        reason: ComponentContractUnsupportedReason::ComponentMetaUnavailable,
+        diagnostics: Arc::from([]),
+    });
+    let hover = crate::features::hover::build_child_event_hover("@missing", &unsupported)
+        .expect("unsupported is a typed diagnostic hover");
+    let transported =
+        transport_child_hover_result("/src/Unavailable.vue", Ok(ChildHoverOutcome::Hover(hover)))
+            .expect("typed unsupported is not a projection transport error");
+    let ChildHoverOutcome::Hover(hover) = transported else {
+        panic!("typed unsupported hover was collapsed")
+    };
+    assert!(crate::features::hover::hover_text(&hover).contains("ComponentMetaUnavailable"));
+
+    let transported = transport_child_hover_result(
+        "/src/Supported.vue",
+        Ok(ChildHoverOutcome::SurfaceAvailableNoMatch),
+    )
+    .expect("authoritative no-match is not an error");
+    assert!(matches!(
+        transported,
+        ChildHoverOutcome::SurfaceAvailableNoMatch
+    ));
+}

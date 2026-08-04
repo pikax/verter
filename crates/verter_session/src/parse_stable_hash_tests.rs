@@ -13,7 +13,6 @@
 //! invariant under a type-param IDENTIFIER rename and a member's
 //! VALUE-type edit (bodies never lower at publish).
 
-use std::any::Any;
 use std::sync::Arc;
 
 use oxc_span::SourceType;
@@ -71,54 +70,63 @@ fn h(source: &str) -> [u8; 16] {
     compute_parse_stable_hash(&indexed_for(source))
 }
 
-#[derive(Debug)]
-struct FixtureCarrier;
+fn artifact_for(carrier_source: &str) -> Arc<verter_language::FrameworkParseArtifact> {
+    use verter_language::carrier_grammar::{
+        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
+        FrameworkAdapterSemanticVersion,
+    };
+    use verter_language::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
 
-impl verter_language::CarrierParse for FixtureCarrier {
-    fn __verter_as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn __verter_as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
+    let source_authority = RegisteredSourceAuthority::new().unwrap();
+    let grammar_authority = CarrierGrammarAuthority::new().unwrap();
+    let config = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+    grammar_authority
+        .register_carrier_grammar(
+            verter_language::FileLanguage::vue(),
+            FrameworkAdapterSemanticVersion::new(1).unwrap(),
+            CarrierParserGrammarVersion::new(1).unwrap(),
+            config.clone(),
+        )
+        .unwrap();
+    let source = source_authority
+        .register_source(
+            CanonicalFileId::new("file:///fixture.vue"),
+            FileIncarnation::new(1),
+            SourceGeneration::new(1),
+            verter_language::FileLanguage::vue(),
+            Arc::from(carrier_source),
+        )
+        .unwrap();
+    let accepted = grammar_authority
+        .accept_registered_source(&source_authority, &source, &config)
+        .unwrap();
+    let compiler = crate::parse::carrier_compiler_registry()
+        .get(&verter_language::FrameworkAdapterId::vue())
+        .unwrap();
+    Arc::new(
+        verter_compiler::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
+            compiler.as_ref(),
+            &accepted,
+        )
+        .into_framework_parse_artifact(),
+    )
 }
 
-fn h_with_script_region(
-    source: &str,
-    kind: verter_language::ScriptRegionKind,
-    source_type: verter_language::ScriptSourceType,
-) -> [u8; 16] {
+fn h_with_script_region(source: &str, carrier_source: &str) -> [u8; 16] {
     let mut indexed = Arc::try_unwrap(indexed_for(source)).expect("fixture has one owner");
-    indexed.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
-        verter_language::FrameworkAdapterId::vue(),
-        verter_language::LanguageId::new("vue"),
-        1,
-        verter_language::FrameworkParseCommon {
-            script_regions: vec![verter_language::ScriptRegion {
-                span: verter_span::Span::new(0, source.len() as u32),
-                source_type,
-                kind,
-            }],
-            ..Default::default()
-        },
-        Arc::new(FixtureCarrier),
-    )));
+    indexed.framework_parse = Some(artifact_for(carrier_source));
     compute_parse_stable_hash(&indexed)
 }
 
 #[test]
 fn setup_attribute_only_owner_change_moves_hash() {
     let source = "const value = 1;\n";
-    let companion = h_with_script_region(
-        source,
-        verter_language::ScriptRegionKind::Module,
-        verter_language::ScriptSourceType::Ts,
-    );
+    let companion = h_with_script_region(source, "<script lang=\"ts\">const value = 1;</script>");
     let setup = h_with_script_region(
         source,
-        verter_language::ScriptRegionKind::Instance,
-        verter_language::ScriptSourceType::Ts,
+        "<script setup lang=\"ts\">const value = 1;</script>",
     );
 
     assert_ne!(
@@ -130,39 +138,15 @@ fn setup_attribute_only_owner_change_moves_hash() {
 #[test]
 fn carrier_script_span_offsets_do_not_move_hash() {
     let source = "const value = 1;\n";
-    let mut first = Arc::try_unwrap(indexed_for(source)).expect("fixture has one owner");
-    first.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
-        verter_language::FrameworkAdapterId::vue(),
-        verter_language::LanguageId::new("vue"),
-        1,
-        verter_language::FrameworkParseCommon {
-            script_regions: vec![verter_language::ScriptRegion {
-                span: verter_span::Span::new(0, 1),
-                source_type: verter_language::ScriptSourceType::Ts,
-                kind: verter_language::ScriptRegionKind::Instance,
-            }],
-            ..Default::default()
-        },
-        Arc::new(FixtureCarrier),
-    )));
-    let mut second = first.clone();
-    let parse = second
-        .framework_parse
-        .take()
-        .expect("fixture has framework parse");
-    let mut common = parse.common.clone();
-    common.script_regions[0].span = verter_span::Span::new(8, 9);
-    second.framework_parse = Some(Arc::new(verter_language::FrameworkParseArtifact::new(
-        verter_language::FrameworkAdapterId::vue(),
-        verter_language::LanguageId::new("vue"),
-        1,
-        common,
-        Arc::new(FixtureCarrier),
-    )));
-
     assert_eq!(
-        compute_parse_stable_hash(&first),
-        compute_parse_stable_hash(&second),
+        h_with_script_region(
+            source,
+            "<script setup lang=\"ts\">const value = 1;</script>"
+        ),
+        h_with_script_region(
+            source,
+            "\n\n<script setup lang=\"ts\">const value = 1;</script>",
+        ),
         "carrier byte-offset movement is cosmetic"
     );
 }

@@ -1,5 +1,7 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::{
+    project_carrier_blocks, test_carrier_blocks, test_structure,
+};
 use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
 use verter_span::Span;
@@ -149,7 +151,7 @@ fn make_directive_with_modifiers(
 #[test]
 fn test_root_level_outside_all_blocks() {
     let source = "<template><div></div></template>\n<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     // Cursor after </script>\n
     let ctx = classify_cursor_context(57, source, &blocks, None);
@@ -163,7 +165,7 @@ fn test_root_level_outside_all_blocks() {
 #[test]
 fn uppercase_tag_at_vue_root_stays_root_level() {
     let source = "<template><div></div></template>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = source.find("<DraftCard ").unwrap() + "<DraftCard ".len();
 
     let ctx = classify_cursor_context(cursor as u32, source, &blocks, None);
@@ -176,7 +178,7 @@ fn uppercase_tag_at_vue_root_stays_root_level() {
 #[test]
 fn script_only_vue_does_not_enable_svelte_root_markup() {
     let source = "<script>export default {}</script>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let cursor = source.len() as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -185,6 +187,7 @@ fn script_only_vue_does_not_enable_svelte_root_markup() {
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Vue),
+        None,
     );
     assert!(
         matches!(ctx, CursorContext::RootLevel),
@@ -195,7 +198,8 @@ fn script_only_vue_does_not_enable_svelte_root_markup() {
 #[test]
 fn svelte_template_element_does_not_disable_root_markup() {
     let source = "<template><span>fragment</span></template>\n<DraftCard ";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = source.len() as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -204,6 +208,7 @@ fn svelte_template_element_does_not_disable_root_markup() {
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -221,7 +226,7 @@ fn svelte_template_element_does_not_disable_root_markup() {
 #[test]
 fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
     let source = "<template >hello</template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let mut template = empty_template();
     template
         .elements
@@ -234,6 +239,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     assert!(
         matches!(
@@ -253,6 +259,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     assert!(
         matches!(
@@ -266,7 +273,7 @@ fn paired_svelte_template_element_opening_and_content_use_template_semantics() {
 #[test]
 fn test_script_block_content() {
     let source = "<script setup>\nconst x = 1\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(20, source, &blocks, None);
     assert!(
@@ -280,7 +287,7 @@ fn test_script_block_content() {
 fn test_style_block_general() {
     let source =
         "<template><div></div></template>\n<style scoped>\n.foo { color: red; }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let analysis = empty_analysis();
 
     let ctx = classify_cursor_context(55, source, &blocks, Some(&analysis));
@@ -291,25 +298,41 @@ fn test_style_block_general() {
     );
 }
 
+fn vbind_analysis_for(
+    expression: &str,
+    start: u32,
+    end: u32,
+    block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
+) -> verter_semantic::analysis::StyleBlockAnalysis {
+    verter_semantic::analysis::StyleBlockAnalysis {
+        v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
+            expression: expression.to_string(),
+            quoted: false,
+            start,
+            end,
+            generated_var_name: None,
+            expr_roots: vec![expression.to_string()],
+            roots_complete: true,
+        }],
+        block_ref,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn test_style_block_vbind() {
     let source = "<template><div></div></template>\n<style scoped>\n.foo { color: v-bind(color); }\n</style>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
+    let style_ref = blocks
+        .iter()
+        .find(|b| b.tag_name == "style")
+        .expect("style block")
+        .block_ref
+        .artifact_block_ref()
+        .clone();
 
     let analysis = FileAnalysisSnapshot {
-        styles: (vec![verter_semantic::analysis::StyleBlockAnalysis {
-            v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
-                expression: "color".to_string(),
-                quoted: false,
-                start: 68,
-                end: 73,
-                generated_var_name: None,
-                expr_roots: vec!["color".to_string()],
-                roots_complete: true,
-            }],
-            ..Default::default()
-        }])
-        .into(),
+        styles: (vec![vbind_analysis_for("color", 68, 73, Some(style_ref))]).into(),
         ..Default::default()
     };
 
@@ -321,10 +344,71 @@ fn test_style_block_vbind() {
     );
 }
 
+/// R2-B-02: the sealed `block_ref` is the SOLE association key between a
+/// structure style block and its analysis. A styles vector arriving in a
+/// different order than the document must still attach the right `v_binds`
+/// — never the recounted style ordinal's.
+#[test]
+fn test_style_vbind_joins_by_sealed_block_ref_not_ordinal() {
+    let source = "<style>.a { color: red; }</style>\n<style>.b { color: v-bind(color); }</style>\n";
+    let blocks = test_carrier_blocks(source);
+    let style_refs: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.tag_name == "style")
+        .map(|b| b.block_ref.artifact_block_ref().clone())
+        .collect();
+    assert_eq!(style_refs.len(), 2, "two style blocks");
+    let vb_start = source.rfind("v-bind(").expect("v-bind") as u32 + 7;
+    let vb_end = vb_start + 5;
+
+    // REORDERED: the SECOND block's analysis sits at ordinal 0.
+    let analysis = FileAnalysisSnapshot {
+        styles: (vec![
+            vbind_analysis_for("color", vb_start, vb_end, Some(style_refs[1].clone())),
+            verter_semantic::analysis::StyleBlockAnalysis {
+                block_ref: Some(style_refs[0].clone()),
+                ..Default::default()
+            },
+        ])
+        .into(),
+        ..Default::default()
+    };
+
+    let ctx = classify_cursor_context(vb_start + 2, source, &blocks, Some(&analysis));
+    assert!(
+        matches!(ctx, CursorContext::Style(StyleCursorContext::VBind)),
+        "the sealed-ref join must attach the second block's v_binds despite \
+         the reordered styles vector, got: {:?}",
+        ctx
+    );
+}
+
+/// R2-B-02 fail-closed arm: an analysis carrier with NO sealed `block_ref`
+/// (e.g. a deserialized snapshot — the field is `#[serde(skip)]`) must not
+/// attach `v_binds` by ordinal; classification fails closed to General.
+#[test]
+fn test_style_vbind_fails_closed_without_sealed_block_ref() {
+    let source = "<template><div></div></template>\n<style scoped>\n.foo { color: v-bind(color); }\n</style>\n";
+    let blocks = test_carrier_blocks(source);
+
+    let analysis = FileAnalysisSnapshot {
+        styles: (vec![vbind_analysis_for("color", 68, 73, None)]).into(),
+        ..Default::default()
+    };
+
+    let ctx = classify_cursor_context(70, source, &blocks, Some(&analysis));
+    assert!(
+        matches!(ctx, CursorContext::Style(StyleCursorContext::General)),
+        "a ref-less analysis must fail closed to General, never ordinal-attach \
+         v_binds, got: {:?}",
+        ctx
+    );
+}
+
 #[test]
 fn test_block_opening_tag() {
     let source = "<script setup lang=\"ts\">\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(10, source, &blocks, None);
     assert!(
@@ -337,7 +421,7 @@ fn test_block_opening_tag() {
 #[test]
 fn test_block_closing_tag() {
     let source = "<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(18, source, &blocks, None);
     assert!(
@@ -354,7 +438,7 @@ fn test_block_closing_tag() {
 #[test]
 fn test_template_tag_name() {
     let source = "<template><div></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -380,7 +464,7 @@ fn test_template_tag_name() {
 #[test]
 fn test_template_closing_tag_name() {
     let source = "<template><div></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -410,7 +494,7 @@ fn test_template_attribute_name_html() {
     //                   0         1         2         3
     //                   0123456789012345678901234567890123456789
     let source = "<template><div class=\"foo\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 25, 25);
@@ -434,7 +518,7 @@ fn test_template_attribute_name_gap() {
     //                   0         1         2         3         4
     //                   01234567890123456789012345678901234567890123456789
     let source = "<template><div class=\"foo\" ></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 33), 27, 27);
@@ -456,7 +540,7 @@ fn test_template_attribute_name_gap() {
 #[test]
 fn test_template_attribute_name_component() {
     let source = "<template><MyComp ></MyComp></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("MyComp", (10, 27), 18, 18);
@@ -489,7 +573,7 @@ fn test_event_modifier_context() {
     //                   0         1         2         3         4         5
     //                   01234567890123456789012345678901234567890123456789012345
     let source = "<template><div @click.prevent.></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 36), 30, 30);
@@ -525,7 +609,7 @@ fn event_handler_value_member_access_is_expression_not_modifier() {
     // EventModifier completions. The sibling `test_event_modifier_context` only pins
     // the modifier-position case; this pins the value-position case it must NOT be.
     let source = r#"<template><button @click="handle($event.)"></button></template>"#;
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let at = source.find("@click").unwrap() as u32;
     let click = source.find("click").unwrap() as u32;
@@ -582,7 +666,7 @@ fn event_handler_value_member_access_is_expression_not_modifier() {
 #[test]
 fn test_vmodel_modifier_context() {
     let source = "<template><input v-model.lazy.></input></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("input", (10, 38), 30, 30);
@@ -620,7 +704,7 @@ fn test_directive_expression() {
     //                   0         1         2         3         4
     //                   01234567890123456789012345678901234567890123456789
     let source = "<template><div v-if=\"show\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 32), 26, 26);
@@ -650,7 +734,7 @@ fn test_event_handler_expression() {
     //                   0         1         2         3         4         5
     //                   012345678901234567890123456789012345678901234567890123456789
     let source = "<template><button @click=\"handleClick\"></button></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("button", (10, 48), 38, 38);
@@ -678,7 +762,7 @@ fn test_event_handler_expression() {
 #[test]
 fn test_dynamic_prop_expression() {
     let source = "<template><div :title=\"msg\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 33), 27, 27);
@@ -711,7 +795,7 @@ fn test_expression_stale_analysis_cursor_past_expr_end() {
     //                    1111111111222222222233333333334444
     //          01234567890123456789012345678901234567890123
     let source = "<template><div :icon=\"action.icon || x\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     // The element span covers the whole <div ...> tag up to </div>
@@ -744,7 +828,7 @@ fn test_expression_at_expr_span_end_boundary() {
     //                    1111111111222222222233
     //          0123456789012345678901234567890123
     let source = "<template><div :icon=\"action.icon\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 40), 34, 34);
@@ -776,7 +860,7 @@ fn test_expression_at_expr_span_end_boundary() {
 #[test]
 fn test_interpolation() {
     let source = "<template><div>{{ count }}</div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 14, 25);
@@ -807,7 +891,7 @@ fn test_interpolation() {
 #[test]
 fn test_static_attribute_value() {
     let source = "<template><div class=\"hello\"></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 34), 28, 28);
@@ -836,7 +920,7 @@ fn test_static_attribute_value() {
 #[test]
 fn test_text_content() {
     let source = "<template><div>hello world</div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 31), 14, 25);
@@ -867,7 +951,7 @@ fn test_text_content() {
 #[test]
 fn test_attribute_name_existing_attrs() {
     let source = "<template><div class=\"foo\" id=\"bar\" ></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 43), 36, 36);
@@ -906,7 +990,7 @@ fn test_attribute_name_existing_attrs() {
 #[test]
 fn test_template_without_analysis_returns_template_fallback() {
     let source = "<template><div></div></template>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let ctx = classify_cursor_context(12, source, &blocks, None);
     assert!(
@@ -1056,7 +1140,7 @@ fn test_expression_context_unknown_trailing_pipe() {
 #[test]
 fn test_nested_elements_deepest_wins() {
     let source = "<template><div><span ></span></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1085,7 +1169,7 @@ fn test_nested_elements_deepest_wins() {
 #[test]
 fn test_directive_argument() {
     let source = "<template><div v-slot:default></div></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("div", (10, 35), 29, 29);
@@ -1120,7 +1204,8 @@ fn test_directive_argument() {
 fn test_slot_name_hash_shorthand_empty() {
     // `<template #|` — the incomplete shorthand is not yet a parsed directive.
     let source = "<template><template #></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1129,7 +1214,14 @@ fn test_slot_name_hash_shorthand_empty() {
     let analysis = analysis_with_template(template);
 
     // Cursor right after `#` (offset 21).
-    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        21,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName {
             tag_name,
@@ -1146,7 +1238,8 @@ fn test_slot_name_hash_shorthand_empty() {
 fn test_slot_name_hash_shorthand_partial_on_component() {
     // `<MyComp #he|` — partial slot name on a component element.
     let source = "<template><MyComp #he></MyComp></template>";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1155,7 +1248,14 @@ fn test_slot_name_hash_shorthand_partial_on_component() {
     let analysis = analysis_with_template(template);
 
     // Cursor after `#he` (offset 21).
-    let ctx = classify_cursor_context(21, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        21,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName {
             tag_name,
@@ -1172,7 +1272,8 @@ fn test_slot_name_hash_shorthand_partial_on_component() {
 fn test_slot_name_longhand_empty_arg() {
     // `<template v-slot:|` — empty longhand argument.
     let source = "<template><template v-slot:></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, false);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template
@@ -1181,7 +1282,14 @@ fn test_slot_name_longhand_empty_arg() {
     let analysis = analysis_with_template(template);
 
     // Cursor right after `v-slot:` (offset 27).
-    let ctx = classify_cursor_context(27, source, &blocks, Some(&analysis));
+    let ctx = classify_cursor_context_for_language(
+        27,
+        source,
+        &blocks,
+        Some(&analysis),
+        None,
+        Some(&structure),
+    );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SlotName { tag_name, .. }) => {
             assert_eq!(tag_name, "template");
@@ -1198,7 +1306,7 @@ fn test_slot_name_scan_does_not_fire_inside_pattern_value() {
     // `<template #default="{ ti|` — cursor inside the pattern value is NOT a
     // slot-name position.
     let source = "<template><template #default=\"{ ti\"></template></template>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     let mut el = make_element("template", (10, 34), 34, 27);
@@ -1227,7 +1335,8 @@ fn test_svelte_snippet_name_context() {
     // `{#snippet |` inside a component — completing the slot name the child
     // accepts.
     let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
 
     let mut template = empty_template();
     template
@@ -1242,6 +1351,7 @@ fn test_svelte_snippet_name_context() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name }) => {
@@ -1255,7 +1365,7 @@ fn test_svelte_snippet_name_context() {
 fn test_svelte_render_callee_context() {
     // `{@render |` — completing an in-scope snippet name.
     let source = "<ul>\n  {@render \n</ul>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
 
     let mut template = empty_template();
     template.elements.push(make_element("ul", (0, 20), 4, 15));
@@ -1268,6 +1378,7 @@ fn test_svelte_render_callee_context() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
+        None,
     );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SvelteRenderCallee) => {}
@@ -1278,7 +1389,8 @@ fn test_svelte_render_callee_context() {
 #[test]
 fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent() {
     let source = "<IdeSurfaceChild onPick={on} />";
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = (source.find("{on}").expect("attribute expression") + "{on".len()) as u32;
 
     let ctx = classify_cursor_context_for_language(
@@ -1287,6 +1399,7 @@ fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent()
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -1300,7 +1413,8 @@ fn svelte_braced_attribute_value_uses_current_source_when_semantics_are_absent()
 }
 
 fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_prop: &str) {
-    let blocks = scan_sfc_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let cursor = (source.find(marker).expect("cursor marker") + marker.len()) as u32;
     let ctx = classify_cursor_context_for_language(
         cursor,
@@ -1308,6 +1422,7 @@ fn assert_svelte_source_prop_expression(source: &str, marker: &str, expected_pro
         &blocks,
         None,
         Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
     );
     assert!(
         matches!(
@@ -1435,7 +1550,7 @@ fn nested_comment_template() -> TemplateAnalysisSnapshot {
 
 fn classify_nested_comment_cursor() -> CursorContext {
     let analysis = analysis_with_template(nested_comment_template());
-    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    let blocks = test_carrier_blocks(NESTED_COMMENT_SFC);
     classify_cursor_context(
         nested_comment_cursor_offset(),
         NESTED_COMMENT_SFC,
@@ -1489,7 +1604,7 @@ fn cursor_in_uncovered_region_of_root_element_terminates_in_process() {
     template.elements[1].parent_index = None;
     template.elements[1].parent_tag = None;
     let analysis = analysis_with_template(template);
-    let blocks = scan_sfc_blocks(NESTED_COMMENT_SFC);
+    let blocks = test_carrier_blocks(NESTED_COMMENT_SFC);
     let context = classify_cursor_context(
         nested_comment_cursor_offset(),
         NESTED_COMMENT_SFC,
@@ -1503,4 +1618,311 @@ fn cursor_in_uncovered_region_of_root_element_terminates_in_process() {
         ),
         "a parentless element never reached the fallback and must classify as text content, got {context:?}"
     );
+}
+
+// =============================================================================
+// Parser-fact geometry (scanner replacement) — discriminating fixtures where a
+// raw source scan and registered-inventory facts diverge.
+// =============================================================================
+
+#[test]
+fn svelte_braced_attribute_survives_decoy_close_tag_literal_in_value() {
+    // A `"</style>"` STRING LITERAL inside the braced value. A raw backward
+    // `rfind("</style>")` boundary scan cuts the candidate window inside the
+    // attribute value and loses the real open tag; the registered inventory's
+    // opening span still owns the cursor.
+    assert_svelte_source_prop_expression(
+        r#"<Child title={"</style>" + user.na} />"#,
+        "user.",
+        "title",
+    );
+}
+
+#[test]
+fn svelte_braced_attribute_requires_parser_facts_not_a_source_scan() {
+    // Without registered parser facts the classifier must NOT rediscover tag
+    // geometry from raw source (fail closed): no Expression classification.
+    let source = "<Child value={count} />";
+    let blocks = test_carrier_blocks(source);
+    let cursor = (source.find("{count").expect("expression") + "{count".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        None,
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Expression { .. })
+        ),
+        "no parser facts must mean no raw-scan geometry recovery: {ctx:?}"
+    );
+}
+
+#[test]
+fn slot_name_recovery_ignores_decoy_component_tag_inside_html_comment() {
+    // `<!-- <Comp #de -->` — the slot token lives inside COMMENT content. A raw
+    // backward `<` scan finds the decoy `<Comp` and fabricates a slot-name
+    // context; the registered arena owns the position as a comment.
+    let source = "<template><div><!-- <Comp #de --> x</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("#de").expect("slot token") + "#de".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::SlotName { .. })
+        ),
+        "a comment-interior decoy must never classify as SlotName: {ctx:?}"
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "comment interiors are inert text for the classifier: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_ignores_interpolation_decoy_inside_attribute_value() {
+    // `{{decoy` inside a STATIC attribute value. The raw `rfind("{{")` mustache
+    // scan classifies later text content as Interpolation; the arena records no
+    // interpolation node for the quoted value.
+    let source = "<template><div title=\"{{decoy\"> text </div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find(" text ").expect("text content") + 3) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "an attribute-value {{{{ decoy must not classify text as Interpolation: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_keeps_angle_decoy_in_text_as_text() {
+    // `1 <2` in text content. The raw backward `<` scan fabricates a `<2` tag
+    // and classifies the following text as an attribute-name position; the
+    // arena records the whole run as text.
+    let source = "<template><div> 1 <2 text</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("text").expect("text content") + 2) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "a `<` comparison decoy in text must not fabricate tag geometry: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_treats_comment_interior_as_text() {
+    // `<span` INSIDE a comment. The raw backward scan classifies positions
+    // after it as attribute-name positions on a fabricated `<span` tag.
+    let source = "<template><div><!-- <span --> x</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("<span").expect("decoy") + "<span ".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TextContent)
+        ),
+        "comment interiors must classify as text, not fabricated tag markup: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_requires_parser_facts_not_a_source_scan() {
+    // Without registered parser facts the analysis-absent classification must
+    // fail closed: no raw-source tag-geometry rediscovery.
+    let source = "<template><Dra";
+    let blocks = test_carrier_blocks(source);
+    let cursor = source.len() as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        None,
+    );
+    assert!(
+        !matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::TagName { .. })
+        ),
+        "no parser facts must mean no raw-scan tag recovery: {ctx:?}"
+    );
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_tag_name_from_facts() {
+    // Mid-typed `<Dra` at EOF: the still-typed opening tag classifies as a
+    // TagName position with the typed partial, from parser-bounded geometry.
+    let source = "<template><Dra";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::TagName { partial }) => {
+            assert_eq!(partial, "Dra");
+        }
+        other => panic!("expected TagName for mid-typed `<Dra|`, got: {other:?}"),
+    }
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_attribute_position_from_facts() {
+    // `<DraftCard |` at EOF: the parser retains the unterminated opening span;
+    // the cursor past the name classifies as an attribute-name position.
+    let source = "<template><DraftCard ";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::AttributeName {
+            tag_name,
+            is_component,
+            ..
+        }) => {
+            assert_eq!(tag_name, "DraftCard");
+            assert!(is_component);
+        }
+        other => panic!("expected AttributeName for `<DraftCard |`, got: {other:?}"),
+    }
+}
+
+#[test]
+fn analysis_absent_fallback_classifies_unterminated_interpolation() {
+    // `{{ ms` mid-content: the parser drops the unterminated interpolation,
+    // leaving a parser-bounded unowned gap; the bounded gap lex still
+    // classifies the in-progress expression.
+    let source = "<template><div>{{ ms</div></template>";
+    let structure = test_structure(source, false);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        (source.find("ms").expect("expression") + 2) as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Vue),
+        Some(&structure),
+    );
+    assert!(
+        matches!(
+            ctx,
+            CursorContext::Template(TemplateCursorContext::Interpolation)
+        ),
+        "an in-progress interpolation must classify as Interpolation: {ctx:?}"
+    );
+}
+
+#[test]
+fn svelte_root_midtyped_tag_recovers_within_parser_bounded_gap() {
+    // A mid-typed Svelte ROOT component tag at EOF is dropped by the parser;
+    // the recovery lexes only the parser-bounded unowned trailing gap — the
+    // script block's `1 < 2` decoy sits inside a parsed block and can never
+    // enter the window.
+    let source = "<script>let a = 1 < 2</script>\n<DraftCard ";
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
+    let ctx = classify_cursor_context_for_language(
+        source.len() as u32,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::AttributeName {
+            tag_name,
+            is_component,
+            ..
+        }) => {
+            assert_eq!(tag_name, "DraftCard");
+            assert!(is_component);
+        }
+        other => panic!("expected AttributeName for `<DraftCard |`, got: {other:?}"),
+    }
+}
+
+#[test]
+fn svelte_snippet_owner_recovers_from_markup_facts_without_semantic_usage() {
+    // `{#snippet |` inside a component whose USAGE the semantic snapshot has
+    // not retained: the owner comes from the registered markup arena parent
+    // chain, never from a backward source scan.
+    let source = "<IdeSurfaceChild>\n  {#snippet \n</IdeSurfaceChild>";
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
+    let cursor = (source.find("{#snippet ").expect("snippet head") + "{#snippet ".len()) as u32;
+    let ctx = classify_cursor_context_for_language(
+        cursor,
+        source,
+        &blocks,
+        None,
+        Some(CarrierTemplateLanguage::Svelte),
+        Some(&structure),
+    );
+    match ctx {
+        CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name }) => {
+            assert_eq!(tag_name, "IdeSurfaceChild");
+        }
+        other => panic!("expected SvelteSnippetName, got: {other:?}"),
+    }
 }

@@ -1365,6 +1365,7 @@ fn route_consuming_compile_slot_goes_stale_after_exact_resolution_retarget() {
 /// fact; the retarget clears the owner's route mirror, the recomputed hash
 /// mismatches, and the slot re-derives under the new external target.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1492,6 +1493,7 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
 /// re-derives the output. Unstamped caller-supplied routes keep their
 /// serve-until-replaced contract.
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn src_attr_prefetch_reresolves_stale_stamped_memo_after_ts_sibling_appears() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1884,10 +1886,9 @@ fn apply_block_overrides_template() {
         "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
     let _ = upsert_vue(&host, "test.vue", sfc);
 
-    let profile = CompileProfile::default();
     let result = host.apply_block_overrides(BlockOverrideRequest {
         canonical_id: "test.vue".to_string(),
-        compile_profile: profile.clone(),
+        compile_profile: CompileProfile::default(),
         overrides: vec![BlockOverrideEntry {
             block_type: PreprocessorBlockType::Template,
             index: 0,
@@ -1895,37 +1896,15 @@ fn apply_block_overrides_template() {
             source_map: None,
         }],
     });
-    assert!(result.is_ok(), "apply_block_overrides should succeed");
-    let result = result.unwrap();
-    assert!(result.changed, "should report changed");
-
-    // With scheduler as sole parser, get_source() returns the RAW source
-    // (before block overrides). The synthetic source is per-profile in compile_cache.
-    let source = host.get_source("test.vue");
-    assert!(source.is_some(), "source should exist");
-    let source = source.unwrap();
-    assert!(
-        source.contains("lang=\"pug\""),
-        "get_source should return raw source (with pug lang), got: {}",
-        source
-    );
-
-    // Verify the file can be compiled (get_virtual_file succeeds)
-    let vf = host.get_virtual_file(VirtualQuery {
-        raw_id: Some("test.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile,
-    });
-    assert!(
-        vf.is_ok(),
-        "should be able to compile template after block override: {:?}",
-        vf.err()
-    );
+    assert!(matches!(
+        result,
+        Err(HostError::ExternalBlockContentDeferred(_))
+    ));
 }
 
 /// @ai-generated - apply_block_overrides: no change if same override applied twice
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn apply_block_overrides_no_change_if_same_hash() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc =
@@ -2058,6 +2037,284 @@ fn style_override_changes_virtual_id_lang_to_css() {
         !main.code.contains("lang.sass"),
         "main module should NOT import style with lang.sass, got:\n{}",
         main.code
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Preprocessor override lane — inventory-owned geometry + interim contract
+// ═══════════════════════════════════════════════════════════
+
+/// Inventory-span remap: the ORIGINAL content fed to source-map remapping is
+/// the SELECTED style block's inventory `content_span`, never a raw
+/// `</style` delimiter search over the source bytes.
+///
+/// The fixture's second style block contains the literal `</styleguide` and
+/// `</sty` inside a declaration value. The parser's raw-text rule keeps the
+/// block open (a close tag terminates only when `</style` is followed by
+/// `>` or whitespace), so the authored `.target` selector on a LATER line is
+/// inside the block. A raw `find("</style")` scan mis-splits at the literal
+/// and truncates the original content — the `.target` mapping then points
+/// past the truncated line table, the remap fails, and the span collapses to
+/// compiled-CSS geometry. Any perturbation of the inventory-span path (raw
+/// scan, wrong block ordinal, empty content) moves the remapped span off the
+/// authored `.target` bytes → RED.
+#[test]
+fn style_override_remap_uses_selected_inventory_block_span_not_style_close_scan() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc = concat!(
+        "<template><div class=\"used\">x</div></template>\n",
+        "<style>\n",
+        ".plain { color: red; }\n",
+        "</style>\n",
+        "<style lang=\"sass\">\n",
+        ".first\n",
+        "  color: blue\n",
+        ".lit\n",
+        "  content: \"</styleguide </sty\"\n",
+        ".target\n",
+        "  color: green\n",
+        "</style>\n",
+    );
+    let _ = upsert_vue(&host, "tricky.vue", sfc);
+
+    // Fixture sanity: the parser kept the tricky block OPEN through the
+    // literal — two style blocks, and the second one's content starts right
+    // after its opening tag.
+    let analysis = host.get_analysis("tricky.vue").unwrap();
+    assert_eq!(
+        analysis.styles.len(),
+        2,
+        "fixture must parse 2 style blocks"
+    );
+    let sass_tag_end = sfc.find("<style lang=\"sass\">").unwrap() + "<style lang=\"sass\">".len();
+    assert_eq!(
+        analysis.styles[1].content_offset as usize, sass_tag_end,
+        "second block content starts after its opening tag"
+    );
+
+    // Simulated preprocessor output + map. Original content lines (0-based,
+    // relative to the block content):
+    //   0: ""                 (newline after the opening tag)
+    //   1: ".first"           2: "  color: blue"
+    //   3: ".lit"             4: "  content: \"</styleguide </sty\""
+    //   5: ".target"          6: "  color: green"
+    let compiled_css = ".first { color: blue; }\n.target { color: green; }\n";
+    let original_content =
+        "\n.first\n  color: blue\n.lit\n  content: \"</styleguide </sty\"\n.target\n  color: green\n";
+    let sm_json = build_test_source_map(
+        original_content,
+        &[
+            (0, 0, 1, 0), // compiled `.first`  → original line 1
+            (1, 0, 5, 0), // compiled `.target` → original line 5 (PAST the literal)
+        ],
+    );
+
+    let profile = CompileProfile {
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let _ = host
+        .apply_style_overrides(StyleOverrideRequest {
+            canonical_id: "tricky.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![StyleOverrideEntry {
+                index: 1,
+                code: Arc::from(compiled_css),
+                source_map: Some(Arc::from(sm_json)),
+            }],
+        })
+        .expect("style override applies");
+
+    let profile_hash = crate::hash::compile_profile_hash(&profile);
+    let styles = host
+        .effective_style_analyses(&canonicalize_id("tricky.vue"), Some(profile_hash))
+        .expect("effective style analyses");
+    let css = styles[1].css.as_ref().expect("override CSS analysis");
+    let target = css
+        .selectors
+        .iter()
+        .find(|s| s.text == ".target")
+        .expect(".target selector present in override analysis");
+
+    // The remapped span points at the authored `.target` in the SFC bytes —
+    // provable ONLY when the original content is the full inventory content
+    // span of the SELECTED (second) block.
+    let start = target.span.start as usize;
+    assert_eq!(
+        &sfc[start..start + 7],
+        ".target",
+        "remapped span must land on the authored `.target` (inventory \
+         content-span geometry); got byte offset {start}"
+    );
+    let authored_target = sass_tag_end + original_content.find(".target").unwrap();
+    assert_eq!(
+        start, authored_target,
+        "remap must use the full block content span, not a delimiter-scan \
+         truncation of it"
+    );
+
+    // Negative: `.first` (before the literal) also remaps — so the assert
+    // above discriminates geometry, not a wholesale remap failure.
+    let first = css
+        .selectors
+        .iter()
+        .find(|s| s.text == ".first")
+        .expect(".first selector present");
+    assert_eq!(
+        &sfc[first.span.start as usize..first.span.start as usize + 6],
+        ".first",
+        "pre-literal selector remaps in both geometries"
+    );
+}
+
+/// Interim override contract, arm 1: template/script CONTENT overrides are
+/// refused with the TYPED `ExternalBlockContentDeferred` carrying acceptance
+/// `B-23` — not a generic error, and never a silent success.
+#[test]
+fn torn_lane_template_and_script_overrides_refuse_typed_b23() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc = concat!(
+        "<template lang=\"pug\">\ndiv hi\n</template>\n",
+        "<script setup lang=\"coffee\">\nx = 1\n</script>\n",
+        "<style>.a { color: red; }</style>\n",
+    );
+    let _ = upsert_vue(&host, "torn.vue", sfc);
+
+    for block_type in [
+        PreprocessorBlockType::Template,
+        PreprocessorBlockType::Script,
+    ] {
+        let err = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "torn.vue".to_string(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![BlockOverrideEntry {
+                    block_type,
+                    index: 0,
+                    code: Arc::from("const compiled = 1"),
+                    source_map: None,
+                }],
+            })
+            .expect_err("content override must refuse, not succeed");
+        match err {
+            HostError::ExternalBlockContentDeferred(deferred) => assert_eq!(
+                deferred,
+                crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+                "refusal must carry the B-23 acceptance token"
+            ),
+            other => panic!("expected typed B-23 refusal, got {other:?}"),
+        }
+    }
+}
+
+/// Interim override contract, arm 2: style overrides stay LIVE and apply
+/// WITHOUT a carrier reparse — the scheduler's source snapshot is byte- and
+/// identity-identical after the override (same `Arc`), while the overridden
+/// analysis is served from the per-profile layer.
+#[test]
+fn torn_lane_style_override_lives_without_carrier_reparse() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc =
+        "<template><div>hi</div></template>\n<style lang=\"sass\">.a\n  color: red\n</style>\n";
+    let _ = upsert_vue(&host, "live.vue", sfc);
+    let canonical = canonicalize_id("live.vue");
+
+    let before = host
+        .scheduler
+        .try_get_source(&canonical)
+        .expect("source snapshot present");
+
+    let profile = CompileProfile::default();
+    let result = host
+        .apply_style_overrides(StyleOverrideRequest {
+            canonical_id: "live.vue".to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![StyleOverrideEntry {
+                index: 0,
+                code: Arc::from(".a { color: red; }"),
+                source_map: None,
+            }],
+        })
+        .expect("style override lane is live");
+    assert!(result.changed, "override reports a change");
+    assert_eq!(
+        result.changed_virtual_nodes,
+        vec![VirtualNodeKind::Style { index: 0 }],
+        "exactly the overridden style node changes"
+    );
+
+    let after = host
+        .scheduler
+        .try_get_source(&canonical)
+        .expect("source snapshot still present");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "style override must not reparse/republish the carrier source"
+    );
+
+    // The override is really served: the raw sass block has no CSS analysis;
+    // the per-profile layer carries the compiled-CSS analysis.
+    let profile_hash = crate::hash::compile_profile_hash(&profile);
+    let styles = host
+        .effective_style_analyses(&canonical, Some(profile_hash))
+        .expect("effective style analyses");
+    assert!(
+        styles[0].css.is_some(),
+        "overridden analysis is served for the profile"
+    );
+}
+
+/// Interim override contract, arm 3: the `apply_block_overrides` callback
+/// SURFACE (the host API behind NAPI/WASM `applyBlockOverrides` and the
+/// unplugin `BlockPreprocessor`) remains reachable: it routes style entries
+/// onto the live style lane and refuses content entries with the typed B-23
+/// — it is neither deleted nor silently succeeding for content kinds.
+#[test]
+fn torn_lane_block_override_surface_routes_style_live_and_content_typed() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc = concat!(
+        "<template lang=\"pug\">\ndiv hi\n</template>\n",
+        "<style lang=\"sass\">.a\n  color: red\n</style>\n",
+    );
+    let _ = upsert_vue(&host, "surface.vue", sfc);
+
+    // Style entry through the block-override surface → live success.
+    let style_result = host.apply_block_overrides(BlockOverrideRequest {
+        canonical_id: "surface.vue".to_string(),
+        compile_profile: CompileProfile::default(),
+        overrides: vec![BlockOverrideEntry {
+            block_type: PreprocessorBlockType::Style,
+            index: 0,
+            code: Arc::from(".a { color: red; }"),
+            source_map: None,
+        }],
+    });
+    assert!(
+        style_result.is_ok(),
+        "style routing through the surface stays live: {style_result:?}"
+    );
+
+    // Content entry through the same surface → typed refusal.
+    let content_err = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "surface.vue".to_string(),
+            compile_profile: CompileProfile::default(),
+            overrides: vec![BlockOverrideEntry {
+                block_type: PreprocessorBlockType::Template,
+                index: 0,
+                code: Arc::from("<div>hi</div>"),
+                source_map: None,
+            }],
+        })
+        .expect_err("content routing refuses");
+    assert!(
+        matches!(
+            content_err,
+            HostError::ExternalBlockContentDeferred(
+                crate::carrier_publication_store::ExternalBlockContentDeferred::B23
+            )
+        ),
+        "content refusal is the typed B-23, got {content_err:?}"
     );
 }
 
@@ -2646,6 +2903,7 @@ fn resolve_import_transient_uses_exact_resolutions() {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -3965,6 +4223,7 @@ mod upsert_compile_cache_tests {
     }
 
     #[test]
+    #[should_panic(expected = "ExternalBlockContentDeferred")]
     fn test_block_override_does_not_leak_into_raw_source() {
         // P1 invariant: applying a block override for profile A must NOT change
         // what get_source() returns (raw, profileless).

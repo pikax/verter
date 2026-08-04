@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::{assemble_vue_main_module, merge_external_sources};
+use crate::compile::assemble_vue_main_module;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
@@ -117,6 +117,29 @@ fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
     buf.extend_from_slice(&CompileCacheMode::Content.stable_hash());
     buf.extend_from_slice(&compile_profile_hash(profile).to_le_bytes());
     crate::hash::hash_16(&buf)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_registered_carrier_inputs(
+    input: &CompileInput,
+    profile: &CompileProfile,
+) -> Result<(), HostError> {
+    if !input.src_blocks.is_empty() {
+        return Err(HostError::ExternalBlockContentDeferred(
+            crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+        ));
+    }
+    let grammar_matches = profile
+        .delimiters
+        .as_ref()
+        .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+        && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+    if !grammar_matches {
+        return Err(HostError::GrammarMismatch(
+            crate::carrier_publication_store::GrammarMismatch,
+        ));
+    }
+    Ok(())
 }
 
 /// Deployment version hash for the compiler crate. Two builds of a
@@ -655,8 +678,8 @@ impl VerterHost {
                 // is a candidate slot worth validating. A cold miss (no
                 // `ProfileState`, or a present `ProfileState` with no slot
                 // for this profile_hash) and a hash mismatch both fall
-                // through to recompile WITHOUT building a full-workspace
-                // store-view snapshot.
+                // through to recompile WITHOUT requesting a store-view root
+                // capture.
                 if let Some(cc) = self.compile_cache().get(&canonical) {
                     let soh = cc
                         .style_overrides
@@ -989,6 +1012,7 @@ impl VerterHost {
             CompileInput {
                 canonical_id: canonical.clone(),
                 source: efs.source,
+                whole_hash: efs.whole_hash,
                 meta: effective_meta,
                 parse_diagnostics: parse.parse_diagnostics.clone(),
                 src_blocks: parse.src_blocks.clone(),
@@ -1005,6 +1029,8 @@ impl VerterHost {
                 style_v_bind_vars,
             }
         };
+
+        validate_registered_carrier_inputs(&compile_input, profile)?;
 
         // The render-only compile: the SAME shared substrate + host-side
         // `Main` assembly as `compile_entry`, without the per-file wrapper
@@ -1196,6 +1222,22 @@ impl VerterHost {
                     })?;
                 let parse = &hd.parse;
 
+                if !parse.src_blocks.is_empty() {
+                    return Err(HostError::ExternalBlockContentDeferred(
+                        crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
+                    ));
+                }
+                let grammar_matches = profile
+                    .delimiters
+                    .as_ref()
+                    .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+                    && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+                if !grammar_matches {
+                    return Err(HostError::GrammarMismatch(
+                        crate::carrier_publication_store::GrammarMismatch,
+                    ));
+                }
+
                 // Test-only seam: the snapshot→compile-input window.
                 // Fence tests land a content upsert here to prove the
                 // compiled bytes and the content-addressed key cohere
@@ -1314,6 +1356,7 @@ impl VerterHost {
                 let compile_input = CompileInput {
                     canonical_id: canonical_id.clone(),
                     source: efs.source,
+                    whole_hash: effective_whole_hash,
                     meta: effective_meta.clone(),
                     parse_diagnostics: parse.parse_diagnostics.clone(),
                     src_blocks: parse.src_blocks.clone(),
@@ -1418,7 +1461,7 @@ impl VerterHost {
                     // the `acquire_view` callback `lookup` invokes ONLY after
                     // its cheap slot-present + carrier + hash predicates pass, so
                     // that cold/profile-miss path (and a hash mismatch) never
-                    // builds a full-workspace store-view snapshot.
+                    // requests a store-view root capture.
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
                             crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
@@ -1707,11 +1750,18 @@ impl VerterHost {
             stale,
             compiled_tsx,
             compiled_template_analysis,
+            template_class_admission,
             runtime_surface_refused,
         ) = match compile_result {
-            Ok((outputs, diagnostics, tsx, tpl, refused)) => {
-                (outputs, diagnostics, false, tsx, tpl, refused)
-            }
+            Ok((outputs, diagnostics, tsx, tpl, class_admission, refused)) => (
+                outputs,
+                diagnostics,
+                false,
+                tsx,
+                tpl,
+                class_admission,
+                refused,
+            ),
             Err(diagnostics) => {
                 self.store_latest_diagnostics_if_source_unmoved(
                     &canonical_id,
@@ -1733,7 +1783,15 @@ impl VerterHost {
                 if serve_last_good {
                     if let Some(last_good) = fallback_last_good.clone() {
                         // A last-good serve is not a fresh runtime refusal.
-                        (last_good, diagnostics, true, None, None, false)
+                        (
+                            last_good,
+                            diagnostics,
+                            true,
+                            None,
+                            None,
+                            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
+                            false,
+                        )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
                             diagnostics,
@@ -1860,7 +1918,7 @@ impl VerterHost {
                                 )
                             })
                     });
-                if live_key.as_ref() == Some(&captured_key) {
+                if live_key.as_ref() == Some(&captured_key) && template_class_admission.owner_only {
                     self.compile_output_pure_content().publish_content(
                         captured_key,
                         compile_output_value,
@@ -1917,6 +1975,9 @@ impl VerterHost {
                                 source_generation: Some(source_snap.generation),
                                 has_src_blocks: !compile_input.src_blocks.is_empty(),
                                 default_extraction: !profile.has_parse_affecting_template_options(),
+                                template_class_signature: template_class_admission
+                                    .signature
+                                    .clone(),
                             },
                         );
                     }
@@ -2178,11 +2239,6 @@ impl VerterHost {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
-            .into_iter()
-            .map(|projection| {
-                projection.map(|projection| projection.map(|projection| projection.response))
-            })
-            .collect()
     }
 
     /// The shared per-item public-API render body (scalar `N=1` + batch `N`).
@@ -2193,6 +2249,15 @@ impl VerterHost {
     /// session view threaded via the `render_seed` ctx carrier so the render
     /// takes ZERO per-call store-view reads. Scalar and batch are byte-identical
     /// by construction (both are THIS body).
+    ///
+    /// RESPONSE-ONLY by design: the render is adapter declaration output and
+    /// never composes the structured component contract. The contract is
+    /// projection-entry-scoped — [`Self::get_public_api_projection`] composes
+    /// it at the demand that consumes it, under the same `(fixed, view)`
+    /// capture as its render. Response-only consumers (carrier sync,
+    /// background drains, batch, MCP, NAPI) therefore never pay a
+    /// composed-then-discarded component-meta walk, and a completion-time
+    /// reconcile never cold-loads a child through it.
     fn render_public_api_items(
         &self,
         canonical_ids: &[&str],
@@ -2200,12 +2265,7 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         view: &dyn crate::session_view::SessionView,
-    ) -> Vec<
-        Result<
-            Option<crate::framework::api_projector::ComponentApiProjection>,
-            crate::PublicApiProjectionError,
-        >,
-    > {
+    ) -> Vec<Result<Option<TscResponse>, crate::PublicApiProjectionError>> {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2246,6 +2306,37 @@ impl VerterHost {
                 })
             })
             .collect()
+    }
+
+    /// Compose one canonical's mandatory structured contract under the SAME
+    /// `(fixed, view)` capture its declaration render used — the
+    /// projection-entry half of the "one coherent projector invocation"
+    /// contract. Composition never gates the response: an absent or failed
+    /// component-meta output degrades to the typed `Unsupported` availability.
+    fn compose_component_contract(
+        &self,
+        canonical: &str,
+        adapter_id: &verter_language::FrameworkAdapterId,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+    ) -> crate::framework::ComponentContractAvailability {
+        match self.get_component_meta_output_via_view_with_fixed_store_view(
+            canonical, view, fixed, false,
+        ) {
+            Ok(Some(output)) => output.contract().clone(),
+            Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
+                crate::framework::ComponentContractUnsupported {
+                    adapter_id: adapter_id.clone(),
+                    reason:
+                        crate::framework::ComponentContractUnsupportedReason::ComponentMetaUnavailable,
+                    diagnostics: std::sync::Arc::from([]),
+                },
+            ),
+            Err(error) => crate::framework::public_contract::unsupported_from_output_error(
+                adapter_id.clone(),
+                &error,
+            ),
+        }
     }
 
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
@@ -2316,7 +2407,6 @@ impl VerterHost {
             .into_iter()
             .next()
             .unwrap_or(Ok(None))
-            .map(|projection| projection.map(|projection| projection.response))
         };
 
         if let Some(profile) = profile {
@@ -2354,9 +2444,15 @@ impl VerterHost {
     /// contract from one coherent projector invocation.
     ///
     /// Editor consumers use the sidecar instead of reparsing generated
-    /// declaration text. Adapters that do not expose a structured contract
-    /// retain their existing declaration-only behavior through `contract:
-    /// None`.
+    /// declaration text. When structured metadata is unavailable, the
+    /// declaration remains available with typed `Unsupported` contract
+    /// availability.
+    ///
+    /// THIS entry is where the mandatory contract composes (demand-scoped):
+    /// the declaration renders and the contract composes under ONE shared
+    /// `(fixed, view)` capture. Response-only entries ([`Self::get_public_api`],
+    /// [`Self::get_public_api_with_mode`], [`Self::get_public_api_batch`])
+    /// render the declaration only and never run the component-meta walk.
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,
@@ -2366,16 +2462,39 @@ impl VerterHost {
     > {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
-        self.render_public_api_items(
-            std::slice::from_ref(&canonical_id),
-            PublicApiMode::Public,
-            None,
-            &fixed,
-            &view,
-        )
-        .into_iter()
-        .next()
-        .unwrap_or(Ok(None))
+        let response = self
+            .render_public_api_items(
+                std::slice::from_ref(&canonical_id),
+                PublicApiMode::Public,
+                None,
+                &fixed,
+                &view,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(None))?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
+        // A rendered response proves the same classification chain the render
+        // ran resolves; re-derive the adapter identity for the contract's
+        // typed `Unsupported` arms.
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let Some(adapter_id) = self
+            .scheduler
+            .try_get_source(&canonical)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|hd| hd.file_language.clone())
+            })
+            .and_then(|file_language| file_language.adapter_id().cloned())
+        else {
+            return Ok(None);
+        };
+        let contract = self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        Ok(Some(
+            crate::framework::api_projector::ComponentApiProjection { response, contract },
+        ))
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the
@@ -2701,6 +2820,7 @@ impl VerterHost {
             DiagnosticsSnapshot,
             Option<CachedTsx>,
             Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
             // Whether the carrier fail-closed on an unsupported runtime surface (the
             // TYPED runtime-refusal signal, sourced from the bundle).
             bool,
@@ -2716,46 +2836,15 @@ impl VerterHost {
         self.test_force
             .wrapper_source_clone_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut merged_source = snapshot.source.to_string();
         if !snapshot.src_blocks.is_empty() {
-            let ext_sources = {
-                let mut map = FxHashMap::default();
-                for req in &snapshot.external_requests {
-                    if let Some(dep_source) = self.resolve_dep_source(
-                        &snapshot.canonical_id,
-                        &req.resolved_canonical_id,
-                        &req.specifier,
-                    ) {
-                        map.insert(req.resolved_canonical_id.clone(), dep_source);
-                    }
-                }
-                map
-            };
-
-            for (idx, req) in snapshot.external_requests.iter().enumerate() {
-                if !ext_sources.contains_key(&req.resolved_canonical_id) {
-                    let span = snapshot.src_blocks.get(idx).map(|block| {
-                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
-                    });
-                    diagnostics =
-                        diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
-                            message: format!(
-                                "missing external source '{}' for '{}'",
-                                req.specifier, snapshot.canonical_id
-                            ),
-                            span,
-                        }]));
-                }
-            }
-
-            if diagnostics.has_errors {
-                return Err(diagnostics);
-            }
-
-            merged_source =
-                merge_external_sources(&merged_source, &snapshot.src_blocks, &ext_sources);
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_EXTERNAL_BLOCK_CONTENT_DEFERRED_B23".to_string(),
+                    message: "external block content is deferred until acceptance B-23".to_string(),
+                    span: None,
+                }])),
+            );
         }
 
         let alloc = Allocator::new();
@@ -2893,29 +2982,35 @@ impl VerterHost {
         // parse-affecting template options (custom delimiters / custom
         // elements). Otherwise the carrier re-parses the merged source.
         // Either way the carrier owns the typed downcast + native compile.
-        let can_use_cache =
-            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
-        let fresh_artifact = if can_use_cache {
-            None
-        } else {
-            // Route the re-parse through the COUNTED chokepoint so it stays
-            // visible to the `carrier_parses` dedup rail (an uncounted raw
-            // `compiler.parse` is invisible to it).
-            Some(crate::parse::parse_carrier_counted(
-                &self.provenance,
-                compiler.as_ref(),
-                &merged_source,
-                &verter_compiler::framework_common::ParseOptions {
-                    delimiters: profile.delimiters.clone(),
-                    custom_elements: profile.custom_elements.clone(),
-                },
-            ))
-        };
-        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+        if !snapshot.src_blocks.is_empty() {
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_EXTERNAL_BLOCK_CONTENT_DEFERRED_B23".to_string(),
+                    message: "external block content is deferred until acceptance B-23".to_string(),
+                    span: None,
+                }])),
+            );
+        }
+        let grammar_matches = profile
+            .delimiters
+            .as_ref()
+            .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+            && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+        if !grammar_matches {
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
+                    message: "compile profile grammar differs from registered grammar".to_string(),
+                    span: None,
+                }])),
+            );
+        }
 
         let compiled = match compiler.compile_bundle(
-            &merged_source,
-            compile_artifact,
+            snapshot.source.as_ref(),
+            artifact,
             &runtime_opts,
             &alloc,
         ) {
@@ -3134,13 +3229,40 @@ impl VerterHost {
         });
 
         // Convert raw template data into analysis types when available
+        let mut template_class_admission =
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
         let template_analysis = compiled.template_data.as_ref().map(|raw| {
             // Build script import pairs for component â†’ source resolution
-            let (all_imports, binding_class_unions, props_binding_name) = template_converter_inputs(
-                &snapshot.script_imports,
-                &snapshot.script_macros,
-                &snapshot.script_bindings,
+            let all_imports =
+                template_converter_inputs(&snapshot.script_imports, &snapshot.script_bindings);
+            let facts = self.build_template_class_semantic_facts(
+                &snapshot.canonical_id,
+                snapshot.whole_hash,
+                Arc::clone(&snapshot.source),
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                    macros: &snapshot.script_macros,
+                    bindings: &snapshot.script_bindings,
+                },
+                raw,
+                // The compile lane's bytes attestation: an override layer is a
+                // fenced input, plain snapshot bytes are store-published. The
+                // seed-currentness half is composed inside the wrapper.
+                match snapshot.content_override_layer {
+                    Some(_) => crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
+                        crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::ContentOverride,
+                    ),
+                    None => crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+                },
             );
+            let class_domains =
+                crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+                    &facts,
+                    &snapshot.canonical_id,
+                    snapshot.whole_hash,
+                )
+                .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
+            template_class_admission =
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::from_facts(&facts);
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.script_macros,
                 snapshot.script_macro_usage.as_ref(),
@@ -3153,8 +3275,7 @@ impl VerterHost {
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
-                &binding_class_unions,
-                props_binding_name.as_deref(),
+                &class_domains,
                 Some(&unused_ctx),
             )
         });
@@ -3164,6 +3285,7 @@ impl VerterHost {
             compile_diags,
             cached_tsx,
             template_analysis,
+            template_class_admission,
             // The TYPED runtime-refusal signal the carrier set on the bundle (no
             // `Main` was produced for an unsupported runtime surface), captured
             // before the bundle's fields were moved out.
@@ -3195,62 +3317,27 @@ impl VerterHost {
         snapshot: &CompileInput,
         profile: &CompileProfile,
     ) -> Result<RenderOnlyMain, HostError> {
-        let mut diagnostics = snapshot.parse_diagnostics.clone();
+        let diagnostics = snapshot.parse_diagnostics.clone();
 
         // (a) DROP the source re-clone for the common case. Only the
         // external-`src=` merge (rare, and inherently allocating) builds an
         // owned String; otherwise the substrate borrows the snapshot bytes.
-        let merged_source: std::borrow::Cow<'_, str> = if snapshot.src_blocks.is_empty() {
-            std::borrow::Cow::Borrowed(&*snapshot.source)
-        } else {
-            let ext_sources = {
-                let mut map = FxHashMap::default();
-                for req in &snapshot.external_requests {
-                    if let Some(dep_source) = self.resolve_dep_source(
-                        &snapshot.canonical_id,
-                        &req.resolved_canonical_id,
-                        &req.specifier,
-                    ) {
-                        map.insert(req.resolved_canonical_id.clone(), dep_source);
-                    }
-                }
-                map
-            };
-
-            for (idx, req) in snapshot.external_requests.iter().enumerate() {
-                if !ext_sources.contains_key(&req.resolved_canonical_id) {
-                    let span = snapshot.src_blocks.get(idx).map(|block| {
-                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
-                    });
-                    diagnostics =
-                        diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
-                            message: format!(
-                                "missing external source '{}' for '{}'",
-                                req.specifier, snapshot.canonical_id
-                            ),
-                            span,
-                        }]));
-                }
-            }
-
-            // Site 1 (missing external `src=`) stays FATAL on the render lane.
-            if diagnostics.has_errors {
-                return Err(HostError::CompileError(CompileFailure {
-                    diagnostics,
-                    requested_mode: profile.requested_mode,
-                    actual_mode: profile.requested_mode,
-                    downgrade_reason: None,
-                }));
-            }
-
-            std::borrow::Cow::Owned(merge_external_sources(
-                &snapshot.source,
-                &snapshot.src_blocks,
-                &ext_sources,
-            ))
-        };
+        if !snapshot.src_blocks.is_empty() {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_EXTERNAL_BLOCK_CONTENT_DEFERRED_B23".to_string(),
+                        message: "external block content is deferred until acceptance B-23"
+                            .to_string(),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
 
         // The compiler's own parse scratch. A local `Allocator` per render
         // call passed straight into `compile_bundle` is NOT carrier-lifecycle
@@ -3357,26 +3444,47 @@ impl VerterHost {
         // The host OWNS the cached-parse validity decision — identical to
         // `compile_entry` so the substrate sees the same parse for the same
         // bytes/options.
-        let can_use_cache =
-            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
-        let fresh_artifact = if can_use_cache {
-            None
-        } else {
-            Some(crate::parse::parse_carrier_counted(
-                &self.provenance,
-                compiler.as_ref(),
-                &merged_source,
-                &verter_compiler::framework_common::ParseOptions {
-                    delimiters: profile.delimiters.clone(),
-                    custom_elements: profile.custom_elements.clone(),
-                },
-            ))
-        };
-        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+        if !snapshot.src_blocks.is_empty() {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_EXTERNAL_BLOCK_CONTENT_DEFERRED_B23".to_string(),
+                        message: "external block content is deferred until acceptance B-23"
+                            .to_string(),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
+        let grammar_matches = profile
+            .delimiters
+            .as_ref()
+            .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+            && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+        if !grammar_matches {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
+                        message: "compile profile grammar differs from registered grammar"
+                            .to_string(),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
 
         let compiled = match compiler.compile_bundle(
-            &merged_source,
-            compile_artifact,
+            snapshot.source.as_ref(),
+            artifact,
             &runtime_opts,
             &alloc,
         ) {

@@ -8,9 +8,8 @@
 //!    from_host` calls — the per-batch capture, not ≥2 per item. Without
 //!    the fixed view every per-job closure reads the store view at least
 //!    twice (warm probe + extraction cold-seed), so the count scales ~2N.
-//! 2. **Full-workspace sweeps stay O(1).** The `StoreViewManager`
-//!    collapses a warm batch onto ~O(1) actual `build_coherent` sweeps —
-//!    one capture per batch.
+//! 2. **Root captures stay O(1).** The `StoreViewManager` collapses a warm
+//!    batch onto at most one O(1)-in-host-size coherent capture.
 //! 3. **Fence soundness.** A result computed against a fixed view whose
 //!    live token MOVED since capture is NOT promoted to the resolved-meta
 //!    cache NOR the payload cache. The captured-vs-live fence rejects it;
@@ -1153,7 +1152,10 @@ fn encode_full_surface(output: crate::meta_resolve::ComponentMetaOutput) -> Vec<
         let _ = writeln!(
             out,
             "prop {} req={} default={} type={:?}",
-            p.name, p.required, p.has_default, p.type_source
+            p.name,
+            p.required,
+            p.has_default,
+            p.publication.source_position()
         );
     }
     for e in &analysis.events {

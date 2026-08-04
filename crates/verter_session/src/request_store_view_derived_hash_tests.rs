@@ -10,8 +10,8 @@
 //! The per-rejection attribution helper
 //! (`attribute_prepared_decl_bundle_rejection` in
 //! `crates/verter_session/src/host_manage/prepared_decl.rs`)
-//! discriminates `ImportRoute` mismatch vs absent by calling
-//! `view.derived_hash_for(canonical, ImportRoute)` and observing
+//! discriminates `Route` mismatch vs absent by calling
+//! `view.derived_hash_for(canonical, Route)` and observing
 //! `Some(_)` vs `None`.
 //!
 //! Before this fix, the `StoreView` impl on `RequestStoreView` did not

@@ -31,7 +31,7 @@ describe("decodeComponentMetaPayload", () => {
         {
           name: "item",
           type: { kind: "ref", name: "Item" },
-          rawType: "Item",
+          terminalDisplay: "Item",
           required: true,
         },
       ],
@@ -408,7 +408,7 @@ describe("decodeComponentMetaPayload", () => {
             object: { kind: "ref", name: "Fields" },
             index: { kind: "literal", literalKind: "string", value: "label" },
           },
-          rawType: 'Fields["label"]',
+          terminalDisplay: 'Fields["label"]',
           required: true,
         },
       ],

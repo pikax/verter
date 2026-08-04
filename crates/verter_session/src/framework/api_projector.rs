@@ -15,40 +15,18 @@
 
 use verter_language::FileLanguage;
 
+use crate::framework::public_contract::ComponentContractAvailability;
 use crate::types::{CompileProfile, PublicApiMode, PublicApiProjectionError, TscResponse};
 use crate::VerterHost;
 
-/// One resolved public prop exposed to editor/host consumers alongside a
-/// framework component's declaration carrier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComponentPublicProp {
-    /// Authored public prop name.
-    pub name: String,
-    /// Best safe resolved display type. `None` is an honest unresolved row.
-    pub type_annotation: Option<String>,
-    /// Whether callers may omit the prop.
-    pub optional: bool,
-    /// Whether the framework captured an authored runtime default.
-    pub has_default: bool,
-}
-
-/// Framework-neutral public component contract produced from semantic facts,
-/// never reconstructed by parsing the generated declaration text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ComponentPublicContract {
-    /// Public prop rows in the framework surface's stable source order.
-    pub props: Vec<ComponentPublicProp>,
-}
-
-/// One projector result: the declaration response plus its structured public
-/// contract when the adapter provides one.
+/// One host-composed projector result: declaration response plus mandatory
+/// semantic contract availability.
 #[derive(Debug, Clone)]
 pub struct ComponentApiProjection {
     /// Generated public declaration surface.
     pub response: TscResponse,
-    /// Semantic public contract. `None` preserves adapters whose established
-    /// public surface has not opted into this sidecar.
-    pub contract: Option<ComponentPublicContract>,
+    /// Mandatory semantic public contract availability.
+    pub contract: ComponentContractAvailability,
 }
 
 /// One framework's public-API projection policy.
@@ -66,7 +44,7 @@ pub trait ComponentApiProjector: Send + Sync {
     fn render_api(
         &self,
         cx: ComponentApiProjectorCtx<'_>,
-    ) -> Result<Option<ComponentApiProjection>, PublicApiProjectionError>;
+    ) -> Result<Option<TscResponse>, PublicApiProjectionError>;
 }
 
 /// The public-API projection context.

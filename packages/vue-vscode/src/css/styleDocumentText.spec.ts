@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { scanStyleBlocks } from "./styleBlockScanner";
 import { directStyleDocumentText } from "./styleDocumentText";
 
 /**
@@ -15,6 +14,9 @@ describe("directStyleDocumentText", () => {
   const sfc =
     '<template><div class="first"></div></template>\n' +
     "<style scoped>\n.first {\n  color: #abc;\n}\n</style>\n";
+  const contentStartOffset = sfc.indexOf(">", sfc.indexOf("<style")) + 1;
+  const contentEndOffset = sfc.indexOf("</style>", contentStartOffset);
+  const block = { contentStartOffset, contentEndOffset, contentStartLine: 1 };
 
   // Mirrors CssService.toSfcPosition (line arithmetic, no source maps).
   function toSfcLine(block: { contentStartLine: number }, cssLine: number): number {
@@ -22,14 +24,12 @@ describe("directStyleDocumentText", () => {
   }
 
   it("returns the verbatim authored slice including the leading newline", () => {
-    const block = scanStyleBlocks(sfc)[0];
     const text = directStyleDocumentText(sfc, block);
     expect(text).toBe("\n.first {\n  color: #abc;\n}\n");
     expect(text.startsWith("\n")).toBe(true);
   });
 
   it("keeps the color value on its authored line under the line-arithmetic mapping", () => {
-    const block = scanStyleBlocks(sfc)[0];
     const text = directStyleDocumentText(sfc, block);
 
     // The color sits on css-doc line 2 ("  color: #abc;").
@@ -46,7 +46,6 @@ describe("directStyleDocumentText", () => {
   });
 
   it("DISCRIMINATES: a compiled-style-shaped text (leading trim) would mis-map onto the class name", () => {
-    const block = scanStyleBlocks(sfc)[0];
     // The compiled style virtual output starts at the first rule (no leading
     // newline) — the exact shape that produced the defect.
     const compiledShaped = directStyleDocumentText(sfc, block).replace(/^\n/, "");

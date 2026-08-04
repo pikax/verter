@@ -229,7 +229,7 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
     // under cosmetic carrier edits and are not semantic shape.
     write_section(&mut buf, b"carrier_script_regions");
     if let Some(parse) = indexed.framework_parse.as_deref() {
-        for region in &parse.common.script_regions {
+        for region in parse.script_regions() {
             write_script_region_kind(&mut buf, region.kind);
             write_script_source_type(&mut buf, region.source_type);
             buf.push(SEP);

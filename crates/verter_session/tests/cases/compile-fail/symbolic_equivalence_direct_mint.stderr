@@ -1,0 +1,16 @@
+error[E0599]: no associated function or constant named `structural` found for struct `SymbolicEquivalenceProof` in the current scope
+  --> tests/cases/compile-fail/symbolic_equivalence_direct_mint.rs:12:45
+   |
+12 |     let _forged = SymbolicEquivalenceProof::structural(
+   |                                             ^^^^^^^^^^ associated function or constant not found in `SymbolicEquivalenceProof`
+   |
+note: if you're trying to build a new `SymbolicEquivalenceProof`, consider using `SymbolicEquivalenceProof::from_lossless_projection` which returns `SymbolicEquivalenceProof`
+  --> $WORKSPACE/crates/verter_type_expr/src/publication.rs
+   |
+   | /     pub fn from_lossless_projection(
+   | |         _mint: &SymbolicEquivalenceMint,
+   | |         kind: SymbolicEquivalenceKind,
+   | |         resolved_source: SemanticTypeSource,
+   | |         authored_source: AuthoredTypeSource,
+   | |     ) -> Self {
+   | |_____________^

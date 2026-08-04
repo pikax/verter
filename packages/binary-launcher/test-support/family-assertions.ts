@@ -252,30 +252,38 @@ export function describeBinaryFamily(family: BinaryFamily): void {
       );
     });
 
-    it("exposes the resolved path to bare-command clients via the CLI shim", () => {
-      // Editors and MCP hosts that cannot resolve a Node module ask the shim
-      // for the native binary path. The flag must answer WITHOUT starting a
-      // server, so this is safe to run.
-      const stdout = execFileSync(
-        process.execPath,
-        [join("bin", "run.js"), "--print-server-path"],
-        {
-          cwd: packageDir,
-          encoding: "utf8",
-          // Closed stdin plus a hard bound: if the flag branch ever regresses,
-          // the shim would forward the flag to a real stdio server, and this
-          // must fail fast instead of hanging the suite.
-          input: "",
-          timeout: 30_000,
-        },
-      );
+    it(
+      "exposes the resolved path to bare-command clients via the CLI shim",
+      { timeout: 45_000 },
+      () => {
+        // Editors and MCP hosts that cannot resolve a Node module ask the shim
+        // for the native binary path. The flag must answer WITHOUT starting a
+        // server, so this is safe to run.
+        //
+        // The child's own 30s bound below is the regression discriminator; the
+        // test timeout sits ABOVE it so a loaded parallel test run cannot fire
+        // the 5s framework default while a healthy child is still starting.
+        const stdout = execFileSync(
+          process.execPath,
+          [join("bin", "run.js"), "--print-server-path"],
+          {
+            cwd: packageDir,
+            encoding: "utf8",
+            // Closed stdin plus a hard bound: if the flag branch ever regresses,
+            // the shim would forward the flag to a real stdio server, and this
+            // must fail fast instead of hanging the suite.
+            input: "",
+            timeout: 30_000,
+          },
+        );
 
-      const lines = stdout.trim().split(/\r?\n/);
-      expect(lines).toHaveLength(1);
+        const lines = stdout.trim().split(/\r?\n/);
+        expect(lines).toHaveLength(1);
 
-      const stem = matrix.find((row) => row.os === process.platform)?.binaryName ?? packageName;
-      expect(basename(lines[0])).toBe(stem);
-    });
+        const stem = matrix.find((row) => row.os === process.platform)?.binaryName ?? packageName;
+        expect(basename(lines[0])).toBe(stem);
+      },
+    );
   });
 
   describe(`${packageName} — platform packages`, () => {

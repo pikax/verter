@@ -1,5 +1,5 @@
 use super::*;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use verter_semantic::analysis::template;
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
@@ -18,7 +18,7 @@ fn make_analysis(
 #[test]
 fn test_rename_binding_across_blocks() {
     let source = "<template>\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // AnalyzedBinding spans are script-content-relative (OXC offset 0 = script content start)
@@ -74,7 +74,7 @@ fn test_rename_binding_across_blocks() {
 #[test]
 fn test_classify_script_binding_is_native_with_the_word_range() {
     let source = "<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let count_offset = source.find("count").unwrap() as u32;
@@ -112,7 +112,7 @@ fn test_classify_script_binding_is_native_with_the_word_range() {
 #[test]
 fn test_cannot_rename_unknown_word() {
     let source = "<script setup>\nconst x = 1\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(vec![], vec![]);
@@ -136,7 +136,7 @@ fn test_cannot_rename_unknown_word() {
 #[test]
 fn test_classify_css_class_in_template_is_css() {
     let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -168,7 +168,7 @@ fn test_classify_css_class_in_template_is_css() {
 #[test]
 fn test_rename_css_class_across_template_and_style() {
     let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -263,11 +263,14 @@ fn make_element_with_attrs(
     }
 }
 
-fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::StyleBlockAnalysis {
+fn build_style(
+    source: &str,
+    blocks: &[CarrierBlockView],
+) -> verter_semantic::analysis::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
-    let scoped = style_block.attrs_raw.contains("scoped");
+    let scoped = style_block.is_scoped();
     verter_semantic::analysis::style::build_css_style_analysis(
         css_content,
         verter_semantic::analysis::style::VueStyleInput {
@@ -284,7 +287,7 @@ fn build_style(source: &str, blocks: &[SfcBlock]) -> verter_semantic::analysis::
 #[test]
 fn test_rename_css_id_across_template_and_style() {
     let source = "<template><div id=\"app\"></div></template>\n<style scoped>\n#app { margin: 0; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -330,7 +333,7 @@ fn test_rename_css_id_across_template_and_style() {
 #[test]
 fn test_rename_css_class_doesnt_affect_other_names() {
     let source = "<template><div class=\"btn active\"></div></template>\n<style scoped>\n.btn { color: red; }\n.active { display: block; }\n</style>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let css = build_style(source, &blocks);
 
@@ -364,7 +367,7 @@ fn test_rename_css_class_doesnt_affect_other_names() {
 #[test]
 fn test_cannot_rename_type_only_import() {
     let source = "<script setup>\nimport type { Props } from './types'\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let analysis = make_analysis(
@@ -406,7 +409,7 @@ fn test_span_based_rename_no_false_positives() {
     // "count" appears in plain text "count: " but only the interpolation {{ count }}
     // should be found via binding_occurrences, not plain text.
     let source = "<template>\n  <div>count: {{ count }}</div>\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     // The interpolation {{ count }} — find the second "count" in template
@@ -471,7 +474,7 @@ fn test_span_based_rename_no_false_positives() {
 #[test]
 fn test_rename_with_dual_script_blocks() {
     let source = "<template>\n  {{ count }}\n</template>\n<script>\nexport default {}\n</script>\n<script setup>\nconst count = ref(0)\n</script>";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
     let setup = blocks

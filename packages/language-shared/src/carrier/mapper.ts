@@ -420,6 +420,31 @@ export class CarrierMapper {
     return best;
   }
 
+  /** Earliest authored offset stamped into the generated map for one source. */
+  firstMappedSourceOffset(source?: string): number | null {
+    const sourceIndex = this.resolveSourceIndex(source);
+    if (sourceIndex === null) return null;
+    const sourceName = this.map.sources[sourceIndex];
+    if (sourceName === null || sourceName === undefined) return null;
+    const table = this.sourceTableFor(sourceIndex, sourceName);
+    if (table === null) return null;
+    let best: ForwardSegment | null = null;
+    let bestLine = -1;
+    for (const [line, segments] of this.forwardIndexFor(sourceIndex)) {
+      for (const segment of segments) {
+        if (
+          best === null ||
+          segment.genLine < best.genLine ||
+          (segment.genLine === best.genLine && segment.genCol < best.genCol)
+        ) {
+          best = segment;
+          bestLine = line;
+        }
+      }
+    }
+    return best === null ? null : table.starts[bestLine] + best.srcCol;
+  }
+
   /**
    * Enumerate every generated run that faithfully contains one authored
    * source position. Ordinary request routing deliberately returns only its

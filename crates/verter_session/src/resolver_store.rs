@@ -7,12 +7,10 @@ use std::sync::OnceLock;
 
 /// Per-call-site counter for [`HostStoreView::from_host_read`] invocations.
 ///
-/// **Per-call-site instrumentation.** `HostStoreView::from_host` rebuilds
-/// the entire workspace snapshot on every call; the dominant cost
-/// surfaces as `host_store_view_from_host_builds` per-Button counts in
-/// the audit-record diagnostic counters. To attribute those builds
-/// back to specific warm-hit validator call sites (the Bug 2 hypothesis
-/// the 3-way consult identified), every entry into `from_host`
+/// **Per-call-site instrumentation.** `HostStoreView::from_host` obtains the
+/// token-keyed base view on every call; a stable-token hit is an `Arc` clone,
+/// while a miss performs one O(1) root capture. To attribute those requests
+/// back to specific warm-hit validator call sites, every entry into `from_host`
 /// records `std::panic::Location::caller()` and bumps a per-site
 /// counter. The `#[track_caller]` rail on `from_host`,
 /// `VerterHost::resolver_store_view`, the
@@ -23,9 +21,8 @@ use std::sync::OnceLock;
 /// to the actual cache layer paying for them, not to the deepest
 /// `from_host` body call site.
 ///
-/// **Cost is negligible:** each call performs one `DashMap` lookup
-/// (sub-µs) vs the multi-ms workspace sweep `from_host` itself does,
-/// so the counter stays production-on. The map is keyed by
+/// **Cost is negligible:** each call performs one `DashMap` lookup, so the
+/// counter stays production-on. The map is keyed by
 /// `&'static Location<'static>` — `track_caller` locations are
 /// `'static` by language guarantee, so pointer identity is stable and
 /// the key set is bounded by the number of distinct call sites in the
@@ -40,37 +37,37 @@ fn from_host_site_table() -> &'static DashMap<&'static Location<'static>, Atomic
     FROM_HOST_BY_SITE.get_or_init(DashMap::new)
 }
 
-/// Process-wide count of ACTUAL base-view sweeps — incremented once per
+/// Process-wide count of actual coherent base-view build attempts — incremented once per
 /// `HostStoreView::build_coherent` entry, NOT per `from_host` call.
 ///
 /// Distinct from [`FROM_HOST_BY_SITE`] / the per-request
 /// `host_store_view_from_host_builds` diagnostic, which count every
 /// `from_host` call INCLUDING the cheap token-stable
 /// `Arc<StoreViewSnapshot>`-clone hits that the [`StoreViewManager`]
-/// serves without sweeping. A batch-saturation gate keys off THIS
-/// counter (full-workspace sweeps) to assert that a warm batch performs
-/// ~O(1) sweeps rather than O(N) — the call-count counter cannot make
+/// serves without rebuilding. A batch-saturation gate keys off THIS
+/// counter to assert that a warm batch performs ~O(1) root captures rather
+/// than O(N) — the call-count counter cannot make
 /// that distinction because a manager hit and a manager miss both bump
 /// it.
 static STORE_VIEW_COHERENT_BUILD_SWEEPS: AtomicU64 = AtomicU64::new(0);
 
-/// Number of actual full-workspace base-view sweeps performed since the
+/// Number of coherent base-view build attempts performed since the
 /// last [`reset_store_view_coherent_build_sweeps`]. A batch-saturation
-/// gate reads this to verify the [`StoreViewManager`] collapses a warm
-/// batch onto ~O(1) sweeps.
+/// gate reads this to verify the [`StoreViewManager`] collapses a warm batch
+/// onto ~O(1) captures.
 #[must_use]
 pub fn store_view_coherent_build_sweeps() -> u64 {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.load(Ordering::Relaxed)
 }
 
-/// Reset the actual-sweep counter — for tests / benches that want a
+/// Reset the coherent-build counter — for tests / benches that want a
 /// clean delta around a batch.
 pub fn reset_store_view_coherent_build_sweeps() {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.store(0, Ordering::Relaxed);
 }
 
 /// Test-only: live count of ENROLLED threads currently inside
-/// `build_coherent`'s full-workspace sweep region. Incremented on entry,
+/// `build_coherent`'s root-capture region. Incremented on entry,
 /// decremented on exit — but ONLY for threads that opted in via
 /// [`enroll_concurrent_sweep_gauge`]. Enrollment isolates the gauge from
 /// unrelated parallel store-view tests (whose sweeper threads never enroll),
@@ -111,7 +108,7 @@ pub(crate) fn enroll_concurrent_sweep_gauge() {
     CONCURRENT_SWEEP_GAUGE_PARTICIPANT.with(|c| c.set(true));
 }
 
-/// Test-only: the peak number of concurrent full-workspace sweeps observed
+/// Test-only: the peak number of concurrent coherent build attempts observed
 /// since the last reset. The final-fallback singleflight regression asserts
 /// this stays `<= 1` (no parallel unclaimed sweeps under churn + contention).
 #[cfg(test)]
@@ -173,7 +170,7 @@ pub(crate) fn reset_store_view_peak_concurrent_sweeps() {
     STORE_VIEW_PEAK_CONCURRENT_SWEEPS.store(0, Ordering::Relaxed);
 }
 
-/// Test-only: when `true`, each `build_coherent` sweep holds a short fixed
+/// Test-only: when `true`, each `build_coherent` attempt holds a short fixed
 /// delay inside the concurrent-sweep gauge window. The delay widens the
 /// window so genuinely-parallel UNCLAIMED sweeps reliably overlap and the
 /// peak gauge observes them, without depending on incidental timing. Under
@@ -193,8 +190,8 @@ pub(crate) fn arm_store_view_sweep_overlap_hold(armed: bool) {
 /// Test-only RAII guard that bumps the live concurrent-sweep gauge on
 /// construction (updating the peak) and drops it on `Drop` — but ONLY on an
 /// ENROLLED thread ([`enroll_concurrent_sweep_gauge`]). Armed for the
-/// duration of each `build_coherent` full-workspace sweep so a parallel
-/// UNCLAIMED sweep across enrolled threads is observable as a peak `> 1`.
+/// duration of each `build_coherent` attempt so a parallel UNCLAIMED build
+/// across enrolled threads is observable as a peak `> 1`.
 /// When the overlap hold is armed, an enrolled `enter` sleeps briefly to
 /// widen the overlap window. A non-enrolled thread (an unrelated parallel
 /// store-view test's sweeper) is a no-op, so it never perturbs the gauge.
@@ -362,7 +359,7 @@ use std::sync::Arc;
 /// retries when a mutation lands mid-build. Exceeding the bound is a
 /// genuinely contended host; the builder then reports the build as
 /// [`SnapshotBuildOutcome::Superseded`] rather than publishing a view
-/// whose per-canonical snapshots could be torn across a mutation.
+/// whose roots and token could be torn across a mutation.
 const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
 /// Complete validity oracle for a [`StoreViewSnapshot`].
@@ -479,15 +476,10 @@ pub(crate) struct StoreViewValidationToken {
     /// WITHOUT any host-side epoch or generation necessarily moving
     /// (no `verter_session` handler observes `DirectoryTreeDirty`).
     ///
-    /// The snapshot build is edge-currency-dependent on this LIVE value:
-    /// `route_surface_is_edge_current` gates every Route/ImportRoute
-    /// derived hash (base build, overlay re-root, completion overlay)
-    /// against it at BUILD time. A cached snapshot whose gates were
-    /// evaluated pre-mutation must therefore MISS once it advances —
-    /// without this dimension the manager would keep validating warm
-    /// entries across a watcher recovery or an edge-staleness transition
-    /// (a dependency appeared / retargeted while the owner's content
-    /// stayed put) for the snapshot's lifetime.
+    /// A file-set mutation can supersede the captured source and resolution
+    /// roots even while an owner's bytes stay unchanged. A cached view must
+    /// therefore MISS once this advances; path-precise resolution validity
+    /// itself remains owned by the captured resolution world and its facts.
     ///
     /// Included in BOTH the `StoreViewManager` REUSE oracle and
     /// [`Self::externally_superseded_by`]: unlike the two additive
@@ -689,26 +681,17 @@ impl StoreViewValidationToken {
     }
 }
 
-/// Token-relevant raw inputs captured ONCE, before any per-canonical
-/// snapshotting begins, so the entire snapshot is built under a single
-/// coherent token.
+/// Token-relevant raw inputs and immutable store roots captured ONCE, so the
+/// root-backed snapshot is built under a single coherent token.
 ///
-/// **No-torn-snapshot contract.** `HostStoreView::build` populates the
-/// per-canonical / per-domain snapshot maps (`whole_hashes`,
-/// `file_facts`, `derived_hashes`, …) one source at a time. Every
-/// token-relevant by-value dimension (the two additive generations,
-/// the env-hash bundle, the project identity, the project generation)
-/// MUST be read BEFORE that population window opens and stamped into the
-/// view unchanged — never re-read live near the end of the build. If a
-/// dimension is read late, a mid-build mutation that advances it WITHOUT
-/// moving `store_view_epoch` (e.g. a resolve-extensions / env-hash
-/// update, or a `project_generation` bump) would leave the view's
-/// reconstructed token reflecting the NEW value while the snapshot maps
-/// were captured under the OLD value, and the post-build coherence check
-/// (`live_token == captured`) would accept a TORN view as coherent.
+/// **No-torn-snapshot contract.** Every token-relevant by-value dimension and
+/// each immutable root/retention lease MUST come from the same capture window
+/// and be stamped into the view unchanged. A late live re-read could otherwise
+/// pair a new token dimension with old roots and let the post-build coherence
+/// check accept a torn view.
 ///
-/// Capturing all inputs first closes that hole: the snapshot maps and the
-/// token both derive from the SAME read window, so the post-build
+/// Capturing all inputs first closes that hole: the roots and token derive
+/// from the SAME read window, so the post-build
 /// comparison against the LIVE token detects any mid-build advance of any
 /// dimension and forces a retry / `Superseded`.
 #[derive(Clone)]
@@ -749,7 +732,7 @@ struct PreBuildTokenInputs {
 
 impl PreBuildTokenInputs {
     /// Capture every token-relevant raw input from the host in one read
-    /// window, before snapshotting begins.
+    /// window, before the roots are sealed into the snapshot.
     fn capture(host: &VerterHost) -> Self {
         Self {
             store_view_epoch: host.current_store_view_epoch(),
@@ -800,7 +783,7 @@ fn fold_env_hashes(env: &crate::session_view::EnvHashes) -> Hash16 {
 /// Outcome of a no-torn-return snapshot build. When the host mutates
 /// faster than the builder can complete a coherent capture, the
 /// builder reports [`Self::Superseded`] instead of treating the build as
-/// publishable — its per-canonical snapshots straddle a mutation.
+/// publishable — its roots and token straddle a mutation.
 ///
 /// `Superseded` still carries the freshest built view. That view is NOT
 /// coherent against the live host (it was stamped under the stale
@@ -877,6 +860,21 @@ pub(crate) enum StoreViewReturnOnlyReason {
     /// build attempt observed a mid-build mutation — `build_coherent`
     /// reported supersession on every round.
     Superseded,
+    /// The reading thread ALREADY HOLDS this manager's singleflight build
+    /// claim: a store-view build re-entered
+    /// [`StoreViewManager::base_view`] on the claim-holding thread.
+    /// The `built` condvar such a caller would park on can only be
+    /// signalled by its own `BuildClaimGuard::drop`, so parking is a
+    /// one-thread deadlock. The manager refuses to park and hands the
+    /// re-entrant caller a fail-closed return-only read instead —
+    /// `StoreViewRead::current()` yields `None`, so the caller declines
+    /// rather than validating anything, and `ReturnOnly` can never publish
+    /// an entry, reverse-index metadata or a persistent artifact.
+    ///
+    /// This arm is a BUG SIGNAL, not a normal degradation: it is
+    /// `tracing::error!`-logged and `debug_assert!`-loud. See
+    /// [`StoreViewManager::park_for_build`].
+    ReentrantBuildClaim,
 }
 
 /// A [`HostStoreView`] the [`StoreViewManager`] proved current at
@@ -952,8 +950,8 @@ impl ColdSeedHostStoreView {
     ///
     /// The session-bound cold-compute path
     /// ([`crate::resolver_core::SessionResolverContext::from_cold_seed`])
-    /// needs the overlay-rooted form of the seed (per-canonical snapshots
-    /// re-rooted, the coalescing fingerprint recomputed) while preserving
+    /// needs the overlay-rooted form of the seed (the overlay override root
+    /// attached, the coalescing fingerprint recomputed) while preserving
     /// the seed's `current` flag — so a `ReturnOnly` seed stays non-current
     /// after overlaying and its derived request-bound view fails every
     /// `validates*` closed. This is the ONLY currentness-preserving
@@ -1505,17 +1503,16 @@ thread_local! {
     };
 
     /// Test-only knob: when armed, the next `build` call on this thread
-    /// performs an env-hash mutation IN THE MIDDLE of the build —
-    /// AFTER the per-canonical snapshot maps are populated but BEFORE the
-    /// token-relevant env-hash / project-identity dimensions are stamped.
+    /// performs an env-hash mutation after the root token is sealed but before
+    /// the coherent-build post-check.
     /// The mutation advances `resolve_env_hash` WITHOUT bumping
     /// `store_view_epoch`. One-shot; disarmed on fire.
     ///
     /// Drives the build-coherence regression: with a LATE env read inside
     /// `build`, the view's reconstructed token would reflect the NEW
     /// (post-mutation) env while the snapshot maps were captured under the
-    /// OLD env, and the post-build coherence check (which compared a token
-    /// reconstructed from the same late reads) would accept the TORN view
+    /// OLD env, and a post-build check based on the same late reads would
+    /// accept the torn view
     /// as coherent. With the pre-capture stamp the view's token reflects
     /// the OLD env, the post-build LIVE token reflects the NEW env, the
     /// comparison mismatches, and the attempt is treated as superseded.
@@ -1594,6 +1591,54 @@ thread_local! {
     pub(crate) static FORCE_RESET_FENCE_DECLINE_ALWAYS: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+
+    /// Test-only ONE-SHOT knob: when armed, the next `build_coherent`
+    /// attempt on this thread performs ONE nested
+    /// `resolver_store_view_read()` from INSIDE the singleflight claim
+    /// region, on the claim-holding thread.
+    ///
+    /// This reproduces the self-await geometry directly. The O(1) production
+    /// builder does not re-index or enumerate owners; the backstop still
+    /// protects the manager if any future claim-holding path re-enters
+    /// [`StoreViewManager::base_view`] and reaches the would-park arm.
+    /// The knob arms exactly that.
+    ///
+    /// Without the claim-ownership backstop the nested read parks on the
+    /// `built` condvar that only its own `BuildClaimGuard::drop` can
+    /// signal, and the whole store-view path is dead at zero CPU.
+    pub(crate) static FORCE_REENTRANT_STORE_VIEW_READ_ONCE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+
+    /// Test-only: what the nested read armed by
+    /// [`FORCE_REENTRANT_STORE_VIEW_READ_ONCE`] actually RETURNED, as
+    /// `(is_current, return_only_reason)`. Stays `None` when the nested
+    /// read never happened (so a test can prove it armed the re-entrancy)
+    /// and also when the refusal's `debug_assert!` unwound before the
+    /// value could propagate back — which is the normal debug-build
+    /// outcome, and is why the chokepoint separately records
+    /// [`LAST_SELF_AWAIT_REFUSAL_THIS_THREAD`].
+    pub(crate) static REENTRANT_STORE_VIEW_READ_OBSERVED: std::cell::Cell<
+        Option<(bool, Option<StoreViewReturnOnlyReason>)>,
+    > = const { std::cell::Cell::new(None) };
+
+    /// Test-only PER-THREAD count of self-await park refusals taken at
+    /// [`StoreViewManager::park_for_build`]. Per-thread (not process-wide)
+    /// so an unrelated parallel test can never perturb the assertion, and
+    /// because a self-await refusal is by construction observed on the
+    /// very thread that armed it.
+    pub(crate) static SELF_AWAIT_REFUSALS_THIS_THREAD: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+
+    /// Test-only: the [`StoreViewReturnOnlyReason`] of the fail-closed read
+    /// the most recent self-await refusal on this thread produced. Recorded
+    /// at the chokepoint BEFORE its `debug_assert!` fires, so the
+    /// fail-closed value stays observable in a debug build where the
+    /// assertion unwinds the caller.
+    pub(crate) static LAST_SELF_AWAIT_REFUSAL_THIS_THREAD: std::cell::Cell<
+        Option<StoreViewReturnOnlyReason>,
+    > = const { std::cell::Cell::new(None) };
 }
 
 /// Test-only PROCESS-GLOBAL build gate, used by the woken-waiter
@@ -1748,9 +1793,9 @@ impl HostStoreView {
         host.store_view_manager().base_view(host)
     }
 
-    /// Build a coherent base snapshot or report supersession (no-torn
-    /// return). The final attempt never treats a view whose per-canonical
-    /// snapshots could straddle a mutation as publishable. The
+    /// Build a coherent root-backed base snapshot or report supersession
+    /// (no-torn return). The final attempt never treats a capture whose roots
+    /// and token could straddle a mutation as publishable. The
     /// [`StoreViewManager`] retries on `Superseded` (a concurrent winner
     /// may have published a coherent view in the meantime), and on
     /// retry-cap exhaustion hands the carried freshest view back
@@ -1761,12 +1806,12 @@ impl HostStoreView {
         // the caller return-only instead of producing nothing.
         let mut freshest: Option<HostStoreView> = None;
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
-            // Count every ACTUAL full-workspace sweep (one per `build`
+            // Count every actual coherent root capture (one per `build`
             // attempt). A batch-saturation gate reads this to verify the
-            // `StoreViewManager` collapses a warm batch onto ~O(1) sweeps
+            // `StoreViewManager` collapses a warm batch onto ~O(1) captures
             // — distinct from the `from_host` call count, which also bumps
             // on the cheap token-stable Arc-clone hits the manager serves
-            // without sweeping.
+            // without rebuilding.
             STORE_VIEW_COHERENT_BUILD_SWEEPS.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
             COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|c| c.set(c.get().saturating_add(1)));
@@ -1783,8 +1828,8 @@ impl HostStoreView {
                 panic!("FORCE_BUILD_PANIC: injected mid-build panic");
             }
             // Capture the COMPLETE set of token-relevant raw inputs ONCE,
-            // before any per-canonical snapshotting begins, and build the
-            // entire snapshot under that single captured token. `build`
+            // before the roots are sealed, and build the root-backed snapshot
+            // under that single captured token. `build`
             // stamps the view's token-relevant dimensions from this capture
             // (NOT from late live re-reads), so the view's own token equals
             // `pre.token()` exactly — there is no separately-reconstructed
@@ -1799,14 +1844,32 @@ impl HostStoreView {
             // regression. One-shot; only the first gated builder is held.
             #[cfg(test)]
             TEST_BUILD_GATE.wait_if_armed();
-            // Test-only: arm the concurrent-sweep gauge across the ACTUAL
-            // workspace sweep (`build`). Held only for the build itself (not
-            // the gate park above), so the PEAK reflects threads genuinely
-            // sweeping in parallel. An UNCLAIMED final-fallback sweep
+            // Test-only: arm the concurrency gauge across the actual O(1)
+            // build. Held only for the build itself (not the gate park above),
+            // so the PEAK reflects parallel build attempts. An UNCLAIMED fallback
             // (the defect) overlaps another build and drives the peak > 1;
             // the singleflight claim keeps it at 1.
             #[cfg(test)]
             let _sweep_gauge = ConcurrentSweepGauge::enter();
+            // Test-only: perform ONE nested `resolver_store_view_read()` from
+            // INSIDE the claim region, on the claim-holding thread. This arms
+            // the self-await refusal geometry directly without adding a host
+            // dependency or enumeration to the O(1) production builder.
+            // One-shot and thread-local, so unrelated parallel tests never see it.
+            #[cfg(test)]
+            if FORCE_REENTRANT_STORE_VIEW_READ_ONCE.with(|c| {
+                let armed = c.get();
+                c.set(false);
+                armed
+            }) {
+                let nested = host.resolver_store_view_read();
+                REENTRANT_STORE_VIEW_READ_OBSERVED.with(|slot| {
+                    slot.set(Some((
+                        nested.is_current_for_tests(),
+                        nested.return_only_reason_for_tests(),
+                    )));
+                });
+            }
             let view = Self::build(&pre, session_id);
             debug_assert_eq!(
                 view.validation_token(),
@@ -1866,12 +1929,11 @@ impl HostStoreView {
 
     /// Re-root this view against a [`SessionView`]'s overlay so
     /// warm-read validation observes the session's CURRENT content
-    /// identity rather than the base host's — across **every**
-    /// per-canonical / per-domain snapshot, not just `whole_hashes`.
+    /// identity rather than the base host's — across every point lookup
+    /// routed through the overlay override root.
     ///
-    /// `HostStoreView::build` snapshots every per-canonical field from
-    /// the scheduler / `FileArtifactStore` — i.e. the **base** content
-    /// of every tracked canonical. A query executed under a
+    /// `HostStoreView::build` captures immutable base roots from the scheduler
+    /// and `FileArtifactStore`. A query executed under a
     /// [`crate::resolver_core::SessionResolverContext`] roots its
     /// cached values (semantic-graph `MemoEntry` self-roots, the
     /// path-precise fact rail, the legacy whole-hash rail) on the
@@ -1905,7 +1967,8 @@ impl HostStoreView {
     ///   against the overlay's `FileFacts`.
     /// - **`Route` derived hash** — overlay-Upsert: `Value` of
     ///   `hash_route_surface` over the overlay `shallow_state` when the
-    ///   overlay surface is edge-current, else `Absent`.
+    ///   overlay surface was built under the current parse environment, else
+    ///   `Absent`.
     /// - **source-env identity** — always `Absent`: the base identity no
     ///   longer describes the artifact this session serves, so a recorded
     ///   `FileSourceEnv` fact must reject strictly rather than validate
@@ -2279,16 +2342,15 @@ impl HostStoreView {
     fn build(pre: &PreBuildTokenInputs, session_id: Option<u64>) -> Self {
         let _build_scope = crate::store_view_roots::StoreViewBuildScope::enter();
         // EVERY token-relevant by-value dimension comes from the single
-        // `pre` capture taken BEFORE the per-canonical snapshot population
-        // window opened. They are NEVER re-read live here — re-reading any
-        // of them late (after the snapshot maps were populated) would let a
+        // `pre` capture taken before the roots are sealed. They are NEVER
+        // re-read live here — a late read would let a
         // mid-build mutation that advanced a dimension WITHOUT bumping
         // `store_view_epoch` produce a view whose token reflects the NEW
-        // value while its snapshot maps were captured under the OLD value;
+        // value while its roots were captured under the OLD value;
         // `build_coherent`'s post-build coherence check (which compares the
         // PRE-build captured token against the live token) would then accept
         // that TORN view as coherent. Stamping every dimension from `pre`
-        // keeps the snapshot maps and the token coherent under one read
+        // keeps the roots and token coherent under one read
         // window; any mid-build advance is caught by the post-build
         // comparison and forces a retry / `Superseded`.
         let snapshot_epoch = pre.store_view_epoch;
@@ -2301,15 +2363,10 @@ impl HostStoreView {
         // no per-owner answer is copied, and nothing here grows with the
         // number of files the host tracks.
         //
-        // What used to live here — a scheduler-node/compile-cache union, a
-        // per-canonical source probe, a whole-artifact-store scan, a
-        // per-tracked-file artifact walk and a whole-augmentation-index
-        // scan — was six terms linear in the host's size, paid on every
-        // keystroke that moved the validation token. Each of those answers
-        // is now derived on demand by an exact point lookup through the
-        // roots below (`HostStoreView::canonical_view`), and the roots are
-        // RETENTION LEASES: whatever the live host has since superseded or
-        // evicted, this view's world stays reachable through them.
+        // Per-canonical answers are derived on demand by exact point lookups
+        // through the roots below (`HostStoreView::canonical_view`). The roots
+        // are RETENTION LEASES, so the captured world remains reachable after
+        // the live host advances or evicts newer state.
         //
         // `seal` moves the already-captured handles into the token: the
         // scheduler source root, the artifact root (exact keys, the
@@ -2566,8 +2623,8 @@ impl HostStoreView {
     /// by [`crate::resolver_core::RequestStoreView`] when a canonical
     /// was promoted into the per-request completion overlay after the
     /// base view was built. All other key
-    /// dimensions (`parse_env_hash`, `resolve_env_hash`,
-    /// `resolver_version`, `known_miss_generation`) compose against
+    /// dimensions (`parse_env_hash`, `resolve_env_hash`, and
+    /// `resolver_version`) compose against
     /// the base view's snapshot unchanged.
     pub(crate) fn validates_resolve_imports_domain_for_content_hash(
         &self,
@@ -2613,8 +2670,8 @@ impl HostStoreView {
             resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
         };
 
-        // The candidate must root its own witness — the owner's
-        // generation-current `ImportRoute` fact — in THIS view. That is
+        // The candidate must root its own path-precise resolution witness in
+        // THIS view. That is
         // what makes a specifier's appearance, disappearance, or
         // retarget reject a bundle admitted before it: the resolution
         // state rides on the candidate, not on a key dimension.
@@ -3059,11 +3116,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// Resolve-imports-domain validator (R26).
     ///
     /// Compose `ResolvedImportFactsKey { canonical, content_hash,
-    /// parse_env_hash, resolve_env_hash, resolver_version,
-    /// known_miss_generation }` from the fact's `canonical_id`, the
-    /// view's tracked `whole_hashes[canonical]`,
-    /// `resolved_import_facts_known_miss_tags[canonical]`, and the
-    /// view's `env_hashes`. Look up the matching
+    /// parse_env_hash, resolve_env_hash, resolver_version }` from the fact's
+    /// `canonical_id`, the view's root-backed content hash, and the view's
+    /// environment hashes. Look up the matching
     /// `Arc<ResolvedImportFacts>` from the captured
     /// `ResolvedImportFactsDb` handle and compare the per-binding
     /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
@@ -3238,11 +3293,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base
 /// [`HostStoreView`] keyed by its [`StoreViewValidationToken`].
 ///
-/// Batch component-meta rebuilds the full-workspace base view once per
-/// job today (the dominant repeated CPU cost). The manager turns that
-/// into a build-once / share-by-`Arc`-clone discipline: while the token
+/// The manager applies a build-once / share-by-`Arc`-clone discipline: while the token
 /// is unchanged, [`Self::base_view`] hands back a refcount-bumped clone
-/// of the cached view instead of re-sweeping the workspace. On a token
+/// of the cached view instead of recapturing roots. On a token
 /// change the next caller rebuilds and republishes; concurrent callers
 /// that observe the same stale token cooperatively converge on whichever
 /// build lands first under the lock.
@@ -3255,15 +3308,168 @@ impl crate::resolver_core::StoreView for HostStoreView {
 ///
 /// `cached` is the published token-keyed base view. `building` is the
 /// singleflight claim: while it is set, a builder owns the in-flight
-/// cold sweep and concurrent token-miss callers WAIT on `built` rather
-/// than launching their own parallel sweeps.
+/// root capture and concurrent token-miss callers WAIT on `built` rather
+/// than launching parallel builds.
+/// Structural confinement for the [`StoreViewManager`] singleflight build
+/// claim, and the self-await backstop built on it.
+///
+/// `CLAUDE.md`'s completion-fence rule — *"Waiters on in-flight work block
+/// cooperatively, never busy-spin; **same-path recursion never
+/// self-awaits**"*. The coherent build runs OUTSIDE the manager lock and
+/// can be re-entered by a future claim-holding helper. Such a thread observes
+/// its OWN claim and would
+/// park on the `built` condvar that only its own [`BuildClaimGuard`]'s
+/// `Drop` can signal — a wait-for cycle of length one, at zero CPU,
+/// forever, taking the host's whole store-view path with it.
+///
+/// The invariant is now STRUCTURAL, not documented:
+///
+/// * [`ClaimFlag`]'s inner bool is private TO THIS MODULE, so no code in
+///   the parent module can set or clear the singleflight claim — it can
+///   only read it through [`ClaimFlag::is_claimed`].
+/// * [`BuildClaimGuard`]'s `manager` field is private TO THIS MODULE, so
+///   the parent module cannot build the guard with a struct literal
+///   (`E0451`). The one and only constructor is [`BuildClaimGuard::claim`].
+/// * [`BuildClaimGuard::claim`] sets the flag AND registers the owning
+///   thread as one indivisible step; `Drop` deregisters the thread AND
+///   clears the flag as one indivisible step.
+///
+/// Claim ownership therefore cannot drift from claim-taking: holding the
+/// claim and being registered as its owner are the same fact, enforced by
+/// the compiler rather than by convention. That makes
+/// [`claim_held_by_current_thread`] — consulted at the manager's single
+/// park chokepoint [`StoreViewManager::park_for_build`] — exact rather
+/// than best-effort.
+///
+/// A child module can read its ancestors' private items, which is what
+/// lets `claim` mutate [`StoreViewManagerState`]; the reverse is not true,
+/// and that asymmetry is the whole point.
+mod build_claim {
+    use std::cell::RefCell;
+
+    use super::{StoreViewManager, StoreViewManagerState};
+
+    thread_local! {
+        /// The managers whose build claim THIS thread currently holds,
+        /// by address.
+        ///
+        /// A set of manager identities, not a depth counter: a thread can
+        /// legitimately be inside two different hosts' managers, and
+        /// parking behind ANOTHER manager's claim is ordinary cross-thread
+        /// cooperation that must keep working. Only parking behind one's
+        /// OWN claim is the self-await.
+        ///
+        /// Entries are pushed by [`BuildClaimGuard::claim`] and removed by
+        /// its `Drop`, whose lifetime is bounded by the borrow of the
+        /// manager it registered — so an address can never outlive the
+        /// manager it names.
+        static HELD_CLAIMS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn manager_key(manager: &StoreViewManager) -> usize {
+        std::ptr::from_ref(manager).addr()
+    }
+
+    /// The [`StoreViewManager`] singleflight claim flag.
+    ///
+    /// The inner bool is private to [`super::build_claim`]: the parent
+    /// module can ask [`Self::is_claimed`] but CANNOT flip it. Every
+    /// transition runs through [`BuildClaimGuard`], which is what makes the
+    /// claim and its registered owning thread inseparable.
+    #[derive(Debug, Default)]
+    pub(super) struct ClaimFlag(bool);
+
+    impl ClaimFlag {
+        /// Whether a builder currently owns the in-flight cold build.
+        pub(super) fn is_claimed(&self) -> bool {
+            self.0
+        }
+    }
+
+    /// RAII guard for the [`StoreViewManager`] singleflight build claim.
+    ///
+    /// Armed by [`Self::claim`] the moment the claim is taken. Its `Drop`
+    /// deregisters this thread as the claim owner, re-acquires the manager
+    /// mutex, clears the claim, and wakes every parked joiner on the
+    /// `built` condvar — on EVERY exit path, including a panic unwinding
+    /// out of `build_coherent`. parking_lot mutexes do NOT poison, so
+    /// without this guard a panicking builder would leave the claim set
+    /// forever and every current joiner AND every future caller would
+    /// block permanently on `built` (a total hang of the store-view path).
+    ///
+    /// The publish path drops the manager lock BEFORE this guard drops
+    /// (parking_lot is not reentrant), so the guard's `Drop` re-locks
+    /// cleanly.
+    pub(super) struct BuildClaimGuard<'m> {
+        manager: &'m StoreViewManager,
+    }
+
+    impl<'m> BuildClaimGuard<'m> {
+        /// Take the singleflight claim: set the claim flag under the
+        /// caller's already-held manager lock AND register this thread as
+        /// the claim owner, as ONE indivisible step. Returns the guard
+        /// together with the reset generation observed at claim time (the
+        /// value the publish fence compares against).
+        ///
+        /// The guard is produced UNDER the lock, so there is no window in
+        /// which the claim is set without an armed guard.
+        pub(super) fn claim(
+            manager: &'m StoreViewManager,
+            state: &mut StoreViewManagerState,
+        ) -> (Self, u64) {
+            debug_assert!(
+                !state.building.is_claimed(),
+                "the singleflight claim must be free when it is taken \
+                 (double-claim would run parallel coherent builds)"
+            );
+            state.building.0 = true;
+            HELD_CLAIMS.with(|held| held.borrow_mut().push(manager_key(manager)));
+            (Self { manager }, state.reset_generation)
+        }
+    }
+
+    impl Drop for BuildClaimGuard<'_> {
+        fn drop(&mut self) {
+            // Deregister BEFORE releasing the claim: once the flag clears
+            // another thread may claim, and this thread must not still be
+            // recorded as an owner of anything.
+            let key = manager_key(self.manager);
+            HELD_CLAIMS.with(|held| {
+                let mut held = held.borrow_mut();
+                if let Some(pos) = held.iter().rposition(|held_key| *held_key == key) {
+                    held.remove(pos);
+                }
+            });
+            let mut state = self.manager.state.lock();
+            state.building.0 = false;
+            // Wake every parked joiner: on a published `Coherent` view they
+            // re-probe and (when tokens match) warm-hit the freshly-published
+            // view; on `Superseded` (or a panic that published nothing) one of
+            // them re-claims the build.
+            self.manager.built.notify_all();
+        }
+    }
+
+    /// Whether the CURRENT thread holds `manager`'s build claim.
+    ///
+    /// `true` means the `built` condvar can only be signalled by this very
+    /// thread's own guard, so parking on it would deadlock.
+    pub(super) fn claim_held_by_current_thread(manager: &StoreViewManager) -> bool {
+        let key = manager_key(manager);
+        HELD_CLAIMS.with(|held| held.borrow().contains(&key))
+    }
+}
+
+use build_claim::BuildClaimGuard;
+
 #[derive(Debug, Default)]
 struct StoreViewManagerState {
     cached: Option<(StoreViewValidationToken, HostStoreView)>,
-    /// `true` while a builder is running `build_coherent` outside the
+    /// Claimed while a builder is running `build_coherent` outside the
     /// lock. A single in-flight build at a time; joiners block on the
-    /// condvar.
-    building: bool,
+    /// condvar. Only [`BuildClaimGuard`] can move this flag — see
+    /// [`build_claim`].
+    building: build_claim::ClaimFlag,
     /// Monotonic reset generation. Advanced by every [`StoreViewManager::clear`]
     /// (a host-lifecycle reset: `close` / `set_workspace` /
     /// `configure_projects`). A builder claims the build under the
@@ -3286,8 +3492,7 @@ struct StoreViewManagerState {
 
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base view keyed
 /// by its [`StoreViewValidationToken`], with a singleflight cold-build
-/// claim so concurrent token-miss callers do not run N parallel
-/// full-workspace sweeps.
+/// claim so concurrent token-miss callers do not run N parallel builds.
 #[derive(Debug, Default)]
 /// **Lock rank.** `state` is OUTER to both root registries: publishing a
 /// new cached view drops the previous one under the `state` guard, and
@@ -3304,36 +3509,121 @@ pub(crate) struct StoreViewManager {
     built: parking_lot::Condvar,
 }
 
-/// RAII guard for the [`StoreViewManager`] singleflight build claim.
-///
-/// Armed the moment a caller sets `building = true`. Its `Drop` re-acquires
-/// the manager mutex, clears the claim, and wakes every parked joiner on the
-/// `built` condvar — on EVERY exit path, including a panic unwinding out of
-/// `build_coherent`. parking_lot mutexes do NOT poison, so without this guard
-/// a panicking builder would leave `building == true` forever and every
-/// current joiner AND every future caller would block permanently on
-/// `self.built.wait` (a total hang of the store-view path). The guard makes
-/// the claim-release unconditional.
-///
-/// The publish path drops the manager lock BEFORE this guard drops (parking_lot
-/// is not reentrant), so the guard's `Drop` re-locks cleanly.
-struct BuildClaimGuard<'m> {
-    manager: &'m StoreViewManager,
-}
-
-impl Drop for BuildClaimGuard<'_> {
-    fn drop(&mut self) {
-        let mut state = self.manager.state.lock();
-        state.building = false;
-        // Wake every parked joiner: on a published `Coherent` view they
-        // re-probe and (when tokens match) warm-hit the freshly-published
-        // view; on `Superseded` (or a panic that published nothing) one of
-        // them re-claims the build.
-        self.manager.built.notify_all();
-    }
+/// Outcome of the [`StoreViewManager`]'s single park chokepoint,
+/// [`StoreViewManager::park_for_build`].
+#[must_use]
+enum ParkDecision {
+    /// The caller parked cooperatively on the `built` condvar and has since
+    /// been woken. It must restart its round and re-decide its role against
+    /// a freshly re-read live token.
+    Woken,
+    /// The CURRENT thread already holds this manager's build claim, so the
+    /// `built` condvar can only be signalled by this thread's own
+    /// `BuildClaimGuard::drop`. Parking would be a one-thread deadlock, so
+    /// the park was REFUSED and the chokepoint produced the fail-closed
+    /// read the caller must return WITHOUT parking and WITHOUT claiming.
+    RefusedSelfAwait(StoreViewRead),
 }
 
 impl StoreViewManager {
+    /// The SOLE site at which this manager parks on the `built` condvar.
+    ///
+    /// ## Cross-thread cooperation is UNCHANGED
+    ///
+    /// A genuine joiner — a different thread that finds a builder in flight
+    /// — parks cooperatively exactly as before, is woken by the builder's
+    /// [`BuildClaimGuard`] `Drop` (`notify_all`), and re-decides its role
+    /// against a freshly re-read live token. The bounded-liveness and
+    /// singleflight contracts are untouched, and the test-only
+    /// `parked_waiters` gauge still counts precisely those cooperative
+    /// parks.
+    ///
+    /// ## Self-await is refused
+    ///
+    /// The ONLY behaviour change is for a caller that already holds THIS
+    /// manager's claim on THIS thread. A nested store-view read from any
+    /// claim-holding path observes its own `building`
+    /// observation is its OWN claim, and the condvar it would park on can
+    /// only be signalled by its own guard: a wait-for cycle of length one,
+    /// at zero CPU, permanent. `CLAUDE.md`'s "same-path recursion never
+    /// self-awaits" and this manager's own bounded-liveness rustdoc both
+    /// forbid it.
+    ///
+    /// So the park is refused and the caller gets a FAIL-CLOSED
+    /// [`StoreViewRead::ReturnOnly`] carrying
+    /// [`StoreViewReturnOnlyReason::ReentrantBuildClaim`]: the freshest view
+    /// the manager has (the stale cached base when one exists, otherwise an
+    /// empty view). That is the architecturally safe degradation —
+    /// `ReturnOnly` never publishes entries, reverse-index metadata or
+    /// persistent artifacts, `StoreViewRead::current()` yields `None` so a
+    /// warm validator MISSES instead of validating, and
+    /// [`StoreViewRead::into_cold_seed_view`] marks the derived context
+    /// non-current so its own publish fence refuses promotion. Nothing can
+    /// be warmed from it.
+    ///
+    /// It is nevertheless a BUG, not a normal degradation, so it is loud:
+    /// `tracing::error!` in every build, and a `debug_assert!` that turns
+    /// any dev/test occurrence into an immediate, fully-symbolised failure
+    /// at the exact frame. Never a hang.
+    fn park_for_build(
+        &self,
+        state: &mut parking_lot::MutexGuard<'_, StoreViewManagerState>,
+    ) -> ParkDecision {
+        if build_claim::claim_held_by_current_thread(self) {
+            // Fail closed. Prefer the (stale) cached base view so a cold
+            // seed still has real workspace data to work from; an empty view
+            // only when the manager has never published anything, which is
+            // exactly the state a genuinely-first cold read is in anyway.
+            let view = state
+                .cached
+                .as_ref()
+                .map_or_else(HostStoreView::default, |(_token, view)| view.clone());
+            let read = StoreViewRead::ReturnOnly {
+                view,
+                reason: StoreViewReturnOnlyReason::ReentrantBuildClaim,
+            };
+            // Record BEFORE the assertion so the fail-closed value stays
+            // observable in a debug build, where the `debug_assert!` below
+            // unwinds the caller before the read can propagate back.
+            #[cfg(test)]
+            {
+                SELF_AWAIT_REFUSALS_THIS_THREAD
+                    .with(|count| count.set(count.get().saturating_add(1)));
+                LAST_SELF_AWAIT_REFUSAL_THIS_THREAD
+                    .with(|slot| slot.set(read.return_only_reason_for_tests()));
+            }
+            tracing::error!(
+                target: "verter::store_view",
+                "store-view build re-entered base_view on the thread that already holds \
+                 its singleflight claim; refusing to park behind our own claim (that \
+                 condvar can only be signalled by this thread's own claim guard) and \
+                 degrading the re-entrant read to return-only",
+            );
+            debug_assert!(
+                false,
+                "STORE-VIEW SELF-AWAIT: base_view was re-entered on the thread holding \
+                 its own build claim. Parking here would deadlock permanently, so the \
+                 read was degraded to ReturnOnly. Fix the re-entrant caller: a helper \
+                 reachable while holding the store-view build claim must not acquire \
+                 another store view. See CLAUDE.md: same-path recursion never \
+                 self-awaits."
+            );
+            return ParkDecision::RefusedSelfAwait(read);
+        }
+        // A builder on ANOTHER thread owns the in-flight cold build: park
+        // cooperatively until it publishes or abandons.
+        #[cfg(test)]
+        {
+            state.parked_waiters += 1;
+        }
+        self.built.wait(state);
+        #[cfg(test)]
+        {
+            state.parked_waiters = state.parked_waiters.saturating_sub(1);
+        }
+        ParkDecision::Woken
+    }
+
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
@@ -3349,7 +3639,7 @@ impl StoreViewManager {
     /// The returned [`HostStoreView`] clone is cheap: its
     /// `Arc<StoreViewSnapshot>` is shared with the cached entry, so a
     /// stable-token hit costs one refcount bump rather than a
-    /// full-workspace sweep.
+    /// coherent root capture.
     ///
     /// ## Singleflight (canonical-dependency-cache rule)
     ///
@@ -3357,14 +3647,21 @@ impl StoreViewManager {
     /// true`) and runs `build_coherent` OUTSIDE the lock; concurrent
     /// token-miss callers WAIT on the `built` condvar and then clone the
     /// winner's published `Arc<StoreViewSnapshot>` instead of each
-    /// running a parallel full-workspace sweep. This collapses the first
+    /// running a parallel coherent build. This collapses the first
     /// wave after any token change onto one materialization (without it,
-    /// N batch workers all pass the warm probe and run N sweeps — the
+    /// N batch workers all pass the warm probe and run N builds — the
     /// exact CPU waste this manager exists to remove).
     ///
     /// The build runs strictly outside the lock, so unrelated readers are
-    /// never serialised behind it and there is no self-await / deadlock:
-    /// a builder never re-enters `base_view` while holding the claim.
+    /// never serialised behind it. Any future claim-holding helper could still
+    /// re-enter `base_view`, so "no self-await" is
+    /// not left to call-site discipline. [`Self::park_for_build`] is the
+    /// manager's single park site and it consults
+    /// [`build_claim::claim_held_by_current_thread`]: a caller that already
+    /// holds THIS claim on THIS thread is refused the park and handed a
+    /// fail-closed [`StoreViewRead::ReturnOnly`]
+    /// ([`StoreViewReturnOnlyReason::ReentrantBuildClaim`]) instead. Genuine
+    /// cross-thread joiners are unaffected.
     ///
     /// ## Bounded liveness (no spin under token churn)
     ///
@@ -3406,10 +3703,10 @@ impl StoreViewManager {
             // re-read INSIDE the lock (below) on every iteration, so a woken
             // waiter that re-enters this loop top always decides its role
             // against a freshly-captured token — never one captured before
-            // it slept. The block evaluates to the reset generation observed
-            // when this round CLAIMED the build (the warm-hit / park arms
-            // return / continue before reaching it).
-            let claim_reset_generation = {
+            // it slept. The block evaluates to the armed claim guard plus the
+            // reset generation observed when this round CLAIMED the build (the
+            // warm-hit / park arms return / continue before reaching it).
+            let (claim, claim_reset_generation) = {
                 let mut state = self.state.lock();
                 // Warm probe: token-stable cache hit hands back an Arc clone.
                 //
@@ -3453,8 +3750,8 @@ impl StoreViewManager {
                         return StoreViewRead::Current(CurrentHostStoreView(view.clone()));
                     }
                 }
-                if state.building {
-                    // A builder owns the in-flight cold sweep. Park until it
+                if state.building.is_claimed() {
+                    // A builder owns the in-flight cold build. Park until it
                     // publishes. On wake the live host token may have advanced
                     // (a host mutation while we slept, or the winner was
                     // superseded to a still newer token), so we restart the
@@ -3462,32 +3759,28 @@ impl StoreViewManager {
                     // deciding our role afresh: a published winner keyed on a
                     // now-stale token must false-miss (forcing a re-claim),
                     // and a winner keyed on the current token warm-hits.
-                    #[cfg(test)]
-                    {
-                        state.parked_waiters += 1;
+                    //
+                    // ...UNLESS the claim we just observed is OUR OWN, in
+                    // which case parking would deadlock behind ourselves; the
+                    // chokepoint hands back a fail-closed read instead.
+                    match self.park_for_build(&mut state) {
+                        ParkDecision::Woken => continue,
+                        ParkDecision::RefusedSelfAwait(read) => return read,
                     }
-                    self.built.wait(&mut state);
-                    #[cfg(test)]
-                    {
-                        state.parked_waiters = state.parked_waiters.saturating_sub(1);
-                    }
-                    continue;
                 }
-                // No warm hit and no in-flight build — claim it. Record the
-                // reset generation observed at claim time so the publish
-                // fence below can detect a `clear()` that races this build.
-                state.building = true;
-                state.reset_generation
+                // No warm hit and no in-flight build — claim it. Taking the
+                // claim ALSO arms the RAII guard, under this same lock, so
+                // the claim is cleared (and joiners woken) on EVERY exit path
+                // — including a panic unwinding out of `build_coherent`.
+                // parking_lot mutexes do not poison, so without the guard a
+                // panicking builder would leave the claim set forever and
+                // every current joiner AND future caller would block on the
+                // `built` condvar permanently (a total store-view hang). The
+                // guard also records the reset generation observed at claim
+                // time, so the publish fence below can detect a `clear()`
+                // that races this build.
+                BuildClaimGuard::claim(self, &mut state)
             };
-
-            // We hold the build claim. Arm the RAII guard FIRST so the
-            // claim is cleared (and joiners woken) on EVERY exit path —
-            // including a panic unwinding out of `build_coherent`.
-            // parking_lot mutexes do not poison, so without the guard a
-            // panicking builder would leave `building == true` forever and
-            // every current joiner AND future caller would block on the
-            // `built` condvar permanently (a total store-view hang).
-            let claim = BuildClaimGuard { manager: self };
 
             // Run the coherent build OUTSIDE the lock. A panic here unwinds
             // through `claim`'s `Drop`, releasing the claim and waking
@@ -3609,7 +3902,7 @@ impl StoreViewManager {
     fn claim_or_rejoin_final_build(&self, host: &VerterHost) -> StoreViewRead {
         let mut fallback: Option<(HostStoreView, StoreViewReturnOnlyReason)> = None;
         for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
-            let claim_reset_generation = {
+            let (claim, claim_reset_generation) = {
                 let mut state = self.state.lock();
                 // Re-probe the cache under the lock (re-reading the live token
                 // so a hit is served only when genuinely current). A cached
@@ -3617,17 +3910,14 @@ impl StoreViewManager {
                 if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                     return read;
                 }
-                if state.building {
+                if state.building.is_claimed() {
                     // A builder owns the lane and nothing is cached yet. PARK
-                    // and ride its result rather than sweeping in parallel.
-                    #[cfg(test)]
-                    {
-                        state.parked_waiters += 1;
-                    }
-                    self.built.wait(&mut state);
-                    #[cfg(test)]
-                    {
-                        state.parked_waiters = state.parked_waiters.saturating_sub(1);
+                    // and ride its result rather than sweeping in parallel —
+                    // unless the claim is OUR OWN, which the chokepoint
+                    // refuses fail-closed instead of deadlocking.
+                    match self.park_for_build(&mut state) {
+                        ParkDecision::Woken => {}
+                        ParkDecision::RefusedSelfAwait(read) => return read,
                     }
                     // Re-check IN THE SAME lock acquisition: a cached view now
                     // (current/stale) is returned; if the lane freed, fall
@@ -3636,7 +3926,7 @@ impl StoreViewManager {
                     if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                         return read;
                     }
-                    if state.building {
+                    if state.building.is_claimed() {
                         // Another builder re-claimed before we could; re-loop
                         // and park again (bounded).
                         continue;
@@ -3644,11 +3934,9 @@ impl StoreViewManager {
                     // Lane freed on wake with an empty cache — claim it inline.
                 }
                 // Lane free, cache empty — claim so exactly THIS waiter sweeps.
-                state.building = true;
-                state.reset_generation
+                BuildClaimGuard::claim(self, &mut state)
             };
 
-            let claim = BuildClaimGuard { manager: self };
             let outcome = HostStoreView::build_coherent(host, None);
             match outcome {
                 SnapshotBuildOutcome::Coherent { view, token } => {
@@ -3692,32 +3980,26 @@ impl StoreViewManager {
         // cached view if one finally exists; otherwise claim the now-or-soon-
         // free lane for a single guarded build. This still never sweeps
         // unclaimed.
-        let claim_reset_generation = {
+        let (claim, claim_reset_generation) = {
             let mut state = self.state.lock();
             if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                 return read;
             }
             // Wait (bounded) for the lane to free, then claim it. Each
             // `build_coherent` releases its claim on completion, so this wakes
-            // within bounded time.
-            while state.building {
-                #[cfg(test)]
-                {
-                    state.parked_waiters += 1;
-                }
-                self.built.wait(&mut state);
-                #[cfg(test)]
-                {
-                    state.parked_waiters = state.parked_waiters.saturating_sub(1);
+            // within bounded time. A lane held by THIS thread would never free
+            // from here, so the chokepoint refuses that park fail-closed.
+            while state.building.is_claimed() {
+                match self.park_for_build(&mut state) {
+                    ParkDecision::Woken => {}
+                    ParkDecision::RefusedSelfAwait(read) => return read,
                 }
                 if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                     return read;
                 }
             }
-            state.building = true;
-            state.reset_generation
+            BuildClaimGuard::claim(self, &mut state)
         };
-        let claim = BuildClaimGuard { manager: self };
         let outcome = HostStoreView::build_coherent(host, None);
         match outcome {
             SnapshotBuildOutcome::Coherent { view, token } => {
@@ -4321,6 +4603,42 @@ impl HostStoreView {
         FORCE_BUILD_PANIC.with(|c| c.set(true));
     }
 
+    /// Test-only: arm ONE nested `resolver_store_view_read()` from inside
+    /// the next `build_coherent` claim region on the CURRENT thread, and
+    /// reset the observation slots the nested read reports through.
+    ///
+    /// Drives the store-view self-await regression: the nested read reaches
+    /// [`StoreViewManager::base_view`]'s would-park arm while THIS thread
+    /// holds the claim, so without the claim-ownership backstop it parks on
+    /// a condvar only its own claim guard can signal and never returns.
+    pub(crate) fn arm_reentrant_store_view_read_for_tests() {
+        REENTRANT_STORE_VIEW_READ_OBSERVED.with(|slot| slot.set(None));
+        LAST_SELF_AWAIT_REFUSAL_THIS_THREAD.with(|slot| slot.set(None));
+        SELF_AWAIT_REFUSALS_THIS_THREAD.with(|count| count.set(0));
+        FORCE_REENTRANT_STORE_VIEW_READ_ONCE.with(|c| c.set(true));
+    }
+
+    /// Test-only: what the armed nested read observed, as
+    /// `(is_current, return_only_reason)`, or `None` when the nested read
+    /// never happened or never returned (the debug-build `debug_assert!`
+    /// unwinds it — see [`Self::self_await_refusal_evidence_for_tests`]).
+    pub(crate) fn reentrant_store_view_read_observed_for_tests(
+    ) -> Option<(bool, Option<StoreViewReturnOnlyReason>)> {
+        REENTRANT_STORE_VIEW_READ_OBSERVED.with(std::cell::Cell::get)
+    }
+
+    /// Test-only: `(refusal_count, last_refusal_reason)` recorded on this
+    /// thread by [`StoreViewManager::park_for_build`]'s self-await arm.
+    /// Recorded BEFORE its `debug_assert!`, so it survives the debug-build
+    /// unwind and proves the re-entrancy was genuinely reached and refused.
+    pub(crate) fn self_await_refusal_evidence_for_tests() -> (u64, Option<StoreViewReturnOnlyReason>)
+    {
+        (
+            SELF_AWAIT_REFUSALS_THIS_THREAD.with(std::cell::Cell::get),
+            LAST_SELF_AWAIT_REFUSAL_THIS_THREAD.with(std::cell::Cell::get),
+        )
+    }
+
     /// Test-only: arm the PERSISTENT supersede knob on the CURRENT thread.
     /// Every `build_coherent` attempt on this thread then forces a mid-build
     /// mutation, so no build ever produces a coherent view — modelling a
@@ -4388,26 +4706,25 @@ impl HostStoreView {
         FORCE_PUBLISH_DECLINE_ONCE.with(|c| c.set(true));
     }
 
-    /// Test-only: drive a SINGLE `build` attempt with a mid-build env-hash
-    /// mutation injected AFTER the per-canonical snapshot maps are populated
-    /// but BEFORE the token dimensions are stamped (the
+    /// Test-only: drive a SINGLE `build` attempt with an env-hash mutation
+    /// injected after the root token is sealed (the
     /// [`FORCE_MID_BUILD_ENV_BUMP`] one-shot knob, which advances
     /// `resolve_env_hash` WITHOUT bumping `store_view_epoch`).
     ///
     /// Returns `(view, pre_token, live_token)` where `pre_token` is the
-    /// single complete token captured BEFORE snapshotting and `live_token`
+    /// single complete token captured before root sealing and `live_token`
     /// is captured AFTER the build (reflecting the mid-build env mutation).
     ///
     /// Discriminates the build-coherence contract:
     ///
     /// * `view.validation_token()` MUST equal `pre_token` (the view was
     ///   stamped entirely from the pre-build capture, so its env fold
-    ///   matches the snapshot maps that were also captured under the OLD
+    ///   matches the roots that were also captured under the OLD
     ///   env) and MUST differ from `live_token` (which reflects the NEW
     ///   env) — so `build_coherent` rejects the attempt and retries.
     /// * Were `build` to re-read env LATE, `view.validation_token()` would
     ///   equal `live_token` (both the NEW env), and the torn view (NEW-env
-    ///   token over OLD-env snapshot maps) would be accepted as coherent.
+    ///   token over OLD-env roots) would be accepted as coherent.
     pub(crate) fn build_one_attempt_with_mid_build_env_bump_for_tests(
         host: &VerterHost,
     ) -> (
@@ -4511,7 +4828,7 @@ impl HostStoreView {
     /// its retries and reports supersession. Returns `true` iff the
     /// outcome was [`SnapshotBuildOutcome::Superseded`] — i.e. the
     /// builder refused to publish a torn view. Discriminates against the
-    /// retired "retry 3× then return-anyway" behaviour, which would have
+    /// unsafe "retry 3× then return-anyway" behavior, which would have
     /// published a (potentially torn) view rather than reporting
     /// supersession.
     pub(crate) fn build_coherent_is_superseded_for_tests(host: &VerterHost) -> bool {

@@ -23,6 +23,7 @@ path = "junit.xml"
 # missing-attach fallback remain parallel.
 [test-groups]
 shared-provider-live = { max-threads = 1 }
+lsp-server-unit = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback)$/)'
@@ -31,6 +32,19 @@ test-group = 'shared-provider-live'
 [[profile.ci.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback)$/)'
 test-group = 'shared-provider-live'
+
+# Each server contract builds an in-process LSP service and several scheduler
+# pools. Nextest process isolation makes them safe from shared Rust state, but
+# running many services together exhausts Windows scheduler/process capacity
+# and causes production request budgets to expire nondeterministically. Keep
+# the server contracts isolated from one another; every selector still runs.
+[[profile.default.overrides]]
+filter = 'test(/^server::server_tests::/)'
+test-group = 'lsp-server-unit'
+
+[[profile.ci.overrides]]
+filter = 'test(/^server::server_tests::/)'
+test-group = 'lsp-server-unit'
 
 # ── trybuild compile-fail tests: a real `cargo` build, not a unit test ───────
 # `hot_materialize_and_script_fact_structural_rails_smoke` is the combined

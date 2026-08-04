@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type { CarrierStoreReader, Manifest, OwnedSource, ReadyFile } from "./store";
 import {
   clearCarrierMapCache,
+  carrierSourceStructure,
   remapCarrierSpan,
   remapDocumentSpan,
   rewriteInsertedSpecifier,
@@ -109,7 +110,12 @@ class InMemoryCarrierStoreReader implements CarrierStoreReader {
  * line 1 from source line 1; the UNMAPPABLE map (`U.vue`) starts its mappings
  * on generated line 2, so a line-1 query is a generated-only region.
  */
-const MAPPABLE_V3 = { version: 3, sources: ["A.vue"], names: [], mappings: "AAAA" };
+const MAPPABLE_V3 = {
+  version: 3,
+  sources: ["A.vue"],
+  names: [],
+  mappings: "AAAA",
+};
 const UNMAPPABLE_AT_LINE1_V3 = { version: 3, sources: ["U.vue"], names: [], mappings: ";AAAA" };
 
 /**
@@ -186,6 +192,11 @@ function manifest(): Manifest {
             map_hash: "core-mem-ma",
             blob_rel: "blobs/A.vue.tsx",
             map_rel: "maps/A.vue.json",
+            structure: {
+              schema_version: 1,
+              artifact_token: "a".repeat(43),
+              script_content_ranges: [[8, 23]],
+            },
           },
           "d:/ws/src/U.vue.tsx": {
             content_hash: "u1",
@@ -274,6 +285,18 @@ beforeEach(() => {
 });
 
 describe("remap over the CarrierStoreReader INTERFACE (in-memory, no Node fs)", () => {
+  it("reads sealed script ownership beside the unchanged published map", () => {
+    const ctx = inMemoryCtx();
+    expect(carrierSourceStructure(ctx.reader, "d:/ws/src/A.vue.tsx")).toEqual({
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      scriptContentRanges: [[8, 23]],
+      // Additive field: absent in older stamps parses as empty (fail closed).
+      markupOpeningRanges: [],
+    });
+    expect(carrierSourceStructure(ctx.reader, "d:/ws/src/U.vue.tsx")).toBeNull();
+  });
+
   it("remapCarrierSpan maps a companion span to source through a non-disk reader", () => {
     const ctx = inMemoryCtx();
     const remapped = remapCarrierSpan(

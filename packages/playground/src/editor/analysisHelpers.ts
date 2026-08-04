@@ -8,7 +8,9 @@ import type {
   AnalysisImportBinding,
   AnalysisMacro,
   AnalysisBindingInitializer,
+  OrderedSfcStructure,
 } from "../core/types";
+import { utf16ToUtf8Offset } from "./offsets";
 
 // ── Hover formatting ──
 
@@ -187,15 +189,22 @@ export function collectCompletions(
   return items;
 }
 
-/** Simple check: is the offset within a <script> block? */
-export function isOffsetInScriptBlock(source: string, offset: number): boolean {
-  const scriptOpenRe = /<script[^>]*>/gi;
-  let match;
-  while ((match = scriptOpenRe.exec(source)) !== null) {
-    const openEnd = match.index + match[0].length;
-    const closeIdx = source.indexOf("</script>", openEnd);
-    if (closeIdx === -1) continue;
-    if (offset >= openEnd && offset <= closeIdx) return true;
-  }
-  return false;
+/** Check script membership from the host's registered structure projection. */
+export function isOffsetInScriptBlock(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  // Structure ranges are UTF-8 BYTES; the editor offset is UTF-16. Convert
+  // once, compare in byte space.
+  const utf8Offset = utf16ToUtf8Offset(source, offset);
+  return (
+    structure?.blocks.some(
+      (block) =>
+        block.kind === "section" &&
+        block.section.role.kind === "script" &&
+        utf8Offset >= block.section.contentRange.start &&
+        utf8Offset <= block.section.contentRange.end,
+    ) ?? false
+  );
 }

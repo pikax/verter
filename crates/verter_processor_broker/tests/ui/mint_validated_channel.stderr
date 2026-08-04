@@ -1,0 +1,11 @@
+error: cannot construct `ValidatedBrokerChannel` with struct literal syntax due to private fields
+ --> tests/ui/mint_validated_channel.rs:4:19
+  |
+4 |     let _forged = ValidatedBrokerChannel {};
+  |                   ^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: you might have meant to use the `new` associated function
+  |
+4 -     let _forged = ValidatedBrokerChannel {};
+4 +     let _forged = ValidatedBrokerChannel::new(_, _);
+  |

@@ -433,7 +433,7 @@ fn conditional_any_check_unions_both_branches() {
 /// infer-binding path (`absorb_conditional` returns `None`).
 #[test]
 fn conditional_any_check_detects_nested_infer_patterns() {
-    use crate::semantic_query::{DeclIdentity, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{DeclIdentity, SurfaceMember};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -461,7 +461,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     // (2) infer nested inside an `Object` property value:
     //     `any extends { x: infer U } ? U : Y`.
-    let obj_surface = SurfaceView {
+    let obj_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 visibility: verter_type_expr::MemberVisibility::Public,

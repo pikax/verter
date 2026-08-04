@@ -76,13 +76,14 @@ pub fn compute_a11y_score(
     template: Option<&TemplateAnalysisSnapshot>,
     styles: &[StyleBlockAnalysis],
     source: Option<&str>,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> A11yScore {
     let config = LintConfig {
         preset: LintPreset::A11y,
         ..Default::default()
     };
     let linter = Linter::new(config);
-    let diags = linter.lint_with_source(script, template, styles, source);
+    let diags = linter.lint_with_source(script, template, styles, source, blocks);
     let diag_vec = diags.into_diagnostics();
 
     let mut errors = 0u32;
@@ -138,9 +139,10 @@ pub fn compute_quality_score(
     template: Option<&TemplateAnalysisSnapshot>,
     styles: &[StyleBlockAnalysis],
     source: Option<&str>,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> QualityScore {
     // 1. A11y dimension
-    let a11y = compute_a11y_score(script, template, styles, source);
+    let a11y = compute_a11y_score(script, template, styles, source, blocks);
     let a11y_dim = DimensionScore {
         score: a11y.score,
         detail: format!("{} errors, {} warnings", a11y.errors, a11y.warnings),
@@ -152,7 +154,7 @@ pub fn compute_quality_score(
         ..Default::default()
     };
     let linter = Linter::new(lint_config);
-    let lint_diags = linter.lint_with_source(script, template, styles, source);
+    let lint_diags = linter.lint_with_source(script, template, styles, source, blocks);
     let lint_vec = lint_diags.into_diagnostics();
     let lint_errors = lint_vec
         .iter()

@@ -201,6 +201,74 @@ impl OverlayArtifactIdentity {
 }
 
 impl VerterHost {
+    /// Return the registered carrier structure owned by the active view.
+    /// Overlay source is registered through the same authority used by
+    /// materialization; an unmasked file reuses the committed base envelope.
+    pub(super) fn registered_structure_for_view(
+        &self,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        if view.overlay_content_hash_for(canonical_id).is_none() {
+            return self.registered_file_structure(canonical_id);
+        }
+
+        let source = view.source(canonical_id)?;
+        let file_language = self.language_classifier.classify(canonical_id);
+        self.registered_overlay_structure(canonical_id, source, &file_language, view)
+    }
+
+    pub(super) fn registered_overlay_structure(
+        &self,
+        canonical_id: &str,
+        source: Arc<str>,
+        file_language: &verter_language::FileLanguage,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        use verter_language::carrier_grammar::CarrierGrammarConfig;
+        use verter_language::registered_source_authority::{
+            CanonicalFileId, FileIncarnation, SourceGeneration,
+        };
+
+        let fingerprint = view.fingerprint();
+        if fingerprint == 0 {
+            return None;
+        }
+        let content_hash = view.content_hash_for(canonical_id)?;
+        let generation = u64::from_le_bytes(content_hash[..8].try_into().ok()?).max(1);
+        let incarnation = fingerprint | (1_u64 << 63);
+        let registered = self
+            .registered_source_authority
+            .register_source(
+                CanonicalFileId::new(canonical_id),
+                FileIncarnation::new(incarnation),
+                SourceGeneration::new(generation),
+                file_language.clone(),
+                source,
+            )
+            .ok()?;
+        let grammar = if file_language.adapter_id().is_some_and(|id| id.is_vue()) {
+            CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).ok()?
+        } else {
+            CarrierGrammarConfig::Svelte
+        };
+        let accepted = self
+            .carrier_grammar_authority
+            .accept_registered_source(&self.registered_source_authority, &registered, &grammar)
+            .ok()?;
+        let request = crate::carrier_publication_store::PublicationRequestContext::new(
+            crate::carrier_publication_store::AuditRequestId::new(self.next_request_id()),
+            crate::carrier_publication_store::PublicationSurface::Overlay,
+            verter_scheduler::cancellation::CancellationToken::default(),
+            registered.snapshot_id().clone(),
+        );
+        let envelope = self
+            .carrier_publication_store
+            .publish_or_get(&accepted, request)
+            .into_envelope()?;
+        Some(crate::carrier_publication_store::RegisteredFileStructure::new(envelope))
+    }
+
     /// Construct the [`OverlayArtifactIdentity`] for a raw requested
     /// canonical.
     ///
@@ -514,11 +582,19 @@ impl VerterHost {
         // the counted chokepoint (the carrier-neutral producer) and everything
         // downstream reuses its framework-neutral artifact.
         let framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>> =
-            crate::parse::build_carrier_parse_artifact_from_source(
-                &overlay_file_language,
-                raw_source.as_ref(),
-                &self.provenance,
-            );
+            if overlay_file_language.is_framework_carrier() {
+                Some(Arc::clone(
+                    self.registered_overlay_structure(
+                        analysis_canonical_id,
+                        Arc::clone(&raw_source),
+                        &overlay_file_language,
+                        view,
+                    )?
+                    .artifact(),
+                ))
+            } else {
+                None
+            };
         let whole_hash = overlay_whole_hash;
 
         // `eval_is_extracted_script` records whether the eval source is
@@ -637,6 +713,9 @@ impl VerterHost {
                         job_raw_source.as_ref(),
                         job_scope,
                         parsed_sfc,
+                        job_framework_parse
+                            .as_deref()
+                            .expect("Vue parse came from this framework artifact"),
                         &job_provenance,
                         VerterHost::vue_flight_script_program(eval_is_extracted_script, program),
                         Some(&owner_table),

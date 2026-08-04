@@ -15,8 +15,8 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::action_utils::fix_placeholder_uris;
 use crate::features::call_hierarchy;
@@ -47,7 +47,7 @@ pub(super) async fn handle_document_symbol(
     let symbols = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let symbols = build_document_symbols(&blocks, analysis.as_ref(), &doc.line_index);
         if symbols.is_empty() {
             None
@@ -97,7 +97,7 @@ pub(super) async fn handle_folding_range(
     let ranges = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let ranges = build_folding_ranges(&blocks, analysis.as_ref(), &doc.line_index);
         if ranges.is_empty() {
             None
@@ -118,7 +118,7 @@ pub(super) async fn handle_selection_range(
 
     let result = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let line_index = &doc.line_index;
         let source_len = doc.source.len() as u32;
 
@@ -235,7 +235,7 @@ pub(super) async fn handle_document_highlight(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         highlights_at_position(
             position,
             &doc.source,
@@ -367,7 +367,7 @@ pub(super) async fn handle_code_action(
 
         // Extract component refactoring
         if wants_code_action_kind(only, "refactor.extract") {
-            let blocks = scan_sfc_blocks_for_document(&doc);
+            let blocks = project_carrier_blocks_for_document(&doc);
             if let Some(extract_action) =
                 crate::features::extract_component::extract_component_action(
                     &doc.source,
@@ -382,12 +382,18 @@ pub(super) async fn handle_code_action(
         }
 
         if wants_code_action_kind(only, "quickfix") {
-            let blocks = scan_sfc_blocks_for_document(&doc);
+            let blocks = project_carrier_blocks_for_document(&doc);
 
             // Macro code actions (defineSlots, defineEmits generation/augmentation)
             let cursor_offset = doc.line_index.position_to_offset(&range.start);
+            // The live buffer's content identity, minted once per request: every
+            // macro edit offset is analyzer-minted against the bytes the
+            // ANALYSIS saw, so the two identities must agree before an edit is
+            // produced.
+            let live_revision = verter_session::AnalysisSourceRevision::of_source(&doc.source);
             let mut macro_actions = crate::features::macro_actions::macro_code_actions(
                 &doc.source,
+                live_revision,
                 analysis.as_ref(),
                 &blocks,
                 &doc.line_index,
@@ -405,14 +411,19 @@ pub(super) async fn handle_code_action(
                 all_actions.extend(comp_actions);
 
                 // Suggest matching props from parent bindings to child component tags
-                let suggest_actions = crate::features::component_actions::suggest_matching_props(
-                    analysis,
-                    &doc.source,
-                    &doc.line_index,
-                    uri,
-                    &|import_source| server.resolve_component_context(uri, import_source, None),
-                );
-                all_actions.extend(suggest_actions);
+                if let Some(snapshot) = doc.feature_snapshot.as_ref() {
+                    let suggest_actions =
+                        crate::features::component_actions::suggest_matching_props(
+                            analysis,
+                            snapshot.structure(),
+                            &doc.line_index,
+                            uri,
+                            &|import_source| {
+                                server.resolve_component_context(uri, import_source, None)
+                            },
+                        );
+                    all_actions.extend(suggest_actions);
+                }
 
                 // Event handler type hint actions
                 let mut event_actions = crate::features::event_type_hints::event_type_hint_actions(
@@ -433,6 +444,15 @@ pub(super) async fn handle_code_action(
             if let Some(ref analysis) = analysis {
                 let canonical_id = uri_to_canonical_id(uri);
                 let linter = server.linter_for_file(&canonical_id);
+                // Ordered SFC block facts from the registered inventory — the
+                // sole geometry source for block-anchored provider edits.
+                let block_facts = doc
+                    .feature_snapshot
+                    .as_ref()
+                    .map(|snapshot| {
+                        verter_diagnostics::project_block_facts(snapshot.structure().inventory())
+                    })
+                    .unwrap_or_default();
                 if wants_quickfix {
                     all_actions.extend(crate::features::diagnostics_bridge::action_engine_fixes(
                         &server.action_engine,
@@ -442,6 +462,7 @@ pub(super) async fn handle_code_action(
                         &linter,
                         &params.context.diagnostics,
                         uri,
+                        &block_facts,
                     ));
                 }
                 if wants_refactor {
@@ -455,6 +476,7 @@ pub(super) async fn handle_code_action(
                                 &linter,
                                 offset,
                                 uri,
+                                &block_facts,
                             ),
                         );
                     }
@@ -569,11 +591,15 @@ pub(super) async fn handle_code_action(
                                     .collect()
                             })
                             .unwrap_or_default();
+                        let Some(feature_snapshot) = server.documents.feature_snapshot(uri) else {
+                            return Ok(None);
+                        };
                         let preamble_reanchor =
-                            crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor(
+                            crate::type_provider::auto_import::resolve_carrier_preamble_import_anchor_from_structure(
                                 &ctx.tsx_path,
                                 &carrier_source,
                                 &user_import_spans,
+                                feature_snapshot.structure(),
                             );
                         let actions = merge::merge_code_actions(
                             type_actions,
@@ -809,7 +835,7 @@ pub(super) async fn handle_code_lens(
     let lenses = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         Some(code_lenses(&blocks, analysis.as_ref(), &doc.line_index))
     })();
 
@@ -886,7 +912,7 @@ pub(super) async fn handle_inlay_hint(
     let mut hints: Vec<InlayHint> = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri)?;
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         Some(crate::features::inlay_hints::verter_inlay_hints(
             &doc.source,
             &blocks,
@@ -1020,15 +1046,8 @@ pub(super) async fn handle_linked_editing_range(
 
     let result = (|| {
         let doc = server.documents.get(uri)?;
-        let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
-        linked_editing_ranges(
-            position,
-            &doc.source,
-            &blocks,
-            analysis.as_ref(),
-            &doc.line_index,
-        )
+        let structure = doc.feature_snapshot.as_ref()?.structure();
+        linked_editing_ranges(position, structure, &doc.line_index)
     })();
 
     Ok(result)
@@ -1044,7 +1063,7 @@ pub(super) async fn handle_document_link(
     let links = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let links = build_document_links(&doc.source, &blocks, analysis.as_ref(), &doc.line_index);
         if links.is_empty() {
             None
@@ -1065,7 +1084,7 @@ pub(super) async fn handle_document_color(
 
     let colors = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         Some(color_info::document_colors(
             &doc.source,
             &blocks,
@@ -1093,7 +1112,7 @@ pub(super) async fn handle_formatting(
 
     let edits = (|| {
         let doc = server.documents.get(uri)?;
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let edits = format_document(&doc.source, &blocks, &doc.line_index, &params.options);
         if edits.is_empty() {
             None
@@ -1156,10 +1175,11 @@ pub(super) async fn handle_on_type_formatting(
         let carrier = carrier_kind_for_on_type(&doc.language_id, &doc.canonical_id)?;
 
         let offset = doc.line_index.position_to_offset(position)? as usize;
-        let snippet = crate::features::auto_close_tag::auto_close_tag_in_carrier(
+        let snippet = crate::features::auto_close_tag::auto_close_tag_in_structure(
             &doc.source,
             offset,
             carrier,
+            doc.feature_snapshot.as_ref()?.structure(),
         )?;
 
         // Insert the closing tag text right at the cursor position (after the `>`)
@@ -1199,7 +1219,7 @@ pub(super) async fn handle_prepare_call_hierarchy(
     let result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         call_hierarchy::prepare_call_hierarchy(
             position,
             &doc.source,

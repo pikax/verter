@@ -26,6 +26,7 @@ export type PatchRequest<T> = OmitRequest<T> & RequestTyped;
 
 export enum RequestType {
   GetCompiledCode = "$/getCompiledCode",
+  GetDocumentStructure = "$/verter/documentStructure",
   GetStatistics = "$/verter/getStatistics",
   GetVirtualFiles = "$/verter/getVirtualFiles",
   GetAnalysis = "$/verter/getAnalysis",
@@ -41,6 +42,83 @@ export enum RequestType {
   /** D104 — one-layer TypeHandle expansion as protobuf-encoded bytes. */
   GetComponentMetaTypeExpansion = "$/verter/getComponentMetaTypeExpansion",
 }
+
+export interface StructureRangeV1 {
+  sourceSpaceToken: string;
+  start: number;
+  end: number;
+}
+
+export interface StructureSectionV1 {
+  blockToken: string;
+  role:
+    | { kind: "templateHost" }
+    | { kind: "script"; role: string; dialect: string }
+    | { kind: "style"; dialect: string; scoped: boolean; module: string }
+    | { kind: "custom"; normalizedName: string };
+  openingRange: StructureRangeV1;
+  openingNameRange: StructureRangeV1;
+  contentRange: StructureRangeV1;
+  closingRange?: StructureRangeV1;
+  closingNameRange?: StructureRangeV1;
+  fullRange: StructureRangeV1;
+  attributeInsertionAnchor: StructureRangeV1;
+  attributes: Array<{
+    attributeToken: string;
+    kind: "named" | "spread" | "directive" | "attach";
+    name?: { spelling: string; normalized: string; range: StructureRangeV1 };
+    value?: string;
+    fullRange: StructureRangeV1;
+    duplicateOf?: string;
+  }>;
+  blockContentBasisToken?: never;
+}
+
+export type StructureBlockV1 =
+  | { kind: "section"; section: StructureSectionV1; markupRootTokens: string[] }
+  | { kind: "markupRoot"; blockToken: string; markupRootToken: string };
+
+export interface DocumentStructureV1 {
+  schemaVersion: 1;
+  documentRevisionToken: string;
+  artifactToken: string;
+  blocks: StructureBlockV1[];
+  markupNodes: unknown[];
+}
+
+export interface DocumentStructureRequestV1 {
+  requestToken: string;
+  textDocument: { uri: string };
+  clientOpenEpoch: string;
+  expectedClientVersion: number;
+}
+
+export type DocumentStructureResponseV1 =
+  | {
+      kind: "available";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+      structure: DocumentStructureV1;
+    }
+  | {
+      kind: "staleClientDocument" | "replacementDocument" | "superseded" | "closed";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+    }
+  | {
+      kind: "unavailable";
+      requestToken: string;
+      clientOpenEpoch: string;
+      expectedClientVersion: number;
+      reason:
+        | "unsupportedLanguage"
+        | "carrierProducerUnavailable"
+        | "registryMismatch"
+        | "parseFailed"
+        | "structureNotReady";
+    };
 
 /** Server → client request method for forwarding TypeScript queries to the
  * extension's in-process `ts.createLanguageService()` (Experiment E). */
@@ -74,6 +152,7 @@ export interface GetComponentMetaTypeExpansionResponse {
 
 export type RequestParams = {
   [RequestType.GetCompiledCode]: { uri: string };
+  [RequestType.GetDocumentStructure]: DocumentStructureRequestV1;
   [RequestType.GetStatistics]: StatisticsRequestParams | undefined;
   [RequestType.GetVirtualFiles]: { uri: string };
   [RequestType.GetAnalysis]: { uri: string };
@@ -83,6 +162,15 @@ export type RequestParams = {
   [RequestType.ApplyStyleOverrides]: {
     uri: string;
     overrides: StyleOverrideParam[];
+    /** `documentRevisionToken` of the structure the override was computed
+     * against — REQUIRED. The server refuses an absent or partial token
+     * pair (`missingTokens`) and a mismatched-revision apply
+     * (`revisionMismatch`) — a slow transpile bound to revision A must
+     * never overwrite revision B's state. */
+    documentRevisionToken: string;
+    /** `artifactToken` of the same captured structure — REQUIRED, same
+     * refusal semantics. */
+    artifactToken: string;
   };
   [RequestType.GetRouteTree]: Record<string, never>;
   [RequestType.GetComponentMeta]: { uri: string };
@@ -99,13 +187,30 @@ export type RequestResponse = {
     css: { code: string; map: any | undefined };
     wasm: { code: string; map: any | undefined };
   };
+  [RequestType.GetDocumentStructure]: DocumentStructureResponseV1;
   [RequestType.GetStatistics]: StatisticsSnapshot;
   [RequestType.GetVirtualFiles]: VirtualFilesResponse;
   [RequestType.GetAnalysis]: FileAnalysisSnapshot;
   [RequestType.GetProjectOverview]: ProjectOverview;
-  [RequestType.GetBindingTypes]: Record<string, string | null>;
+  /**
+   * Per-binding provider quick-info, display-only.
+   *
+   * `displaySignature` is the TypeProvider's quick-info display string VERBATIM
+   * (e.g. `const count: Ref<number>`). It is NOT a type: consumers render it
+   * as-is and MUST NOT split, trim to a right-hand side, or otherwise recover
+   * structure from it. `null` = unavailable or produced against a superseded
+   * provider surface (fail closed).
+   */
+  [RequestType.GetBindingTypes]: Record<string, { displaySignature: string } | null>;
   [RequestType.GetComponentParents]: ComponentParentsResponse;
-  [RequestType.ApplyStyleOverrides]: { success: boolean };
+  [RequestType.ApplyStyleOverrides]: {
+    success: boolean;
+    /** Present only when the apply was refused without mutation:
+     * `revisionMismatch` when a captured token no longer matches the live
+     * document, `missingTokens` when the request carried no (or only one)
+     * captured structure token. */
+    refusal?: "revisionMismatch" | "missingTokens";
+  };
   [RequestType.GetRouteTree]: RouteAnalysisSnapshot;
   /** Full Volar-shape payload, JSON-projected. `null` when not a component. */
   [RequestType.GetComponentMeta]: unknown;

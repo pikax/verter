@@ -1664,6 +1664,20 @@ pub fn tsserver_pos_to_byte_offset(content: &str, line: u32, offset: u32) -> u32
     line_column_to_offset_utf16(content, line.saturating_sub(1), offset.saturating_sub(1))
 }
 
+/// Parse a tsserver wire position object (`{"line": L, "offset": C}`, 1-based)
+/// into a byte offset against `content`, failing CLOSED on a malformed or
+/// out-of-range position (the quickinfo hover range is display metadata — a
+/// clamped wrong offset would highlight the wrong span, so it is dropped).
+pub fn quickinfo_wire_pos_to_byte_offset(
+    content: &str,
+    pos: Option<&serde_json::Value>,
+) -> Option<u32> {
+    let pos = pos?;
+    let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
+    let offset = u32::try_from(pos.get("offset")?.as_u64()?).ok()?;
+    tsserver_pos_to_byte_offset_checked(content, line, offset)
+}
+
 /// Convert tsserver's 1-based (line, offset) to a byte offset, returning `None` when the position
 /// is OUT OF RANGE for `content` instead of clamping it to EOF.
 ///
@@ -3449,6 +3463,7 @@ impl TypeProvider for TsserverTypeProvider {
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
         let project_file_name = self.project_file_name_for(&query_file);
+        let witness = self.provider_wire_witness();
         Box::pin(async move {
             let (line, col, cache_hit) = {
                 let cache = contents_cache.lock().await;
@@ -3541,10 +3556,37 @@ impl TypeProvider for TsserverTypeProvider {
                                 ),
                             );
 
+                            // The quickinfo body's `start`/`end` positions map
+                            // onto generated-file byte offsets through the
+                            // synced content snapshot; without one there is no
+                            // valid conversion, so the range fails closed to
+                            // `None` (never a fabricated offset).
+                            let (range_start, range_end) = {
+                                let cache = contents_cache.lock().await;
+                                match cache.get(&file) {
+                                    Some(content) => (
+                                        quickinfo_wire_pos_to_byte_offset(
+                                            content,
+                                            body.get("start"),
+                                        ),
+                                        quickinfo_wire_pos_to_byte_offset(
+                                            content,
+                                            body.get("end"),
+                                        ),
+                                    ),
+                                    None => (None, None),
+                                }
+                            };
+
                             Ok(Some(HoverInfo {
                                 contents,
-                                range_start: None,
-                                range_end: None,
+                                range_start,
+                                range_end,
+                                display_signature: Some(DisplaySignature::from_provider_wire(
+                                    witness, display,
+                                )),
+                                kind: QuickInfoKind::from_tsserver_wire(kind),
+                                documentation: (!docs.is_empty()).then(|| docs.to_string()),
                             }))
                         }
                         Err(e) => {
@@ -5740,21 +5782,14 @@ pub fn assemble_signature_label(
     }
 }
 
-/// Format tsserver quickinfo into hover markdown.
+/// Format tsserver quickinfo into hover markdown — the boundary renderer for
+/// the rendered `contents` blob.
 ///
 /// tsserver's `displayString` may already include a `({kind})` prefix for certain
-/// symbol kinds (e.g., `(alias) const Foo`). This function avoids duplicating it.
+/// symbol kinds (e.g., `(alias) const Foo`); the shared
+/// [`crate::protocol::kind_prefixed_display`] composition avoids duplicating it.
 pub fn format_quickinfo_hover(kind: &str, display: &str, docs: &str) -> String {
-    let display_with_kind = if kind.is_empty() {
-        display.to_string()
-    } else {
-        let prefix = format!("({kind}) ");
-        if display.starts_with(&prefix) {
-            display.to_string()
-        } else {
-            format!("({kind}) {display}")
-        }
-    };
+    let display_with_kind = crate::protocol::kind_prefixed_display(kind, display);
     if docs.is_empty() {
         format!("```typescript\n{display_with_kind}\n```")
     } else {

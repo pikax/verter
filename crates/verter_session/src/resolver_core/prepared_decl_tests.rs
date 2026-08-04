@@ -88,6 +88,165 @@ export interface Props extends /* @vue-ignore */ Imported<string> { own: number 
     );
 }
 
+/// The member authored reference head is minted ONCE at lazy decl-body lowering
+/// and COPIED onto the prepared surface — no re-lowering, no locator deref, and
+/// no resolution at prepare time.
+///
+/// This is the producer half of the named prop-wrapper route: for
+/// `defineProps<Props>()` the macro leases a `TypeExpr::Ref`, so the inline
+/// macro-mirror sidecar mints nothing and the member's own head is the only
+/// exact authored evidence available.
+#[test]
+fn prepared_member_reference_head_survives_the_prepare_copy() {
+    use verter_type_expr::facts::{AuthoredReferenceArgLocator, AuthoredReferenceHeadFact};
+    use verter_type_expr::locators::TypeBodyPathStep;
+
+    let source = r#"
+import type { Ref } from 'vue'
+export interface Props { variant: Ref<'primary' | 'secondary'>; plain: string }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    )]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Ref", "/node_modules/vue/index.d.ts", "Ref")]);
+
+    let prepared = prepare_local_type_decl(
+        "/src/props.ts",
+        &state,
+        "Props",
+        Some(&dep_edges),
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
+
+    let variant = prepared
+        .member_index
+        .get("variant")
+        .expect("variant member indexed");
+    let AuthoredReferenceHeadFact::Bare { local_name, args } = &variant.reference_head else {
+        panic!(
+            "an authored reference member annotation must carry a Bare head, got {:?}",
+            variant.reference_head
+        );
+    };
+    assert_eq!(
+        local_name.as_ref(),
+        "Ref",
+        "the head must carry the AUTHORED local spelling"
+    );
+    let [AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+        panic!("expected exactly one Value argument locator, got {args:?}");
+    };
+    assert_eq!(
+        arg.anchor, variant.ty.anchor,
+        "the head argument anchor must be the member's own declaration anchor"
+    );
+    assert_eq!(
+        &*arg.path,
+        &[
+            TypeBodyPathStep::Member { ordinal: 0 },
+            TypeBodyPathStep::MemberValue
+        ],
+        "the head argument locator must address the member's authored value position"
+    );
+
+    // An authored NON-reference annotation is a complete non-reference proof.
+    let plain = prepared
+        .member_index
+        .get("plain")
+        .expect("plain member indexed");
+    assert_eq!(
+        plain.reference_head,
+        AuthoredReferenceHeadFact::NotReference,
+        "an authored non-reference member annotation must publish NotReference"
+    );
+}
+
+/// A MERGED declaration's member head locator must carry the same
+/// `MergedContributor` prefix its `ty` locator carries. Without it the head
+/// derefs the wrong contributor's body — a silently wrong authored argument
+/// rather than a typed miss.
+#[test]
+fn merged_interface_member_reference_head_locator_carries_the_contributor_prefix() {
+    use verter_type_expr::facts::{AuthoredReferenceArgLocator, AuthoredReferenceHeadFact};
+    use verter_type_expr::locators::TypeBodyPathStep;
+
+    let source = r#"
+import type { Ref } from 'vue'
+export interface Props { first: Ref<'a'> }
+export interface Props { second: Ref<'b'> }
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let dep_edges = FxHashMap::from_iter([(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    )]);
+    let import_canonicalization =
+        ordinary_import_canonicalization(&[("Ref", "/node_modules/vue/index.d.ts", "Ref")]);
+
+    let prepared = prepare_local_type_decl(
+        "/src/props.ts",
+        &state,
+        "Props",
+        Some(&dep_edges),
+        &import_canonicalization,
+        &test_interner(),
+    )
+    .expect("Props preparation should succeed")
+    .expect("Props should be present");
+
+    // Contributor ordinals are the source-order declaration positions; both
+    // members are contributed by DIFFERENT statements, so a shared prefix would
+    // prove the prefix is not per-contributor.
+    let mut seen_ordinals = Vec::new();
+    for name in ["first", "second"] {
+        let member = prepared
+            .member_index
+            .get(name)
+            .expect("merged contributor member indexed");
+        let Some(TypeBodyPathStep::MergedContributor { ordinal }) = member.ty.path.first().copied()
+        else {
+            panic!(
+                "the member `ty` locator must be contributor-prefixed, got {:?}",
+                member.ty.path
+            );
+        };
+        seen_ordinals.push(ordinal);
+
+        let AuthoredReferenceHeadFact::Bare { args, .. } = &member.reference_head else {
+            panic!(
+                "expected a Bare head for {name}, got {:?}",
+                member.reference_head
+            );
+        };
+        let [AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+            panic!("expected one Value argument locator for {name}");
+        };
+        assert_eq!(
+            &*arg.path, &*member.ty.path,
+            "the head argument locator must carry the SAME contributor-prefixed path \
+             as the member `ty` locator for {name}"
+        );
+        assert_eq!(
+            arg.path.first().copied(),
+            Some(TypeBodyPathStep::MergedContributor { ordinal }),
+            "the head must be prefixed with its OWN contributor ordinal for {name}"
+        );
+    }
+    seen_ordinals.sort_unstable();
+    assert_eq!(
+        seen_ordinals,
+        vec![0, 1],
+        "the two contributors must record DISTINCT ordinals, otherwise the \
+         per-contributor prefix is not proven"
+    );
+}
+
 #[test]
 fn prepares_local_value_decl_from_shallow_file_state() {
     let source = r#"
@@ -1314,4 +1473,143 @@ interface Shared { instance: InstanceOnly }
     assert!(bundle
         .owner_scope(verter_type_expr::TopLevelOwnerId::instance(1))
         .is_none());
+}
+
+/// A namespace import the owner cannot canonicalize must not make the whole
+/// value declaration unavailable.
+///
+/// `insert_value_space_import_resolutions` skips `is_namespace` bindings for
+/// exactly this reason — so "this unrelated non-canonicalizable binding [does
+/// not] make every local value declaration in the owner unavailable". The
+/// authored-route arm must mirror that policy: record the first-hop edge when it
+/// is recordable, and otherwise SKIP it, never fail preparation. Failing would
+/// degrade `typeof variant` (and hover/definition on it) from "unresolved `Ref`"
+/// to nothing at all.
+#[test]
+fn a_namespace_annotation_without_a_dep_edge_still_prepares_the_value_decl() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const variant: Vue.Ref<'a' | 'b'> = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    // No `vue` dep edge and no canonicalization entry: the namespace binding is
+    // not routable at preparation time.
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "variant",
+        None,
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect(
+        "an unroutable namespace annotation must leave the value decl AVAILABLE \
+         — preparation must not fail",
+    );
+
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "variant");
+    // The annotation's authored head is still retained as evidence...
+    assert!(
+        matches!(
+            prepared.type_annotation.reference_head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified { .. }
+        ),
+        "the authored qualified head must survive an unroutable first hop"
+    );
+    // ...while the unroutable edge is SKIPPED rather than fabricated.
+    assert!(
+        prepared.external_deps.is_empty(),
+        "an unroutable namespace first hop must record no external dep, got {:?}",
+        prepared.external_deps
+    );
+}
+
+/// The recorded namespace-member edge carries the FILE-DEFAULT top-level owner,
+/// the same discriminant every sibling arm records for an ordinary declaring
+/// file — never the SFC-instance owner. `owner` participates in the derived
+/// `Hash`/serde identity pinned by
+/// `external_dependency_identity_discriminates_owner_in_memo_and_serde`, so a
+/// stable-but-wrong value is a wrong discriminant. Exactly ONE edge is recorded.
+#[test]
+fn a_routable_namespace_member_edge_records_the_file_default_owner_once() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const variant: Vue.Ref<'a' | 'b'> = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let mut dep_edges = FxHashMap::default();
+    dep_edges.insert(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    );
+
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "variant",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect("variant should prepare");
+
+    assert_eq!(
+        prepared.external_deps.len(),
+        1,
+        "exactly one authored first-hop edge, never a duplicate, got {:?}",
+        prepared.external_deps
+    );
+    let edge = &prepared.external_deps[0];
+    assert_eq!(edge.local_name, "Vue");
+    assert_eq!(edge.source_specifier, "vue");
+    assert_eq!(edge.imported_name, "Ref");
+    assert_eq!(edge.symbol_name, "Ref");
+    assert_eq!(edge.canonical_id, "/node_modules/vue/index.d.ts");
+    assert_eq!(
+        edge.owner,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        "a cross-file namespace-member edge declares the FILE-DEFAULT owner"
+    );
+    assert_ne!(
+        edge.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0),
+        "the SFC-instance owner is not a declaring-file owner"
+    );
+}
+
+/// A `Bare` head naming a namespace import (`const v: Vue = ...`) has no member
+/// to route, so there is no first-hop edge to record — and that must not make
+/// the declaration unavailable either.
+#[test]
+fn a_bare_namespace_head_records_no_edge_and_still_prepares() {
+    let source = r#"
+import * as Vue from 'vue'
+
+export const bare: Vue = null as never
+"#;
+    let state = ShallowFileState::service_backed_for_test(source);
+    let mut dep_edges = FxHashMap::default();
+    dep_edges.insert(
+        "vue".to_string(),
+        "/node_modules/vue/index.d.ts".to_string(),
+    );
+
+    let prepared = prepare_local_value_decl(
+        "/src/Button.vue",
+        &state,
+        "bare",
+        Some(&dep_edges),
+        &ImportCanonicalization::default(),
+        &test_interner(),
+    )
+    .expect("a bare namespace head must leave the value decl AVAILABLE");
+
+    assert_eq!(prepared.root_identity.symbol_name.as_ref(), "bare");
+    assert!(
+        prepared.external_deps.is_empty(),
+        "a bare namespace head selects no member, so it records no edge, got {:?}",
+        prepared.external_deps
+    );
 }

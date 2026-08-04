@@ -4,14 +4,262 @@
 use std::sync::Arc;
 
 use verter_session as host;
+use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use crate::types::*;
 
-use super::component_meta::{component_meta_parts_to_ffi, resolved_component_meta_to_ffi};
+use super::component_meta::{
+    component_meta_parts_to_ffi, component_meta_parts_with_contract_to_ffi,
+    resolved_component_meta_to_ffi,
+};
 use super::error::*;
 use super::offset::*;
 use super::string_helpers::*;
 use super::*;
+
+fn publication_fixture(
+    position: verter_type_expr::facts::SourcePosition,
+) -> verter_type_expr::TypePublication {
+    host::test_only::type_publication_fixture(
+        position,
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        None,
+        None,
+    )
+}
+
+fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::MaterializedTypePublication {
+    let selected_source = match &r#type {
+        TypeExpr::Primitive(name) => verter_type_expr::facts::SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Primitive(*name),
+            ),
+        ),
+        _ => verter_type_expr::facts::SemanticTypeSource::Closed(
+            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::Unknown),
+            ),
+        ),
+    };
+    host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Published {
+            selected_source: std::sync::Arc::new(selected_source),
+            semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+            exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+            reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+            provenance: verter_type_expr::PublicationProvenance::Resolved {
+                provenance: verter_type_expr::ResolutionProvenance::SemanticEvaluator,
+            },
+        },
+        Some(r#type),
+        None,
+    )
+}
+
+#[test]
+fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
+    let published = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Published {
+            selected_source: std::sync::Arc::new(
+                verter_type_expr::facts::SemanticTypeSource::Closed(
+                    verter_type_expr::facts::ClosedTypeFact::Leaf(
+                        verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                    ),
+                ),
+            ),
+            semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
+            exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
+            reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
+            provenance: verter_type_expr::PublicationProvenance::Resolved {
+                provenance: verter_type_expr::ResolutionProvenance::SessionProjector,
+            },
+        },
+        Some(TypeExpr::Primitive(PrimitiveName::String)),
+        Some("terminal-only".to_string()),
+    );
+    let (published_type, published_outcome, published_display) =
+        materialized_publication_to_ffi(published);
+    assert_eq!(
+        published_type,
+        Some(TypeExpr::Primitive(PrimitiveName::String))
+    );
+    assert!(matches!(
+        published_outcome,
+        FfiTypePublication::Published {
+            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+            exactness: FfiPublicationExactness::ExactConcrete,
+            reason: FfiPublicationReason::ResolvedExactConcrete,
+            provenance: FfiPublicationProvenance::Resolved(
+                FfiResolutionProvenance::SessionProjector
+            ),
+        }
+    ));
+    assert_eq!(published_display.text.as_deref(), Some("terminal-only"));
+
+    let absent = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Absent {
+            absence: verter_type_expr::facts::SchemaAbsence::BranchDivergent,
+            provenance: verter_type_expr::ResolutionProvenance::FallthroughInheritance,
+        },
+        None,
+        None,
+    );
+    let (absent_type, absent_outcome, absent_display) = materialized_publication_to_ffi(absent);
+    assert_eq!(absent_type, None);
+    assert!(matches!(
+        absent_outcome,
+        FfiTypePublication::Absent {
+            absence: FfiTypePublicationAbsence::BranchDivergent,
+            provenance: FfiResolutionProvenance::FallthroughInheritance,
+        }
+    ));
+    assert_eq!(absent_display.text, None);
+
+    let failed = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Failed {
+            failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(
+                verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+            ),
+            provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        },
+        Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+        Some("must-not-leak".to_string()),
+    );
+    let (failed_type, failed_outcome, failed_display) = materialized_publication_to_ffi(failed);
+    assert_eq!(failed_type, None, "Failed cannot publish a type success");
+    assert!(matches!(
+        failed_outcome,
+        FfiTypePublication::Failed {
+            failure: FfiTypePublicationFailure::UnrepresentableRequiredMemberValue,
+            provenance: FfiResolutionProvenance::FrameworkSurface,
+        }
+    ));
+    assert_eq!(
+        failed_display.text, None,
+        "Failed cannot publish terminal display"
+    );
+}
+
+#[test]
+fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
+    use verter_semantic::analysis::component_meta as cm;
+    use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
+    use verter_type_expr::{PublicationResult, ResolutionProvenance, TypedResolutionFailure};
+
+    let failed_position =
+        SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue);
+    let failed_publication = || publication_fixture(failed_position.clone());
+    let failed_lane = || {
+        host::meta_resolve::MaterializedTypePublication::for_test(
+            PublicationResult::Failed {
+                failure: TypedResolutionFailure::SourceConstruction(
+                    SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ),
+                provenance: ResolutionProvenance::SemanticEvaluator,
+            },
+            Some(TypeExpr::Primitive(PrimitiveName::Boolean)),
+            Some("must-not-leak".to_string()),
+        )
+    };
+
+    let mut analysis = empty_analysis();
+    analysis.props = vec![cm::PropAnalysis {
+        name: "prop".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: failed_publication(),
+        type_expansion: None,
+        required: true,
+        has_default: false,
+        default_value: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+    analysis.slots = vec![cm::SlotAnalysis {
+        name: "default".to_string(),
+        is_scoped: true,
+        bindings: vec![cm::SlotBindingAnalysis {
+            name: "slot".to_string(),
+            publication: failed_publication(),
+            type_expansion: None,
+        }],
+        is_required: false,
+        return_type: None,
+        return_publication: None,
+        return_publication_scope: None,
+        description: None,
+        tags: Vec::new(),
+        declared_in_macro_type_arg: true,
+    }];
+    analysis.accepted_props = vec![cm::AcceptedPropAnalysis {
+        name: "accepted".to_string(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: failed_publication(),
+        type_source_scope: None,
+        required: true,
+        provenance: cm::MemberProvenance::Declared,
+        availability: cm::MemberAvailability::Always,
+        kind: cm::AcceptedPropKind::DeclaredProp,
+    }];
+    analysis.fallthrough_surface = cm::FallthroughSurface::Branches {
+        branches: vec![cm::FallthroughBranch {
+            branch_key: "0".to_string(),
+            condition_text: None,
+            props: vec![cm::FallthroughPropEntry {
+                name: "inherited".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
+                publication: failed_publication(),
+                type_source_scope: None,
+                sources: Vec::new(),
+            }],
+            events: Vec::new(),
+            root_chain: Vec::new(),
+            status: cm::BranchStatus::Resolved,
+        }],
+    };
+
+    let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        props: vec![failed_lane()],
+        slot_bindings: vec![vec![failed_lane()]],
+        slot_returns: vec![None],
+        accepted_props: vec![failed_lane()],
+        fallthrough_props: vec![vec![failed_lane()]],
+        fallthrough_event_payloads: vec![Vec::new()],
+        ..Default::default()
+    };
+    let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
+
+    let assert_failed = |r#type: &Option<TypeExpr>,
+                         publication: &FfiTypePublication,
+                         display: &FfiTerminalTypeDisplay| {
+        assert!(r#type.is_none(), "Failed must not publish a type");
+        assert!(matches!(publication, FfiTypePublication::Failed { .. }));
+        assert!(display.text.is_none(), "Failed must not publish display");
+    };
+    assert_failed(
+        &ffi.props[0].r#type,
+        &ffi.props[0].publication,
+        &ffi.props[0].terminal_display,
+    );
+    assert_failed(
+        &ffi.slots[0].bindings[0].r#type,
+        &ffi.slots[0].bindings[0].publication,
+        &ffi.slots[0].bindings[0].terminal_display,
+    );
+    assert_failed(
+        &ffi.accepted_props[0].r#type,
+        &ffi.accepted_props[0].publication,
+        &ffi.accepted_props[0].terminal_display,
+    );
+    let FfiFallthroughSurface::Branches { branches } = &ffi.fallthrough_surface else {
+        panic!("fallthrough branches expected");
+    };
+    assert_failed(
+        &branches[0].props[0].r#type,
+        &branches[0].props[0].publication,
+        &branches[0].props[0].terminal_display,
+    );
+}
 
 /// A resolution-output sidecar for converter tests: `Expanded` mode, no
 /// macros, the given registry declaration metadata + origin graph.
@@ -35,7 +283,7 @@ fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaA
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),
@@ -195,7 +443,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: vec![
             verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
@@ -292,7 +540,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         // DUPLICATE registry names around a DISTINCT middle element: a
         // name-collapsing (map-keyed) conversion loses a row and an internal
         // positional swap moves the sentinel types — both fail the
@@ -438,7 +686,7 @@ fn component_meta_ffi_exposes_root_info_summary() {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: None,
         type_registry: Vec::new(),
         components: Vec::new(),
         template_refs: Vec::new(),
@@ -1480,8 +1728,6 @@ fn virtual_file_arc_to_string() {
     assert!(ffi.stale);
     assert_eq!(ffi.meta.scope_id, Some("data-v-abc123".to_string()));
     assert!(ffi.meta.block_type.is_none());
-    assert_eq!(ffi.meta.style_index, Some(2));
-    assert!(ffi.meta.custom_index.is_none());
     assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
     assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
     assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
@@ -2180,10 +2426,8 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     let mut analysis = empty_analysis();
     let binding = |name: &str| cm::SlotBindingAnalysis {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
     };
     let slot = |name: &str, bindings: Vec<cm::SlotBindingAnalysis>| cm::SlotAnalysis {
         name: name.to_string(),
@@ -2191,8 +2435,8 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
         bindings,
         is_required: false,
         return_type: None,
-        return_source: None,
-        return_source_scope: None,
+        return_publication: None,
+        return_publication_scope: None,
         description: None,
         tags: Vec::new(),
         declared_in_macro_type_arg: true,
@@ -2206,9 +2450,9 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     ];
     let prop_entry = |name: &str| cm::FallthroughPropEntry {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
-        raw_type: None,
         sources: Vec::new(),
     };
     let event_entry = |name: &str| cm::FallthroughEventEntry {
@@ -2244,17 +2488,22 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
         slot_bindings: vec![
             vec![
-                TypeExpr::Primitive(PrimitiveName::String), // default.row
-                TypeExpr::Primitive(PrimitiveName::Number), // default.other
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::String)), // default.row
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::Number)), // default.other
             ],
-            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // second.row
+            vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::Boolean,
+            ))], // second.row
         ],
+        slot_returns: vec![None, None],
         fallthrough_props: vec![
             vec![
-                TypeExpr::Primitive(PrimitiveName::String), // b0 inherited
-                TypeExpr::Primitive(PrimitiveName::Number), // b0 extraA
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::String)), // b0 inherited
+                materialized_publication(TypeExpr::Primitive(PrimitiveName::Number)), // b0 extraA
             ],
-            vec![TypeExpr::Primitive(PrimitiveName::Boolean)], // b1 inherited
+            vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::Boolean,
+            ))], // b1 inherited
         ],
         fallthrough_event_payloads: vec![
             vec![TypeExpr::Primitive(PrimitiveName::Number)], // b0 changed
@@ -2272,18 +2521,24 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     assert_eq!(ffi.slots[0].bindings[0].name, "row");
     assert_eq!(
         ffi.slots[0].bindings[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
     );
     assert_eq!(ffi.slots[0].bindings[1].name, "other");
     assert_eq!(
         ffi.slots[0].bindings[1].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
     );
     assert_eq!(ffi.slots[1].name, "second");
     assert_eq!(ffi.slots[1].bindings[0].name, "row");
     assert_eq!(
         ffi.slots[1].bindings[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Boolean
+        )),
         "the repeated binding name keeps ITS OWN slot's sentinel — a \
          cross-slot collapse or flattened zip moves default.row here"
     );
@@ -2297,17 +2552,23 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
     assert_eq!(branches[0].props[0].name, "inherited");
     assert_eq!(
         branches[0].props[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        ))
     );
     assert_eq!(branches[0].props[1].name, "extraA");
     assert_eq!(
         branches[0].props[1].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
     );
     assert_eq!(branches[1].props[0].name, "inherited");
     assert_eq!(
         branches[1].props[0].r#type,
-        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Boolean
+        )),
         "the same-named row keeps ITS OWN branch's sentinel — a branch swap \
          or flattened zip moves branch 0's value here"
     );
@@ -2335,10 +2596,9 @@ fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
     // One analysis prop against the EMPTY default lanes — misaligned.
     analysis.props = vec![cm::PropAnalysis {
         name: "misaligned".to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: true,
         has_default: false,
         default_value: None,
@@ -2387,9 +2647,9 @@ fn fallthrough_prop_entry(
 ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
     verter_semantic::analysis::component_meta::FallthroughPropEntry {
         name: name.to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_source_scope: None,
-        raw_type: None,
         sources: Vec::new(),
     }
 }
@@ -2463,7 +2723,9 @@ fn fallthrough_inner_prop_lane_misalignment_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
         );
     });
@@ -2496,7 +2758,9 @@ fn fallthrough_inner_event_lane_misalignment_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             vec![vec![TypeExpr::Primitive(PrimitiveName::Number)]],
         );
     });
@@ -2524,7 +2788,9 @@ fn fallthrough_none_surface_with_nonempty_lanes_fails_closed() {
     let message = conversion_panic_message(|| {
         let _ = fallthrough::fallthrough_surface_to_ffi(
             surface,
-            vec![vec![TypeExpr::Primitive(PrimitiveName::String)]],
+            vec![vec![materialized_publication(TypeExpr::Primitive(
+                PrimitiveName::String,
+            ))]],
             Vec::new(),
         );
     });
@@ -2549,10 +2815,9 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
     let mut analysis = empty_analysis();
     analysis.props = vec![cm::PropAnalysis {
         name: "aligned".to_string(),
-        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
         type_expansion: None,
-        raw_type: None,
-        raw_type_source: None,
         required: true,
         has_default: false,
         default_value: None,
@@ -2561,7 +2826,9 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
         declared_in_macro_type_arg: true,
     }];
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
-        props: vec![TypeExpr::Primitive(PrimitiveName::String)],
+        props: vec![materialized_publication(TypeExpr::Primitive(
+            PrimitiveName::String,
+        ))],
         ..Default::default()
     };
     let ffi = component_meta_parts_to_ffi(analysis, None, lanes);
@@ -2569,8 +2836,98 @@ fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
     assert_eq!(ffi.props[0].name, "aligned");
     assert_eq!(
         ffi.props[0].r#type,
-        TypeExpr::Primitive(PrimitiveName::String)
+        Some(TypeExpr::Primitive(PrimitiveName::String))
     );
+}
+
+#[test]
+fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
+    use host::framework::{
+        ComponentContractAvailability, ComponentPublicContract, ContractExactness,
+        ContractProvenance, PublicCallSignature, PublicDerivedHandlerShape, PublicEvent,
+        PublicHandlerSignature, PublicParameter, PublicSlot, PublicSlotBinding, PublicSlotInput,
+        PublicTypeReference,
+    };
+
+    let reference = || PublicTypeReference {
+        publication: materialized_publication(TypeExpr::Primitive(PrimitiveName::String)),
+    };
+    let parameter = PublicParameter {
+        name: Some(Arc::from("value")),
+        optional: true,
+        rest: true,
+        ty: TypeExpr::Primitive(PrimitiveName::String),
+    };
+    let contract = ComponentContractAvailability::Supported(Arc::new(ComponentPublicContract {
+        adapter_id: host::framework::FrameworkAdapterId::new("vue"),
+        exactness: ContractExactness::Exact,
+        degradation: Arc::from([]),
+        provenance: ContractProvenance::ComponentMetaOutput,
+        props: Arc::from([]),
+        events: Arc::from([PublicEvent {
+            name: Arc::from("select"),
+            overloads: Arc::from([PublicCallSignature {
+                source: reference(),
+                parameters: Arc::from([parameter.clone()]),
+                return_type: TypeExpr::Primitive(PrimitiveName::Void),
+            }]),
+            derived_handler: PublicDerivedHandlerShape {
+                overloads: Arc::from([PublicHandlerSignature {
+                    parameters: Arc::from([parameter]),
+                    return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                }]),
+            },
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+        slots: Arc::from([PublicSlot {
+            name: Arc::from("default"),
+            optional: true,
+            input: PublicSlotInput {
+                bindings: Arc::from([PublicSlotBinding {
+                    name: Arc::from("value"),
+                    ty: reference(),
+                }]),
+            },
+            return_type: Some(PublicTypeReference {
+                publication: materialized_publication(TypeExpr::Object(Arc::new(
+                    verter_type_expr::ObjectExpr {
+                        properties: Vec::new(),
+                    },
+                ))),
+            }),
+            exactness: ContractExactness::Exact,
+            degradation: Arc::from([]),
+            provenance: ContractProvenance::ComponentMetaOutput,
+        }]),
+    }));
+
+    let ffi = component_meta_parts_with_contract_to_ffi(
+        empty_analysis(),
+        None,
+        Default::default(),
+        contract,
+    );
+    let FfiComponentContractAvailability::Supported { contract } = ffi.component_public_contract
+    else {
+        panic!("supported contract must survive FFI conversion")
+    };
+    assert_eq!(contract.adapter_id, "vue");
+    assert_eq!(contract.events.len(), 1);
+    assert_eq!(contract.events[0].overloads.len(), 1);
+    assert!(contract.events[0].overloads[0].parameters[0].optional);
+    assert!(contract.events[0].overloads[0].parameters[0].rest);
+    assert_eq!(contract.slots.len(), 1);
+    assert!(contract.slots[0].optional);
+    assert_eq!(contract.slots[0].input.bindings.len(), 1);
+    assert!(matches!(
+        contract.slots[0]
+            .return_type
+            .as_ref()
+            .and_then(|reference| reference.r#type.as_ref()),
+        Some(TypeExpr::Object(_))
+    ));
 }
 
 /// The wire payload's RESOLUTION STATUS is typed and honest: a
@@ -2626,6 +2983,115 @@ fn inline_maps_to_host_profile() {
 
     let absent = ffi_profile_to_host(Some(FfiCompileProfile::default())).unwrap();
     assert_eq!(absent.inline, None);
+}
+
+/// The FFI boundary preserves the whole-return wrapper role's EXACTNESS: an
+/// exact family, a completed non-wrapper proof, a typed degradation carrying its
+/// exact reason, and an undemanded binding all cross distinctly, and the JSON
+/// projection omits the two keys entirely when nothing was demanded.
+///
+/// Discriminating mutations: drop the role mapping in `component_meta.rs` and
+/// every arm reads absent; drop the reason mapping and the degradation collapses
+/// onto the bare `"unresolved"` discriminant; serialize `None` instead of
+/// skipping and the undemanded binding grows two null keys.
+#[test]
+fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() {
+    use verter_semantic::analysis::component_meta::{BindingAnalysis, BindingKindAnalysis};
+    use verter_semantic::analysis::types::ReactivityKind;
+
+    let binding =
+        |name: &str,
+         reactivity_kind: ReactivityKind,
+         return_wrapper_role: Option<verter_type_expr::ReactiveWrapperRole>| {
+            BindingAnalysis {
+                name: name.to_string(),
+                kind: BindingKindAnalysis::Const,
+                reactivity_kind,
+                return_wrapper_role,
+                type_annotation: None,
+                used_in_template: false,
+                used_in_style: false,
+            }
+        };
+    let mut analysis = empty_analysis();
+    analysis.bindings = vec![
+        binding(
+            "exact",
+            ReactivityKind::Ref,
+            Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        ),
+        binding(
+            "computed",
+            ReactivityKind::Computed,
+            Some(verter_type_expr::ReactiveWrapperRole::ComputedRef),
+        ),
+        binding(
+            "proven_non_wrapper",
+            ReactivityKind::MaybeRef,
+            Some(verter_type_expr::ReactiveWrapperRole::None),
+        ),
+        binding(
+            "degraded",
+            ReactivityKind::MaybeRef,
+            Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+                reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle,
+            }),
+        ),
+        binding("undemanded", ReactivityKind::MaybeRef, None),
+    ];
+
+    let ffi = component_meta_parts_to_ffi(
+        analysis,
+        None,
+        host::meta_resolve::MaterializedComponentMetaTypeLanes::default(),
+    );
+
+    let roles = ffi
+        .bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.name.as_str(),
+                binding.return_wrapper_role.as_deref(),
+                binding.return_wrapper_unresolved_reason.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        vec![
+            ("exact", Some("ref"), None),
+            ("computed", Some("computedRef"), None),
+            // The completed non-wrapper proof is PRESENT as `"none"` — never
+            // conflated with the undemanded absence below.
+            ("proven_non_wrapper", Some("none"), None),
+            // The degradation keeps its exact reason on its own field.
+            ("degraded", Some("unresolved"), Some("cycle")),
+            ("undemanded", None, None),
+        ],
+        "the role vocabulary must cross the FFI boundary without collapsing any class"
+    );
+
+    let json = serde_json::to_value(&ffi).expect("serialize");
+    assert_eq!(json["bindings"][0]["returnWrapperRole"], "ref");
+    assert!(
+        json["bindings"][0]
+            .get("returnWrapperUnresolvedReason")
+            .is_none(),
+        "an exact role must not emit a reason key"
+    );
+    assert_eq!(json["bindings"][3]["returnWrapperRole"], "unresolved");
+    assert_eq!(
+        json["bindings"][3]["returnWrapperUnresolvedReason"],
+        "cycle"
+    );
+    assert!(
+        json["bindings"][4].get("returnWrapperRole").is_none()
+            && json["bindings"][4]
+                .get("returnWrapperUnresolvedReason")
+                .is_none(),
+        "an undemanded binding must omit BOTH keys, never emit nulls"
+    );
 }
 
 // ── OffsetIndex: batch offset conversion ─────────────────────────
@@ -2817,4 +3283,158 @@ fn lint_diagnostics_to_utf16_converts_every_span_in_source_order_agnostic_batche
     // "def", which is 2 + 3 + 2 + 2 = 9 units in.
     assert_eq!(out[0].span.start, 5);
     assert_eq!(out[0].span.end, 9);
+}
+
+// ── Sealed style block token (wire identity) ─────────────────────────
+
+fn sealed_token_host(canonical: &str, source: &str) -> host::VerterHost {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let _ = session
+        .upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("registered carrier");
+    session
+}
+
+/// Public-boundary token join: the FFI styles carry the SAME opaque block
+/// token vocabulary as the ordered structure, one distinct token per style
+/// block, minted only through the revalidated sealed ref.
+#[test]
+fn ffi_styles_carry_validated_public_block_tokens() {
+    let canonical = "/StyleTokens.vue";
+    let session = sealed_token_host(
+        canonical,
+        "<template><div class=\"a\"/></template>\n<style>.a {}</style>\n<style scoped>.b {}</style>",
+    );
+    let (output, _request) = session
+        .get_component_meta_output_with_resolution(canonical)
+        .expect("audited output");
+    let ffi = super::component_meta_output_to_ffi(output.expect("component resolves"));
+
+    let (structure, _) = session
+        .registered_file_structure_snapshot(canonical)
+        .expect("registered structure");
+    let expected: Vec<String> = structure
+        .inventory()
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                id,
+                role: verter_language::parse_artifact::carrier_inventory::SectionRole::Style { .. },
+                ..
+            } => Some(
+                structure
+                    .public_block_token(&structure.block_ref(*id).unwrap())
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(expected.len(), 2, "fixture premise: two style sections");
+
+    let served: Vec<Option<&str>> = ffi
+        .styles
+        .iter()
+        .map(|style| style.block_token.as_deref())
+        .collect();
+    assert_eq!(
+        served,
+        expected
+            .iter()
+            .map(|token| Some(token.as_str()))
+            .collect::<Vec<_>>(),
+        "each FFI style serves the ordered-structure token of its sealed ref"
+    );
+    assert_ne!(expected[0], expected[1], "tokens are distinct per block");
+}
+
+/// A style row whose sealed ref belongs to a DIFFERENT artifact must serve
+/// NO token (typed unavailable) — never a positional or naked-id fallback.
+#[test]
+fn ffi_style_token_fails_closed_for_foreign_artifact_ref() {
+    let canonical = "/Current.vue";
+    let session = sealed_token_host(canonical, "<style>.current {}</style>");
+    let foreign_session = sealed_token_host("/Foreign.vue", "<style>.foreign {}</style>");
+
+    let (structure, _) = session
+        .registered_file_structure_snapshot(canonical)
+        .expect("registered structure");
+    let (foreign_structure, _) = foreign_session
+        .registered_file_structure_snapshot("/Foreign.vue")
+        .expect("registered structure");
+    let style_id = |structure: &host::carrier_publication_store::RegisteredFileStructure| {
+        structure
+            .inventory()
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                    id,
+                    role:
+                        verter_language::parse_artifact::carrier_inventory::SectionRole::Style {
+                            ..
+                        },
+                    ..
+                } => Some(*id),
+                _ => None,
+            })
+            .expect("style section")
+    };
+    let valid_ref = structure
+        .inventory()
+        .block_ref(style_id(&structure))
+        .unwrap();
+    let foreign_ref = foreign_structure
+        .inventory()
+        .block_ref(style_id(&foreign_structure))
+        .unwrap();
+    assert_eq!(
+        valid_ref.block_id(),
+        foreign_ref.block_id(),
+        "fixture premise: identical artifact-local block id"
+    );
+
+    let style_row = |block_ref| verter_semantic::analysis::component_meta::StyleAnalysis {
+        lang: verter_semantic::analysis::style::StyleAnalysisLang::Css,
+        scoped: false,
+        is_module: false,
+        module_name: None,
+        block_ref,
+        classes: Vec::new(),
+        ids: Vec::new(),
+        custom_properties: Vec::new(),
+        v_binds: Vec::new(),
+        selectors: Vec::new(),
+    };
+    let mut analysis = empty_analysis();
+    analysis.ordered_sfc_structure = Some(
+        host::component_meta_host::ordered_sfc_structure_projection(&structure),
+    );
+    analysis.styles = vec![
+        style_row(Some(valid_ref)),
+        style_row(Some(foreign_ref)),
+        style_row(None),
+    ];
+
+    let ffi = component_meta_parts_to_ffi(analysis, None, Default::default());
+    assert!(
+        ffi.styles[0].block_token.is_some(),
+        "the same-artifact ref mints the token"
+    );
+    assert_eq!(
+        ffi.styles[1].block_token, None,
+        "a foreign artifact's ref fails closed"
+    );
+    assert_eq!(
+        ffi.styles[2].block_token, None,
+        "a ref-less row serves no token"
+    );
 }

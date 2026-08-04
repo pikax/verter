@@ -38,10 +38,9 @@ fn build_test_host() -> Arc<VerterHost> {
 /// return its node id. Used as a stable `base` for keys that
 /// otherwise need a `SemanticNodeId` argument.
 fn intern_empty_object(host: &VerterHost) -> SemanticNodeId {
-    use crate::semantic_query::SurfaceView;
     host.project_type_store()
         .semantic_graph()
-        .intern_node(SemanticNodeData::Object(SurfaceView {
+        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),

@@ -193,7 +193,11 @@ fn render_source_signature(
 fn prop_view_from(host: &VerterHost, owner: &str, prop: &PropAnalysis) -> PropView {
     PropView {
         name: prop.name.clone(),
-        type_signature: render_source_signature(host, owner, prop.type_source.present()),
+        type_signature: render_source_signature(
+            host,
+            owner,
+            prop.publication.result().selected_source(),
+        ),
         required: prop.required,
         has_default: prop.has_default,
         default_signature: prop.default_value.clone(),
@@ -238,7 +242,7 @@ fn slot_binding_signature(host: &VerterHost, owner: &str, binding: &SlotBindingA
     // synthetic raise) — the snapshot renders the resolved value
     // (`item: string`), never the carrier's opaque identity. Every other
     // published source renders its shallow-by-default shape.
-    let rendered = match binding.type_source.present() {
+    let rendered = match binding.publication.result().selected_source() {
         Some(source @ SemanticTypeSource::SyntheticSlotBinding(_)) => {
             match verter_session::test_only::semantic_source_probe::demand_type_expr(
                 host, owner, source,
@@ -358,7 +362,7 @@ fn fallthrough_prop_entry_signature(
         "{}{}: {}{}",
         prop.name,
         "",
-        render_source_signature(host, owner, prop.type_source.present()),
+        render_source_signature(host, owner, prop.publication.result().selected_source()),
         format_inherited_sources(&prop.sources),
     )
 }

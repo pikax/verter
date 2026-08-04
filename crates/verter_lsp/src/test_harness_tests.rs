@@ -24,14 +24,163 @@ use super::*;
 #[test]
 fn provider_absence_is_hard_fail_when_required_else_skip() {
     assert_eq!(
-        provider_absence_outcome(true),
+        provider_absence_outcome(ProviderUnavailable::NotFound, true),
         ProviderAbsence::HardFail,
         "a required-but-absent provider must FAIL the test, not skip"
     );
     assert_eq!(
-        provider_absence_outcome(false),
+        provider_absence_outcome(ProviderUnavailable::NotFound, false),
         ProviderAbsence::SkipWithReason,
         "a non-required absent provider degrades to a graceful skip"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A crashed spawn is NOT an absent provider
+// ---------------------------------------------------------------------------
+//
+// The vacuity these pin is the one that hid a whole provider lane: an engine
+// that WAS installed, WAS started, and died was dispositioned as "provider not
+// available" and skipped. On the platform where that happened, 95 real-provider
+// tests ran zero provider processes; 93 reported an ordinary green PASS, and the
+// only 2 visible reds were the sole call site that happened to assert on the
+// session instead of returning at a `let Some(…) else` guard. The require env
+// could not help: it answers "must this machine have the engine", and a crash has
+// already answered YES.
+
+/// A spawn/attach crash is a HARD failure on EVERY run, require-mode or not,
+/// while a genuine absence still honours require-mode. Collapsing the cause (the
+/// pre-fix `provider_absence_outcome(required)`) makes the two crash rows return
+/// `SkipWithReason` and this test fails.
+#[test]
+fn a_crashed_spawn_hard_fails_on_every_run_while_absence_still_honours_require_mode() {
+    for required in [false, true] {
+        assert_eq!(
+            provider_absence_outcome(ProviderUnavailable::SpawnFailed, required),
+            ProviderAbsence::HardFail,
+            "a discovered engine that crashed must FAIL the test (required={required}) — it is \
+             an environment/harness fault, never a platform absence"
+        );
+    }
+    // NEGATIVE: the hardening must not turn a genuine platform absence into a
+    // failure. A machine without the engine still skips on a permissive run,
+    // which is the whole point of keeping the two causes apart.
+    assert_eq!(
+        provider_absence_outcome(ProviderUnavailable::NotFound, false),
+        ProviderAbsence::SkipWithReason,
+        "an engine that is genuinely not installed must still skip on a permissive run"
+    );
+}
+
+/// The funnel PANICS on a spawn crash with the require env explicitly REMOVED —
+/// the exact configuration under which 93 crashed sessions reported green. This
+/// is the behavioural half of the policy (the pure decision above is the other),
+/// and it needs no provider on the machine, so it discriminates everywhere.
+#[test]
+fn handle_absent_provider_panics_on_a_spawn_crash_without_require_env() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsserver.require_env();
+    let prev = std::env::var_os(key);
+    std::env::remove_var(key);
+
+    let crashed = std::panic::catch_unwind(|| {
+        handle_absent_provider(
+            TestProviderKind::Tsserver,
+            ProviderUnavailable::SpawnFailed,
+            "tsserver spawn failed: tsserver process crashed",
+        )
+    });
+    // Same run, same permissive env, same funnel: a genuine ABSENCE still skips.
+    let absent = handle_absent_provider(
+        TestProviderKind::Tsserver,
+        ProviderUnavailable::NotFound,
+        "tsserver.js not found",
+    );
+    let crash_receipt = provider_unavailable_receipt(
+        TestProviderKind::Tsserver,
+        ProviderUnavailable::SpawnFailed,
+        "tsserver spawn failed: tsserver process crashed",
+    );
+
+    // Restore env before asserting so a failure cannot leak the override.
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    assert!(
+        crashed.is_err(),
+        "a provider that was found and CRASHED must PANIC even with the require env unset — \
+         skipping it is the vacuity that made 93 tsserver tests report green with zero \
+         tsserver processes started"
+    );
+    assert!(
+        absent.is_none(),
+        "a genuinely absent provider must still skip (None) on the same permissive run"
+    );
+    // The crash is greppable even though the test then fails: the panic names one
+    // test, the receipt names the class across a whole run.
+    let crash_receipt =
+        crash_receipt.expect("a spawn crash must always mint a receipt, on every run");
+    assert!(
+        crash_receipt.contains("status=SPAWN-CRASHED"),
+        "the crash receipt must carry its own status token: {crash_receipt}"
+    );
+    assert!(
+        !crash_receipt.contains("SKIPPED-NO-PROVIDER"),
+        "a crash must NEVER be receipted as an absent provider — that is the conflation: \
+         {crash_receipt}"
+    );
+    assert!(
+        crash_receipt.contains("reason=tsserver spawn failed: tsserver process crashed"),
+        "the crash receipt must carry WHY: {crash_receipt}"
+    );
+}
+
+/// The failure MESSAGE discriminates too. "install the engine" is the wrong
+/// instruction for a value-mangling defect in the spawn path, and handing a
+/// developer that message is how the class survives a second time.
+#[test]
+fn the_crash_failure_message_says_found_and_failed_not_install_it() {
+    let _guard = require_env_test_lock().lock().unwrap();
+    let key = TestProviderKind::Tsserver.require_env();
+    let prev = std::env::var_os(key);
+    std::env::remove_var(key);
+
+    let crashed = std::panic::catch_unwind(|| {
+        handle_absent_provider(
+            TestProviderKind::Tsserver,
+            ProviderUnavailable::SpawnFailed,
+            "tsserver spawn failed: tsserver process crashed",
+        )
+    });
+
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+
+    // `RealProviderTestSession` is not `Debug`, so unwrap the error by hand
+    // rather than through `expect_err`.
+    let Err(payload) = crashed else {
+        panic!("a spawn crash must panic, but the funnel returned a disposition");
+    };
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .expect("the panic payload must be a message");
+    assert!(
+        message.contains("DISCOVERED") && message.contains("failed to start"),
+        "the message must say the engine was present and then died: {message}"
+    );
+    assert!(
+        message.contains("tsserver spawn failed: tsserver process crashed"),
+        "the message must carry the underlying error: {message}"
+    );
+    assert!(
+        !message.starts_with("VERTER_REQUIRE_TSSERVER=1"),
+        "a crash is not a require-mode absence and must not be reported as one: {message}"
     );
 }
 
@@ -53,13 +202,18 @@ fn handle_absent_provider_fails_closed_under_require_env() {
         // Same-thread: the env var set above is visible. Forces the absent path.
         handle_absent_provider(
             TestProviderKind::Tsgo,
+            ProviderUnavailable::NotFound,
             "forced-absent for fail-closed proof",
         )
     });
     // Under require-mode there is no skip to attest — the absence PANICS, so a
     // skip receipt must not be minted (it would advertise a tolerated skip on
     // exactly the run that must fail).
-    let receipt = absent_provider_skip_receipt(TestProviderKind::Tsgo, "forced-absent");
+    let receipt = provider_unavailable_receipt(
+        TestProviderKind::Tsgo,
+        ProviderUnavailable::NotFound,
+        "forced-absent",
+    );
 
     // Restore env before asserting so a failure cannot leak the override.
     match prev {
@@ -87,10 +241,18 @@ fn handle_absent_provider_skips_without_require_env() {
     let prev = std::env::var_os(key);
     std::env::remove_var(key);
 
-    let result = handle_absent_provider(TestProviderKind::Tsgo, "absent, not required");
+    let result = handle_absent_provider(
+        TestProviderKind::Tsgo,
+        ProviderUnavailable::NotFound,
+        "absent, not required",
+    );
     // The SAME funnel decision `handle_absent_provider` prints, captured as a
     // value so the receipt is provable without intercepting stderr.
-    let receipt = absent_provider_skip_receipt(TestProviderKind::Tsgo, "absent, not required");
+    let receipt = provider_unavailable_receipt(
+        TestProviderKind::Tsgo,
+        ProviderUnavailable::NotFound,
+        "absent, not required",
+    );
 
     match prev {
         Some(v) => std::env::set_var(key, v),
@@ -137,6 +299,7 @@ fn tsserver_handle_absent_provider_fails_closed_under_require_env() {
         // Same-thread: the env var set above is visible. Forces the absent path.
         handle_absent_provider(
             TestProviderKind::Tsserver,
+            ProviderUnavailable::NotFound,
             "forced-absent for fail-closed proof",
         )
     });
@@ -163,8 +326,16 @@ fn tsserver_handle_absent_provider_skips_without_require_env() {
     let prev = std::env::var_os(key);
     std::env::remove_var(key);
 
-    let result = handle_absent_provider(TestProviderKind::Tsserver, "absent, not required");
-    let receipt = absent_provider_skip_receipt(TestProviderKind::Tsserver, "absent, not required");
+    let result = handle_absent_provider(
+        TestProviderKind::Tsserver,
+        ProviderUnavailable::NotFound,
+        "absent, not required",
+    );
+    let receipt = provider_unavailable_receipt(
+        TestProviderKind::Tsserver,
+        ProviderUnavailable::NotFound,
+        "absent, not required",
+    );
 
     match prev {
         Some(v) => std::env::set_var(key, v),
@@ -328,21 +499,42 @@ fn a_multi_line_reason_is_collapsed_into_one_greppable_receipt_line() {
     );
 }
 
-/// All three receipt statuses render distinct machine-greppable tokens, so a
+/// All four receipt statuses render distinct machine-greppable tokens, so a
 /// receipt scan can separate "assertions ran", "live provider but the body
-/// degraded", and "no engine at all". Collapsing any two makes this fail.
+/// degraded", "no engine at all", and "the engine was here and crashed".
+/// Collapsing any two makes this fail.
 #[test]
-fn the_three_receipt_statuses_are_mutually_distinguishable() {
+fn the_four_receipt_statuses_are_mutually_distinguishable() {
     let tokens = [
         BodyReceiptStatus::BodyReturned.token(),
         BodyReceiptStatus::SkippedWarmup.token(),
         BodyReceiptStatus::SkippedNoProvider.token(),
+        BodyReceiptStatus::SpawnCrashed.token(),
     ];
     for (i, a) in tokens.iter().enumerate() {
         for b in tokens.iter().skip(i + 1) {
             assert_ne!(a, b, "receipt statuses must be distinguishable in a scan");
         }
     }
+    // A spawn crash is not a skip at all, so its token must not be greppable as
+    // one — a `SKIPPED-` scan over a run's receipts must miss it entirely.
+    assert!(
+        !BodyReceiptStatus::SpawnCrashed.token().contains("SKIPPED"),
+        "a crash must not be greppable as a skip: {}",
+        BodyReceiptStatus::SpawnCrashed.token()
+    );
+    // The renderer stamps that token, not just the enum.
+    let line = spawn_crashed_receipt_line(
+        "vue_carrier_semantic_token_kinds_match_ts_baseline_tsserver",
+        "tsserver",
+        false,
+        "tsserver spawn failed: tsserver process crashed",
+    );
+    assert!(
+        line.contains("status=SPAWN-CRASHED")
+            && line.contains("test=vue_carrier_semantic_token_kinds_match_ts_baseline_tsserver"),
+        "the crash receipt must be NAMED and carry its status: {line}"
+    );
 }
 
 /// Process-global lock so the env-mutating require-mode tests do not race each

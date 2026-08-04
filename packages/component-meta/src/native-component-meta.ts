@@ -6,17 +6,14 @@ import type {
   AcceptedPropMeta,
   AcceptedEventMeta,
   AcceptedSurfaceCompleteness,
-  SfcBlocksMeta,
-  SfcAttributeMeta,
-  TemplateBlockMeta,
-  ScriptBlockMeta,
-  StyleBlockMeta,
-  CustomBlockMeta,
+  OrderedSfcStructureMeta,
   RootInfo,
   RootReachability,
   FallthroughSurface,
   FallthroughBranch,
   TypeExpansionMeta,
+  ReturnWrapperRole,
+  ReturnWrapperUnresolvedReason,
 } from "./types.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import type { NativeTypeExprLike } from "./type-expr-bridge.js";
@@ -50,11 +47,184 @@ export interface NativeExpansionMetadata extends TypeExpansionMeta {
   diagnostics: NativeExpansionDiagnostic[];
 }
 
+export interface NativeTerminalTypeDisplay {
+  text?: string | null;
+}
+
+export type NativeResolutionProvenance =
+  | "semanticEvaluator"
+  | "sessionProjector"
+  | "frameworkSurface"
+  | "fallthroughInheritance"
+  | "schema";
+
+export type NativePublicationProvenance =
+  | { kind: "resolved"; value: NativeResolutionProvenance }
+  | {
+      kind: "authored";
+      value: "macroPayload" | "declarationBody" | "augmentationBody" | "jsdocTypedefBody";
+    };
+
+export type NativePublicationReason =
+  | { kind: "resolvedExactConcrete" }
+  | { kind: "resolvedExactSymbolic" }
+  | { kind: "resolvedIncomplete" }
+  | {
+      kind: "authoredForIncomplete";
+      policy: "importedMacroCompound" | "importedIndexedAccess";
+    }
+  | {
+      kind: "authoredSymbolicRepresentation";
+      proof: "importedMacroCompound" | "importedIndexedAccess";
+    };
+
+export type NativeTypePublicationFailure =
+  | "unrepresentableRequiredMemberValue"
+  | "unrepresentableRequiredPayload";
+
+export type NativeTypePublication =
+  | {
+      kind: "failed";
+      failure: NativeTypePublicationFailure;
+      provenance: NativeResolutionProvenance;
+    }
+  | {
+      kind: "absent";
+      absence: "unannotated" | "branchDivergent";
+      provenance: NativeResolutionProvenance;
+    }
+  | {
+      kind: "published";
+      semanticAuthority: "resolved" | "authoredFallback";
+      exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+      reason: NativePublicationReason;
+      provenance: NativePublicationProvenance;
+    };
+
+export type NativeContractExactness = "exact" | "degraded";
+export type NativeContractProvenance = "componentMetaOutput";
+
+export type NativeContractSurface =
+  | { kind: "prop"; name: string }
+  | { kind: "event"; name: string; overloadIndex: number }
+  | { kind: "slotBinding"; slot: string; binding: string }
+  | { kind: "slotReturn"; slot: string };
+
+export interface NativeResolutionDiagnostic {
+  kind: NativeExpansionDiagnostic["reason"];
+  context: string;
+  propertyName?: string;
+}
+
+export interface NativeContractDegradation {
+  surface: NativeContractSurface;
+  reason: "absent" | "incomplete";
+  diagnostics: NativeResolutionDiagnostic[];
+}
+
+export interface NativePublicTypeReference {
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
+}
+
+export interface NativePublicParameter {
+  name?: string;
+  optional: boolean;
+  rest: boolean;
+  type: NativeTypeExprLike;
+}
+
+export interface NativePublicCallSignature {
+  source: NativePublicTypeReference;
+  parameters: NativePublicParameter[];
+  returnType: NativeTypeExprLike;
+}
+
+export interface NativePublicHandlerSignature {
+  parameters: NativePublicParameter[];
+  returnType: NativeTypeExprLike;
+}
+
+export interface NativePublicProp {
+  name: string;
+  optional: boolean;
+  hasDefault: boolean;
+  type: NativePublicTypeReference;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativePublicEvent {
+  name: string;
+  overloads: NativePublicCallSignature[];
+  derivedHandler: { overloads: NativePublicHandlerSignature[] };
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativePublicSlot {
+  name: string;
+  optional: boolean;
+  input: { bindings: Array<{ name: string; type: NativePublicTypeReference }> };
+  returnType?: NativePublicTypeReference;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+}
+
+export interface NativeComponentPublicContract {
+  adapterId: string;
+  exactness: NativeContractExactness;
+  degradation: NativeContractDegradation[];
+  provenance: NativeContractProvenance;
+  props: NativePublicProp[];
+  events: NativePublicEvent[];
+  slots: NativePublicSlot[];
+}
+
+export type NativeComponentMetaOutputFailure =
+  | { kind: "unraisableSource" }
+  | {
+      kind: "requiredSourceUnavailable";
+      publicationFailure: NativeTypePublicationFailure;
+    }
+  | { kind: "interiorSourceMiss" }
+  | { kind: "shellMaterializationMiss" }
+  | { kind: "unknownMaterializingSourceInterior" };
+
+export type NativeComponentContractAvailability =
+  | { kind: "supported"; contract: NativeComponentPublicContract }
+  | {
+      kind: "unsupported";
+      adapterId: string;
+      reason:
+        | { kind: "adapterUnavailable" }
+        | { kind: "componentMetaUnavailable" }
+        | {
+            kind: "outputMaterializationFailed";
+            lane: string;
+            index: number;
+            innerIndex?: number;
+            failure: NativeComponentMetaOutputFailure;
+          }
+        | {
+            kind: "publicationFailed";
+            surface: NativeContractSurface;
+            failure: NativeTypePublicationFailure;
+            provenance: NativeResolutionProvenance;
+          };
+      diagnostics: NativeResolutionDiagnostic[];
+    };
+
 export interface NativePropMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  rawType?: string;
   required: boolean;
   hasDefault: boolean;
   defaultValue?: string;
@@ -77,6 +247,8 @@ export interface NativePropMeta {
 export interface NativeEventMeta {
   name: string;
   payload: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   payloadExpansion?: NativeExpansionMetadata;
   rawSignature?: string;
   description?: string;
@@ -85,9 +257,10 @@ export interface NativeEventMeta {
 
 export interface NativeSlotBindingMeta {
   name: string;
-  type: NativeTypeExprLike;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   typeExpansion?: NativeExpansionMetadata;
-  rawType?: string;
 }
 
 export interface NativeSlotMeta {
@@ -96,6 +269,9 @@ export interface NativeSlotMeta {
   bindings: NativeSlotBindingMeta[];
   isRequired: boolean;
   returnType?: string;
+  returnValue?: NativeTypeExprLike;
+  returnPublication?: NativeTypePublication;
+  returnTerminalDisplay?: NativeTerminalTypeDisplay;
   description?: string;
   tags?: NativeJsdocTag[];
   /**
@@ -137,49 +313,11 @@ export interface NativePublicInstanceMemberMeta {
   tags?: NativeJsdocTag[];
 }
 
-export interface NativeSfcBlocksMeta {
-  template?: NativeTemplateBlockMeta;
-  script?: NativeScriptBlockMeta;
-  scriptSetup?: NativeScriptBlockMeta;
-  styles: NativeStyleBlockMeta[];
-  custom: NativeCustomBlockMeta[];
-}
-
-export interface NativeSfcAttributeMeta {
-  name: string;
-  value?: string;
-}
-
-export interface NativeTemplateBlockMeta {
-  lang?: string;
-  src?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeScriptBlockMeta {
-  lang?: string;
-  src?: string;
-  generic?: string;
-  attrsType?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeStyleBlockMeta {
-  index: number;
-  lang?: string;
-  src?: string;
-  scoped: boolean;
-  isModule: boolean;
-  moduleName?: string;
-  attributes: NativeSfcAttributeMeta[];
-}
-
-export interface NativeCustomBlockMeta {
-  index: number;
-  blockType: string;
-  lang?: string;
-  src?: string;
-  attributes: NativeSfcAttributeMeta[];
+export interface NativeOrderedSfcStructure {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: Array<Record<string, unknown>>;
+  markupNodes: Array<Record<string, unknown>>;
 }
 
 export interface NativeResolvedTypeMeta {
@@ -309,6 +447,8 @@ export interface NativeBindingMeta {
   name: string;
   kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  returnWrapperRole?: ReturnWrapperRole;
+  returnWrapperUnresolvedReason?: ReturnWrapperUnresolvedReason;
   typeAnnotation?: string;
   usedInTemplate: boolean;
   usedInStyle: boolean;
@@ -329,6 +469,13 @@ export interface NativeStyleMeta {
   scoped: boolean;
   isModule: boolean;
   moduleName?: string;
+  /**
+   * Opaque sealed block token binding this style analysis to its ordered
+   * structure block (same vocabulary as the structure block tokens). Absent
+   * when the sealed identity could not be revalidated — treat absence as
+   * typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   classes: string[];
   ids: string[];
   customProperties: string[];
@@ -352,8 +499,9 @@ export interface NativeComponentFlags {
 
 export interface NativeAcceptedPropMeta {
   name: string;
-  type: NativeTypeExprLike;
-  rawType?: string;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   required: boolean;
   provenance: NativeMemberProvenance;
   availability: NativeMemberAvailability;
@@ -470,8 +618,9 @@ export type NativeUnresolvedBranchReason =
 
 export interface NativeFallthroughPropEntry {
   name: string;
-  type: NativeTypeExprLike;
-  rawType?: string;
+  type?: NativeTypeExprLike;
+  publication: NativeTypePublication;
+  terminalDisplay: NativeTerminalTypeDisplay;
   sources: NativeInheritedSource[];
 }
 
@@ -523,13 +672,14 @@ export interface NativeOriginGraph {
 }
 
 export interface NativeComponentMetaResult {
+  componentPublicContract: NativeComponentContractAvailability;
   props: NativePropMeta[];
   events: NativeEventMeta[];
   slots: NativeSlotMeta[];
   models: NativeModelMeta[];
   exposed: NativeExposedMeta[];
   publicInstance?: NativePublicInstanceMeta;
-  sfcBlocks?: NativeSfcBlocksMeta;
+  orderedSfcStructure: NativeOrderedSfcStructure;
   typeRegistry?: NativeResolvedTypeMeta[];
   components: NativeComponentUsage[];
   templateRefs: NativeTemplateRefMeta[];
@@ -563,19 +713,40 @@ function deriveComponentName(filePath: string): string {
   return basename(filePath).replace(/\.[^.]+$/, "") || "AnonymousComponent";
 }
 
+function requirePublishedType(
+  row: {
+    type?: NativeTypeExprLike;
+    publication: NativeTypePublication;
+  },
+  label: string,
+): NativeTypeExprLike {
+  if (row.publication.kind === "failed") {
+    throw new Error(`component-meta ${label} has failed type publication`);
+  }
+  if (row.type === undefined) {
+    throw new Error(`component-meta ${label} has no materialized type`);
+  }
+  return row.type;
+}
+
+function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string } {
+  return typeof display.text === "string" ? { rawType: display.text } : {};
+}
+
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
   const nativeRegistry = buildNativeTypeRegistry(meta);
   return {
     filePath: meta.filePath,
     componentName: deriveComponentName(meta.filePath),
     optionsApi: meta.optionsApi,
+    componentPublicContract: meta.componentPublicContract,
     props: meta.props.map((prop) => ({
       name: prop.name,
-      type: typeExprToDescriptor(prop.type, nativeRegistry),
+      type: typeExprToDescriptor(requirePublishedType(prop, `prop ${prop.name}`), nativeRegistry),
       ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
       required: prop.required,
       hasDefault: prop.hasDefault,
-      ...(prop.rawType !== undefined ? { rawType: prop.rawType } : {}),
+      ...compatRawType(prop.terminalDisplay),
       ...(prop.defaultValue !== undefined ? { default: prop.defaultValue } : {}),
       ...(prop.description !== undefined ? { description: prop.description } : {}),
       ...(prop.tags?.length ? { tags: prop.tags } : {}),
@@ -590,7 +761,13 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     })),
     events: meta.events.map((event) => ({
       name: event.name,
-      payload: typeExprToDescriptor(event.payload, nativeRegistry),
+      payload: typeExprToDescriptor(
+        requirePublishedType(
+          { type: event.payload, publication: event.publication },
+          `event ${event.name}`,
+        ),
+        nativeRegistry,
+      ),
       ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
       hasValidator: false,
       isDeclared: true,
@@ -603,9 +780,12 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       isScoped: slot.isScoped,
       bindings: slot.bindings.map((binding) => ({
         name: binding.name,
-        type: typeExprToDescriptor(binding.type, nativeRegistry),
+        type: typeExprToDescriptor(
+          requirePublishedType(binding, `slot binding ${slot.name}.${binding.name}`),
+          nativeRegistry,
+        ),
         ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
-        ...(binding.rawType !== undefined ? { rawType: binding.rawType } : {}),
+        ...compatRawType(binding.terminalDisplay),
       })),
       isRequired: slot.isRequired,
       ...(slot.returnType !== undefined ? { returnType: slot.returnType } : {}),
@@ -643,11 +823,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
           },
         }
       : {}),
-    ...(meta.sfcBlocks !== undefined
-      ? {
-          sfcBlocks: mapNativeSfcBlocks(meta.sfcBlocks),
-        }
-      : {}),
+    orderedSfcStructure: mapNativeOrderedStructure(meta.orderedSfcStructure),
     components: meta.components.map((component) => ({
       name: component.name,
       ...(component.importSource !== undefined ? { importSource: component.importSource } : {}),
@@ -703,6 +879,12 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       name: binding.name,
       kind: binding.kind,
       reactivityKind: binding.reactivityKind,
+      ...(binding.returnWrapperRole !== undefined
+        ? { returnWrapperRole: binding.returnWrapperRole }
+        : {}),
+      ...(binding.returnWrapperUnresolvedReason !== undefined
+        ? { returnWrapperUnresolvedReason: binding.returnWrapperUnresolvedReason }
+        : {}),
       ...(binding.typeAnnotation !== undefined ? { typeAnnotation: binding.typeAnnotation } : {}),
       usedInTemplate: binding.usedInTemplate,
       usedInStyle: binding.usedInStyle,
@@ -716,6 +898,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       scoped: style.scoped,
       isModule: style.isModule,
       ...(style.moduleName !== undefined ? { moduleName: style.moduleName } : {}),
+      ...(style.blockToken !== undefined ? { blockToken: style.blockToken } : {}),
       classes: [...style.classes],
       ids: [...style.ids],
       customProperties: [...style.customProperties],
@@ -744,63 +927,11 @@ function mapNativeRootInfo(info: NativeRootInfo): RootInfo {
   };
 }
 
-function mapNativeSfcBlocks(blocks: NativeSfcBlocksMeta): SfcBlocksMeta {
-  return {
-    ...(blocks.template !== undefined ? { template: mapNativeTemplateBlock(blocks.template) } : {}),
-    ...(blocks.script !== undefined ? { script: mapNativeScriptBlock(blocks.script) } : {}),
-    ...(blocks.scriptSetup !== undefined
-      ? { scriptSetup: mapNativeScriptBlock(blocks.scriptSetup) }
-      : {}),
-    styles: blocks.styles.map((style) => mapNativeStyleBlock(style)),
-    custom: blocks.custom.map((block) => mapNativeCustomBlock(block)),
-  };
-}
-
-function mapNativeSfcAttributes(attributes: NativeSfcAttributeMeta[]): SfcAttributeMeta[] {
-  return attributes.map((attribute) => ({
-    name: attribute.name,
-    ...(attribute.value !== undefined ? { value: attribute.value } : {}),
-  }));
-}
-
-function mapNativeTemplateBlock(block: NativeTemplateBlockMeta): TemplateBlockMeta {
-  return {
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeScriptBlock(block: NativeScriptBlockMeta): ScriptBlockMeta {
-  return {
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    ...(block.generic !== undefined ? { generic: block.generic } : {}),
-    ...(block.attrsType !== undefined ? { attrsType: block.attrsType } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeStyleBlock(block: NativeStyleBlockMeta): StyleBlockMeta {
-  return {
-    index: block.index,
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    scoped: block.scoped,
-    isModule: block.isModule,
-    ...(block.moduleName !== undefined ? { moduleName: block.moduleName } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
-}
-
-function mapNativeCustomBlock(block: NativeCustomBlockMeta): CustomBlockMeta {
-  return {
-    index: block.index,
-    blockType: block.blockType,
-    ...(block.lang !== undefined ? { lang: block.lang } : {}),
-    ...(block.src !== undefined ? { src: block.src } : {}),
-    attributes: mapNativeSfcAttributes(block.attributes),
-  };
+function mapNativeOrderedStructure(structure: NativeOrderedSfcStructure): OrderedSfcStructureMeta {
+  if (structure.schemaVersion !== 1) {
+    throw new Error(`unsupported ordered structure schema ${structure.schemaVersion}`);
+  }
+  return structure;
 }
 
 function deriveRootInfo(reachability: NativeRootReachability): NativeRootInfo {
@@ -830,8 +961,8 @@ function mapNativeAcceptedProps(
 ): AcceptedPropMeta[] {
   return props.map((p) => ({
     name: p.name,
-    type: typeExprToDescriptor(p.type, nativeRegistry),
-    ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+    type: typeExprToDescriptor(requirePublishedType(p, `accepted prop ${p.name}`), nativeRegistry),
+    ...compatRawType(p.terminalDisplay),
     required: p.required,
     provenance: p.provenance,
     availability: p.availability,
@@ -875,8 +1006,11 @@ function mapNativeFallthroughBranch(
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
     props: branch.props.map((p) => ({
       name: p.name,
-      type: typeExprToDescriptor(p.type, nativeRegistry),
-      ...(p.rawType !== undefined ? { rawType: p.rawType } : {}),
+      type: typeExprToDescriptor(
+        requirePublishedType(p, `fallthrough prop ${p.name}`),
+        nativeRegistry,
+      ),
+      ...compatRawType(p.terminalDisplay),
       sources: p.sources,
     })),
     events: branch.events.map((e) => ({

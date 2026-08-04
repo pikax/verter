@@ -4,8 +4,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::references::{
     collect_css_ref_spans, find_css_target_in_style_refs, find_css_target_in_template_refs,
 };
@@ -20,7 +20,7 @@ use crate::features::references::{
 pub fn highlights_at_position(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> Option<Vec<DocumentHighlight>> {
@@ -145,7 +145,7 @@ pub fn highlights_at_position(
 fn css_highlights(
     offset: usize,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Option<Vec<DocumentHighlight>> {
@@ -210,7 +210,7 @@ use crate::utils::{find_all_word_occurrences, word_at_offset};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::types::ImportBindingKind;
     use verter_semantic::analysis::*;
 
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_highlight_binding_declaration_and_usages() {
         let source = "<template>\n  {{ count }}\n</template>\n\n<script setup>\nconst count = ref(0)\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let count_decl = source.rfind("count").unwrap() as u32;
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn test_no_highlight_for_unknown_word() {
         let source = "<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let analysis = make_analysis(vec![], vec![]);
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn test_highlight_css_class_from_template() {
         let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_highlight_css_class_from_style() {
         let source = "<template><div class=\"btn\"></div></template>\n<style scoped>\n.btn { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -410,12 +410,12 @@ mod tests {
 
     fn build_style(
         source: &str,
-        blocks: &[SfcBlock],
+        blocks: &[CarrierBlockView],
     ) -> verter_semantic::analysis::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
-        let scoped = style_block.attrs_raw.contains("scoped");
+        let scoped = style_block.is_scoped();
         verter_semantic::analysis::style::build_css_style_analysis(
             css_content,
             verter_semantic::analysis::style::VueStyleInput {
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn test_highlight_import_binding() {
         let source = "<script setup>\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let ref_import_offset = source.find("ref").unwrap() as u32;
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn test_highlight_css_id_from_template() {
         let source = "<template><div id=\"app\"></div></template>\n<style scoped>\n#app { margin: 0; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn test_no_css_highlight_without_style_match() {
         let source = "<template><div class=\"missing\"></div></template>\n<style scoped>\n.other { color: red; }\n</style>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let css = build_style(source, &blocks);
 

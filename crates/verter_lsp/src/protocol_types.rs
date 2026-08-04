@@ -296,6 +296,18 @@ pub struct GetVirtualFilesParams {
 pub struct ApplyStyleOverridesParams {
     pub uri: String,
     pub overrides: Vec<StyleOverrideParam>,
+    /// The `documentRevisionToken` of the structure the override was computed
+    /// against. REQUIRED: a request without it is refused typed
+    /// (`missingTokens`) — the handler REFUSES a mismatched-revision apply,
+    /// because an async transpile result bound to revision A must never
+    /// overwrite revision B's state. `Option` only so an absent field yields
+    /// the typed refusal instead of a deserialization error.
+    #[serde(default)]
+    pub document_revision_token: Option<String>,
+    /// The `artifactToken` of the same captured structure. Same REQUIRED /
+    /// refusal semantics as `document_revision_token`.
+    #[serde(default)]
+    pub artifact_token: Option<String>,
 }
 
 /// A single style override entry from the client.
@@ -307,10 +319,26 @@ pub struct StyleOverrideParam {
     pub source_map: Option<String>,
 }
 
+/// Typed refusal reason for `$/verter/applyStyleOverrides` (additive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StyleOverrideRefusal {
+    /// The captured revision/artifact token no longer matches the live
+    /// document: the override describes superseded bytes and was NOT applied.
+    RevisionMismatch,
+    /// The request carried no (or only one) captured structure token: a
+    /// revision-unvalidatable apply is refused, never applied unfenced.
+    MissingTokens,
+}
+
 /// Response for `$/verter/applyStyleOverrides` request.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApplyStyleOverridesResponse {
     pub success: bool,
+    /// Present only when the apply was refused without mutation (additive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<StyleOverrideRefusal>,
 }
 
 /// Params for `$/verter/getAnalysis` (and `$/verter/getBindingTypes`) request.
@@ -449,6 +477,159 @@ pub struct ProjectOverviewStats {
 /// it onto `0` made the sentinel collide with a real stamp and silently
 /// disarmed the fence for any file with no compile row.
 pub(crate) type CachedVerterDiagEntry = (i32, Option<u64>, Vec<Diagnostic>);
+
+/// Client-stamped request for the registered structure of one open document.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentStructureRequestV1 {
+    pub request_token: String,
+    pub text_document: TextDocumentIdentifier,
+    pub client_open_epoch: String,
+    pub expected_client_version: i32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentStructureV1 {
+    pub schema_version: u32,
+    pub document_revision_token: String,
+    pub artifact_token: String,
+    pub blocks: Vec<verter_ffi::types::FfiStructureBlock>,
+    pub markup_nodes: Vec<verter_ffi::types::FfiMarkupNode>,
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DocumentStructureResponseV1 {
+    Available {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+        structure: DocumentStructureV1,
+    },
+    StaleClientDocument {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    ReplacementDocument {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    Superseded {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+    Unavailable {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+        reason: DocumentUnavailableReasonV1,
+    },
+    Closed {
+        request_token: String,
+        client_open_epoch: String,
+        expected_client_version: i32,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentUnavailableReasonV1 {
+    UnsupportedLanguage,
+    CarrierProducerUnavailable,
+    RegistryMismatch,
+    ParseFailed,
+    StructureNotReady,
+}
+
+#[cfg(test)]
+mod document_structure_response_tests {
+    use super::{DocumentStructureResponseV1, DocumentUnavailableReasonV1};
+
+    fn stamps() -> (String, String, i32) {
+        ("request-1".into(), "open-7".into(), 19)
+    }
+
+    /// Ratified six-arm sum (`Available`, `StaleClientDocument`,
+    /// `ReplacementDocument`, `Superseded`, `Unavailable`, `Closed`): every
+    /// non-`Available` arm is CONTENT-FREE (no `structure` key), and the wire
+    /// tags stay pairwise disjoint. `Unavailable` additionally carries its
+    /// typed `reason` — still no structure.
+    #[test]
+    fn freshness_failures_have_disjoint_content_free_wire_tags() {
+        let (request_token, client_open_epoch, expected_client_version) = stamps();
+        let responses = [
+            DocumentStructureResponseV1::StaleClientDocument {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+            DocumentStructureResponseV1::ReplacementDocument {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+            DocumentStructureResponseV1::Superseded {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+            DocumentStructureResponseV1::Unavailable {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+                reason: DocumentUnavailableReasonV1::StructureNotReady,
+            },
+            DocumentStructureResponseV1::Closed {
+                request_token: request_token.clone(),
+                client_open_epoch: client_open_epoch.clone(),
+                expected_client_version,
+            },
+        ];
+        let tags = responses
+            .iter()
+            .map(|response| {
+                let value = serde_json::to_value(response).expect("serialize response");
+                let object = value.as_object().expect("response object");
+                assert!(
+                    !object.contains_key("structure"),
+                    "non-available response must remain content-free"
+                );
+                let expected_len = if object["kind"] == "unavailable" {
+                    5
+                } else {
+                    4
+                };
+                assert_eq!(
+                    object.len(),
+                    expected_len,
+                    "non-available response must carry only its stamps (+ typed reason)"
+                );
+                for stamp in ["requestToken", "clientOpenEpoch", "expectedClientVersion"] {
+                    assert!(object.contains_key(stamp), "missing echo stamp {stamp}");
+                }
+                object["kind"].as_str().expect("kind tag").to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            [
+                "staleClientDocument",
+                "replacementDocument",
+                "superseded",
+                "unavailable",
+                "closed"
+            ]
+        );
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Component-meta selective API (D32 / D102 / D104 / D113)

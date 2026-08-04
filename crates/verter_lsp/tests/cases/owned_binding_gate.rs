@@ -101,12 +101,13 @@ fn marker_location() -> TypeLocation {
     }
 }
 
-/// A distinctive non-empty OWNED hover marker.
+/// A distinctive non-empty OWNED hover marker. (The gate assertions check
+/// presence/absence of the whole hover, so the structured fields stay at
+/// their `None` defaults.)
 fn marker_hover() -> HoverInfo {
     HoverInfo {
         contents: "owned-marker".to_string(),
-        range_start: None,
-        range_end: None,
+        ..Default::default()
     }
 }
 

@@ -66,7 +66,7 @@ use crate::semantic_query::{
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-    SemanticQueryValueTag, SignatureRef, SurfaceView,
+    SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;
@@ -103,12 +103,15 @@ pub(crate) mod output_materialization;
 mod output_materialization_guards;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
+pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
 pub(crate) mod relation_predicates;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
 pub(crate) mod substitute;
+pub(crate) mod symbol_identity;
+pub(crate) mod template_class_facts;
 pub(crate) mod walk;
 
 // Private leaf module sealing the `InstantiateBodySource` construction

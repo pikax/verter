@@ -27,9 +27,9 @@ use tower_lsp_server::ls_types::{Position, Range, TextEdit};
 use verter_semantic::analysis::AnalyzedImport;
 use verter_span::TsPosition;
 
+use crate::documents::carrier_structure::project_carrier_blocks;
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::ProviderPositionMapper;
-use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::type_provider::merge;
 
 /// One TypeProvider text edit as returned by completion resolve: byte offsets into the
@@ -162,13 +162,12 @@ impl ScriptImportInsertionAnchor {
 ///
 /// Imports are filtered to those whose span lies inside the selected `<script setup>` block, so an
 /// import in a separate non-setup `<script>` never anchors the setup insertion.
-pub fn resolve_script_import_anchor(
+pub fn resolve_script_import_anchor_from_structure(
     carrier_source: &str,
     user_import_spans: &[(u32, u32)],
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
 ) -> ScriptImportInsertionAnchor {
-    // Vue-scoped by contract (see the doc above), so the default Vue raw-text
-    // custom-block scan is the correct mode here.
-    let blocks = scan_sfc_blocks(carrier_source);
+    let blocks = project_carrier_blocks(structure);
 
     if let Some(setup) = blocks.iter().find(|b| b.is_setup()) {
         let (content_start, content_end) = setup.content_range();
@@ -229,7 +228,7 @@ pub fn resolve_script_import_anchor(
 ///    is in the plain `<script>`. The re-anchor cannot prove WHICH block the use-site lives in (that
 ///    needs use-site/region threading, carrier-membership-adjacent and out of this resolver's scope),
 ///    so on the AMBIGUOUS mixed-script case it DROPS rather than guess `<script setup>` and mis-place.
-///    Block composition is read from the typed [`scan_sfc_blocks`] classification the anchor resolver
+///    Block composition is read from the typed [`test_carrier_blocks`] classification the anchor resolver
 ///    itself uses — never a new string scanner.
 ///
 /// This is the carrier-keyed import-reanchor capability the carrier-NEUTRAL code-action merge layer
@@ -243,10 +242,11 @@ pub fn resolve_script_import_anchor(
 /// path itself accepts a synthesized `CreateScriptSetup` (Volar parity) because it has ALREADY proven
 /// a real Vue carrier that is not a self-file projection; the code-action merge has weaker context
 /// here, so it restricts to the provable-correct anchor.
-pub(crate) fn resolve_carrier_preamble_import_anchor(
+pub(crate) fn resolve_carrier_preamble_import_anchor_from_structure(
     current_tsx_path: &str,
     carrier_source: &str,
     user_import_spans: &[(u32, u32)],
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
 ) -> Option<ScriptImportInsertionAnchor> {
     // The carrier stem is the IDE virtual path minus the trailing `.tsx`/`.jsx`. The branch only
     // runs for `is_carrier_ide_path(current_tsx_path)` edits, so the suffix is present; guard anyway.
@@ -275,10 +275,10 @@ pub(crate) fn resolve_carrier_preamble_import_anchor(
     // `<script setup>`. They are separate scopes, so re-anchoring an add-import into `<script setup>`
     // when the unresolved use-site is actually in the plain `<script>` mis-places it. We cannot prove
     // the use-site block here, so when a NON-EMPTY normal `<script>` coexists with the setup block we
-    // DROP rather than guess. Uses the same typed `scan_sfc_blocks` classification as the resolver
+    // DROP rather than guess. Uses the same typed `test_carrier_blocks` classification as the resolver
     // (no string sniffing): a normal `<script>` is `tag_name == "script" && !is_setup()`, and "non-
     // empty" is non-whitespace inner content.
-    let blocks = scan_sfc_blocks(carrier_source);
+    let blocks = project_carrier_blocks(structure);
     let has_nonempty_normal_script = blocks.iter().any(|b| {
         if b.tag_name != "script" || b.is_setup() {
             return false;
@@ -292,11 +292,39 @@ pub(crate) fn resolve_carrier_preamble_import_anchor(
         return None;
     }
 
-    match resolve_script_import_anchor(carrier_source, user_import_spans) {
+    match resolve_script_import_anchor_from_structure(carrier_source, user_import_spans, structure)
+    {
         anchor @ ScriptImportInsertionAnchor::ExistingScriptSetup { .. } => Some(anchor),
         // No `<script setup>` to extend — do NOT synthesize a block from a quick-fix.
         ScriptImportInsertionAnchor::CreateScriptSetup { .. } => None,
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn resolve_script_import_anchor(
+    carrier_source: &str,
+    user_import_spans: &[(u32, u32)],
+) -> ScriptImportInsertionAnchor {
+    let structure = crate::documents::carrier_structure::test_structure(carrier_source, false);
+    resolve_script_import_anchor_from_structure(carrier_source, user_import_spans, &structure)
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_carrier_preamble_import_anchor(
+    current_tsx_path: &str,
+    carrier_source: &str,
+    user_import_spans: &[(u32, u32)],
+) -> Option<ScriptImportInsertionAnchor> {
+    let structure = crate::documents::carrier_structure::test_structure(
+        carrier_source,
+        current_tsx_path.contains(".svelte."),
+    );
+    resolve_carrier_preamble_import_anchor_from_structure(
+        current_tsx_path,
+        carrier_source,
+        user_import_spans,
+        &structure,
+    )
 }
 
 /// Errors that reject a completion resolve as a whole rather than applying a partial edit set.

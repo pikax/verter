@@ -143,6 +143,7 @@ pub use output::{
     ComponentMetaOutput, ComponentMetaOutputError, ComponentMetaOutputFailure,
     ComponentMetaOutputLane, ComponentMetaResolutionOutput, InteriorSourceStep,
     MaterializedComponentMetaTypeLanes, MaterializedComponentMetaTypes,
+    MaterializedEventOccurrence, MaterializedTypePublication, TerminalTypeDisplay,
 };
 pub(crate) use resolved_state::RegistryMaterialization;
 pub use resolved_state::{ResolvedComponentMetaState, SurfaceNodeIdentities};

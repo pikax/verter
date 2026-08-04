@@ -51,12 +51,11 @@
 //!   [`VueMacroSurface::member_expr_scope`]), the `defineModel` synthesized
 //!   model prop from analyzer facts, and JSDoc sliced from the surface's JSDoc
 //!   SPANS.
-//! - **emits** — call-signature event extraction FIRST (the first parameter's
-//!   string-literal — or union of string literals — is the event name; the
-//!   payload is the call-signature function with the leading event-name
-//!   parameter STRIPPED), property-key members only as a fallback when no
-//!   call-signature emit was found, de-duplicated by event name
-//!   (first-writer-wins).
+//! - **emits** — one CREO walk over the ordered `surface.entries` stream, the
+//!   sole membership and ordering authority. Call-signature and property
+//!   entries publish occurrences in stream order, preserving mixed forms and
+//!   duplicate event names; a call signature's leading event-name parameter
+//!   is stripped from its payload.
 //! - **slots** — function-like members only (non-function members filtered);
 //!   the first-parameter object's properties become the slot bindings; the
 //!   function return type becomes the slot return.
@@ -114,7 +113,9 @@ pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
     object_members_from_typeinfo_surface, props_from_typeinfo_surface,
 };
-pub(crate) use normalize_slots::slots_from_typeinfo_surface;
+pub(crate) use normalize_slots::{
+    slot_return_publications_from_typeinfo_surface, slots_from_typeinfo_surface,
+};
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
     /// The Vue framework-surface executor's output-sink capability: the Vue
@@ -598,7 +599,7 @@ impl VerterHost {
         // shared path walker runs intermediate hops in `Navigate` and the
         // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
         // argument decomposes to `(handle_node, [])`.
-        let handle = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             request.owner_canonical.as_ref(),
             request.macro_index,
@@ -606,7 +607,7 @@ impl VerterHost {
         let (base_carrier, path) =
             crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain_node(
                 ctx,
-                handle.node(),
+                product.hot.node(),
             );
         // Resolve the carrier base ONE Navigate hop through the shared dispatch
         // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
@@ -1090,10 +1091,16 @@ pub(crate) fn vue_macro_dtos_with_ctx(
                         }),
                         ..MacroSurfaceDtos::default()
                     },
-                    AnalyzedMacroKind::DefineSlots => MacroSurfaceDtos {
-                        slots: Some(slots_from_typeinfo_surface(ctx, &resolved)),
-                        ..MacroSurfaceDtos::default()
-                    },
+                    AnalyzedMacroKind::DefineSlots => {
+                        let slots = slots_from_typeinfo_surface(ctx, &resolved);
+                        let slot_return_publications =
+                            slot_return_publications_from_typeinfo_surface(ctx, &resolved, &slots);
+                        MacroSurfaceDtos {
+                            slots: Some(slots),
+                            slot_return_publications,
+                            ..MacroSurfaceDtos::default()
+                        }
+                    }
                     // `defineOptions<T>()` / `defineExpose<T>()` are object-member
                     // surfaces: the type argument projects to the SAME one-level
                     // object surface props/emits/slots resolve through (the SHARED

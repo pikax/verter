@@ -85,8 +85,8 @@ describe("typeDescriptorToString", () => {
     );
   });
 
-  it("converts unknown", () => {
-    expect(typeDescriptorToString(unknown("SomeWeirdType"))).toBe("SomeWeirdType");
+  it("projects unknown mechanically without rendering diagnostic text", () => {
+    expect(typeDescriptorToString(unknown("void"))).toBe("unknown");
     expect(typeDescriptorToString(unknown(""))).toBe("unknown");
   });
 });
@@ -199,8 +199,8 @@ describe("typeDescriptorToSchema", () => {
     });
   });
 
-  it("converts unknown to rawType string", () => {
-    expect(typeDescriptorToSchema(unknown("SomeType"))).toBe("SomeType");
+  it("projects unknown schema as unsupported without manufacturing meaning", () => {
+    expect(typeDescriptorToSchema(unknown("Booleanish"))).toBe("unknown");
   });
 
   it("returns 'unknown' when schema: false", () => {

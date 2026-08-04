@@ -217,7 +217,7 @@ fn find_residual_operator_leaves(
     };
     let mut violations = Vec::new();
     for prop in &meta.props {
-        if let Some(source) = prop.type_source.present() {
+        if let Some(source) = prop.publication.result().selected_source() {
             let ty = demand(source, &format!("prop:{}", prop.name));
             walk(&ty, &format!("prop:{}", prop.name), &mut violations);
         }
@@ -230,7 +230,7 @@ fn find_residual_operator_leaves(
     }
     for slot in &meta.slots {
         for binding in &slot.bindings {
-            if let Some(source) = binding.type_source.present() {
+            if let Some(source) = binding.publication.result().selected_source() {
                 let ty = demand(source, &format!("slot:{}.{}", slot.name, binding.name));
                 walk(
                     &ty,

@@ -461,7 +461,11 @@ export class ExtensionTsService {
       this.ts.findConfigFile(this.workspaceRoot, this.ts.sys.fileExists, "jsconfig.json");
 
     if (configPath) {
-      const configFile = this.ts.readConfigFile(configPath, this.ts.sys.readFile);
+      // TypeScript canonicalizes config-source filenames with `/` internally.
+      // Feed its config APIs that same spelling so Windows paths do not trip
+      // TypeScript's exact filename invariant while attaching diagnostics.
+      const tsConfigPath = configPath.replace(/\\/g, "/");
+      const configFile = this.ts.readConfigFile(tsConfigPath, this.ts.sys.readFile);
       if (configFile.error) {
         throw this.failClosed(
           `Verter: the extension TypeScript provider could not read the configuration ` +
@@ -475,9 +479,9 @@ export class ExtensionTsService {
       const parsed = this.ts.parseJsonConfigFileContent(
         configFile.config,
         this.ts.sys,
-        dirname(configPath),
+        dirname(tsConfigPath),
         undefined,
-        configPath,
+        tsConfigPath,
       );
       // `parseJsonConfigFileContent` reports unknown/invalid options, bad
       // `extends` targets, and malformed values HERE rather than throwing — the

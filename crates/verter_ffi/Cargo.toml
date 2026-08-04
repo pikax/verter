@@ -20,10 +20,12 @@ verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" 
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }
 verter_protocol = { path = "../verter_protocol", version = "0.0.1-beta.1" }
 verter_span = { path = "../verter_span" }
+verter_language = { path = "../verter_language" }
 log = "0.4"
 serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+verter_session = { path = "../verter_session", features = ["test-util"] }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_macro_dto = { path = "../verter_macro_dto" }

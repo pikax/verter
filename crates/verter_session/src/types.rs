@@ -12,6 +12,49 @@ pub use verter_language::FileLanguage;
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
 
+/// Content identity of the EXACT source bytes an analysis observed.
+///
+/// Pairs a [`FileAnalysisSnapshot`] with the buffer its spans and edit anchors
+/// address. A consumer that is about to apply an analyzer-minted edit position
+/// to a live buffer compares this against [`Self::of_source`] of that buffer:
+/// on mismatch it must produce no edit at all, because an in-bounds offset from
+/// a different revision silently lands in the wrong place.
+///
+/// Deliberately NOT `verter_semantic::RevisionMarker` (a session query-revision
+/// tuple, not a content identity, and not comparable against an editor buffer)
+/// and NOT the LSP `version: i32` alone (a host-served analysis carries no LSP
+/// version — precisely the ungated case).
+///
+/// `Default` is the UNSTAMPED sentinel. It equals no realistic source
+/// identity, so an unstamped analysis fails the comparison and the consumer
+/// fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
+#[serde(transparent)]
+pub struct AnalysisSourceRevision(Hash16);
+
+impl AnalysisSourceRevision {
+    /// Mint the revision of these exact source bytes.
+    ///
+    /// Producer and consumer share this one function, so the two sides cannot
+    /// drift apart on the hash algorithm.
+    pub fn of_source(source: &str) -> Self {
+        Self(crate::hash::hash_16(source.as_bytes()))
+    }
+
+    /// Adopt a `ParseSnapshot::whole_hash`, which is already
+    /// `hash_16(source.as_bytes())` over the whole file — identical to
+    /// [`Self::of_source`] on the same bytes, and free at a producer that
+    /// already holds it.
+    pub(crate) fn from_whole_hash(whole_hash: Hash16) -> Self {
+        Self(whole_hash)
+    }
+
+    /// Whether this revision was never stamped (the `Default` sentinel).
+    pub fn is_unstamped(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Hot Module Replacement strategy injected into the assembled main module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HmrStrategy {
@@ -1692,6 +1735,17 @@ pub struct FileAnalysisSnapshot {
     /// Whether the script block uses TypeScript (`lang="ts"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_typescript: bool,
+
+    /// Content identity of the exact source bytes this analysis observed.
+    ///
+    /// A per-FILE identity, so two macros in one snapshot can never disagree
+    /// about which buffer they address. Consumers that apply analyzer-minted
+    /// edit anchors to a live buffer compare this against
+    /// [`AnalysisSourceRevision::of_source`] of that buffer and fail closed on
+    /// mismatch. `Default` (unstamped) never matches, so an unstamped snapshot
+    /// also fails closed.
+    #[serde(default, skip_serializing_if = "AnalysisSourceRevision::is_unstamped")]
+    pub anchor_revision: AnalysisSourceRevision,
 }
 
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.
@@ -2100,6 +2154,12 @@ pub enum HostError {
     /// The scheduler was shut down.
     #[error("scheduler shut down")]
     Shutdown,
+    /// The request's parse-affecting profile differs from registered grammar.
+    #[error("compile profile grammar differs from registered grammar")]
+    GrammarMismatch(crate::carrier_publication_store::GrammarMismatch),
+    /// Typed B2 fail-closed result for external block bytes.
+    #[error("external block content deferred until {0:?}")]
+    ExternalBlockContentDeferred(crate::carrier_publication_store::ExternalBlockContentDeferred),
 }
 
 #[derive(Debug, Clone)]
@@ -2173,6 +2233,7 @@ impl FileMeta {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Geometry fields remain until the B4 physical cleanup.
 pub(crate) struct SrcBlockInfo {
     pub(crate) tag_name: String,
     pub(crate) resolved_canonical_id: String,
@@ -2199,6 +2260,8 @@ pub(crate) struct SrcBlockInfo {
 /// overlay results never populate base caches.
 pub(crate) struct VueTemplateInputs {
     pub(crate) source: Arc<str>,
+    /// Exact source revision shared by source, parse, and script analysis.
+    pub(crate) whole_hash: Hash16,
     /// The framework-neutral carrier parse artifact of `source`. `None`
     /// routes the computation through one counted carrier parse of its
     /// own — a single parse, never a duplicate of one the caller ran.
@@ -2258,6 +2321,7 @@ pub(crate) struct StyleOverrideLayer {
 
 /// Preprocessed template/script content that replaces the original block
 /// content before compilation. Stored per compile-profile.
+#[allow(dead_code)] // B4 owns physical retirement after B3 typed content lands.
 #[derive(Debug, Clone)]
 pub(crate) struct ContentOverride {
     pub(crate) code: Arc<str>,
@@ -2484,6 +2548,8 @@ pub(crate) struct CompileSlot {
 pub(crate) struct CompileInput {
     pub(crate) canonical_id: String,
     pub(crate) source: Arc<str>,
+    /// Exact source revision of the effective script/template snapshot.
+    pub(crate) whole_hash: Hash16,
     pub(crate) meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
@@ -2700,6 +2766,10 @@ pub(crate) struct RawTemplateAnalysisEntry {
     /// Scheduler node generation of the source read the template's
     /// inputs were captured from.
     pub(crate) source_generation: u64,
+    /// Exact semantic dependency read set for the dynamic-class projection.
+    /// Readers validate this against a proven-current store view before
+    /// serving the profileless slot.
+    pub(crate) template_class_signature: crate::fact_signature_helpers::ReadSetSignature,
 }
 
 /// A persist site's by-value admission statement for the
@@ -2740,6 +2810,9 @@ pub(crate) struct RawTemplateSlotAdmission {
     /// would carry a VALID current generation stamp no reader could
     /// reject.
     pub(crate) default_extraction: bool,
+    /// Complete dependency signature of the template-class semantic facts.
+    /// `None` means the fact set was ReturnOnly/partial and declines.
+    pub(crate) template_class_signature: Option<crate::fact_signature_helpers::ReadSetSignature>,
 }
 
 impl RawTemplateSlotAdmission {
@@ -2764,7 +2837,11 @@ impl RawTemplateSlotAdmission {
     ///   rail: an entry without a rail cannot be validated by any
     ///   reader, so it must not exist.
     pub(crate) fn admitted_generation(&self) -> Option<u64> {
-        if self.has_src_blocks || !self.default_extraction || !self.store_published {
+        if self.has_src_blocks
+            || !self.default_extraction
+            || !self.store_published
+            || self.template_class_signature.is_none()
+        {
             return None;
         }
         self.source_generation
@@ -2886,6 +2963,9 @@ impl DerivedRawState {
         let Some(source_generation) = admission.admitted_generation() else {
             return;
         };
+        let template_class_signature = admission
+            .template_class_signature
+            .expect("admitted raw-template statements carry complete class facts");
         let supersedes = self
             .raw_template_analysis
             .as_ref()
@@ -2894,6 +2974,7 @@ impl DerivedRawState {
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
                 source_generation,
+                template_class_signature,
             });
         }
     }
@@ -3222,7 +3303,7 @@ pub struct MetaProvenance {
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
     pub eval_program_parses: std::sync::atomic::AtomicU64,
     /// Carrier parses performed through the single counted carrier
-    /// chokepoint (`parse::parse_carrier_counted`) — every framework
+    /// store-leader projector boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
     /// `CarrierCompiler::parse`. The framework-neutral parse-once rail:
     /// a cold build of any carrier file bumps this once, so a duplicate
@@ -3230,7 +3311,7 @@ pub struct MetaProvenance {
     /// without naming a framework.
     pub carrier_parses: std::sync::atomic::AtomicU64,
     /// SFC structure parses (the Vue carrier compatibility rail) —
-    /// bumped by `parse::parse_carrier_counted` only when the dispatched
+    /// bumped by the elected store leader only when the dispatched
     /// carrier is Vue, covering the materialise lanes (base + overlay),
     /// the compile/template merged-source lanes, and the lazy
     /// `get_analysis` re-parse fallbacks, so a duplicate-SFC-parse
@@ -3352,7 +3433,7 @@ pub struct MetaProvenance {
     pub owner_import_surface_overflow_refusals: std::sync::atomic::AtomicU64,
     /// Admission refusals for `OwnerImportSurfaceDb` because an
     /// unresolved direct import could not be rooted in the owner's
-    /// `ImportRoute` fact rail (no coverage for the skipped specifier).
+    /// path-precise resolution witness (no coverage for the skipped specifier).
     /// The surface is served to the caller but never cached — the next
     /// request cold-recomputes against the live workspace.
     pub owner_import_surface_unrooted_skip_refusals: std::sync::atomic::AtomicU64,
@@ -4016,6 +4097,56 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // AnalysisSourceRevision
+    // -----------------------------------------------------------------------
+
+    /// Every producer stamps `anchor_revision` from a `ParseSnapshot::whole_hash`
+    /// (already `hash_16` of the whole file), while the LSP consumer mints its
+    /// live-buffer identity through `of_source`. Those two entry points MUST
+    /// agree on the same bytes or every macro edit fails closed forever.
+    #[test]
+    fn anchor_revision_from_whole_hash_agrees_with_of_source() {
+        let source = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>";
+        let whole_hash = crate::hash::hash_16(source.as_bytes());
+        assert_eq!(
+            AnalysisSourceRevision::from_whole_hash(whole_hash),
+            AnalysisSourceRevision::of_source(source),
+            "the producer's whole-hash stamp and the consumer's of_source mint \
+             must be the same identity for the same bytes"
+        );
+        // Negative: different bytes are a different identity, including a
+        // same-length edit a bounds check could never catch.
+        let same_length = source.replacen("defineSlots", "defineSlotX", 1);
+        assert_eq!(same_length.len(), source.len());
+        assert_ne!(same_length.as_str(), source);
+        assert_ne!(
+            AnalysisSourceRevision::of_source(&same_length),
+            AnalysisSourceRevision::of_source(source)
+        );
+    }
+
+    #[test]
+    fn anchor_revision_default_is_unstamped_and_matches_no_source() {
+        let unstamped = AnalysisSourceRevision::default();
+        assert!(unstamped.is_unstamped());
+        for source in ["", "x", "<script setup></script>"] {
+            let minted = AnalysisSourceRevision::of_source(source);
+            assert!(
+                !minted.is_unstamped(),
+                "of_source({source:?}) must be stamped"
+            );
+            assert_ne!(
+                minted, unstamped,
+                "the unstamped sentinel must match no real source identity"
+            );
+        }
+        // A default-constructed snapshot is therefore fail-closed for anchors.
+        assert!(FileAnalysisSnapshot::default()
+            .anchor_revision
+            .is_unstamped());
+    }
 
     // -----------------------------------------------------------------------
     // CompileFailure classification

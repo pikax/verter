@@ -8,6 +8,24 @@ use verter_compiler::svelte::parser::parse_svelte;
 /// binding resolution scope.
 const LEGACY_SLOT_OWNER: &str = "/Component.svelte";
 
+fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> TypeInfoSurface {
+    retain_svelte_snippet_members(surface, |member| {
+        if names.contains(&member.name.as_ref()) {
+            verter_type_expr::PropCallableRole::SvelteSnippet {
+                symbol: verter_type_expr::ResolvedSymbolIdentity {
+                    canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from("Snippet"),
+                },
+                exactness: ResolutionExactness::ExactSymbolic,
+                provenance: ResolutionProvenance::FrameworkSurface,
+            }
+        } else {
+            verter_type_expr::PropCallableRole::Other
+        }
+    })
+}
+
 /// Collect the legacy `<slot>` slot fields from a `.svelte` SOURCE through the
 /// same structural walk the resolver uses (the typed template carrier),
 /// scoped to [`LEGACY_SLOT_OWNER`].
@@ -1313,13 +1331,13 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .expect("the `onselect` callback prop surfaces as event `select`");
 
     // The `select` event carries the `(row: Row)` payload tuple (rendered at
     // the terminal sink).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the `select` event carries a payload tuple"
     );
@@ -1327,7 +1345,7 @@ fn callback_event_payload_named_ref_resolves_on_the_component_meta_surface() {
     // it has no authored macro-payload position, so the published locator and
     // scope are the honest paired `None`s (`payload_type` above is display).
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
 
@@ -1371,17 +1389,13 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the OPTIONAL callback prop IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL `onselect?:` callback prop must classify as event \
@@ -1405,12 +1419,12 @@ fn optional_callback_prop_classifies_as_event_with_precise_payload() {
     // synthesized tuple has no authored position), and `Row` resolves through
     // the graph-surface demand.
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the optional callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1444,12 +1458,12 @@ fn union_with_no_callable_arm_is_not_an_event() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.analysis.name == "mode"),
+        !emits.fields.iter().any(|e| e.name == "mode"),
         "an `on`-prefixed union with no callable arm must NOT be an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.analysis.name.as_str())
+            .map(|e| e.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1491,7 +1505,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an OPTIONAL alias callback prop `onselect?: Handler` must classify as \
@@ -1500,7 +1514,7 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
                 emits
                     .fields
                     .iter()
-                    .map(|e| e.analysis.name.as_str())
+                    .map(|e| e.name.as_str())
                     .collect::<Vec<_>>()
             )
         });
@@ -1508,12 +1522,12 @@ fn optional_alias_callback_prop_classifies_as_event_with_precise_payload() {
     // labelled tuple, the locator/scope stay the honest paired `None`s, and
     // `Row` resolves through the graph-surface demand.
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the optional alias callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1561,11 +1575,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the EXPLICIT-union callable VALUE IS event `select` (this is the
     // branch the member-`?` tests do NOT cover — they raise to a bare
@@ -1573,7 +1583,7 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "an EXPLICIT-union callable prop VALUE `onselect: ((row: Row) => void) | \
@@ -1592,12 +1602,12 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     // locator/scope stay the honest paired `None`s, and `Row` resolves
     // through the graph-surface demand (member `id`).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the explicit-union callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1638,13 +1648,13 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
     assert!(
-        !emits.fields.iter().any(|e| e.analysis.name == "select"),
+        !emits.fields.iter().any(|e| e.name == "select"),
         "an explicit union with TWO distinct callable arms is ambiguous and must NOT be \
              mined as an event, got {:?}",
         emits
             .fields
             .iter()
-            .map(|e| e.analysis.name.as_str())
+            .map(|e| e.name.as_str())
             .collect::<Vec<_>>()
     );
 }
@@ -1691,17 +1701,13 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
         panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
     };
     let emits = dtos.emits.as_ref().expect("emits surface present");
-    let names: Vec<&str> = emits
-        .fields
-        .iter()
-        .map(|e| e.analysis.name.as_str())
-        .collect();
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
 
     // (a) the carrier-wrapped nullish callable alias IS event `select`.
     let select = emits
         .fields
         .iter()
-        .find(|e| e.analysis.name == "select")
+        .find(|e| e.name == "select")
         .unwrap_or_else(|| {
             panic!(
                 "a carrier-wrapped nullish callback alias `onselect: Handler` (Handler = \
@@ -1720,12 +1726,12 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
     // locator/scope stay the honest paired `None`s, and `Row` resolves
     // through the graph-surface demand (member `id`).
     assert_eq!(
-        select.analysis.payload_type.as_deref(),
+        select.payload_type.as_deref(),
         Some("[row: Row]"),
         "the carrier-nullish callback publishes the `[row: Row]` payload display"
     );
     assert!(
-        select.analysis.payload.is_none() && select.analysis.payload_expr_scope.is_none(),
+        select.payload.is_none() && select.payload_expr_scope.is_none(),
         "a synthesized callback payload publishes no authored locator/scope"
     );
     assert_callback_row_param_resolves_precisely(&host, &ctx, canonical, "onselect");
@@ -1735,7 +1741,7 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
 fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
     // END-TO-END (the CONVERTED node-domain normalizer): a
     // `Snippet<[item: Item, index: number]>` member publishes ordered slot
-    // bindings `item` + `index` through `svelte_snippet_slots_from_typeinfo_surface`
+    // bindings `item` + `index` through `svelte_snippet_slot_fields_from_typeinfo_surface`
     // — the node-domain path (no materialize-then-decide). Uses a WORKSPACE-LOCAL
     // `Snippet` interface + a direct `retain_members` (bypassing package-backed
     // validation) so the CONVERTED normalizer is exercised directly.
@@ -1767,10 +1773,10 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
-    let filtered = retain_members(&surface, &["row".to_string()]);
+    let filtered = retain_test_snippet_members(&surface, &["row"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
 
-    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
     let row = slots
         .iter()
         .find(|s| s.name == "row")
@@ -2029,9 +2035,9 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
-    let filtered = retain_members(&surface, &["bad".to_string(), "good".to_string()]);
+    let filtered = retain_test_snippet_members(&surface, &["bad", "good"]);
     let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
-    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let slots = svelte_snippet_slot_fields_from_typeinfo_surface(&ctx, &resolved);
     let slot_names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
     assert!(
         !slot_names.contains(&"bad"),
@@ -2085,15 +2091,14 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let recovered_surface =
         navigate_param_to_object_surface(&recovered_ctx, component, recovered_props)
             .expect("props surface after recovery");
-    let recovered_filtered =
-        retain_members(&recovered_surface, &["bad".to_string(), "good".to_string()]);
+    let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
     let recovered_resolved = macro_surface_shell(
         recovered_filtered,
         AnalyzedMacroKind::DefineSlots,
         component,
     );
     let recovered_slots =
-        svelte_snippet_slots_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
+        svelte_snippet_slot_fields_from_typeinfo_surface(&recovered_ctx, &recovered_resolved);
     let recovered_bad = recovered_slots
         .iter()
         .find(|s| s.name == "bad")

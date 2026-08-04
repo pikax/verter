@@ -98,6 +98,7 @@ mod tests {
             script: Some(script),
             styles: &[],
             source: Some(source),
+            blocks: &[],
         };
         visitor.visit_file(&file_ctx, &mut ctx);
         ctx.into_diagnostics()

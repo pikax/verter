@@ -328,6 +328,7 @@ mod tests {
     /// One slot field with the given name (an otherwise-empty fixture).
     fn slot_field(name: &str) -> verter_semantic::analysis::types::AnalyzedSlotField {
         verter_semantic::analysis::types::AnalyzedSlotField {
+            props_anchor: Default::default(),
             name: name.to_string(),
             is_required: false,
             span: verter_span::Span::default(),
@@ -405,10 +406,11 @@ mod tests {
         let runes = ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
             props: Some(crate::typeinfo::framework_surface::results::PropsSurface {
                 fields: vec![
-                    crate::typeinfo::framework_surface::results::ResolvedPropField {
-                        analysis: prop("a"),
-                        type_source: verter_type_expr::facts::SourcePosition::unannotated(),
-                    },
+                    crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
+                        prop("a"),
+                        verter_type_expr::facts::SourcePosition::unannotated(),
+                        verter_type_expr::PropCallableRole::Other,
+                    ),
                 ],
                 index_signatures: Vec::new(),
                 ..Default::default()

@@ -822,7 +822,7 @@ fn object_one_member(
     name: &str,
     value: SemanticNodeId,
 ) -> SemanticNodeId {
-    use crate::semantic_query::{IndexSignature, SurfaceMember, SurfaceView};
+    use crate::semantic_query::{IndexSignature, SurfaceMember};
     let member = SurfaceMember {
         visibility: verter_type_expr::MemberVisibility::Public,
         name: Arc::from(name),
@@ -837,7 +837,7 @@ fn object_one_member(
     };
     dispatch
         .graph()
-        .intern_node(SemanticNodeData::Object(SurfaceView {
+        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -991,7 +991,7 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
     // key domain is its selection argument `'a'` (provably closed), so the
     // source/key-space role must prove finiteness CLOSED and enumerate `{a}`.
     let source_obj = {
-        use crate::semantic_query::{IndexSignature, SurfaceMember, SurfaceView};
+        use crate::semantic_query::{IndexSignature, SurfaceMember};
         let member = |name: &str, value: SemanticNodeId| SurfaceMember {
             visibility: verter_type_expr::MemberVisibility::Public,
             name: Arc::from(name),
@@ -1006,7 +1006,7 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
         };
         dispatch
             .graph()
-            .intern_node(SemanticNodeData::Object(SurfaceView {
+            .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from(
                     vec![member("a", string_ty), member("b", number_ty)].into_boxed_slice(),
                 ),

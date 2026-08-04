@@ -25,14 +25,14 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as vscode from "vscode";
 import type { LanguageClient } from "vscode-languageclient/node";
-import type { PatchClient } from "@verter/language-shared";
+import type { PatchClient, DocumentStructureResponseV1 } from "@verter/language-shared";
 import { RequestType } from "@verter/language-shared";
 import {
-  scanStyleBlocks,
+  styleBlocksFromStructure,
   findStyleBlockAt,
   type StyleBlockInfo,
   type StyleLang,
-} from "./styleBlockScanner";
+} from "./styleStructure";
 import { directStyleDocumentText } from "./styleDocumentText";
 import { transpile, type TranspileResult } from "./transpiler";
 import { resolvePreprocessor, type PreprocessorCache } from "./preprocessorResolver";
@@ -60,17 +60,16 @@ function getServiceForLang(lang: StyleLang): CSSLanguageService | null {
 
 // ── Virtual file cache ───────────────────────────────────────────
 
-interface CachedStyleEntry {
-  code: string;
-  lang: string;
-}
-
 interface DocumentCache {
   version: number;
+  openEpoch: string;
+  availability: DocumentStructureResponseV1["kind"] | "transportUnavailable" | "staleInvocation";
   blocks: StyleBlockInfo[];
   source: string;
-  /** Keyed by style block index */
-  virtualFiles: Map<number, CachedStyleEntry>;
+  /** Captured from the admitted `available` structure (R2-B-04): style
+   * overrides computed against this structure are revision-bound to it. */
+  documentRevisionToken?: string;
+  artifactToken?: string;
   /** Keyed by style block index — transpiled CSS for preprocessors */
   transpiled: Map<number, TranspileResult>;
 }
@@ -84,10 +83,12 @@ export class CssService {
   private warnedMissing = new Set<string>();
   /** Inline diagnostics for missing preprocessor packages (sass, stylus). */
   private diagnostics = vscode.languages.createDiagnosticCollection("verter-preprocessor");
+  private requestNonce = 0;
 
   constructor(
     private getClient: () => PatchClient<LanguageClient>,
     private workspacePath: string | undefined,
+    private getOpenEpoch: (uri: string) => string,
   ) {
     // Pre-resolve preprocessors from the workspace's node_modules
     if (workspacePath) {
@@ -166,14 +167,24 @@ export class CssService {
 
   /**
    * Get CSS diagnostics for all style blocks in the document.
+   *
+   * FAIL CLOSED on availability (TE-C-11): returns `null` — NOT an empty
+   * array — unless the structure response for THIS version was an admitted
+   * `available`. An empty array is a successful "genuinely clean" validation
+   * the publisher may publish (clearing prior diagnostics); `null` means the
+   * structure was stale/unavailable/closed or the transport failed, and the
+   * publisher must keep the last-known real diagnostics and publish nothing.
    */
   async doValidation(
     uri: string,
     source: string,
     version: number,
-  ): Promise<Array<{ blockIndex: number; diagnostics: CSSDiagnostic[] }>> {
+  ): Promise<Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> | null> {
     const entry = await this.ensureCache(uri, source, version);
-    const results: Array<{ blockIndex: number; diagnostics: CSSDiagnostic[] }> = [];
+    if (entry.availability !== "available") {
+      return null;
+    }
+    const results: Array<{ blockToken: string; diagnostics: CSSDiagnostic[] }> = [];
 
     for (const block of entry.blocks) {
       const service = this.getServiceForBlock(block, entry);
@@ -187,7 +198,7 @@ export class CssService {
         for (const d of diags) {
           d.range = this.toSfcRange(block, d.range);
         }
-        results.push({ blockIndex: block.index, diagnostics: diags });
+        results.push({ blockToken: block.blockToken, diagnostics: diags });
       }
     }
 
@@ -270,14 +281,6 @@ export class CssService {
     }));
   }
 
-  /**
-   * Check if a position is inside a style block.
-   */
-  isInStyleBlock(source: string, line: number, character: number): boolean {
-    const blocks = scanStyleBlocks(source);
-    return findStyleBlockAt(blocks, source, line, character) !== undefined;
-  }
-
   dispose(): void {
     this.cache.clear();
     this.diagnostics.dispose();
@@ -313,7 +316,7 @@ export class CssService {
   ): CSSLanguageService | null {
     // For preprocessors that need transpilation, check if we have transpiled output
     if (block.lang === "sass" || block.lang === "stylus") {
-      return entry.transpiled.has(block.index) ? cssService : null;
+      return entry.transpiled.has(block.legacyPreprocessorIndex) ? cssService : null;
     }
     return getServiceForLang(block.lang);
   }
@@ -323,11 +326,21 @@ export class CssService {
     entry: DocumentCache,
     sfcUri: string,
   ): CSSTextDocument | null {
+    // External-src blocks yield NO inline slice (R2-B-03): the inline bytes
+    // are framework-ignored — never validate, hover, or color them as if
+    // they were available content. Typed unavailable, fail closed.
+    if (block.externalSrc) return null;
+
     // For transpiled languages, use transpiled CSS
     if (block.lang === "sass" || block.lang === "stylus") {
-      const transpiled = entry.transpiled.get(block.index);
+      const transpiled = entry.transpiled.get(block.legacyPreprocessorIndex);
       if (!transpiled) return null;
-      return TextDocument.create(`${sfcUri}.style.${block.index}.css`, "css", 1, transpiled.css);
+      return TextDocument.create(
+        `${sfcUri}.style.${block.blockToken}.css`,
+        "css",
+        1,
+        transpiled.css,
+      );
     }
 
     // For direct languages (css, scss, less, postcss), the CSS service MUST
@@ -339,7 +352,7 @@ export class CssService {
     const code = directStyleDocumentText(entry.source, block);
 
     const langId = block.lang === "postcss" ? "css" : block.lang;
-    return TextDocument.create(`${sfcUri}.style.${block.index}.${langId}`, langId, 1, code);
+    return TextDocument.create(`${sfcUri}.style.${block.blockToken}.${langId}`, langId, 1, code);
   }
 
   /**
@@ -383,40 +396,63 @@ export class CssService {
    */
   private async ensureCache(uri: string, source: string, version: number): Promise<DocumentCache> {
     const existing = this.cache.get(uri);
-    if (existing && existing.version === version) {
+    const openEpoch = this.getOpenEpoch(uri);
+    if (existing && existing.version === version && existing.openEpoch === openEpoch) {
       return existing;
     }
 
-    const blocks = scanStyleBlocks(source);
-
-    // Request virtual files from the LSP
-    const virtualFiles = new Map<number, CachedStyleEntry>();
-    const transpiled = new Map<number, TranspileResult>();
-
+    const requestToken = `${openEpoch}:${version}:${++this.requestNonce}`;
+    let response: DocumentStructureResponseV1 | null = null;
     try {
-      const client = this.getClient();
-      const response = await client.sendRequest(RequestType.GetVirtualFiles, {
-        uri,
+      response = await this.getClient().sendRequest(RequestType.GetDocumentStructure, {
+        requestToken,
+        textDocument: { uri },
+        clientOpenEpoch: openEpoch,
+        expectedClientVersion: version,
       });
-
-      if (response?.virtualFiles) {
-        for (const vf of response.virtualFiles) {
-          // Parse "style:N" kind
-          const match = /^style:(\d+)$/.exec(vf.kind);
-          if (!match) continue;
-          const idx = parseInt(match[1], 10);
-          virtualFiles.set(idx, { code: vf.code, lang: vf.lang });
-        }
-      }
     } catch {
-      // LSP might not be ready; fall back to empty
+      response = null;
     }
+    const live = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri);
+    const admitted =
+      response !== null &&
+      response.requestToken === requestToken &&
+      response.clientOpenEpoch === openEpoch &&
+      response.expectedClientVersion === version &&
+      live?.version === version &&
+      this.getOpenEpoch(uri) === openEpoch;
+    const blocks = admitted && response ? styleBlocksFromStructure(source, response) : [];
+    const admittedAvailable = admitted && response !== null && response.kind === "available";
+    const captured =
+      admittedAvailable && response !== null && response.kind === "available"
+        ? {
+            documentRevisionToken: response.structure.documentRevisionToken,
+            artifactToken: response.structure.artifactToken,
+          }
+        : undefined;
+    const transpiled = new Map<number, TranspileResult>();
 
     // Transpile preprocessors if needed (resolved from workspace node_modules)
     // Collect missing-preprocessor diagnostics for this URI atomically.
     const missingDiags: vscode.Diagnostic[] = [];
 
+    // Every post-transpile-await side effect (warning, diagnostics publish,
+    // cache write) runs only for a still-current invocation: the document
+    // may have moved (or been reopened) while an await was in flight, and a
+    // STALE invocation must never warn, clear, or replace a newer
+    // revision's state.
+    const stillCurrent = () => {
+      const liveNow = vscode.workspace.textDocuments.find(
+        (document) => document.uri.toString() === uri,
+      );
+      return liveNow?.version === version && this.getOpenEpoch(uri) === openEpoch;
+    };
+
     for (const block of blocks) {
+      // External-src blocks have no inline content to transpile — the
+      // inline slice is framework-ignored and the host REJECTS overrides
+      // targeting a deferred block (R2-B-03). Send nothing.
+      if (block.externalSrc) continue;
       if (block.lang !== "sass" && block.lang !== "stylus") continue;
 
       // Re-resolve if workspace path changed or wasn't available at construction
@@ -424,15 +460,22 @@ export class CssService {
         resolvePreprocessor(block.lang, this.workspacePath, this.preprocessors);
       }
 
-      const vf = virtualFiles.get(block.index);
-      if (!vf) continue;
-
-      const result = await transpile(vf.code, block.lang, uri, this.preprocessors);
+      const authored = directStyleDocumentText(source, block);
+      const result = await transpile(authored, block.lang, uri, this.preprocessors);
       if (result) {
-        transpiled.set(block.index, result);
+        transpiled.set(block.legacyPreprocessorIndex, result);
 
-        // Send transpiled CSS back to the host for analysis
-        await this.applyStyleOverride(uri, block.index, result);
+        // Send transpiled CSS back to the host for analysis — bound to the
+        // captured structure tokens, and only while the document is still
+        // the exact revision the transpile ran against (R2-B-04).
+        await this.applyStyleOverride(
+          uri,
+          block.legacyPreprocessorIndex,
+          result,
+          version,
+          openEpoch,
+          captured,
+        );
       } else {
         // Emit an inline diagnostic on the lang="..." attribute
         if (block.langAttributeRange) {
@@ -453,8 +496,11 @@ export class CssService {
           missingDiags.push(diag);
         }
 
-        // Show a one-time warning message as secondary guidance
-        if (!this.warnedMissing.has(block.lang)) {
+        // Show a one-time warning message as secondary guidance — only from
+        // a still-current invocation: a stale post-transpile invocation must
+        // neither warn nor mark the lang as warned, which would permanently
+        // suppress a later relevant warning.
+        if (stillCurrent() && !this.warnedMissing.has(block.lang)) {
           this.warnedMissing.add(block.lang);
           vscode.window.showWarningMessage(
             `Verter: "${block.lang}" is not installed in the workspace. ` +
@@ -465,34 +511,88 @@ export class CssService {
       }
     }
 
-    // Update diagnostics atomically for this URI (clears stale entries)
-    try {
-      const vscodeUri = vscode.Uri.parse(uri);
-      this.diagnostics.set(vscodeUri, missingDiags);
-    } catch {
-      // URI parsing may fail for non-file URIs; ignore
+    // One post-await admission decision governs every remaining side effect
+    // AND the returned value: the transpile/override awaits above may have
+    // outlived the revision this invocation ran against.
+    const current = stillCurrent();
+
+    // Update diagnostics atomically for this URI (clears stale entries) —
+    // only from a current, admitted-available invocation. A non-available
+    // structure knows NOTHING about the blocks, so it has nothing
+    // authoritative to publish or clear.
+    if (admittedAvailable && current) {
+      try {
+        const vscodeUri = vscode.Uri.parse(uri);
+        this.diagnostics.set(vscodeUri, missingDiags);
+      } catch {
+        // URI parsing may fail for non-file URIs; ignore
+      }
+    }
+
+    // A STALE invocation returns a typed miss (B-29): its admitted structure
+    // belongs to a revision the document has left behind. Handing it back as
+    // "available" would let a caller validate old blocks against new text and
+    // publish the result (an empty validation would even CLEAR the newer
+    // revision's real diagnostics). Callers fail closed on non-available.
+    if (!current) {
+      return {
+        version,
+        openEpoch,
+        availability: "staleInvocation",
+        blocks: [],
+        source,
+        transpiled: new Map(),
+      };
     }
 
     const entry: DocumentCache = {
       version,
+      openEpoch,
+      availability: admitted && response ? response.kind : "transportUnavailable",
       blocks,
       source,
-      virtualFiles,
+      ...(captured ?? {}),
       transpiled,
     };
-    this.cache.set(uri, entry);
+    // Cache only current, admitted-available results: a transient
+    // non-available must be re-queried on the next demand — never sticky
+    // for the whole (version, openEpoch) — and a stale invocation must not
+    // overwrite the newer revision's entry.
+    if (admittedAvailable) {
+      this.cache.set(uri, entry);
+    }
     return entry;
   }
 
   /**
    * Send a preprocessor-compiled style override to the Rust LSP host.
    * This updates the host's analysis with the transpiled CSS.
+   *
+   * Revision-bound (R2-B-04): the transpile is async, so the document may
+   * have moved while it ran. The result is dropped client-side when the live
+   * document no longer matches the captured version/epoch, and the request
+   * carries the captured structure tokens so the server independently
+   * refuses a mismatched-revision apply.
    */
   private async applyStyleOverride(
     uri: string,
     index: number,
     result: TranspileResult,
+    version: number,
+    openEpoch: string,
+    captured?: { documentRevisionToken: string; artifactToken: string },
   ): Promise<void> {
+    if (!captured) {
+      // The structure tokens are REQUIRED server-side: an apply that cannot
+      // carry them would be refused typed — send nothing.
+      return;
+    }
+    const live = vscode.workspace.textDocuments.find((document) => document.uri.toString() === uri);
+    if (live?.version !== version || this.getOpenEpoch(uri) !== openEpoch) {
+      // Revision A's slow transpile result must not overwrite revision B's
+      // state: the newer revision owes its own transpile.
+      return;
+    }
     try {
       const client = this.getClient();
       await client.sendRequest(RequestType.ApplyStyleOverrides, {
@@ -504,6 +604,7 @@ export class CssService {
             sourceMap: result.sourceMap ? JSON.stringify(result.sourceMap) : undefined,
           },
         ],
+        ...captured,
       });
     } catch {
       // Silently fail — LSP might not support this yet

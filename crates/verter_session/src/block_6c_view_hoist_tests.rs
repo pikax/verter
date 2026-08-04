@@ -71,6 +71,21 @@ defineProps<ButtonProps>()
     (host, canonical)
 }
 
+fn small_host_with_one_script() -> (VerterHost, String) {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/proj/button.ts".to_string();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: canonical.clone(),
+            source: Arc::from("export interface ButtonProps { label: string }\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert button.ts must succeed");
+    (host, canonical)
+}
+
 /// View-build count test.
 ///
 /// A single resolver-tier read pattern under a `HostResolverContext`
@@ -400,7 +415,11 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
 
-    let (host, canonical) = small_host_with_one_component();
+    // This assertion is about generic session-rooted artifact hashes. Carrier
+    // document revisions require their own registered document authority, so
+    // use an ordinary script overlay here rather than inventing carrier source
+    // identity inside the overlay materializer.
+    let (host, canonical) = small_host_with_one_script();
 
     // Materialise the base IndexedReady so `with_session_overlay` and
     // the overlay artifact lookup both have something to find.
@@ -413,18 +432,8 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
     // Construct a session view that overlays `canonical` with DIFFERENT
     // content — the overlay hash must diverge from the base hash for
     // this test to discriminate.
-    let overlay_source: Arc<str> = Arc::from(
-        r#"<script setup lang="ts">
-interface ButtonProps {
-  label: string
-  disabled?: boolean
-  variant?: 'primary' | 'secondary'
-}
-defineProps<ButtonProps>()
-</script>
-<template><button :disabled="disabled">{{ label }}</button></template>
-"#,
-    );
+    let overlay_source: Arc<str> =
+        Arc::from("export interface ButtonProps { label: string; disabled?: boolean }\n");
     let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     overlays.insert(canonical.clone(), Arc::clone(&overlay_source));
     let view = OverlaidView::new(Arc::clone(&host), overlays);

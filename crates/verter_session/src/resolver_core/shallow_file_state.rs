@@ -44,9 +44,10 @@ enum RequiredImportClosure {
 /// Keyed by `(canonical_id, whole_hash)`.  Invalidated when the file’s
 /// whole-hash changes.
 ///
-/// All cross-file edges carry canonical target IDs resolved at construction
-/// time.  The frontier and other consumers never need to re-resolve raw
-/// specifiers during the hot path.
+/// Cross-file edges retain authored source specifiers only. Request-bound
+/// consumers resolve them through the captured workspace resolution world, so
+/// this content-addressed parse artifact never becomes a second resolution
+/// authority.
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
     /// Content hash of the source that produced this state.
@@ -55,14 +56,14 @@ pub struct ShallowFileState {
     /// Named exports: exported name → routing target.
     pub exports: FxHashMap<String, ExportTarget>,
 
-    /// `export * from` sources with canonical targets, in declaration order.
+    /// Authored `export * from` source specifiers, in declaration order.
     pub wildcard_reexports: Vec<WildcardReexport>,
 
     /// Import-local names (names that come from `import` declarations).
     /// Used to classify dependencies as local vs external during closure.
     pub import_locals: FxHashSet<String>,
 
-    /// Import specifier targets: local import name → canonical import target.
+    /// Import specifier targets: local import name → authored source/name fact.
     pub import_targets: FxHashMap<String, ImportTarget>,
 
     /// Authoritative owner-qualified import table. The public string-keyed
@@ -80,9 +81,9 @@ pub struct ShallowFileState {
     decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
 
     /// Per-name DEPENDENCY-EDGE cache: the local/external dependency
-    /// classification for one file-scope TYPE symbol (canonicals baked
-    /// from THIS state's import targets — rebuilt with the state at edge
-    /// refresh so cross-file edges re-resolve). Stores ONLY dependency
+    /// classification for one file-scope TYPE symbol. Cross-file entries retain
+    /// authored specifiers and are resolved by the request context. Stores ONLY
+    /// dependency
     /// edges, never a lowered body product — body data is read through
     /// the lazy memo accessors ([`Self::type_decl`]). Populated only for
     /// names the header inventory knows; a header miss never inserts.
@@ -825,7 +826,7 @@ impl ShallowFileState {
             );
         }
 
-        // Wildcard reexport sources (in declaration order) with canonical targets
+        // Wildcard reexport sources in declaration order, retaining authored specifiers.
         for wildcard in &route_inventory.wildcard_reexports {
             if let Some(exported_namespace) = &wildcard.exported_namespace {
                 insert_export(
@@ -1359,27 +1360,13 @@ impl ShallowFileState {
         !self.wildcard_reexports.is_empty()
     }
 
-    /// Whether the SHALLOW INVENTORY carries any cross-file edge — a
-    /// resolved import target, a wildcard reexport, a named reexport, or a
-    /// bindingless (side-effect / empty-list) import. Every such edge
-    /// bakes or implies a target `canonical_id` that depends on the
-    /// DEPENDENCY file set (not this file's own content). Bindingless
-    /// imports carry no local binding (so they never enter
-    /// `import_targets`) yet still resolve into
-    /// `IndexedReady.import_routes`; the retained route inventory is
-    /// the single authoritative source for them.
+    /// Whether the shallow PARSE inventory contains authored syntax that can
+    /// demand a cross-file resolution: an import, wildcard or named reexport,
+    /// or bindingless side-effect/empty-list import.
     ///
-    /// This is a COMPONENT predicate, not an edge-currency authority: an
-    /// artifact can carry cross-file edges exclusively in its
-    /// `import_routes` table (the SFC external `src=` class, caller-pushed
-    /// route snapshots) that are invisible here. The complete authority is
-    /// `IndexedReady::has_cross_file_edges` (`!import_routes.is_empty() ||`
-    /// this component); the shared edge-currency oracle
-    /// (`route_surface_is_edge_current`) and the reuse gates consult ONLY
-    /// the complete authority. The legitimate component uses are the
-    /// authority's own composition and gates over data derived purely from
-    /// the shallow inventory (e.g. whether a bare shallow route-surface
-    /// hash is currency-independent).
+    /// This predicate classifies authored shape only. It carries no resolved
+    /// canonical and is never a resolution-currency authority; consumers
+    /// resolve each specifier through the request's captured resolution world.
     pub fn has_shallow_cross_file_edges(&self) -> bool {
         !self.import_targets.is_empty()
             || self.has_wildcard_reexports()
@@ -4090,13 +4077,16 @@ export interface Props { child: Foo }
         assert_eq!(foo_ext.imported_name, "Foo");
         assert_eq!(foo_ext.source_specifier, "./bar");
 
-        // The digest a `Route` derived fact publishes is likewise pure
-        // parse domain: it is computable from this state alone, with no
-        // resolver, host, or workspace in scope.
-        assert_eq!(
+        // The digest a `Route` derived fact publishes includes the authored
+        // routing surface and changes when an authored specifier changes.
+        let changed = ShallowFileState::service_backed_for_test_at(
+            "/ws/fixture.ts",
+            &source.replace("./bar", "./other"),
+        );
+        assert_ne!(
             crate::resolver_store::hash_route_surface(&state),
-            crate::resolver_store::hash_route_surface(&state),
-            "the route-surface digest is a pure function of the authored surface"
+            crate::resolver_store::hash_route_surface(&changed),
+            "the route-surface digest must discriminate authored specifiers"
         );
     }
 

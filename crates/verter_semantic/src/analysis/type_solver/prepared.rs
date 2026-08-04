@@ -228,6 +228,10 @@ pub struct PreparedTypeDecl {
     verter_no_typeexpr::NoTypeExpr,
 )]
 pub struct PreparedExternalDep {
+    pub local_name: String,
+    pub source_specifier: String,
+    pub imported_name: String,
+    pub member_path: Arc<[Arc<str>]>,
     pub canonical_id: String,
     pub owner: verter_type_expr::TopLevelOwnerId,
     pub symbol_name: String,
@@ -254,11 +258,16 @@ impl std::error::Error for AuthoredOrdinalOverflow {}
 mod prepared_external_dep_owner_tests {
     use super::PreparedExternalDep;
     use std::collections::HashSet;
+    use std::sync::Arc;
     use verter_type_expr::TopLevelOwnerId;
 
     #[test]
     fn external_dependency_identity_discriminates_owner_in_memo_and_serde() {
         let make = |owner| PreparedExternalDep {
+            local_name: "Local".to_string(),
+            source_specifier: "./dep".to_string(),
+            imported_name: "Shared".to_string(),
+            member_path: Arc::from([]),
             canonical_id: "/src/dep.vue".to_string(),
             owner,
             symbol_name: "Shared".to_string(),
@@ -275,6 +284,46 @@ mod prepared_external_dep_owner_tests {
             serde_json::from_str::<PreparedExternalDep>(&serde_json::to_string(&module).unwrap())
                 .unwrap(),
             module
+        );
+
+        // Authored route data is value-side EVIDENCE that survives the persisted
+        // round trip and DISCRIMINATES two authored routes to one terminal. It
+        // is deliberately NOT semantic query or cache KEY identity — the
+        // route-provenance ruling forbids a local alias there, and this edge
+        // rides on the prepared decl VALUE (`PreparedValueDecl` /
+        // `LoweredValueDecl` derive neither `PartialEq` nor `Hash`), keyed by
+        // the owner's content-addressed identity.
+        let other_route = PreparedExternalDep {
+            source_specifier: "./other".to_string(),
+            ..module.clone()
+        };
+        assert_ne!(module, other_route);
+        assert_ne!(
+            serde_json::to_string(&module).unwrap(),
+            serde_json::to_string(&other_route).unwrap(),
+            "authored route evidence must survive the persisted VALUE round trip"
+        );
+        let alias_only = PreparedExternalDep {
+            local_name: "Aliased".to_string(),
+            ..module.clone()
+        };
+        assert_ne!(
+            module, alias_only,
+            "the authored local binding discriminates the evidence"
+        );
+        assert_eq!(
+            (
+                alias_only.canonical_id.as_str(),
+                alias_only.owner,
+                alias_only.symbol_name.as_str()
+            ),
+            (
+                module.canonical_id.as_str(),
+                module.owner,
+                module.symbol_name.as_str()
+            ),
+            "changing only the authored local alias must leave the RESOLVED \
+             terminal identity — the part any cache key may key on — untouched"
         );
     }
 }
@@ -616,6 +665,29 @@ impl PreparedTypeDecl {
                             visibility: prop.visibility,
                             // Stamp this declaration's defining file.
                             declaration_origin: declaration_origin.clone(),
+                            // The AUTHORED reference head of this member's own
+                            // annotation, minted HERE — at the one lazy lowering
+                            // that already holds the transient body — and copied
+                            // verbatim onto the prepared surface. The AUTHORSHIP
+                            // GATE mirrors `has_authored_return`: a property's
+                            // `ty` is NOT always authored (an initializer-only
+                            // class field carries an INFERRED type), and
+                            // `spans.type_annotation` is `Some` iff the member
+                            // carries an authored annotation on BOTH producer
+                            // paths — so an inferred member type mints the typed
+                            // `Unavailable`, never a fabricated head whose
+                            // locator addresses source that does not exist. An
+                            // authored non-reference annotation classifies to
+                            // `NotReference`.
+                            reference_head: if prop.spans.type_annotation.is_some() {
+                                crate::analysis::fact_projection::member_annotation_reference_head_fact(
+                                    &prop.ty,
+                                    &decl_anchor(root_identity, LocatorSymbolSpace::Type),
+                                    &member_value_path(),
+                                )
+                            } else {
+                                verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable
+                            },
                             ty: decl_slot(
                                 root_identity,
                                 LocatorSymbolSpace::Type,
@@ -647,6 +719,15 @@ impl PreparedTypeDecl {
                             visibility: method.visibility,
                             // Stamp this declaration's defining file.
                             declaration_origin: declaration_origin.clone(),
+                            // A method member has NO authored member type
+                            // annotation — its surface is a function signature,
+                            // whose authored RETURN head is the separate
+                            // `FunctionSignatureFact::return_reference_head`
+                            // peer. Minting a member head from its shape would
+                            // fabricate authored evidence, so the typed absence
+                            // is published instead.
+                            reference_head:
+                                verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
                             ty: decl_slot(
                                 root_identity,
                                 LocatorSymbolSpace::Type,
@@ -1327,6 +1408,7 @@ impl PreparedValueDecl {
                 typeof_alias_target: None,
                 classification: ValueAnnotationClass::Absent,
                 annotation: None,
+                reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -1405,6 +1487,249 @@ mod tests {
         assert_eq!(&*count.ty.path, &member_value_path(1));
 
         assert!(decl.member("missing").is_none());
+    }
+
+    /// The prepared member index mints the member's AUTHORED reference head at
+    /// the same lazy lowering that indexes the member, from the transient
+    /// contributor body it already holds — the producer half of the named
+    /// prop-wrapper route.
+    ///
+    /// Three discriminated states, one per authored shape:
+    ///
+    /// - a reference annotation (`variant: Ref<'a' | 'b'>`) mints the closed
+    ///   `Bare` head, with the argument locator rooted at the member's OWN value
+    ///   path so the demand side can address the outer authored argument;
+    /// - an authored NON-reference annotation (`plain: string`) mints
+    ///   `NotReference` — a complete "this member is not a reference" proof;
+    /// - a METHOD member has no authored member type ANNOTATION at all and
+    ///   mints `Unavailable` — never a head fabricated from its function shape.
+    #[test]
+    fn member_head_mint_is_gated_on_an_authored_annotation() {
+        // The AUTHORSHIP GATE for member heads, mirroring
+        // `has_authored_return`: `ObjectProperty.ty` is NOT always authored —
+        // an initializer-only class field carries an INFERRED type (with a
+        // reference shape such as `Ref<"ReturnType">`), and minting a head
+        // from it would publish authored route evidence for an annotation the
+        // author never wrote, with an argument locator addressing a source
+        // position that does not exist. `spans.type_annotation` is `Some` iff
+        // the member carries an authored annotation, on BOTH producer paths.
+        let annotated_span = verter_span::Span::new(10, 30);
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_spans_public(
+                    "annotated".into(),
+                    TypeExpr::Ref {
+                        name: "Ref".into(),
+                        type_arguments: Arc::from(
+                            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                        ),
+                    },
+                    false,
+                    false,
+                    verter_type_expr::MemberSpans {
+                        declaration: None,
+                        name: None,
+                        type_annotation: Some(annotated_span),
+                    },
+                )),
+                // An initializer-inferred field: reference-SHAPED type, but no
+                // authored annotation span — the exact fabrication hazard.
+                ObjectMember::Property(ObjectProperty::with_spans_public(
+                    "inferred".into(),
+                    TypeExpr::Ref {
+                        name: "ReturnType".into(),
+                        type_arguments: Arc::from(
+                            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                        ),
+                    },
+                    false,
+                    false,
+                    verter_type_expr::MemberSpans {
+                        declaration: None,
+                        name: None,
+                        type_annotation: None,
+                    },
+                )),
+            ],
+        }));
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/gate.ts", "Props"),
+            TypeDeclKind::Interface,
+        );
+        decl.build_member_index(&body, None);
+
+        assert!(
+            matches!(
+                &decl.member("annotated").expect("annotated row").reference_head,
+                verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. }
+                    if local_name.as_ref() == "Ref"
+            ),
+            "an authored reference annotation mints the Bare head"
+        );
+        assert!(
+            matches!(
+                &decl
+                    .member("inferred")
+                    .expect("inferred row")
+                    .reference_head,
+                verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable
+            ),
+            "an INFERRED member type must mint Unavailable — a Bare head here is \
+             fabricated authored evidence with a locator addressing no source, \
+             got {:?}",
+            decl.member("inferred").unwrap().reference_head
+        );
+    }
+
+    #[test]
+    fn prepared_member_index_mints_authored_reference_heads_per_member() {
+        let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                ObjectMember::Property(ObjectProperty::with_spans_public(
+                    "variant".into(),
+                    TypeExpr::Ref {
+                        name: "Ref".into(),
+                        type_arguments: Arc::from(
+                            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                        ),
+                    },
+                    false,
+                    false,
+                    verter_type_expr::MemberSpans {
+                        declaration: None,
+                        name: None,
+                        type_annotation: Some(verter_span::Span::new(1, 2)),
+                    },
+                )),
+                ObjectMember::Property(ObjectProperty::with_spans_public(
+                    "plain".into(),
+                    TypeExpr::Primitive(PrimitiveName::String),
+                    false,
+                    false,
+                    verter_type_expr::MemberSpans {
+                        declaration: None,
+                        name: None,
+                        type_annotation: Some(verter_span::Span::new(3, 4)),
+                    },
+                )),
+                ObjectMember::Method(verter_type_expr::MethodSignature::synthetic_public(
+                    "greet".into(),
+                    verter_type_expr::FunctionExpr::synthetic(
+                        vec![],
+                        Some(Arc::new(TypeExpr::Ref {
+                            name: "Ref".into(),
+                            type_arguments: Arc::from(
+                                vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                            ),
+                        })),
+                        vec![],
+                    ),
+                    false,
+                )),
+            ],
+        }));
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Props"),
+            TypeDeclKind::Interface,
+        );
+        decl.build_member_index(&body, None);
+
+        let variant = decl.member("variant").expect("variant indexed");
+        let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args } =
+            &variant.reference_head
+        else {
+            panic!(
+                "an authored reference annotation must mint a Bare head, got {:?}",
+                variant.reference_head
+            );
+        };
+        assert_eq!(local_name.as_ref(), "Ref");
+        let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(arg)] = args.as_ref()
+        else {
+            panic!("expected exactly one Value argument locator, got {args:?}");
+        };
+        // The argument locator is rooted at the MEMBER's own value position
+        // under the declaration anchor — the same `(anchor, path)` pair the
+        // member's `ty` locator carries, so a deref addresses the authored
+        // annotation and not the declaration body root.
+        assert_eq!(arg.anchor, variant.ty.anchor);
+        assert_eq!(&*arg.path, &member_value_path(0));
+        assert_eq!(arg.arg_index, 0);
+
+        let plain = decl.member("plain").expect("plain indexed");
+        assert_eq!(
+            plain.reference_head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+            "an authored non-reference annotation is a COMPLETE non-reference proof"
+        );
+
+        let greet = decl.member("greet").expect("greet indexed");
+        assert_eq!(
+            greet.reference_head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
+            "a method member has no authored member type annotation, so it must \
+             publish Unavailable rather than a head fabricated from its return"
+        );
+    }
+
+    /// An intersection-arm member's head argument locator carries the SAME
+    /// `IntersectionArm` path prefix its `ty` locator carries — a head rooted at
+    /// the object root would deref the wrong arm.
+    #[test]
+    fn prepared_member_head_locator_carries_the_intersection_arm_prefix() {
+        let arm = |name: &str| {
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                properties: vec![ObjectMember::Property(ObjectProperty::with_spans_public(
+                    name.into(),
+                    TypeExpr::Ref {
+                        name: "Ref".into(),
+                        type_arguments: Arc::from(
+                            vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
+                        ),
+                    },
+                    false,
+                    false,
+                    verter_type_expr::MemberSpans {
+                        declaration: None,
+                        name: None,
+                        type_annotation: Some(verter_span::Span::new(5, 6)),
+                    },
+                ))],
+            }))
+        };
+        let body = TypeExpr::intersection(vec![arm("first"), arm("second")]);
+
+        let mut decl = PreparedTypeDecl::new(
+            ResolvedRootIdentity::new("/types.ts", "Props"),
+            TypeDeclKind::Interface,
+        );
+        decl.build_member_index(&body, None);
+
+        for name in ["first", "second"] {
+            let member = decl.member(name).expect("intersection arm member indexed");
+            let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { args, .. } =
+                &member.reference_head
+            else {
+                panic!("expected a Bare head for {name}");
+            };
+            let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(arg)] = args.as_ref()
+            else {
+                panic!("expected one Value argument locator for {name}");
+            };
+            assert_eq!(
+                &*arg.path, &*member.ty.path,
+                "the head argument locator must share the member `ty` locator's path"
+            );
+            assert!(
+                matches!(
+                    arg.path.first(),
+                    Some(TypeBodyPathStep::IntersectionArm { .. })
+                ),
+                "an intersection-arm member's head must keep its arm prefix, got {:?}",
+                arg.path
+            );
+        }
     }
 
     #[test]

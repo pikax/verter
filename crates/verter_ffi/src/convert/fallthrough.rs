@@ -5,7 +5,7 @@
 use crate::types::*;
 
 use super::component_meta::require_lane_aligned;
-use super::string_helpers::inherited_source_to_ffi;
+use super::string_helpers::{inherited_source_to_ffi, materialized_publication_to_ffi};
 
 pub(super) fn root_reachability_to_ffi(
     reachability: verter_semantic::analysis::component_meta::RootReachability,
@@ -189,7 +189,7 @@ pub(super) fn unresolved_root_target_reason_to_ffi(
 /// ship the truncated payload.
 pub(super) fn fallthrough_surface_to_ffi(
     surface: verter_semantic::analysis::component_meta::FallthroughSurface,
-    prop_lanes: Vec<Vec<verter_type_expr::TypeExpr>>,
+    prop_lanes: Vec<Vec<verter_session::meta_resolve::MaterializedTypePublication>>,
     event_lanes: Vec<Vec<verter_type_expr::TypeExpr>>,
 ) -> FfiFallthroughSurface {
     match surface {
@@ -257,7 +257,7 @@ pub(super) fn fallthrough_surface_to_ffi(
 
 pub(super) fn fallthrough_branch_to_ffi(
     branch: verter_semantic::analysis::component_meta::FallthroughBranch,
-    prop_types: Vec<verter_type_expr::TypeExpr>,
+    prop_types: Vec<verter_session::meta_resolve::MaterializedTypePublication>,
     event_payloads: Vec<verter_type_expr::TypeExpr>,
 ) -> FfiFallthroughBranch {
     FfiFallthroughBranch {
@@ -267,11 +267,15 @@ pub(super) fn fallthrough_branch_to_ffi(
             .props
             .into_iter()
             .zip(prop_types)
-            .map(|(p, r#type)| FfiFallthroughPropEntry {
-                name: p.name,
-                r#type,
-                raw_type: p.raw_type,
-                sources: p.sources.into_iter().map(inherited_source_to_ffi).collect(),
+            .map(|(p, lane)| {
+                let (r#type, publication, terminal_display) = materialized_publication_to_ffi(lane);
+                FfiFallthroughPropEntry {
+                    name: p.name,
+                    r#type,
+                    publication,
+                    terminal_display,
+                    sources: p.sources.into_iter().map(inherited_source_to_ffi).collect(),
+                }
             })
             .collect(),
         events: branch

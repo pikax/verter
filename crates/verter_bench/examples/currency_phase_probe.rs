@@ -166,15 +166,29 @@ fn upsert_one(host: &VerterHost, f: &VueFile) {
     });
 }
 
+/// Ordered SFC block facts projected from the registered carrier inventory,
+/// mirroring the production NAPI/MCP lint callers. Empty when the file has no
+/// registered structure (fail closed).
+fn registered_block_facts(
+    host: &VerterHost,
+    canonical_or_alias: &str,
+) -> Vec<verter_diagnostics::SfcBlockFact> {
+    host.registered_file_structure_snapshot(canonical_or_alias)
+        .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+        .unwrap_or_default()
+}
+
 fn lint_one(host: &VerterHost, linter: &Linter, id: &str) -> usize {
     match host.get_analysis(id) {
         Some(snapshot) => {
             let script = script_from_host(&snapshot);
+            let blocks = registered_block_facts(host, id);
             linter
                 .lint(
                     Some(&script),
                     snapshot.template.as_deref(),
                     &snapshot.styles,
+                    &blocks,
                 )
                 .into_diagnostics()
                 .len()
@@ -402,11 +416,13 @@ fn lint_two_phase(files: &[VueFile], phases: &mut LintPhases) -> (usize, Counter
         if let Some(snapshot) = snapshot {
             let t = Instant::now();
             let script = script_from_host(&snapshot);
+            let blocks = registered_block_facts(&host, &f.id);
             work += linter
                 .lint(
                     Some(&script),
                     snapshot.template.as_deref(),
                     &snapshot.styles,
+                    &blocks,
                 )
                 .into_diagnostics()
                 .len();
@@ -808,15 +824,26 @@ fn run_napi_shape_mode() {
         }
         let s_build = ms(t0.elapsed());
 
+        // 200x block-fact projection (parallels the script snapshot pass).
+        let mut block_facts = Vec::with_capacity(n);
+        for f in &files {
+            block_facts.push(registered_block_facts(&host, &f.id));
+        }
+
         // 200x pure lint run (hoisted linter, as the probe does).
         let linter = Linter::new(LintConfig::default());
         let t0 = Instant::now();
         let mut all_diags = Vec::with_capacity(n);
-        for (s, script) in snaps.iter().zip(scripts.iter()) {
+        for ((s, script), blocks) in snaps.iter().zip(scripts.iter()).zip(block_facts.iter()) {
             match (s, script) {
                 (Some(snapshot), Some(script)) => all_diags.push(
                     linter
-                        .lint(Some(script), snapshot.template.as_deref(), &snapshot.styles)
+                        .lint(
+                            Some(script),
+                            snapshot.template.as_deref(),
+                            &snapshot.styles,
+                            blocks,
+                        )
                         .into_diagnostics(),
                 ),
                 _ => all_diags.push(Vec::new()),

@@ -4,9 +4,21 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  nativeComponentMetaToComponentMeta,
+  nativeComponentMetaToComponentMeta as mapNativeComponentMeta,
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
+
+function nativeComponentMetaToComponentMeta(meta: any) {
+  return mapNativeComponentMeta({
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
+    ...meta,
+  });
+}
 
 /** Default fallthrough surface fields for test payloads. */
 const defaultFallthroughFields = {
@@ -17,7 +29,117 @@ const defaultFallthroughFields = {
   fallthroughSurface: { kind: "none" as const, reason: "noTemplate" as const },
 };
 
+function publishedTypeFields(text?: string) {
+  return {
+    publication: {
+      kind: "published" as const,
+      semanticAuthority: "resolved" as const,
+      exactness: "exactConcrete" as const,
+      reason: { kind: "resolvedExactConcrete" as const },
+      provenance: { kind: "resolved" as const, value: "semanticEvaluator" as const },
+    },
+    terminalDisplay: { text },
+  };
+}
+
+function nativeMetaWithProp(prop: Record<string, unknown>) {
+  return {
+    filePath: "/project/src/App.vue",
+    componentPublicContract: {
+      kind: "unsupported" as const,
+      adapterId: "vue",
+      reason: { kind: "componentMetaUnavailable" as const },
+      diagnostics: [],
+    },
+    optionsApi: false,
+    props: [prop],
+    events: [],
+    slots: [],
+    models: [],
+    exposed: [],
+    components: [],
+    templateRefs: [],
+    imports: [],
+    bindings: [],
+    vueApiCalls: [],
+    styles: [],
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
+    flags: {
+      asyncSetup: false,
+      hasReactiveState: false,
+      hasComputed: false,
+      hasWatchers: false,
+      hasLifecycleHooks: false,
+      hasProvide: false,
+      hasInject: false,
+      hasInheritAttrsFalse: false,
+      hasStoreUsage: false,
+    },
+    ...defaultFallthroughFields,
+  } as any;
+}
+
 describe("nativeComponentMetaToComponentMeta", () => {
+  it("exposes mandatory contract availability on ComponentMeta", () => {
+    const native = nativeMetaWithProp({
+      name: "value",
+      type: { kind: "primitive", name: "string" },
+      ...publishedTypeFields("string"),
+      required: true,
+      hasDefault: false,
+    });
+
+    const mapped = nativeComponentMetaToComponentMeta(native);
+
+    expect(mapped.componentPublicContract).toBe(native.componentPublicContract);
+  });
+
+  it("projects compat rawType only from terminal display and rejects Failed publication", () => {
+    const published = nativeComponentMetaToComponentMeta(
+      nativeMetaWithProp({
+        name: "value",
+        type: { kind: "primitive", name: "string" },
+        ...publishedTypeFields("TerminalDisplayOnly"),
+        required: true,
+        hasDefault: false,
+      }),
+    );
+
+    expect(published.props[0].rawType).toBe("TerminalDisplayOnly");
+    const perturbed = nativeComponentMetaToComponentMeta(
+      nativeMetaWithProp({
+        name: "value",
+        type: { kind: "primitive", name: "string" },
+        ...publishedTypeFields("HOSTILE_UNION | HOSTILE_ARRAY[]"),
+        required: true,
+        hasDefault: false,
+      }),
+    );
+    expect(perturbed.props[0].type).toEqual(published.props[0].type);
+    expect(perturbed.props[0].rawType).not.toBe(published.props[0].rawType);
+    expect(() =>
+      nativeComponentMetaToComponentMeta(
+        nativeMetaWithProp({
+          name: "value",
+          type: { kind: "primitive", name: "string" },
+          publication: {
+            kind: "failed",
+            failure: "unrepresentableRequiredMemberValue",
+            provenance: "semanticEvaluator",
+          },
+          terminalDisplay: {},
+          required: true,
+          hasDefault: false,
+        }),
+      ),
+    ).toThrow(/failed type publication/i);
+  });
+
   it("preserves full metadata fields from the native result", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
@@ -197,7 +319,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "visible",
           type: { kind: "primitive", name: "string" },
-          rawType: "string",
+          ...publishedTypeFields("string"),
           required: true,
           hasDefault: false,
         },
@@ -286,6 +408,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "items",
           type: { kind: "ref", name: "Items", typeArguments: [] },
+          ...publishedTypeFields("Items"),
           typeExpansion: {
             exactness: "incomplete",
             executionStatus: "completed",
@@ -304,6 +427,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "select",
           payload: { kind: "ref", name: "Payload", typeArguments: [] },
+          ...publishedTypeFields("Payload"),
           payloadExpansion: {
             exactness: "incomplete",
             executionStatus: "completed",
@@ -325,6 +449,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
             {
               name: "row",
               type: { kind: "ref", name: "Row", typeArguments: [] },
+              ...publishedTypeFields("Row"),
               typeExpansion: {
                 exactness: "incomplete",
                 executionStatus: "completed",
@@ -451,6 +576,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
+          ...publishedTypeFields("string"),
           required: true,
           hasDefault: false,
         },
@@ -461,7 +587,13 @@ describe("nativeComponentMetaToComponentMeta", () => {
           name: "default",
           isScoped: true,
           isRequired: false,
-          bindings: [{ name: "item", type: { kind: "primitive", name: "number" } }],
+          bindings: [
+            {
+              name: "item",
+              type: { kind: "primitive", name: "number" },
+              ...publishedTypeFields("number"),
+            },
+          ],
         },
       ],
       models: [],
@@ -532,7 +664,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
     });
   });
 
-  it("maps additive SFC block metadata from the native payload", () => {
+  it("maps the mandatory ordered structure from the native payload", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
       optionsApi: false,
@@ -545,7 +677,11 @@ describe("nativeComponentMetaToComponentMeta", () => {
         completeness: "partial",
         members: [],
       },
-      sfcBlocks: {
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "artifact-token",
+        blocks: [],
+        markupNodes: [],
         script: {
           lang: "ts",
           attributes: [{ name: "lang", value: "ts" }],
@@ -611,7 +747,11 @@ describe("nativeComponentMetaToComponentMeta", () => {
       ...defaultFallthroughFields,
     } as any);
 
-    expect(meta.sfcBlocks).toEqual({
+    expect(meta.orderedSfcStructure).toMatchObject({
+      schemaVersion: 1,
+      artifactToken: "artifact-token",
+      blocks: [],
+      markupNodes: [],
       script: {
         lang: "ts",
         attributes: [{ name: "lang", value: "ts" }],
@@ -917,7 +1057,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
             object: { kind: "ref", name: "NuxtLinkProps", typeArguments: [] },
             index: { kind: "literal", literalKind: "string", value: "to" },
           },
-          rawType: "NuxtLinkProps['to']",
+          ...publishedTypeFields("NuxtLinkProps['to']"),
           required: false,
           hasDefault: false,
         },
@@ -996,5 +1136,96 @@ describe("nativeComponentMetaToComponentMeta", () => {
     const registry = nativeTypeRegistryToMap(native);
     expect(registry?.get("NuxtLinkProps")).toBeDefined();
     expect(registry?.get("RouteLocationRaw")).toBeDefined();
+  });
+
+  it("maps an exact, a proven-non-wrapper and a typed-degraded return wrapper role distinctly", () => {
+    const native = nativeMetaWithProp({
+      name: "value",
+      type: { kind: "primitive", name: "string" },
+      ...publishedTypeFields("string"),
+      required: true,
+      hasDefault: false,
+    });
+    native.bindings = [
+      {
+        name: "counter",
+        kind: "const",
+        reactivityKind: "ref",
+        returnWrapperRole: "ref",
+        usedInTemplate: true,
+        usedInStyle: false,
+      },
+      {
+        name: "plain",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "none",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      {
+        name: "degraded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "unresolved",
+        returnWrapperUnresolvedReason: "cycle",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      {
+        name: "undemanded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+    ];
+
+    const mapped = nativeComponentMetaToComponentMeta(native);
+
+    // EXACT — the role rides alongside the refined decoration kind.
+    expect(mapped.bindings).toEqual([
+      {
+        name: "counter",
+        kind: "const",
+        reactivityKind: "ref",
+        returnWrapperRole: "ref",
+        usedInTemplate: true,
+        usedInStyle: false,
+      },
+      // COMPLETED NON-WRAPPER PROOF — published as `"none"` while the
+      // decoration kind stays at the undecided `maybeRef`.
+      {
+        name: "plain",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "none",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      // TYPED DEGRADATION — the exact reason survives the mapping and does NOT
+      // collapse onto the bare `"unresolved"` discriminant.
+      {
+        name: "degraded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        returnWrapperRole: "unresolved",
+        returnWrapperUnresolvedReason: "cycle",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+      // UNDEMANDED — both keys stay ABSENT, never `undefined`-valued and never
+      // conflated with the `"none"` proof.
+      {
+        name: "undemanded",
+        kind: "const",
+        reactivityKind: "maybeRef",
+        usedInTemplate: false,
+        usedInStyle: false,
+      },
+    ]);
+    expect("returnWrapperRole" in mapped.bindings[3]!).toBe(false);
+    expect("returnWrapperUnresolvedReason" in mapped.bindings[0]!).toBe(false);
+    expect(mapped.bindings[1]!.returnWrapperRole).not.toBe(mapped.bindings[3]!.returnWrapperRole);
   });
 });

@@ -50,6 +50,7 @@ mod oracle_tsgo_forbidden;
 mod output_projector_residual_guards;
 mod parse_sfc_chokepoint_guard;
 mod residual_type_expr_body_reader_inventory;
+mod scanners_replacement;
 mod svelte_compiler_block1;
 mod svelte_compiler_block1_guards;
 mod svelte_jsx_shim_freshness;

@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `from_id_and_source` found for struct `RegisteredSourceSnapshot` in the current scope
+ --> tests/compile-fail/registered_snapshot_id_bytes_api.rs:8:39
+  |
+8 |     let _ = RegisteredSourceSnapshot::from_id_and_source(id, bytes);
+  |                                       ^^^^^^^^^^^^^^^^^^ associated function or constant not found in `RegisteredSourceSnapshot`

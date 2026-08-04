@@ -201,6 +201,19 @@ pub trait ScriptFactProvider: Send + Sync {
     ) -> FrameworkScriptCandidates {
         candidates
     }
+    /// The module specifiers this provider's captured candidates reference —
+    /// the resolution INPUT the session turns into
+    /// [`ResolvedValidationCx::resolved_import_targets`] rows.
+    ///
+    /// The session always resolves the file's import STATEMENTS; a provider
+    /// whose candidates can reference a module WITHOUT an import statement
+    /// (a binding-less inline `import("…")` type reference) surfaces those
+    /// specifiers here so the session resolves them exactly like statement
+    /// specifiers. Pure candidate read — no resolution happens here (the
+    /// capture half stays syntax-only). The default reads nothing.
+    fn candidate_import_specifiers(&self, _candidates: &FrameworkScriptCandidates) -> Vec<String> {
+        Vec::new()
+    }
     /// Validate this provider's captured candidates against resolved import
     /// sources + derived capability bits, producing the typed resolved payload.
     ///

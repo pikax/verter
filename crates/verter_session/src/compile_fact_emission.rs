@@ -56,9 +56,8 @@
 //! SFC whose only cross-file dependency is a side-effect import
 //! produces an empty `fact_dep_signature` that trivially validates.
 //!
-//! External `src=` blocks (`<template src="./tpl.html">`) are spliced
-//! verbatim into the merged compile source by `merge_external_sources`
-//! — the entire external file content lands in the compiled output.
+//! External `src=` blocks (`<template src="./tpl.html">`) depend on the
+//! complete external file content.
 //! The producer observes `FileWholeHash` of each resolved external
 //! source canonical so any edit to it invalidates the dependent slot.
 //! Without this, an SFC whose only cross-file dependency is an external
@@ -240,9 +239,8 @@ pub(crate) fn observe_compile_tier_dependencies(
     //    augmenter-set churn invalidates dependent slots.
     observe_augmentation_fingerprints(host, script_imports);
 
-    // 4. External `src=` block deps. `merge_external_sources` splices
-    //    the WHOLE content of each external file verbatim into the
-    //    merged compile source, so any edit to an external template /
+    // 4. External `src=` block deps. The deferred typed-content lane consumes
+    //    the WHOLE content of each external file, so any edit to an external template /
     //    script / style / custom block invalidates the dependent
     //    compile output. Whole-hash is the correct granularity — the
     //    entire file is embedded, not a path-precise slice. Each

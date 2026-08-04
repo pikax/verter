@@ -144,6 +144,10 @@ async fn serve() {
     )
     .custom_method("$/getCompiledCode", VerterLanguageServer::get_compiled_code)
     .custom_method(
+        "$/verter/documentStructure",
+        VerterLanguageServer::document_structure,
+    )
+    .custom_method(
         "$/verter/getStatistics",
         VerterLanguageServer::get_statistics,
     )

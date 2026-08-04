@@ -884,6 +884,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "getAuditRecords",
       "getBundlerBatchSummary",
       "getCodeActions",
+      "getDocumentStructure",
       "getDocumentSymbols",
       "getIde",
       "getLastAuditRecord",

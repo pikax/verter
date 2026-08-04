@@ -288,30 +288,25 @@ pub trait StoreView {
         })
     }
 
-    /// Whether the view tracks a specific file (has its hash in the snapshot).
+    /// Whether the view tracks a specific file through its captured roots.
     ///
-    /// Used by route-derived cache materialization paths to decide whether to
-    /// include `DerivedFactHash::ImportRoute` in validation facts. Untracked
-    /// dependency files never have `set_import_dependencies` called on them,
-    /// so their route facts are safe to omit — eliminating false cache misses.
+    /// Used by self-root attribution and route-derived cache paths to
+    /// distinguish an absent canonical from a hash mismatch.
     fn tracks_file(&self, _canonical_id: &str) -> bool {
         false
     }
 
-    /// Direct read of the view's `DerivedFactHash` snapshot for a
+    /// Direct read of a view's parse-domain `DerivedFactHash` for a
     /// `(canonical, kind)` pair.
     ///
-    /// Returns `Some(hash)` when the view's per-domain producer has
-    /// snapshotted a derived hash for the pair (e.g.
-    /// `HostStoreView::derived_hashes[(canonical, ImportRoute)]`),
-    /// `None` otherwise. Used by per-rejection attribution helpers
+    /// Returns `Some(hash)` when the captured roots answer the pair (currently
+    /// `Route`), `None` otherwise. Used by per-rejection attribution helpers
     /// (e.g. `attribute_prepared_decl_bundle_rejection`) to
     /// distinguish "entry absent" from "entry present, hash differs"
     /// without re-probing the validator with synthetic hashes.
     ///
     /// Default returns `None` so test-only / permissive views inherit
-    /// "no derived snapshot" semantics; production `HostStoreView`
-    /// overrides to return the actual snapshot value.
+    /// "no derived fact" semantics; production `HostStoreView` overrides it.
     fn derived_hash_for(
         &self,
         _canonical_id: &str,

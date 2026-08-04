@@ -73,7 +73,18 @@
 ///   module-augmentation contributors. Version `3` entries lack the owner
 ///   discriminator and must fail closed rather than alias module and instance
 ///   declarations with the same spelling.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 4;
+/// - `5` — canonical resolved emit occurrences and occurrence-based callable
+///   replay. Version `4` entries can carry ordinal/parallel-lane associations
+///   and must fail closed.
+/// - `6` — exact prop callable roles and package-backed Svelte `Snippet`
+///   symbol identities. Version `5` entries lack the role fact and must fail
+///   closed instead of inferring from display text.
+/// - `7` — call-signature emit declaration spans. Version `6` analyzer-bearing
+///   entries cannot prove an exact declaration-span JSDoc join.
+/// - `8` — authored-only import targets. Version `7` shallow artifacts may
+///   retain a resolved canonical beside the authored source specifier, creating
+///   a second import-resolution authority; version `8` removes that field.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 8;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard

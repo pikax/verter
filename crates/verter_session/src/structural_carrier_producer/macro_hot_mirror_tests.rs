@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use super::macro_type_arg_hot_ref;
+use super::macro_type_arg_hot_ref as macro_type_arg_hot_product;
 use super::MacroHotMirror;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -19,6 +19,14 @@ use crate::semantic_query::{
 };
 use crate::types::HostConfig;
 use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
+
+fn macro_type_arg_hot_ref(
+    host: &VerterHost,
+    canonical: &str,
+    macro_index: usize,
+) -> Option<HotTypeRef> {
+    macro_type_arg_hot_product(host, canonical, macro_index).map(|product| product.hot)
+}
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {

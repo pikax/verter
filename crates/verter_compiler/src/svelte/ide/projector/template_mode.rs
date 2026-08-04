@@ -150,6 +150,7 @@ fn scan_node_for_host(node: &SvelteNode, source: &str, declared: &[String]) -> b
                 SvelteBlockKind::Await {
                     then_binding,
                     catch_binding,
+                    ..
                 } => {
                     let has_then_clause = block
                         .clauses
@@ -173,7 +174,7 @@ fn scan_node_for_host(node: &SvelteNode, source: &str, declared: &[String]) -> b
                         body_declared.extend(collect_pattern_dollar_names(slice(source, span)));
                     }
                 }
-                SvelteBlockKind::If | SvelteBlockKind::Key => {}
+                SvelteBlockKind::If | SvelteBlockKind::Key | SvelteBlockKind::Unknown { .. } => {}
             }
 
             if scan_nodes_for_host(&block.children, source, &body_declared) {

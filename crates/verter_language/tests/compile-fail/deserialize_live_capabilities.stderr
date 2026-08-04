@@ -1,0 +1,137 @@
+error[E0277]: the trait bound `SourceAuthorityNamespaceId: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:12:29
+   |
+12 |     assert_deserializable::<SourceAuthorityNamespaceId>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `SourceAuthorityNamespaceId`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `SourceAuthorityNamespaceId` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`
+
+error[E0277]: the trait bound `GrammarAuthorityNamespaceId: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:13:29
+   |
+13 |     assert_deserializable::<GrammarAuthorityNamespaceId>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `GrammarAuthorityNamespaceId`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `GrammarAuthorityNamespaceId` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`
+
+error[E0277]: the trait bound `RegisteredSourceSnapshotId: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:14:29
+   |
+14 |     assert_deserializable::<RegisteredSourceSnapshotId>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `RegisteredSourceSnapshotId`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `RegisteredSourceSnapshotId` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`
+
+error[E0277]: the trait bound `RegisteredSourceSnapshot: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:15:29
+   |
+15 |     assert_deserializable::<RegisteredSourceSnapshot>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `RegisteredSourceSnapshot`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `RegisteredSourceSnapshot` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`
+
+error[E0277]: the trait bound `CanonicalCarrierGrammar: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:16:29
+   |
+16 |     assert_deserializable::<CanonicalCarrierGrammar>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `CanonicalCarrierGrammar`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `CanonicalCarrierGrammar` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`
+
+error[E0277]: the trait bound `AcceptedRegisteredCarrierSource: serde::de::DeserializeOwned` is not satisfied
+  --> tests/compile-fail/deserialize_live_capabilities.rs:17:29
+   |
+17 |     assert_deserializable::<AcceptedRegisteredCarrierSource>();
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `for<'de> Deserialize<'de>` is not implemented for `AcceptedRegisteredCarrierSource`
+   |
+   = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
+             &'a [u8]
+             &'a str
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+           and $N others
+   = note: required for `AcceptedRegisteredCarrierSource` to implement `DeserializeOwned`
+note: required by a bound in `assert_deserializable`
+  --> tests/compile-fail/deserialize_live_capabilities.rs:9:29
+   |
+ 9 | fn assert_deserializable<T: DeserializeOwned>() {}
+   |                             ^^^^^^^^^^^^^^^^ required by this bound in `assert_deserializable`

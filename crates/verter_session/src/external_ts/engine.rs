@@ -159,6 +159,19 @@ impl EnsureProject {
     }
 }
 
+/// Content-free carrier ownership facts published beside a standard source map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotStructureStamp {
+    pub schema_version: u32,
+    pub artifact_token: Arc<str>,
+    pub script_content_ranges: Vec<[u32; 2]>,
+    /// Parser-identified markup opening-tag spans (elements plus recovered/
+    /// unknown nodes retaining an opening span), in arena order. The plugin's
+    /// bounded cursor-attribute classification lexes ONLY inside one of these
+    /// parser-supplied spans — it never rediscovers `<` from raw source.
+    pub markup_opening_ranges: Vec<[u32; 2]>,
+}
+
 /// One file in a published snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFile {
@@ -177,6 +190,9 @@ pub struct SnapshotFile {
     /// `None`, and the store then advertises no on-disk map blob (no broken
     /// pointer), the fail-closed two-phase rule applied to maps as well as content.
     pub map_json: Option<Arc<str>>,
+    /// Content-free carrier ownership facts published beside, not inside, the
+    /// standard source map so every source-map consumer sees unchanged JSON.
+    pub structure: Option<SnapshotStructureStamp>,
     pub version: u64,
     pub open_state: OpenState,
 }

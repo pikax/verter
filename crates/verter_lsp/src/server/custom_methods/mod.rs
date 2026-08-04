@@ -11,13 +11,15 @@
 //! rules).
 
 mod component_meta;
+#[cfg(test)]
+mod document_structure_tests;
 
 use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
 
@@ -26,6 +28,120 @@ use super::server_utils::*;
 use super::VerterLanguageServer;
 
 impl VerterLanguageServer {
+    /// Return a content-free structure only while the client's open/version
+    /// stamps and the registry's post-await revision still match exactly.
+    pub async fn document_structure(
+        &self,
+        params: DocumentStructureRequestV1,
+    ) -> Result<DocumentStructureResponseV1> {
+        let echo = || {
+            (
+                params.request_token.clone(),
+                params.client_open_epoch.clone(),
+                params.expected_client_version,
+            )
+        };
+        // `DocumentRegistry::get` hands out a LIVE DashMap shard READ guard;
+        // `did_change` takes the WRITE side of the same shard through a
+        // blocking `get_mut`, and the stdio loop polls this handler inline on
+        // a single task. Copy what each fence needs and DROP every guard
+        // before any await — a guard held across the yield below parks the
+        // whole server behind its own read lock.
+        let snapshot = {
+            let Some(before) = self.documents.get(&params.text_document.uri) else {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::Closed {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            };
+            if before.version != params.expected_client_version {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::StaleClientDocument {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            }
+            match before.feature_snapshot.clone() {
+                Some(snapshot) => snapshot,
+                None => {
+                    let (request_token, client_open_epoch, expected_client_version) = echo();
+                    return Ok(DocumentStructureResponseV1::Unavailable {
+                        request_token,
+                        client_open_epoch,
+                        expected_client_version,
+                        reason: DocumentUnavailableReasonV1::StructureNotReady,
+                    });
+                }
+            }
+        };
+
+        tokio::task::yield_now().await;
+        // Post-await re-admission: copy the after-state facts under one scoped
+        // guard acquisition (a single consistent registry observation), then
+        // decide with no guard held. The check ALGEBRA and its order are
+        // unchanged: version, then document revision, then artifact identity.
+        let (after_version, after_document_revision, artifact_diverged) = {
+            let Some(after) = self.documents.get(&params.text_document.uri) else {
+                let (request_token, client_open_epoch, expected_client_version) = echo();
+                return Ok(DocumentStructureResponseV1::Closed {
+                    request_token,
+                    client_open_epoch,
+                    expected_client_version,
+                });
+            };
+            (
+                after.version,
+                after.document_revision,
+                after.feature_snapshot.as_ref().is_none_or(|current| {
+                    current.structure().artifact_id() != snapshot.structure().artifact_id()
+                }),
+            )
+        };
+        if after_version != params.expected_client_version {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Superseded {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+        if after_document_revision != snapshot.document_revision() {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::ReplacementDocument {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+        if artifact_diverged {
+            let (request_token, client_open_epoch, expected_client_version) = echo();
+            return Ok(DocumentStructureResponseV1::Superseded {
+                request_token,
+                client_open_epoch,
+                expected_client_version,
+            });
+        }
+
+        let projected = verter_ffi::convert::registered_structure_to_ffi(snapshot.structure());
+        let structure = DocumentStructureV1 {
+            schema_version: projected.schema_version,
+            document_revision_token: snapshot.document_revision().public_token(),
+            artifact_token: projected.artifact_token,
+            blocks: projected.blocks,
+            markup_nodes: projected.markup_nodes,
+        };
+        let (request_token, client_open_epoch, expected_client_version) = echo();
+        Ok(DocumentStructureResponseV1::Available {
+            request_token,
+            client_open_epoch,
+            expected_client_version,
+            structure,
+        })
+    }
+
     /// Handle `$/onDidChangeTsOrJsFile` notification.
     ///
     /// Called when the client edits a `.ts`, `.js`, or `.vue` file.
@@ -246,7 +362,7 @@ impl VerterLanguageServer {
             None => return Ok(None),
         };
 
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         // Compute preferred import path (alias-based if available)
         let canonical_target = crate::documents::uri_to_canonical_id(uri);
         let canonical_dropped = crate::documents::uri_to_canonical_id_from_str(&params.dropped_uri);
@@ -308,15 +424,21 @@ impl VerterLanguageServer {
         &self,
         params: ApplyStyleOverridesParams,
     ) -> Result<ApplyStyleOverridesResponse> {
+        use crate::documents::StyleOverrideApplyOutcome;
+
         let uri = &params.uri;
         tracing::debug!("$/verter/applyStyleOverrides: {uri}");
 
         let parsed_uri: Uri = match uri.parse() {
             Ok(u) => u,
-            Err(_) => return Ok(ApplyStyleOverridesResponse { success: false }),
+            Err(_) => {
+                return Ok(ApplyStyleOverridesResponse {
+                    success: false,
+                    refusal: None,
+                })
+            }
         };
 
-        let canonical_id = uri_to_canonical_id(&parsed_uri);
         let overrides = params
             .overrides
             .into_iter()
@@ -327,16 +449,46 @@ impl VerterLanguageServer {
             })
             .collect();
 
-        let result = self
-            .documents
-            .apply_style_overrides(&canonical_id, overrides);
+        let outcome = {
+            // The token validation and the host mutation must be ONE
+            // freshness transaction with respect to document commits. Hold
+            // the document-commit fence — the same `did_change_mutex` every
+            // did_change / did_open commit path holds across its host upsert
+            // + registry commit — so no revision can land between the token
+            // check and the host apply (revision A's compiled CSS must never
+            // land on revision B's host state).
+            let _document_commit_fence = self.did_change_mutex.lock().await;
+            self.documents.apply_style_overrides(
+                &parsed_uri,
+                overrides,
+                params.document_revision_token.as_deref(),
+                params.artifact_token.as_deref(),
+            )
+        };
 
-        if result {
+        if outcome == StyleOverrideApplyOutcome::Applied {
             // Re-publish diagnostics since analysis has changed
             self.publish_full_diagnostics_with_audit(&parsed_uri).await;
         }
 
-        Ok(ApplyStyleOverridesResponse { success: result })
+        Ok(match outcome {
+            StyleOverrideApplyOutcome::Applied => ApplyStyleOverridesResponse {
+                success: true,
+                refusal: None,
+            },
+            StyleOverrideApplyOutcome::Failed => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: None,
+            },
+            StyleOverrideApplyOutcome::RevisionMismatch => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: Some(StyleOverrideRefusal::RevisionMismatch),
+            },
+            StyleOverrideApplyOutcome::MissingTokens => ApplyStyleOverridesResponse {
+                success: false,
+                refusal: Some(StyleOverrideRefusal::MissingTokens),
+            },
+        })
     }
 
     /// Handle `$/verter/getAnalysis` request.
@@ -549,8 +701,12 @@ impl VerterLanguageServer {
 
     /// Handle `$/verter/getBindingTypes` request.
     ///
-    /// For each binding in the file's analysis, queries TSGO for its TypeScript type.
-    /// Returns a map of binding name → type string (or null if unavailable).
+    /// For each binding in the file's analysis, queries the TypeProvider for
+    /// its quick-info and projects the STRUCTURED display signature onto the
+    /// wire: binding name → `{ "displaySignature": string }` (or null when
+    /// unavailable / produced against a superseded surface — fail closed).
+    /// Display-only: the value is the provider's display string verbatim,
+    /// never parsed out of rendered hover markdown.
     pub async fn get_binding_types(&self, params: GetAnalysisParams) -> Result<serde_json::Value> {
         let uri = params.uri;
         tracing::debug!("$/verter/getBindingTypes: {uri}");
@@ -609,13 +765,19 @@ impl VerterLanguageServer {
                     result.insert(binding.name.clone(), serde_json::Value::Null);
                     continue;
                 }
-                // Extract the type from the hover contents
-                // Typical format: "```typescript\nconst x: number\n```" or "(property) x: string"
-                let type_str = extract_type_from_hover(&hover.contents, &binding.name);
+                // Project the provider's STRUCTURED display signature onto the
+                // wire. Missing signature ⇒ null — never a scrape of the
+                // rendered `contents` blob (that consumer class is deleted).
                 result.insert(
                     binding.name.clone(),
-                    type_str
-                        .map(serde_json::Value::String)
+                    hover
+                        .display_signature
+                        .as_ref()
+                        .map(|signature| {
+                            serde_json::json!({
+                                "displaySignature": signature.as_display_str(),
+                            })
+                        })
                         .unwrap_or(serde_json::Value::Null),
                 );
             } else {

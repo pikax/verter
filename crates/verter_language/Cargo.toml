@@ -11,4 +11,9 @@ keywords = ["vue", "compiler", "language", "classification"]
 categories = ["compilers"]
 
 [dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
+
+[dev-dependencies]
+serde.workspace = true
+trybuild = "1.0"

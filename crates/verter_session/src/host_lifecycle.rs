@@ -1034,16 +1034,11 @@ impl VerterHost {
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
-        // Every successful load — first-time additive OR reload — adds or
-        // changes host state that `HostStoreView::build` snapshots BY
-        // VALUE: a scheduler node + `whole_hashes` entry, the
-        // `derived_raw_cache` known-miss tag the build folds into
-        // `resolved_import_facts_known_miss_tags`, and the dependency/alias
-        // maps. A `StoreViewManager`-cached base snapshot built BEFORE this
-        // load does not track the newly-loaded canonical, so the token MUST
-        // advance or the manager would hand a stale pre-load snapshot back
-        // to the next caller (and the untracked-file `None => true`
-        // optimistic-accept would fossilize against it).
+        // Every successful load — first-time additive OR reload — publishes
+        // source state visible through a store view's captured scheduler root.
+        // A manager-cached base view captured BEFORE this load does not track
+        // the newly-loaded canonical, so the token MUST advance or the manager
+        // could hand the stale pre-load root back to the next caller.
         // `integrate_scheduler_snapshot` does NOT publish into
         // `FileArtifactStore`, so `artifact_generation` does not cover it.
         //

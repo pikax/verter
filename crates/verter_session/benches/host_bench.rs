@@ -235,6 +235,38 @@ fn bench_resolve(c: &mut Criterion) {
     group.finish();
 }
 
+fn inventory_fixture(block_count: usize) -> String {
+    let mut source = String::from("<template><main /></template>\n");
+    for index in 0..block_count {
+        source.push_str(&format!("<style>.c{index} {{ color: red }}</style>\n"));
+    }
+    source
+}
+
+fn bench_inventory_accessors(c: &mut Criterion) {
+    let mut group = c.benchmark_group("carrier_inventory_accessors");
+
+    for block_count in [1, 1024] {
+        let host = make_host();
+        let source = inventory_fixture(block_count);
+        upsert(&host, "Inventory.vue", &source);
+        let structure = host
+            .registered_file_structure("Inventory.vue")
+            .expect("registered inventory fixture");
+        let last = structure.inventory().blocks().len() - 1;
+        let block_id = verter_language::parse_artifact::carrier_inventory::BlockId(last as u32);
+
+        group.bench_function(format!("blocks_get/{block_count}"), |b| {
+            b.iter(|| black_box(structure.inventory().blocks().get(black_box(last))))
+        });
+        group.bench_function(format!("sealed_block_ref/{block_count}"), |b| {
+            b.iter(|| black_box(structure.block_ref(black_box(block_id))))
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_upsert_first_time,
@@ -243,5 +275,6 @@ criterion_group!(
     bench_compile_cache_hit,
     bench_compile_cache_miss,
     bench_resolve,
+    bench_inventory_accessors,
 );
 criterion_main!(benches);

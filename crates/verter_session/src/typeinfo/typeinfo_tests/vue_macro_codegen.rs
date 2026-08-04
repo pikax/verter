@@ -373,10 +373,10 @@ defineProps<Props>()
     assert_eq!(deps.owner_value_deps, ["seed"]);
     assert_eq!(deps.retained_value_carrier_deps, ["Base"]);
 
-    let hot =
+    let product =
         crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
             .expect("macro payload carrier must be present");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, hot.node())
+    let data = crate::project_semantic_dispatch::node_data_for(&host, product.hot.node())
         .expect("macro payload carrier node must be interned");
     let (name, scope) = data
         .bare_ref_head()
@@ -394,7 +394,7 @@ defineProps<Props>()
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let resolved = dispatch.resolve_carrier_subject_node(
-            hot.node(),
+            product.hot.node(),
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
             ),

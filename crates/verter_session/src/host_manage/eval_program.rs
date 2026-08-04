@@ -142,7 +142,7 @@ impl VerterHost {
             if !is_vue {
                 let mut spans: Vec<(u32, u32)> = artifact
                     .common
-                    .script_regions
+                    .script_regions()
                     .iter()
                     .map(|region| (region.span.start, region.span.end))
                     .filter(|(start, end)| end > start)
@@ -158,11 +158,9 @@ impl VerterHost {
                 return (blanked, true);
             }
         }
-        // Vue (and the CARRIER no-artifact fallback) keep the EXACT existing
-        // extraction: the parser-vs-raw-scan agreement + the forgiving raw scan
-        // when no parsed SFC is available + the inter-script `\n` injection —
-        // a Vue file arriving without a framework_parse still extracts its
-        // `<script>` from the raw markup.
+        // Vue extraction consumes parser-owned spans only. A classified
+        // carrier without its registered artifact fails closed by preserving
+        // offsets while exposing no markup or script bytes to type evaluation.
         let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
         // A file with NO parse artifact script-extracts ONLY when its
         // canonical CLASSIFIES as a framework carrier. A non-carrier file's
@@ -177,9 +175,18 @@ impl VerterHost {
         {
             return (source.to_string(), false);
         }
-        match crate::host_resolve::extract_vue_script_content(source, parsed.map(|p| p.as_ref())) {
+        let Some(parsed) = parsed else {
+            return (
+                crate::host_resolve::build_position_preserving_script_source(source, &[]),
+                true,
+            );
+        };
+        match crate::host_resolve::extract_vue_script_content(source, parsed.as_ref()) {
             Some(script) => (script, true),
-            None => (source.to_string(), false),
+            None => (
+                crate::host_resolve::build_position_preserving_script_source(source, &[]),
+                true,
+            ),
         }
     }
 

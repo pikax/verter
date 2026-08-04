@@ -269,19 +269,11 @@ fn src_policy_missing_external_source_produces_deterministic_error() {
         })
         .unwrap_err();
 
-    match err {
-        HostError::CompileError(failure) => {
-            assert!(failure
-                .diagnostics
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "HOST_MISSING_EXTERNAL_SOURCE"));
-        }
-        _ => panic!("expected compile error"),
-    }
+    assert!(matches!(err, HostError::ExternalBlockContentDeferred(_)));
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn external_upsert_invalidates_dependent_owner() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -869,6 +861,7 @@ fn non_sfc_reupsert_with_same_content_reports_not_changed() {
 
 /// @ai-generated - Non-SFC reupsert still invalidates dependents via invalidate_dependents
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn non_sfc_reupsert_still_invalidates_dependents() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1568,6 +1561,7 @@ fn empty_script_setup_block() {
 
 /// @ai-generated - Removing a dependency file invalidates owners' compile slots
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn remove_invalidates_dependent_compile_slots() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -1645,9 +1639,10 @@ fn get_diagnostics_without_compilation() {
 
     // get_diagnostics should return stored diagnostics without recompiling
     let diags = host.get_diagnostics("Comp.vue", &profile_dev());
-    assert!(diags.is_some(), "should have stored diagnostics");
-    let diags = diags.unwrap();
-    assert!(diags.has_errors);
+    assert!(
+        diags.is_none(),
+        "typed external-content deferral must not be cached as compile diagnostics",
+    );
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3245,6 +3240,7 @@ fn css_var_flow_across_files() {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn css_var_flow_with_template_override_profile() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(
@@ -3283,6 +3279,7 @@ fn css_var_flow_with_template_override_profile() {
 }
 
 #[test]
+#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn override_compile_slot_does_not_poison_raw_css_var_flow() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(

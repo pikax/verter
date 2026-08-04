@@ -410,6 +410,19 @@ impl WasmVerterHost {
         to_wasm_value(&output)
     }
 
+    /// Returns the exact registered, content-free schema-8 structure projection.
+    /// Ranges are UTF-8 offsets and identity fields are sealed public tokens.
+    #[wasm_bindgen(js_name = getDocumentStructure)]
+    pub fn get_document_structure(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
+        let output = catch_panic(|| {
+            self.inner
+                .ordered_sfc_structure(canonical_id)
+                .as_ref()
+                .map(verter_ffi::convert::ordered_structure_to_ffi)
+        })?;
+        to_wasm_value(&output)
+    }
+
     /// Removes a file from the host by its canonical ID or any registered alias.
     ///
     /// All associated virtual nodes and cached compilations are discarded.
@@ -636,6 +649,20 @@ impl WasmVerterHost {
         to_wasm_value(&resolved)
     }
 
+    /// Ordered SFC block facts projected from the registered carrier
+    /// inventory — the sole geometry source for block-structure lint rules
+    /// and block-anchored code-action edits. Empty when the file has no
+    /// registered structure (those rules then stay silent — fail closed).
+    fn registered_block_facts(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Vec<verter_diagnostics::SfcBlockFact> {
+        self.inner
+            .registered_file_structure_snapshot(canonical_or_alias)
+            .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+            .unwrap_or_default()
+    }
+
     /// Runs lint rules against a file's analysis data and returns diagnostics.
     ///
     /// Takes a canonical ID (or alias), retrieves its analysis data from the
@@ -659,11 +686,13 @@ impl WasmVerterHost {
             Some(snapshot) => {
                 let linter = Linter::new(lint_config);
                 let script = build_script_snapshot(&snapshot);
+                let blocks = self.registered_block_facts(canonical_or_alias);
                 linter
                     .lint(
                         Some(&script),
                         snapshot.template.as_deref(),
                         &snapshot.styles,
+                        &blocks,
                     )
                     .into_diagnostics()
             }
@@ -699,11 +728,13 @@ impl WasmVerterHost {
 
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::default();
+                let blocks = self.registered_block_facts(canonical_or_alias);
                 let diag_set = linter.lint_with_source(
                     Some(&script),
                     snapshot.template.as_deref(),
                     &snapshot.styles,
                     Some(source),
+                    &blocks,
                 );
 
                 let engine = ActionEngine::default();
@@ -714,6 +745,7 @@ impl WasmVerterHost {
                     template: snapshot.template.as_deref(),
                     script: Some(&script),
                     styles: &snapshot.styles,
+                    blocks: &blocks,
                 };
 
                 // Collect fixes for diagnostics that overlap the cursor

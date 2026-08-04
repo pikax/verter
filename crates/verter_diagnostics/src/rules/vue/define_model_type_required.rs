@@ -81,6 +81,7 @@ mod tests {
     fn define_model_without_type_reports() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineModel,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
@@ -123,6 +124,7 @@ mod tests {
     fn define_model_with_type_passes() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineModel,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -156,6 +158,7 @@ mod tests {
         let script = ScriptAnalysisSnapshot {
             macros: vec![
                 AnalyzedMacro {
+                    edit_anchors: Default::default(),
                     kind: AnalyzedMacroKind::DefineModel,
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_based: true,
@@ -175,6 +178,7 @@ mod tests {
                     span: Span::new(20, 42),
                 },
                 AnalyzedMacro {
+                    edit_anchors: Default::default(),
                     kind: AnalyzedMacroKind::DefineModel,
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_based: false,
@@ -209,6 +213,7 @@ mod tests {
     fn no_define_model_passes() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -245,6 +250,7 @@ mod tests {
     fn js_script_does_not_report() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineModel,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,

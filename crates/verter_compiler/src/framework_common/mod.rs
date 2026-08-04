@@ -21,8 +21,14 @@
 pub mod carrier_compiler;
 pub mod ctx;
 pub mod generated_identifier;
+#[doc(hidden)]
+pub mod registered_carrier_projection;
+mod registered_projector_seal;
 pub mod registry;
 pub mod vue_bridge;
+
+#[cfg(test)]
+mod registered_carrier_projection_tests;
 
 /// Reusable framework IDE sourcemap end-to-end assertion helpers, shared
 /// by every carrier vertical's `#[cfg(test)]` sourcemap suite.
@@ -37,4 +43,6 @@ pub use carrier_compiler::{
 };
 pub use ctx::CarrierCompilerCtx;
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
+#[doc(hidden)]
+pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;

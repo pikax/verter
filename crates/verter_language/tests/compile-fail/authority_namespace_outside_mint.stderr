@@ -1,0 +1,23 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/compile-fail/authority_namespace_outside_mint.rs:5:13
+  |
+5 |     let _ = SourceAuthorityNamespaceId([0; 16]);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/registered_source_authority.rs
+  |
+  | pub struct SourceAuthorityNamespaceId([u8; 16]);
+  |                                       ^^^^^^^^ private field
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/compile-fail/authority_namespace_outside_mint.rs:6:13
+  |
+6 |     let _ = GrammarAuthorityNamespaceId([0; 16]);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/carrier_grammar.rs
+  |
+  | pub struct GrammarAuthorityNamespaceId([u8; 16]);
+  |                                        ^^^^^^^^ private field

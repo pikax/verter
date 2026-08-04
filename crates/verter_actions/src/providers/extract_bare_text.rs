@@ -45,7 +45,7 @@ impl ActionProvider for ExtractBareText {
             return vec![];
         };
 
-        build_extract_action(el, template, script, ctx.source)
+        build_extract_action(el, template, script, ctx.source, ctx.blocks)
     }
 
     fn actions_at(&self, offset: u32, ctx: &ActionContext) -> Vec<CodeAction> {
@@ -59,7 +59,7 @@ impl ActionProvider for ExtractBareText {
             return vec![];
         };
 
-        build_extract_action(el, template, script, ctx.source)
+        build_extract_action(el, template, script, ctx.source, ctx.blocks)
     }
 }
 
@@ -361,13 +361,18 @@ fn build_extract_action(
     template: &TemplateAnalysisSnapshot,
     script: Option<&ScriptAnalysisSnapshot>,
     source: &str,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> Vec<CodeAction> {
     if el.text_children.is_empty() {
         return vec![];
     }
 
-    // Find script setup end insertion point
-    let Some(script_insert_pos) = find_script_end_insert_pos(source) else {
+    // Script insertion anchor: the parser-owned content end of the selected
+    // script block (fail closed without inventory facts).
+    let Some(script_block) = selected_script_block(blocks) else {
+        return vec![];
+    };
+    let Some(script_insert_pos) = script_end_insert_pos(source, script_block) else {
         return vec![];
     };
 
@@ -542,12 +547,12 @@ fn build_extract_action(
 
     // 3. Import edit: add computed/unref to vue import if needed
     if !has_scoped {
-        if let Some(edit) = find_or_extend_vue_import(source, script, "computed") {
+        if let Some(edit) = find_or_extend_vue_import(source, script, script_block, "computed") {
             edits.push(edit);
         }
     }
     if needs_unref {
-        if let Some(edit) = find_or_extend_vue_import(source, script, "unref") {
+        if let Some(edit) = find_or_extend_vue_import(source, script, script_block, "unref") {
             edits.push(edit);
         }
     }
@@ -584,16 +589,29 @@ fn build_extract_action(
     }]
 }
 
-/// Find byte position just before `</script` in the source.
-fn find_script_end_insert_pos(source: &str) -> Option<u32> {
-    // Find </script — we want to insert before the newline preceding it
-    let idx = source.find("</script")?;
-    // Back up past any trailing whitespace/newline before </script
-    let mut pos = idx;
-    while pos > 0 && source.as_bytes()[pos - 1].is_ascii_whitespace() {
+/// The selected script block's inventory facts (first script section in
+/// source order). Block geometry comes ONLY from these parser-owned facts.
+fn selected_script_block(
+    blocks: &[verter_diagnostics::SfcBlockFact],
+) -> Option<&verter_diagnostics::SfcBlockFact> {
+    blocks
+        .iter()
+        .find(|block| block.role == verter_diagnostics::SfcBlockRole::Script)
+}
+
+/// Insertion position at the end of the selected script block's parser-owned
+/// content span, backed up over trailing whitespace INSIDE that span. Raw
+/// source is never searched for a `</script` delimiter, so a decoy literal
+/// inside the script body can never displace the anchor.
+fn script_end_insert_pos(
+    source: &str,
+    script_block: &verter_diagnostics::SfcBlockFact,
+) -> Option<u32> {
+    let content_start = script_block.content_span.start as usize;
+    let mut pos = (script_block.content_span.end as usize).min(source.len());
+    while pos > content_start && source.as_bytes()[pos - 1].is_ascii_whitespace() {
         pos -= 1;
     }
-    // Insert after the last non-whitespace character before </script
     Some(pos as u32)
 }
 
@@ -602,6 +620,7 @@ fn find_script_end_insert_pos(source: &str) -> Option<u32> {
 fn find_or_extend_vue_import(
     source: &str,
     script: Option<&ScriptAnalysisSnapshot>,
+    script_block: &verter_diagnostics::SfcBlockFact,
     specifier: &str,
 ) -> Option<FileEdit> {
     let script = script?;
@@ -632,11 +651,10 @@ fn find_or_extend_vue_import(
         }
     }
 
-    // No vue import exists — create one at the top of the script
-    // Find the start of the script content (after <script setup...>)
-    let script_tag_end = source.find("<script")?;
-    let after_tag = source[script_tag_end..].find('>')?;
-    let insert_pos = (script_tag_end + after_tag + 1) as u32;
+    // No vue import exists — create one at the top of the script: the
+    // parser-owned content start of the selected script block (right after
+    // the opening tag), never a raw `<script`/`>` search.
+    let insert_pos = script_block.content_span.start;
 
     Some(FileEdit {
         file_id: None,

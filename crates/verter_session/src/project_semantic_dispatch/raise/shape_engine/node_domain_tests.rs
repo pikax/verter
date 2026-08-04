@@ -165,23 +165,26 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let empty_surface = || SurfaceView {
-        members: StdArc::from(Vec::new().into_boxed_slice()),
-        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
+    let empty_surface = || {
+        crate::test_surface_view! {
+            members: StdArc::from(Vec::new().into_boxed_slice()),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }
     };
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let empty_obj = graph.intern_node(SemanticNodeData::Object(empty_surface()));
     // A non-empty object via an OPEN index surface — member-presence settled by
     // `has_index_signature` with no `SurfaceMember` construction required.
-    let open_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        has_index_signature: true,
-        ..empty_surface()
-    }));
+    let open_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+        Vec::new(),
+        None,
+        true,
+    )));
     let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: dummy,
@@ -210,10 +213,11 @@ fn root_only_projection_root_kind_matches_full_fold() {
         signature_span: None,
         return_type_span: None,
     });
-    let call_sig_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        call_signatures: StdArc::from(vec![func].into_boxed_slice()),
-        ..empty_surface()
-    }));
+    let call_sig_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+        vec![crate::semantic_query::SurfaceEntry::CallSignature(func)],
+        None,
+        false,
+    )));
 
     // Collapsed-intersection cases (directly interned so lowering does NOT
     // pre-collapse them): the fold DROPS the `{}` arm and classifies the survivor.
@@ -330,21 +334,24 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
 
-    let empty_surface = || SurfaceView {
-        members: StdArc::from(Vec::new().into_boxed_slice()),
-        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
+    let _empty_surface = || {
+        crate::test_surface_view! {
+            members: StdArc::from(Vec::new().into_boxed_slice()),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }
     };
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let open_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        has_index_signature: true,
-        ..empty_surface()
-    }));
+    let open_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+        Vec::new(),
+        None,
+        true,
+    )));
     let func = graph.intern_node(SemanticNodeData::Function {
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
@@ -600,7 +607,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
         IndexKey, MapperKey, MapperKind, OptionalityMod, PrimitiveKind, ReadonlyMod,
-        SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+        SemanticNodeData, SemanticNodeId, SurfaceMember,
     };
     use crate::VerterHost;
     use verter_type_expr::MemberVisibility;
@@ -756,28 +763,29 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     // dangling is NOT a required-edge `None` — the full fold wraps the missing value
     // as a sentinel (member present), so BOTH sides return Some with an Object root.
     // A root-only member deep-walk would FALSELY propagate None here.
-    let dangling_member_obj = graph.intern_node(SemanticNodeData::Object(SurfaceView {
-        members: StdArc::from(
-            vec![SurfaceMember {
-                visibility: MemberVisibility::Public,
-                name: StdArc::from("a"),
-                value: dangling,
-                optional: false,
-                readonly: false,
-                is_method: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                spans: Default::default(),
-                declaration_origin: None,
-            }]
-            .into_boxed_slice(),
-        ),
-        call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let dangling_member_obj =
+        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            members: StdArc::from(
+                vec![SurfaceMember {
+                    visibility: MemberVisibility::Public,
+                    name: StdArc::from("a"),
+                    value: dangling,
+                    optional: false,
+                    readonly: false,
+                    is_method: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    spans: Default::default(),
+                    declaration_origin: None,
+                }]
+                .into_boxed_slice(),
+            ),
+            call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            index_signatures: StdArc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        }));
     let full_obj = {
         let mut alg = super::RaisedFactsAlg;
         let mut active = FxHashSet::default();

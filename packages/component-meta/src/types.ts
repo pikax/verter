@@ -3,7 +3,10 @@
  */
 
 import type { TypeDescriptor } from "@verter/type-ir";
-import type { NativeOriginGraph } from "./native-component-meta.js";
+import type {
+  NativeComponentContractAvailability,
+  NativeOriginGraph,
+} from "./native-component-meta.js";
 
 /** Structured metadata extracted from a Vue Single File Component. */
 export interface ComponentMeta {
@@ -13,6 +16,8 @@ export interface ComponentMeta {
   componentName: string;
   /** Whether the component uses the Options API (`export default { ... }`). */
   optionsApi: boolean;
+  /** Mandatory structured Vue/Svelte public-contract availability. */
+  componentPublicContract: NativeComponentContractAvailability;
   /** Props declared via `defineProps` or Options API `props`. */
   props: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */
@@ -25,8 +30,8 @@ export interface ComponentMeta {
   exposed: ExposedMeta[];
   /** Host-derived runtime public-instance surface for ref-accessible members. */
   publicInstance?: PublicInstanceMeta;
-  /** Parsed SFC root block metadata for template/script/style/custom blocks. */
-  sfcBlocks?: SfcBlocksMeta;
+  /** Mandatory schema-8 ordered structure from the registered artifact. */
+  orderedSfcStructure: OrderedSfcStructureMeta;
 
   // ── Template usage ─────────────────────────────────────────────
 
@@ -258,82 +263,13 @@ export interface PublicInstanceMemberMeta {
   tags?: JsdocTag[];
 }
 
-/** Parsed SFC root block metadata. */
-export interface SfcBlocksMeta {
-  /** The `<template>` block when present. */
-  template?: TemplateBlockMeta;
-  /** The classic `<script>` block when present. */
-  script?: ScriptBlockMeta;
-  /** The `<script setup>` block when present. */
-  scriptSetup?: ScriptBlockMeta;
-  /** All `<style>` blocks in source order. */
-  styles: StyleBlockMeta[];
-  /** All custom root blocks such as `<i18n>` in source order. */
-  custom: CustomBlockMeta[];
-}
-
-/** A single raw root-block attribute. */
-export interface SfcAttributeMeta {
-  /** Attribute name as written in source. */
-  name: string;
-  /** Attribute value when present; omitted for boolean attributes. */
-  value?: string;
-}
-
-/** Metadata for a `<template>` block. */
-export interface TemplateBlockMeta {
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a `<script>` or `<script setup>` block. */
-export interface ScriptBlockMeta {
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** `<script setup generic="...">` when present. */
-  generic?: string;
-  /** `<script setup attrs="...">` or `attributes="..."` when present. */
-  attrsType?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a `<style>` block. */
-export interface StyleBlockMeta {
-  /** Source-order block index among `<style>` blocks. */
-  index: number;
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** Whether the block has the `scoped` attribute. */
-  scoped: boolean;
-  /** Whether the block has the `module` attribute. */
-  isModule: boolean;
-  /** Custom module name from `module="..."` when present. */
-  moduleName?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
-}
-
-/** Metadata for a custom root block such as `<i18n>`. */
-export interface CustomBlockMeta {
-  /** Source-order block index among custom blocks. */
-  index: number;
-  /** Raw custom tag name, for example `"i18n"`. */
-  blockType: string;
-  /** `lang="..."` when present. */
-  lang?: string;
-  /** `src="..."` when present. */
-  src?: string;
-  /** All raw root-block attributes in source order. */
-  attributes: SfcAttributeMeta[];
+/** Content-free ordered structure. Nested records preserve generated oneof
+ * shapes and sealed token identities without an ordinal compatibility view. */
+export interface OrderedSfcStructureMeta {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: Array<Record<string, unknown>>;
+  markupNodes: Array<Record<string, unknown>>;
 }
 
 // ── Template usage types ───────────────────────────────────────────
@@ -445,6 +381,37 @@ export interface ImportMeta {
   }[];
 }
 
+/**
+ * The reactive-wrapper family a composable binding's whole-return type resolves
+ * to — a CLOSED vocabulary.
+ *
+ * `"none"` is a COMPLETED proof that the return type is not a Vue wrapper, not a
+ * claim of non-reactivity: `reactive()` returns `UnwrapNestedRefs<T>`, so a
+ * non-wrapper return type never downgrades {@link BindingMeta.reactivityKind}.
+ * `"unresolved"` pairs with {@link BindingMeta.returnWrapperUnresolvedReason}.
+ */
+export type ReturnWrapperRole =
+  | "ref"
+  | "shallowRef"
+  | "computedRef"
+  | "modelRef"
+  | "reactive"
+  | "shallowReactive"
+  | "none"
+  | "unresolved";
+
+/** The exact reason a whole-return wrapper role could not be resolved. */
+export type ReturnWrapperUnresolvedReason =
+  | "analysisUnavailable"
+  | "revisionMismatch"
+  | "missingDependency"
+  | "cycle"
+  | "budgetExceeded"
+  | "workLimitExceeded"
+  | "cancelled"
+  | "unsupported"
+  | "fault";
+
 /** A script-level binding (variable, function, class, etc.). */
 export interface BindingMeta {
   /** Binding name. */
@@ -453,6 +420,18 @@ export interface BindingMeta {
   kind: "const" | "let" | "var" | "function" | "asyncFunction" | "class";
   /** Reactivity classification. */
   reactivityKind: "none" | "ref" | "reactive" | "computed" | "maybeRef" | "mutable";
+  /**
+   * The demand-resolved whole-return wrapper role of a composable binding, or
+   * absent when no role was demanded (the binding is not a whole-value
+   * composable call, or the value-space analysis already decided it).
+   *
+   * This is the EXACTNESS carrier: {@link BindingMeta.reactivityKind} is a
+   * collapsed decoration vocabulary with no degraded arm, so it cannot separate
+   * "proven a `Ref`" from "proven not a Vue wrapper" from "could not resolve".
+   */
+  returnWrapperRole?: ReturnWrapperRole;
+  /** Present only with `returnWrapperRole === "unresolved"`. */
+  returnWrapperUnresolvedReason?: ReturnWrapperUnresolvedReason;
   /** TS type annotation if present (e.g. `"number"`, `"Ref<string>"`). */
   typeAnnotation?: string;
   /** Whether this binding is used in the template. */
@@ -475,6 +454,12 @@ export interface VueApiCallMeta {
 export interface StyleMeta {
   /** Preprocessor language (`"Css"`, `"Scss"`, `"Less"`, etc.). */
   lang: string;
+  /**
+   * Opaque sealed block token binding this style analysis to its ordered
+   * structure block. Absent means the sealed identity could not be
+   * revalidated — typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   /** Whether the style block is scoped. */
   scoped: boolean;
   /** Whether this is a CSS module (`<style module>`). */

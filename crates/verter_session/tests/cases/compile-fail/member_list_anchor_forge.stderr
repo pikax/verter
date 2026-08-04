@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/cases/compile-fail/member_list_anchor_forge.rs:9:71
+  |
+9 |     let _forged = verter_semantic::analysis::types::MemberListAnchor::new(4, false);
+  |                                                                       ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/verter_semantic/src/analysis/types.rs
+  |
+  |     pub(crate) fn new(insert_offset: u32, is_empty: bool) -> Self {
+  |     ------------------------------------------------------------- private associated function defined here

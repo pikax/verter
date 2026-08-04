@@ -2,6 +2,20 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
 import { createMetaRuntime, getMetaRuntime, resolvePath } from "./runtime/index.js";
 import type { NativeMetaProject, NativeMetaSession } from "./runtime/index.js";
+import type { NativeComponentMetaResult } from "./native-component-meta.js";
+
+function resolvedTypeRow(display: string) {
+  return {
+    publication: {
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactConcrete",
+      reason: { kind: "resolvedExactConcrete" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    } as const,
+    terminalDisplay: { text: display },
+  };
+}
 
 function nativeMetaPayload(filePath: string) {
   return {
@@ -11,11 +25,36 @@ function nativeMetaPayload(filePath: string) {
       {
         name: "label",
         type: { kind: "primitive", name: "string" },
-        rawType: "string",
+        ...resolvedTypeRow("string"),
         required: true,
         hasDefault: false,
       },
     ],
+    componentPublicContract: {
+      kind: "supported",
+      contract: {
+        adapterId: "vue",
+        exactness: "exact",
+        degradation: [],
+        provenance: "componentMetaOutput",
+        props: [
+          {
+            name: "label",
+            optional: false,
+            hasDefault: false,
+            type: {
+              type: { kind: "primitive", name: "string" },
+              ...resolvedTypeRow("string"),
+            },
+            exactness: "exact",
+            degradation: [],
+            provenance: "componentMetaOutput",
+          },
+        ],
+        events: [],
+        slots: [],
+      },
+    },
     events: [],
     slots: [],
     models: [],
@@ -42,7 +81,13 @@ function nativeMetaPayload(filePath: string) {
     acceptedSurfaceCompleteness: "exact",
     rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
     fallthroughSurface: { kind: "none", reason: "noTemplate" },
-  };
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
+  } satisfies NativeComponentMetaResult;
 }
 
 /** Mock native session with in-memory file tracking. */
@@ -351,7 +396,7 @@ describe("ComponentMetaSession public API", () => {
             {
               name: "searchInput",
               type: { kind: "primitive", name: "boolean" },
-              rawType: "boolean | Omit<InputProps, 'modelValue'>",
+              ...resolvedTypeRow("boolean | Omit<InputProps, 'modelValue'>"),
               required: false,
               hasDefault: false,
             },
@@ -400,6 +445,7 @@ describe("ComponentMetaSession public API", () => {
                   },
                 ],
               },
+              ...resolvedTypeRow("[item: Item]"),
               rawSignature: '(event: "select", item: Item) => void',
             },
           ],
@@ -412,9 +458,13 @@ describe("ComponentMetaSession public API", () => {
                 {
                   name: "item",
                   type: { kind: "ref", name: "Item", typeArguments: [] },
-                  rawType: "Item",
+                  ...resolvedTypeRow("Item"),
                 },
               ],
+              returnType: "boolean",
+              returnValue: { kind: "primitive", name: "boolean" },
+              returnPublication: resolvedTypeRow("boolean").publication,
+              returnTerminalDisplay: resolvedTypeRow("boolean").terminalDisplay,
             },
           ],
           exposed: [
@@ -453,6 +503,104 @@ describe("ComponentMetaSession public API", () => {
               },
             },
           ],
+          componentPublicContract: {
+            kind: "supported",
+            contract: {
+              adapterId: "vue",
+              exactness: "exact",
+              degradation: [],
+              provenance: "componentMetaOutput",
+              props: [
+                {
+                  name: "label",
+                  optional: false,
+                  hasDefault: false,
+                  type: {
+                    type: { kind: "primitive", name: "string" },
+                    ...resolvedTypeRow("string"),
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+              events: [
+                {
+                  name: "select",
+                  overloads: [
+                    {
+                      source: {
+                        type: {
+                          kind: "tuple",
+                          readonly: false,
+                          elements: [
+                            {
+                              label: "item",
+                              ty: { kind: "ref", name: "Item", typeArguments: [] },
+                              optional: false,
+                              rest: false,
+                            },
+                          ],
+                        },
+                        ...resolvedTypeRow("[item: Item]"),
+                      },
+                      parameters: [
+                        {
+                          name: "item",
+                          optional: false,
+                          rest: false,
+                          type: { kind: "ref", name: "Item", typeArguments: [] },
+                        },
+                      ],
+                      returnType: { kind: "primitive", name: "void" },
+                    },
+                  ],
+                  derivedHandler: {
+                    overloads: [
+                      {
+                        parameters: [
+                          {
+                            name: "item",
+                            optional: false,
+                            rest: false,
+                            type: { kind: "ref", name: "Item", typeArguments: [] },
+                          },
+                        ],
+                        returnType: { kind: "primitive", name: "void" },
+                      },
+                    ],
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+              slots: [
+                {
+                  name: "default",
+                  optional: false,
+                  input: {
+                    bindings: [
+                      {
+                        name: "item",
+                        type: {
+                          type: { kind: "ref", name: "Item", typeArguments: [] },
+                          ...resolvedTypeRow("Item"),
+                        },
+                      },
+                    ],
+                  },
+                  returnType: {
+                    type: { kind: "primitive", name: "boolean" },
+                    ...resolvedTypeRow("boolean"),
+                  },
+                  exactness: "exact",
+                  degradation: [],
+                  provenance: "componentMetaOutput",
+                },
+              ],
+            },
+          },
         };
       },
       getEffectiveSource() {

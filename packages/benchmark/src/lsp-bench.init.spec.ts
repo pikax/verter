@@ -29,7 +29,12 @@ interface InitResult {
   receivedInitializationOptions: unknown;
 }
 
-describe("initializeBenchmarkClient position-encoding negotiation", () => {
+// Both handshake tests spawn a real node fake-server child; the handshake
+// bound passed to `initializeBenchmarkClient` is the discriminator (a
+// regression never answers at all), and the suite timeout sits above it so a
+// loaded parallel test run cannot fire the 5s framework default while a
+// healthy child is still starting.
+describe("initializeBenchmarkClient position-encoding negotiation", { timeout: 30_000 }, () => {
   it("advertises general.positionEncodings and adopts the server's chosen encoding", async () => {
     const client = makeClient({ FAKE_INIT_ENCODING: "utf-8" });
     // Before the handshake the client sits at the LSP default.
@@ -39,7 +44,7 @@ describe("initializeBenchmarkClient position-encoding negotiation", () => {
       client,
       "file:///bench",
       "bench",
-      5000,
+      15_000,
     );
 
     // Advertised: the benchmark's init params reached the server WITH the
@@ -60,7 +65,7 @@ describe("initializeBenchmarkClient position-encoding negotiation", () => {
       client,
       "file:///bench",
       "bench",
-      5000,
+      15_000,
       volarInitOptions,
     );
 

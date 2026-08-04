@@ -45,6 +45,7 @@ fn make_child_with_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
                     .iter()
                     .map(|name| AnalyzedPropDefinition {
                         name: name.to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::default(),
                         type_annotation: Some("string".into()),
                         has_default: false,
                         is_required: true,
@@ -640,6 +641,7 @@ fn make_child_with_models(model_names: &[Option<&str>]) -> FileAnalysisSnapshot 
         macros: model_names
             .iter()
             .map(|name| AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineModel,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -803,6 +805,7 @@ fn dynamic_component_vmodel_skipped() {
 fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysisSnapshot {
     fn macro_shell(kind: AnalyzedMacroKind) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -847,6 +850,7 @@ fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysi
         .map(|name| verter_semantic::analysis::AnalyzedEmitField {
             name: (*name).to_string(),
             span: verter_span::Span::new(0, 0),
+            call_signature_span: None,
             payload_type: None,
             description: None,
             tags: vec![],
@@ -1373,6 +1377,7 @@ fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
 
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -1461,6 +1466,7 @@ fn macro_fallback_with_defaults_pattern() {
     let child = FileAnalysisSnapshot {
         macros: vec![
             AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::WithDefaults,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,
@@ -1480,6 +1486,7 @@ fn macro_fallback_with_defaults_pattern() {
                 span: verter_span::Span::new(0, 50),
             },
             AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,
@@ -1607,6 +1614,7 @@ fn make_component_with_slots(
 fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineSlots,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -1620,6 +1628,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
                 .iter()
                 .map(
                     |(name, required)| verter_semantic::analysis::AnalyzedSlotField {
+                        props_anchor: Default::default(),
                         name: name.to_string(),
                         is_required: *required,
                         span: verter_span::Span::new(0, 10),

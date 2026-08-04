@@ -1,6 +1,6 @@
 //! [P2] discrimination fixtures for the projected REPLAY-ROUTE facts —
 //! the content-free replay addresses ([`ProjectedTypeFact::MemberPath`],
-//! [`ProjectedTypeFact::CallableParams`], [`ProjectedTypeFact::IndexPosition`])
+//! [`ProjectedTypeFact::CallableOccurrence`], [`ProjectedTypeFact::IndexPosition`])
 //! a publication surface stamps for members/payloads/positions the closed
 //! vocabulary cannot faithfully express. Each fixture proves every identity
 //! axis independently discriminates (base anchor, base macro ordinal, the
@@ -88,7 +88,7 @@ fn projected_member_path_fact_discriminates_base_and_path() {
 }
 
 #[test]
-fn projected_callable_params_fact_discriminates_base_ordinal_and_first_param() {
+fn projected_callable_occurrence_fact_discriminates_base_subject_and_projection() {
     let base = |canonical: &str, macro_index: u32| {
         AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
             anchor: AuthoredAnchor {
@@ -101,22 +101,21 @@ fn projected_callable_params_fact_discriminates_base_ordinal_and_first_param() {
             payload: MacroPayloadPosition::TypeArgument,
         })
     };
-    let mk = |canonical: &str, macro_index: u32, signature_ordinal: u32, first_param: u32| {
-        ProjectedTypeFact::CallableParams {
+    let mk = |canonical: &str, macro_index: u32, subject: u64, first_param: u32| {
+        ProjectedTypeFact::CallableOccurrence {
             base: base(canonical, macro_index),
-            signature_ordinal,
-            first_param,
+            occurrence: CallableOccurrenceHandle::root(subject),
+            projection: CallableOccurrenceProjection::Parameters { first_param },
         }
     };
     let save = mk("/App.vue", 0, 0, 1);
     // Identity: an identical rebuild is equal.
     assert_eq!(save, mk("/App.vue", 0, 0, 1));
     // Each axis independently discriminates: the base anchor, the base macro
-    // ordinal, the SIGNATURE ordinal (a different call signature is a
-    // different payload), and the first payload parameter index.
+    // ordinal, the exact semantic subject, and the selected payload position.
     assert_ne!(save, mk("/Other.vue", 0, 0, 1), "base anchor");
     assert_ne!(save, mk("/App.vue", 1, 0, 1), "base macro ordinal");
-    assert_ne!(save, mk("/App.vue", 0, 1, 1), "signature ordinal");
+    assert_ne!(save, mk("/App.vue", 0, 1, 1), "semantic subject");
     assert_ne!(save, mk("/App.vue", 0, 0, 0), "first payload param");
     // The arm discriminates from its sibling projected arms (a callable-params
     // route is never a member-path route or a whole surface, even over the
@@ -208,10 +207,10 @@ fn projected_index_position_fact_discriminates_base_ordinal_and_position() {
     // member-path route).
     assert_ne!(
         value,
-        ProjectedTypeFact::CallableParams {
+        ProjectedTypeFact::CallableOccurrence {
             base: base("/App.vue", 0),
-            signature_ordinal: 0,
-            first_param: 1,
+            occurrence: CallableOccurrenceHandle::root(0),
+            projection: CallableOccurrenceProjection::Parameters { first_param: 1 },
         },
         "index-position vs callable-params over the same base"
     );

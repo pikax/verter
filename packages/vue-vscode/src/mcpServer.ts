@@ -20,7 +20,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 import { createInterface } from "node:readline";
 
 import { serverBinaryCandidates } from "verter-mcp";
@@ -110,7 +110,8 @@ export function bundledMcpBinaryCandidate(
   platform: NodeJS.Platform = process.platform,
 ): McpBinaryCandidate {
   const binaryName = platform === "win32" ? "verter-mcp.exe" : "verter-mcp";
-  return { path: join(extensionPath, "bin", binaryName), source: "bundled" };
+  const targetPath = platform === "win32" ? win32 : posix;
+  return { path: targetPath.join(extensionPath, "bin", binaryName), source: "bundled" };
 }
 
 /**

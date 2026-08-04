@@ -558,6 +558,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     // THIS destructure. Each binding's type is annotated to pin "span / id /
     // flag / interned name", never an owned `String` type body.
     let TypeInfoSurface {
+        entries,
         members,
         call_signatures,
         construct_signatures,
@@ -565,6 +566,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         keyspace,
         has_index_signature,
     } = &surface.surface;
+    let _entries: &Arc<[crate::typeinfo::surface::TypeInfoSurfaceEntry]> = entries;
     let _members: &Arc<[TypeInfoSurfaceMember]> = members;
     let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
     let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;

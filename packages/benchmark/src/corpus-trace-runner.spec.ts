@@ -145,7 +145,12 @@ describe("runComponentInIsolation", () => {
       component: "src/runtime/components/TestOk.vue",
       command: process.execPath,
       args: [childScript],
-      timeoutMs: 5_000,
+      // The happy-path child exits immediately once spawned; the runner's
+      // parent-owned timeout only exists to reap a HUNG child (asserted by
+      // the dedicated hang test below with a short bound). Keep this bound
+      // at the test's own 15s so a load-delayed spawn cannot be reaped as a
+      // spurious query_timeout.
+      timeoutMs: 15_000,
       outputDir: tmpDir,
     });
 

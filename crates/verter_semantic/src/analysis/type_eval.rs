@@ -29,9 +29,10 @@ use rustc_hash::FxHashMap;
 use crate::analysis::top_level_owners::DeclMap;
 
 use verter_type_expr::facts::{
-    EnumMemberEntry, EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar,
-    FunctionSignatureFact, MemberHeaderFact, MemberReturnInferenceFact, ObjectShapeFact,
-    ReturnInferenceCompleteness, TypeParamDeclFact, ValueTypeAnnotationFact,
+    AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, EnumMemberEntry, EnumMemberFact,
+    EnumMemberNamesFact, EnumPrimitiveDomain, EnumScalar, FunctionSignatureFact, MemberHeaderFact,
+    MemberReturnInferenceFact, ObjectShapeFact, ReturnInferenceCompleteness, TypeParamDeclFact,
+    ValueTypeAnnotationFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::FunctionSpansOrigin;
@@ -1081,13 +1082,20 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool 
         let Some(ordinal) = checked_rebased_ordinal(base, j) else {
             return false;
         };
-        let repoint = |slot: &mut TypeBodySlot| {
-            if let Some(TypeBodyPathStep::ValueSignature { .. }) = slot.path.first() {
-                let mut path: Vec<TypeBodyPathStep> = slot.path.to_vec();
-                path[0] = TypeBodyPathStep::ValueSignature { ordinal };
-                slot.path = path.into();
+        // Generalized over the PATH position rather than the carrier type: the
+        // authored return head's arguments are `TypeArgLocator`s, not
+        // `TypeBodySlot`s, and they carry the same leading `ValueSignature`
+        // step. A rebase typed to the slot alone would leave every merged
+        // contributor's head addressing overload ordinal 0 — the wrong
+        // overload.
+        let repoint_path = |path: &mut Arc<[TypeBodyPathStep]>| {
+            if let Some(TypeBodyPathStep::ValueSignature { .. }) = path.first() {
+                let mut rebased: Vec<TypeBodyPathStep> = path.to_vec();
+                rebased[0] = TypeBodyPathStep::ValueSignature { ordinal };
+                *path = rebased.into();
             }
         };
+        let repoint = |slot: &mut TypeBodySlot| repoint_path(&mut slot.path);
         if let Some(return_ty) = &mut signature.return_ty {
             repoint(return_ty);
         }
@@ -1100,8 +1108,33 @@ fn rebase_value_signature_ordinals(decl: &mut ValueDeclInfo, base: u32) -> bool 
             }
         }
         signature.parameters = parameters.into();
+        rebase_authored_reference_head(&mut signature.return_reference_head, repoint_path);
     }
     true
+}
+
+/// Re-point the leading `ValueSignature` step of every argument locator on an
+/// authored reference head. The anchor-free head arms (`NotReference` /
+/// `Unavailable`) and macro-payload argument locators carry no
+/// `ValueSignature`-rooted path and pass through untouched.
+fn rebase_authored_reference_head(
+    head: &mut AuthoredReferenceHeadFact,
+    repoint_path: impl Fn(&mut Arc<[TypeBodyPathStep]>),
+) {
+    let args = match head {
+        AuthoredReferenceHeadFact::Bare { args, .. }
+        | AuthoredReferenceHeadFact::Qualified { args, .. }
+        | AuthoredReferenceHeadFact::ImportType { args, .. } => args,
+        AuthoredReferenceHeadFact::NotReference | AuthoredReferenceHeadFact::Unavailable => return,
+    };
+    let mut rebased = args.to_vec();
+    for arg in &mut rebased {
+        match arg {
+            AuthoredReferenceArgLocator::Value(locator) => repoint_path(&mut locator.path),
+            AuthoredReferenceArgLocator::MacroPayload { .. } => {}
+        }
+    }
+    *args = rebased.into();
 }
 
 #[cfg(test)]

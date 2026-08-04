@@ -2528,16 +2528,26 @@ fn lowered_type_decl_from_group(
                     if merged_index.contains_key(&name) {
                         continue;
                     }
+                    let contributor_step = TypeBodyPathStep::MergedContributor {
+                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                    };
                     let mut path: Vec<TypeBodyPathStep> =
                         Vec::with_capacity(fact.ty.path.len() + 1);
-                    path.push(TypeBodyPathStep::MergedContributor {
-                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    });
+                    path.push(contributor_step);
                     path.extend(fact.ty.path.iter().cloned());
                     fact.ty = TypeBodySlot {
                         anchor: fact.ty.anchor.clone(),
                         path: path.into(),
                     };
+                    // The member's AUTHORED head argument locators address the
+                    // same body position as `fact.ty` and were minted against
+                    // this contributor's OWN body, so they take the SAME
+                    // contributor step. Without it the head derefs the wrong
+                    // contributor — a silently wrong authored argument rather
+                    // than a typed miss.
+                    fact.reference_head = fact
+                        .reference_head
+                        .with_arg_path_prefix(&[contributor_step]);
                     merged_index.insert(name, fact);
                 }
             }
@@ -2785,12 +2795,16 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             typeof_alias_target: None,
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
+            reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
             parameters: Arc::from(Vec::new().into_boxed_slice()),
             return_ty: None,
             return_inference: verter_type_expr::facts::ReturnInferenceCompleteness::NotInferred,
+            // A synthesised default-export constructor has no authored return
+            // annotation at all.
+            return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
             has_implementation_body: true,
             spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
         }],
