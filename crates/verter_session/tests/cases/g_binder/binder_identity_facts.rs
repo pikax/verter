@@ -108,7 +108,7 @@ fn seeds(facts: &BinderIdentityFacts) -> Vec<DeclarationSlotSeed> {
 /// contract: ids are content-derived from the scope's own header
 /// (owner + qualified name), never from a positional ordinal.
 #[test]
-fn binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing() {
+pub(crate) fn binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing() {
     const CANONICAL: &str = "/w/scopes.ts";
     const BASE: &str = "namespace Alpha { interface A1 {} }\nnamespace Beta { interface B1 {} }\n";
     // Cosmetic churn: comments + blank lines, identical declarations.
@@ -184,7 +184,7 @@ fn binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing() {
 /// has none by construction) and the artifact stores the seed, never the
 /// env-bearing slot.
 #[test]
-fn declaration_slots_are_stable_symbol_space_scoped_facts() {
+pub(crate) fn declaration_slots_are_stable_symbol_space_scoped_facts() {
     const CANONICAL: &str = "/w/dual.ts";
     // `Foo` in THREE declaration spaces: type (interface) + value
     // (function) + namespace (`namespace Foo { … }`).
@@ -308,7 +308,7 @@ fn declaration_slots_are_stable_symbol_space_scoped_facts() {
 /// still validates) and invalidates on a semantic edit (the key moves
 /// AND the recorded parse-fact rail moves with it).
 #[test]
-fn binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit() {
+pub(crate) fn binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit() {
     const CANONICAL: &str = "/w/warm.ts";
     const V1: &str = "export interface Foo { a: string }\n";
     let host = make_host_with_file(CANONICAL, V1);
@@ -402,7 +402,7 @@ fn binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit() {
 /// and the projection is computed in exactly one place (grep evidence:
 /// no consumer re-walks raw `IndexedReady` for it).
 #[test]
-fn binder_provenance_served_from_artifact_in_authored_order() {
+pub(crate) fn binder_provenance_served_from_artifact_in_authored_order() {
     const CANONICAL: &str = "/w/prov.ts";
     const SOURCE: &str = "\
 function f(a: string): void;
@@ -535,7 +535,7 @@ fn rust_files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// DISTINCT, and the id is derived from the scope's structural header
 /// (never a content/version hash).
 #[test]
-fn binder_scope_id_enters_context_sensitive_query_identity() {
+pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
     let owner = TopLevelOwnerId::ordinary_file();
     let scope_alpha = ScopeId::file(Arc::from("/w/a.ts"), owner);
     let mut scope_beta = scope_alpha.clone();
@@ -578,7 +578,7 @@ fn binder_scope_id_enters_context_sensitive_query_identity() {
 /// navigation layer is a pure PROJECTION over this substrate).
 /// Structural evidence over the source tree.
 #[test]
-fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
+pub(crate) fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let producer_src = std::fs::read_to_string(manifest_dir.join("src/binder_identity_facts.rs"))
         .expect("the family-A artifact module must exist");
@@ -645,7 +645,7 @@ fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
 /// recorded corpus completeness fact in this block, so it routes
 /// `ReturnOnly` — never a warm-cached miss.
 #[test]
-fn negative_name_lookup_requires_recorded_completeness_or_returnonly() {
+pub(crate) fn negative_name_lookup_requires_recorded_completeness_or_returnonly() {
     const CANONICAL: &str = "/w/neg.ts";
     let host = make_host_with_file(CANONICAL, "export interface Foo { a: string }\n");
     let facts = produce(&host, CANONICAL).facts.clone();

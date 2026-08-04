@@ -5797,7 +5797,7 @@ fn signature_kind_semantics_and_cross_producer_parity() {
 // filtering, FreshOwn-only candidate selection, structured known-name
 // checking, reduced-arm value checking, and three-valued outcomes.
 
-mod fresh_excess_property_checking {
+pub(crate) mod fresh_excess_property_checking {
     use std::sync::Arc;
 
     use verter_type_expr::ExcessPropertyOrigin;
@@ -6550,7 +6550,7 @@ mod fresh_excess_property_checking {
     /// spread-tainted is exempt; taint never suppresses value checking; and
     /// ordinary relation ignores the origin axis entirely.
     #[test]
-    fn freshness_tracks_per_property_spread_taint() {
+    pub(crate) fn freshness_tracks_per_property_spread_taint() {
         let host = host_for_relation_tests();
         let graph = host.project_type_store().semantic_graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

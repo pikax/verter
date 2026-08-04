@@ -15,4 +15,4 @@ mod family_bcd_overflow_refuses_cache;
 #[path = "g_family/family_bcd_top_level_tracer_admits_cache.rs"]
 mod family_bcd_top_level_tracer_admits_cache;
 #[path = "g_family/family_slots_multi_candidate.rs"]
-mod family_slots_multi_candidate;
+pub(crate) mod family_slots_multi_candidate;

@@ -124,7 +124,7 @@ pub use types::{
 mod tests;
 
 #[cfg(test)]
-mod typeinfo_tests;
+pub(crate) mod typeinfo_tests;
 
 // The TS7 `TypeExpr`-projection oracle harness core (normalizer, snapshot
 // schema, identity derivation, admission gate, probe synthesis, hover

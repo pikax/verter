@@ -117,7 +117,7 @@ fn template_literal_reduce_key(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn apparent_type_key_covers_lib_env_demand_and_context() {
+pub(crate) fn apparent_type_key_covers_lib_env_demand_and_context() {
     let base = apparent_type_key(dummy_node(), 0, 0, 0);
 
     // `lib_env_hash` (L) is part of identity — an apparent surface depends
@@ -182,7 +182,7 @@ fn apparent_type_execute_is_non_producing_miss() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn template_literal_reduce_key_covers_context() {
+pub(crate) fn template_literal_reduce_key_covers_context() {
     let a = dummy_node();
     let b = SemanticNodeId(2);
     let base = template_literal_reduce_key(&["", "-", ""], &[a, b], 0, 0, 0, 0);

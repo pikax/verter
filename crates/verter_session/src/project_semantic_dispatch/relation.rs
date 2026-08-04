@@ -5729,7 +5729,7 @@ fn tag_level_disjoint(
 }
 
 #[cfg(test)]
-mod reverse_ownership_tests {
+pub(crate) mod reverse_ownership_tests {
     use super::super::dispatch_txn::SessionId;
     use super::*;
 
@@ -5777,7 +5777,7 @@ mod reverse_ownership_tests {
     }
 
     #[test]
-    fn reverse_mapped_inference_is_relation_owned_in_session() {
+    pub(crate) fn reverse_mapped_inference_is_relation_owned_in_session() {
         // This private function item is nameable only from the relation
         // authority's own module tree, and its sole output is the closed
         // reducer lattice rather than a standalone binding map.

@@ -2,4 +2,4 @@
 //! `BinderIdentityFacts` substrate discriminating tests, merged to cut
 //! test-link count.
 #[path = "g_binder/binder_identity_facts.rs"]
-mod binder_identity_facts;
+pub(crate) mod binder_identity_facts;

@@ -220,7 +220,7 @@ fn template_literal_key_reducer_projects_callable_slots() {
 /// non-cacheable budget-tainted partial). Discriminates the pre-fix unbounded
 /// cartesian build (which enumerated the full union with `cache_suppress=false`).
 #[test]
-fn keyspace_budget_exceeded_admits_nothing() {
+pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     use crate::semantic_query::{QueryResult, SemanticNodeData};
 
     let host = make_host_with_footprint();
@@ -295,7 +295,7 @@ fn keyspace_budget_exceeded_admits_nothing() {
 /// Discriminates the pre-fix fail-closed code (which admitted ONLY string
 /// literals and carrier-stopped these to the deferred shell).
 #[test]
-fn template_literal_reduce_models_ts_numeric_bigint_lexing() {
+pub(crate) fn template_literal_reduce_models_ts_numeric_bigint_lexing() {
     let host = make_host_with_footprint();
     upsert_ts(
         &host,

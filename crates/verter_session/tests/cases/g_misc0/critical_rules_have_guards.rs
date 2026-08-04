@@ -1664,7 +1664,7 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
             for (i, line) in lines.iter().enumerate() {
                 let trimmed = line.trim_start();
                 let after_async = trimmed.strip_prefix("async ").unwrap_or(trimmed);
-                let after_pub = after_async.strip_prefix("pub ").unwrap_or(after_async);
+                let after_pub = strip_visibility_qualifier(after_async);
                 let after_async = after_pub.strip_prefix("async ").unwrap_or(after_pub);
                 let after_const = after_async.strip_prefix("const ").unwrap_or(after_async);
                 let after_fn = match after_const.strip_prefix("fn ") {
@@ -1726,6 +1726,22 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
     }
 
     names
+}
+
+/// Strip a leading visibility qualifier (`pub `, `pub(crate) `,
+/// `pub(super) `, `pub(in path) `) from a trimmed declaration line. A
+/// `#[test]` fn keeps its libtest identity under ANY visibility, so the
+/// fn-declaration parser must not reject qualified forms.
+fn strip_visibility_qualifier(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("pub ") {
+        return rest;
+    }
+    if let Some(rest) = line.strip_prefix("pub(") {
+        if let Some(close) = rest.find(')') {
+            return rest[close + 1..].trim_start();
+        }
+    }
+    line
 }
 
 /// Returns `true` when `line` (a trimmed source line starting with

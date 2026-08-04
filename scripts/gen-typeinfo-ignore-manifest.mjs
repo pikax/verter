@@ -2,28 +2,42 @@
 /**
  * Regenerate the checked typeinfo manifest data.
  *
- * Emits three checked-in, generated-not-hand-maintained files:
+ * Emits the checked-in, generated-not-hand-maintained artifacts:
  *
  * 1. `crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs`
- *    — the 348 `IgnoredTestRow`s, each with the full 13-column schema.
+ *    — one `IgnoredTestRow` per row-registry identity, each with the full
+ *    13-column schema (the row count derives from the partition registry,
+ *    never a frozen literal).
  * 2. `crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs`
  *    — the CLOSED set of 7 coverage-only `AdditionalProofRow`s.
  * 3. `crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs`
  *    — the `TYPEINFO_PARITY_BLOCKS` DAG (every block + prereqs +
- *    dominant mechanism + consumed mechanisms).
+ *    dominant mechanism + consumed mechanisms + typed `required_guards`
+ *    + landing `status`).
+ * 4. `crates/verter_session/tests/cases/manifest_data/typeinfo_guard_registry.rs`
+ *    — the typed `GuardId` registry (`GUARD_REGISTRY`), row-registry counts
+ *    (`ROW_REGISTRY_COUNTS` / `ROW_REGISTRY_PER_BLOCK`), contract
+ *    amendments, landing transactions, and block-status evidence.
+ * 5. `crates/verter_session/src/typeinfo_guard_registry_lib.rs`
+ *    — the lib-test-target mirror of the `GuardId` enum plus the set of
+ *    `GuardId`s whose live binding is owed by the lib target.
+ * 6. `docs/arch/typeinfo-row-registry-counts.md` — the derived row-registry
+ *    count documentation (baseline / per-status / per-block).
  *
- * Each `IgnoredTestRow`'s `block_id` is COMPUTED here from the
- * authoritative machine-readable row→block partition in
+ * Each `IgnoredTestRow`'s `block_id` AND `status` are COMPUTED here from the
+ * authoritative machine-readable append-only row registry in
  * `scripts/manifests/typeinfo-row-block-partition.json` joined with the live
  * `#[ignore = "..."]` discovery + the Capability Map — NOT hand-typed
- * 348 times. The `AdditionalProofRow` table (file 2) and the
- * `TYPEINFO_PARITY_BLOCKS` DAG (file 3, with each block's
- * `required_guards`/`verification_labels`/prereqs/mechanisms) are
+ * per row. Block landing statuses, contract amendments, landing
+ * transactions, and restored-row lineage come from
+ * `scripts/manifests/typeinfo-programme-reconciliation.json`. The
+ * `AdditionalProofRow` table and the `TYPEINFO_PARITY_BLOCKS` DAG (each
+ * block's `required_guards`/`verification_labels`/prereqs/mechanisms) are
  * authored in this generator's own data maps (`buildAdditionalRows`,
- * `emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
- * the prereq/mechanism maps), NOT derived from the row partition. The Rust
- * guard tests only diff/fail; they never write the generated source (repo
- * rule: generators are scripts, not tests).
+ * `emitBlockRows`, `BLOCK_TO_REQUIRED_GUARDS`, `GUARD_REGISTRY_DATA`,
+ * `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps), NOT derived from
+ * the row registry. The Rust guard tests only diff/fail; they never write
+ * the generated source (repo rule: generators are scripts, not tests).
  *
  * Run after adding / removing / renaming an ignored test, or after the
  * row partition changes:
@@ -540,12 +554,23 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
     "U0ManifestSubstrate",
     [
       _DAG,
-      "ignored_test_row_table_holds_exactly_356_rows",
+      "row_registry_counts_derive_from_partition",
       "additional_proof_row_table_holds_exactly_7_rows",
       "semantic_query_name_mirror_matches_live_tag_set",
       "every_block_contract_row_carries_required_guards",
       "typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output",
       "key_owning_block_owner_mapping_is_pinned_closed_set",
+      "landed_typeinfo_blocks_have_required_guards",
+      "no_landed_typeinfo_block_has_live_ignored_rows",
+      "no_vacuous_parent_u_block_landing",
+      "zero_row_blocks_land_exactly_once",
+      "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+      "row_registry_matches_discovered_tests",
+      "row_registry_is_append_only_against_head",
+      "guard_registry_live_integration_bindings_are_complete",
+      "live_integration_guards_are_harness_registered_and_not_ignored",
+      "guard_registry_lib_bindings_are_complete",
+      "live_lib_guards_are_harness_registered_and_not_ignored",
     ],
   ],
   [
@@ -704,6 +729,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "program_analysis_fact_domain_validates_flow_slice",
       "flow_slice_ir_detaches_from_oxc_arena",
       "substitution_env_canonical_hash_is_order_independent",
+      "no_depth_sentinel_on_flow_return_path",
     ],
   ],
   ["U6NarrowTypeof", [_DAG, ..._NARROW_SHARED]],
@@ -829,11 +855,10 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
     [
       _DAG,
       "all_typeinfo_parity_rows_lifted_except_stop_gates",
-      "svelte_adapter_stop_gate_is_registered_out_of_scope",
       "react_adapter_stop_gate_is_registered_out_of_scope",
       "bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback",
       "architecture_minimizes_fallback_entry_not_fallback_cost",
-      "ignored_test_row_table_holds_exactly_356_rows",
+      "row_registry_counts_derive_from_partition",
       "no_landed_typeinfo_block_has_live_ignored_rows",
       "no_vacuous_parent_u_block_landing",
       "every_manifest_row_has_non_placeholder_mechanism_and_executable_proof",
@@ -853,6 +878,266 @@ const BLOCK_VERIFICATION_LABELS = [
   "pnpm test",
   "pnpm install --frozen-lockfile",
 ];
+
+// ── The typed guard registry (Q2). Every reconciled required-guard label
+//    resolves to EXACTLY ONE registry entry: `[label, owner_block,
+//    disposition]` where disposition is `"integration"` (live executable
+//    binding in the verter_session integration-test binary), `"lib"` (live
+//    executable binding in the verter_session lib unit-test binary) or
+//    `"owed"` (a retained valid requirement with no implementing test yet —
+//    owed work for its owning block; a block requiring an owed guard cannot
+//    hold status `Landed`). Labels amended AWAY from contracts are NOT
+//    entries here — they are recorded in
+//    `scripts/manifests/typeinfo-programme-reconciliation.json` amendments.
+//    Every entry must appear in at least one `BLOCK_TO_REQUIRED_GUARDS`
+//    list (generation-enforced), and every required label must be an entry
+//    (generation-enforced), so the registry and the contracts cannot
+//    drift apart. ──
+const GUARD_REGISTRY_DATA = [
+  // U0 ledger / enforcement substrate — live integration guards.
+  [_DAG, "U0ManifestSubstrate", "integration"],
+  ["additional_proof_row_table_holds_exactly_7_rows", "U0ManifestSubstrate", "integration"],
+  ["semantic_query_name_mirror_matches_live_tag_set", "U0ManifestSubstrate", "integration"],
+  ["every_block_contract_row_carries_required_guards", "U0ManifestSubstrate", "integration"],
+  [
+    "typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output",
+    "U0ManifestSubstrate",
+    "integration",
+  ],
+  ["key_owning_block_owner_mapping_is_pinned_closed_set", "U0ManifestSubstrate", "integration"],
+  ["row_registry_counts_derive_from_partition", "U0ManifestSubstrate", "integration"],
+  ["row_registry_matches_discovered_tests", "U0ManifestSubstrate", "integration"],
+  ["row_registry_is_append_only_against_head", "U0ManifestSubstrate", "integration"],
+  ["landed_typeinfo_blocks_have_required_guards", "U0ManifestSubstrate", "integration"],
+  ["no_landed_typeinfo_block_has_live_ignored_rows", "U0ManifestSubstrate", "integration"],
+  ["no_vacuous_parent_u_block_landing", "U0ManifestSubstrate", "integration"],
+  ["zero_row_blocks_land_exactly_once", "U0ManifestSubstrate", "integration"],
+  [
+    "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+    "U0ManifestSubstrate",
+    "integration",
+  ],
+  ["guard_registry_live_integration_bindings_are_complete", "U0ManifestSubstrate", "integration"],
+  [
+    "live_integration_guards_are_harness_registered_and_not_ignored",
+    "U0ManifestSubstrate",
+    "integration",
+  ],
+  ["guard_registry_lib_bindings_are_complete", "U0ManifestSubstrate", "lib"],
+  ["live_lib_guards_are_harness_registered_and_not_ignored", "U0ManifestSubstrate", "lib"],
+  // U2.QUERY_VALUE_DOMAIN — live integration guards.
+  ["every_semantic_query_key_maps_to_exactly_one_value_domain", "U2QueryValueDomain", "integration"],
+  ["flow_contextual_keys_return_program_analysis_value", "U2QueryValueDomain", "integration"],
+  ["relate_query_value_carries_relation_proof_and_budget_state", "U2QueryValueDomain", "integration"],
+  [
+    "resolve_class_surface_key_covers_side_demand_type_args_and_context",
+    "U2QueryValueDomain",
+    "integration",
+  ],
+  ["apparent_type_key_covers_lib_env_demand_and_context", "U2QueryValueDomain", "integration"],
+  ["template_literal_reduce_key_covers_context", "U2QueryValueDomain", "integration"],
+  ["relate_key_covers_relation_kind_policy_freshness_and_context", "U2QueryValueDomain", "integration"],
+  [
+    "relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit",
+    "U2QueryValueDomain",
+    "integration",
+  ],
+  ["relate_same_nodes_different_inference_context_do_not_warm_hit", "U2QueryValueDomain", "integration"],
+  ["semantic_query_key_spec_table_equals_enum", "U2QueryValueDomain", "integration"],
+  ["query_modes_are_presets_over_projection_demand_eval_policy", "U2QueryValueDomain", "integration"],
+  ["skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode", "U2QueryValueDomain", "integration"],
+  ["cache_key_axes_are_minimal_and_normalized", "U2QueryValueDomain", "integration"],
+  ["reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check", "U2QueryValueDomain", "owed"],
+  // U2.BINDER_IDENTITY_FACTS — live guards (7 integration + 1 lib).
+  ["binder_identity_facts_are_pre_u2_and_not_n0_owned", "U2BinderIdentityFacts", "integration"],
+  ["declaration_slots_are_stable_symbol_space_scoped_facts", "U2BinderIdentityFacts", "integration"],
+  [
+    "binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
+  ["slot_finalization_enters_env_only_in_query_key", "U2BinderIdentityFacts", "lib"],
+  [
+    "binder_identity_facts_warm_on_cosmetic_edit_invalidate_on_semantic_edit",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
+  ["binder_provenance_served_from_artifact_in_authored_order", "U2BinderIdentityFacts", "integration"],
+  ["binder_scope_id_enters_context_sensitive_query_identity", "U2BinderIdentityFacts", "integration"],
+  [
+    "negative_name_lookup_requires_recorded_completeness_or_returnonly",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
+  // U8.WIRE_SURFACE_CLOSURE — live wire-contract guards + owed closure work.
+  ["node_taxonomy_complete", "U8WireSurfaceClosure", "integration"],
+  ["relation_proofs_not_graph_type_nodes", "U8WireSurfaceClosure", "integration"],
+  [
+    "typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node",
+    "U8WireSurfaceClosure",
+    "integration",
+  ],
+  ["diagnostics_only_on_typeinfo_graph_payload", "U8WireSurfaceClosure", "integration"],
+  ["no_non_type_value_smuggled_into_graph_type_node", "U8WireSurfaceClosure", "owed"],
+  ["flow_contextual_facts_not_graph_type_nodes", "U8WireSurfaceClosure", "owed"],
+  ["program_analysis_graph_exposes_flow_contextual_queries", "U8WireSurfaceClosure", "owed"],
+  [
+    "flow_contextual_doc_and_wire_placement_match_program_analysis_graph",
+    "U8WireSurfaceClosure",
+    "owed",
+  ],
+  ["no_infer_not_type_parameter_metadata", "U8WireSurfaceClosure", "owed"],
+  ["typeinfo_graph_response_payload_arm_is_additive_not_retyped", "U8WireSurfaceClosure", "owed"],
+  ["framework_surface_payload_graph_payload_is_additive_not_retyped", "U8WireSurfaceClosure", "owed"],
+  ["all_public_semantic_type_graph_embeddings_are_payload_wrapped", "U8WireSurfaceClosure", "owed"],
+  // U2.RELATION_INFER — live lib guards + owed relation/inference work.
+  ["freshness_tracks_per_property_spread_taint", "U2RelationInfer", "lib"],
+  ["reverse_mapped_inference_is_relation_owned_in_session", "U2RelationInfer", "lib"],
+  ["relation_cycle_assumptions_are_scoped_to_full_relate_identity", "U2RelationInfer", "owed"],
+  ["relation_coinductive_scc_discharges_on_outgoing_obligations", "U2RelationInfer", "owed"],
+  ["relation_cycle_sentinel_is_never_warm_admitted", "U2RelationInfer", "owed"],
+  ["relation_budget_exceeded_admits_nothing", "U2RelationInfer", "owed"],
+  ["inference_runs_in_checker_transaction_not_per_surface_matcher", "U2RelationInfer", "owed"],
+  ["only_completed_deterministic_sessions_are_admitted", "U2RelationInfer", "owed"],
+  ["inference_candidate_combination_matches_priority_and_variance", "U2RelationInfer", "owed"],
+  ["variance_is_measured_by_marker_probe_fixed_point_not_assumed", "U2RelationInfer", "owed"],
+  ["relation_negative_and_unknown_paths_are_fast", "U2RelationInfer", "owed"],
+  // U2.MAPPED_TEMPLATE — live lib guards.
+  ["keyspace_budget_exceeded_admits_nothing", "U2MappedTemplate", "lib"],
+  ["mapped_minus_optional_strips_only_optional_origin_undefined", "U2MappedTemplate", "lib"],
+  [
+    "mapped_minus_optional_preserves_explicit_undefined_on_required_property",
+    "U2MappedTemplate",
+    "lib",
+  ],
+  ["template_literal_reduce_models_ts_numeric_bigint_lexing", "U2MappedTemplate", "lib"],
+  // U2.CLASS_SURFACES — owed decorator/apparent-type work.
+  ["decorator_identity_method_preserves_declared_return", "U2ClassSurfaces", "owed"],
+  ["accessor_decorator_publishes_public_property", "U2ClassSurfaces", "owed"],
+  ["decorated_method_literal_union_return_projects", "U2ClassSurfaces", "owed"],
+  ["accessor_decorator_identity_target_return_keeps_public_property", "U2ClassSurfaces", "owed"],
+  ["apparent_type_budget_exceeded_admits_nothing", "U2ClassSurfaces", "owed"],
+  // U2.ENUMS — live.
+  ["resolve_enum_do_not_warm_hit", "U2Enums", "integration"],
+  // U2.MODULE_AUGMENTATION — live overlay-isolation guards + owed
+  // declaration-analysis key work.
+  ["session_overlay_augmenter_isolated_from_base_index", "U2ModuleAugmentation", "integration"],
+  ["session_overlay_augmentation_isolated_from_base_meta", "U2ModuleAugmentation", "integration"],
+  ["global_augmentation_query_has_declaration_analysis_identity", "U2ModuleAugmentation", "owed"],
+  [
+    "declaration_augmentation_target_is_env_free_env_comes_from_context",
+    "U2ModuleAugmentation",
+    "owed",
+  ],
+  ["declaration_augmentation_doc_wire_query_placement_match", "U2ModuleAugmentation", "owed"],
+  ["augmentation_keys_return_declaration_analysis_value", "U2ModuleAugmentation", "owed"],
+  ["declaration_augmentation_facts_not_type_nodes", "U2ModuleAugmentation", "owed"],
+  [
+    "declaration_merge_records_binder_overload_augmentation_order_as_facts",
+    "U2ModuleAugmentation",
+    "owed",
+  ],
+  // U2.JSX_FOUNDATIONS — owed.
+  ["jsx_resolution_uses_existing_semantic_queries", "U2JsxFoundations", "owed"],
+  ["jsx_intrinsic_elements_project_via_indexed_access", "U2JsxFoundations", "owed"],
+  ["jsx_no_dedicated_graph_type_node", "U2JsxFoundations", "owed"],
+  // U6.FLOW_RETURN_SUBSTRATE — the live no-depth-sentinel guard (restored
+  // per F1) + the owed demand-sliced substrate contract (Q1) + the shared
+  // narrowing-frame guards its narrowing children consume.
+  ["no_depth_sentinel_on_flow_return_path", "U6FlowReturnSubstrate", "integration"],
+  ["function_flow_graph_built_once_per_function_skeleton", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_is_graph_reachability_not_procedural_walk", "U6FlowReturnSubstrate", "owed"],
+  ["flow_graph_effect_edges_stay_live_past_value_writes", "U6FlowReturnSubstrate", "owed"],
+  ["flow_graph_build_is_shallow_interned_no_lowering_lazy_regions", "U6FlowReturnSubstrate", "owed"],
+  ["flow_return_routes_through_project_semantic_dispatch", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_lowered_body_does_not_compute_slice_hash", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash", "U6FlowReturnSubstrate", "owed"],
+  ["flow_return_key_covers_env_dimensions", "U6FlowReturnSubstrate", "owed"],
+  ["flow_return_key_covers_input_context_and_projection_demand", "U6FlowReturnSubstrate", "owed"],
+  ["flow_solver_never_slices_source_text", "U6FlowReturnSubstrate", "owed"],
+  ["no_flow_slot_in_published_type_surface", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_budget_exceeded_admits_nothing", "U6FlowReturnSubstrate", "owed"],
+  ["program_analysis_fact_domain_validates_flow_slice", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_ir_detaches_from_oxc_arena", "U6FlowReturnSubstrate", "owed"],
+  ["substitution_env_canonical_hash_is_order_independent", "U6FlowReturnSubstrate", "owed"],
+  ["narrowing_facts_compose_in_predicate_keyed_frames", "U6FlowReturnSubstrate", "owed"],
+  ["narrowing_facts_are_program_analysis_not_graph_type_nodes", "U6FlowReturnSubstrate", "owed"],
+  ["array_isarray_narrowing_reads_lib_intrinsic_not_text", "U6FlowReturnSubstrate", "owed"],
+  // U6.PREDICATE_ASSERTION — owed.
+  ["predicate_signature_without_body_audits_signature_only_outcome", "U6PredicateAssertion", "owed"],
+  [
+    "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
+    "U6PredicateAssertion",
+    "owed",
+  ],
+  // U6.CALL_RESOLVE — owed.
+  ["call_resolution_budget_exceeded_admits_nothing", "U6CallResolve", "owed"],
+  ["flow_call_resolves_callee_via_typed_ir_not_text", "U6CallResolve", "owed"],
+  [
+    "resolve_call_key_covers_args_this_contextual_type_overload_policy_and_context",
+    "U6CallResolve",
+    "owed",
+  ],
+  ["resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit", "U6CallResolve", "owed"],
+  ["checker_reentry_graph_spans_flow_call_contextual_narrowing", "U6CallResolve", "owed"],
+  ["cross_engine_cycle_discharge_admits_only_stable_deterministic_results", "U6CallResolve", "owed"],
+  // U6.CONTEXTUAL_CALLBACK — owed.
+  ["callback_contextual_typing_does_not_pollute_caller_frame", "U6ContextualCallback", "owed"],
+  ["contextual_callback_input_signature_differentiates_cache_candidates", "U6ContextualCallback", "owed"],
+  ["this_type_contextual_object_literal_binding_in_contextual_type_at", "U6ContextualCallback", "owed"],
+  // U6.VALUE_INFERENCE — owed.
+  ["satisfies_does_not_widen_returned_value", "U6ValueInference", "owed"],
+  ["flow_return_spread_reduces_left_to_right_later_write_wins", "U6ValueInference", "owed"],
+  // U6.ASYNC_GENERATOR — owed.
+  ["lib_env_hash_drives_generator_return_resolution", "U6AsyncGenerator", "owed"],
+  ["async_return_wraps_in_promise_via_builtin_utility", "U6AsyncGenerator", "owed"],
+  // U6.CROSS_FILE — owed.
+  ["cross_file_flow_routes_via_resolver_core", "U6CrossFile", "owed"],
+  ["cross_file_recursion_terminates_with_audit_event", "U6CrossFile", "owed"],
+  ["value_type_namespace_split_does_not_leak", "U6CrossFile", "owed"],
+  ["flow_cycle_sentinel_is_never_admitted_as_cache_entry", "U6CrossFile", "owed"],
+  ["flow_cycle_sentinel_does_not_hide_real_base_return_contributor", "U6CrossFile", "owed"],
+  // U6.LOOP_CLOSURE — owed.
+  ["no_caching_of_partial_or_budget_exceeded_results", "U6LoopClosure", "owed"],
+  ["closure_capture_barrier_widens_captured_mutable_slots", "U6LoopClosure", "owed"],
+  ["predicate_call_does_not_trigger_closure_barrier", "U6LoopClosure", "owed"],
+  ["divergent_loop_models_as_void", "U6LoopClosure", "owed"],
+  ["flow_policy_differentiates_cache_candidates", "U6LoopClosure", "owed"],
+  // U3.CACHE_FACT_MODEL — owed.
+  ["cache_keys_cover_ts_jsx_moduleresolution_decorator_lib_dimensions", "U3CacheFactModel", "owed"],
+  ["instantiation_depth_policy_in_identity_and_facts", "U3CacheFactModel", "owed"],
+  ["persistent_caches_never_admit_overlay_only_results", "U3CacheFactModel", "owed"],
+  ["architecture_minimizes_fallback_entry_not_fallback_cost", "U3CacheFactModel", "owed"],
+  // U3.ADAPTIVE_FAMILY_RETENTION — live.
+  ["cache_candidate_cap_is_per_family_not_uniform", "U3AdaptiveFamilyRetention", "integration"],
+  ["family_eviction_prefers_invalid_then_lru_valid_hit", "U3AdaptiveFamilyRetention", "integration"],
+  // U10.RESULT_DB — live lib guards + owed published-boundary work.
+  ["cache_satisfaction_is_materialized_point_not_nominal_demand", "U10ResultDb", "lib"],
+  ["backfill_writes_only_recorded_materialized_points", "U10ResultDb", "lib"],
+  ["result_db_published_boundary_serves_only_recorded_materialized_points", "U10ResultDb", "owed"],
+  // U13.PROJECTION — owed coverage gate.
+  ["capability_rows_map_to_expected_query_fact_mechanisms", "U13Projection", "owed"],
+  // U14.MACRO_ADAPTER — owed.
+  ["component_meta_is_thin_framework_adapter_no_second_resolver", "U14MacroAdapter", "owed"],
+  // U15.FINAL_LIFT — live corpus-hermeticity guard + owed terminal gate.
+  ["external_corpus_paths_not_present_outside_gated_tests", "U15FinalLift", "integration"],
+  ["all_typeinfo_parity_rows_lifted_except_stop_gates", "U15FinalLift", "owed"],
+  ["react_adapter_stop_gate_is_registered_out_of_scope", "U15FinalLift", "owed"],
+  [
+    "bench_result_row_reports_cache_mode_sourcemap_batch_thread_hit_fallback",
+    "U15FinalLift",
+    "owed",
+  ],
+  ["every_manifest_row_has_non_placeholder_mechanism_and_executable_proof", "U15FinalLift", "owed"],
+];
+
+/** snake_case guard label → PascalCase `GuardId` variant token. */
+function toGuardVariant(label) {
+  return label
+    .split("_")
+    .map((part) => (part.length === 0 ? part : part[0].toUpperCase() + part.slice(1)))
+    .join("");
+}
 
 // -- ROW-LEVEL mechanism, INDEPENDENT of the `block_id` column --
 //
@@ -1835,7 +2120,7 @@ function proofForCapability(cap) {
     ["AuditFootprint", "AuditFootprintAttachment"],
   ]);
   if (guard.has(cap)) {
-    return `ProofRequirement::StructuralGuard(GuardId::${guard.get(cap)})`;
+    return `ProofRequirement::StructuralGuard(GuardFamily::${guard.get(cap)})`;
   }
   if (oracle.has(cap)) {
     return `ProofRequirement::Ts7Oracle(OracleId::${oracle.get(cap)})`;
@@ -2535,6 +2820,71 @@ const LIFTED_ROW_OVERRIDES = new Map([
   ],
 ]);
 
+// -- RUNNING-UNRATIFIED rows: the restored registry identities whose test
+//    runs always in the default suite (no live `#[ignore]`) but whose
+//    programme obligation is NOT yet ratified `Lifted` (Q4: a test becoming
+//    always-running is a status transition, not permission to erase the
+//    obligation). Each row's proof is its OWN always-running test
+//    (`RowTestGuard` self-reference), independently checked against source
+//    discovery by `row_registry_matches_discovered_tests`. The map carries
+//    the row's `unblocker` prose; the identity set must EXACTLY equal the
+//    partition rows with status `running_unratified` AND the reconciliation
+//    `restored_rows` list. --
+const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
+  ...[
+    "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
+    "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
+    "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
+    "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
+    "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
+  ].map((fn) => [
+    tkey("cache_invalidation.rs", fn),
+    "runs always in the default suite (its `#[ignore]` was removed when the " +
+      "cache-invalidation edit-cycle contract landed); the registry identity " +
+      "was removed at fe1f59497 instead of re-statused and is restored per Q4 " +
+      "(2026-08-04) as running_unratified until Q2 ratification lifts it",
+  ]),
+  [
+    tkey("footprint.rs", "typeinfo_footprint_is_attached_for_named_symbol_request"),
+    "runs always in the default suite (its `#[ignore]` was removed when the " +
+      "footprint-attach contract landed); the registry identity was removed " +
+      "at fe1f59497 instead of re-statused and is restored per Q4 " +
+      "(2026-08-04) as running_unratified until Q2 ratification lifts it",
+  ],
+  [
+    tkey("relation_semantics.rs", "relation_optional_property_not_assignable_to_required"),
+    "runs always in the default suite (its `#[ignore]` was removed at the " +
+      "relation-activation landing, 2ee921b9c); the registry identity was " +
+      "removed instead of re-statused and is restored per Q4 (2026-08-04) as " +
+      "running_unratified until Q2 ratification lifts it",
+  ],
+  ...[
+    ["branded_types.rs", "branded_symbol_key_access_projects_wrapped_value_type"],
+    ["branded_types.rs", "branded_unique_symbol_wrapper_publishes_branded_surface"],
+    ["unique_symbol.rs", "unique_symbol_indexed_access_via_typeof_returns_literal_value"],
+    ["unique_symbol.rs", "unique_symbol_string_key_access_returns_sibling_value"],
+  ].map(([file, fn]) => [
+    tkey(file, fn),
+    "runs always in the default suite (its `#[ignore]` was removed when the " +
+      "unique-symbol branded/key-access typed-key contract landed); the " +
+      "registry identity was removed at 64e6c6745 instead of re-statused and " +
+      "is restored per Q4 (2026-08-04) as running_unratified until Q2 " +
+      "ratification lifts it",
+  ]),
+  ...[
+    "value_inference_arrow_expression_body_publishes_return_shape",
+    "value_inference_arrow_expression_body_substitutes_parameter_references",
+    "value_inference_function_body_return_union_from_return_statements",
+  ].map((fn) => [
+    tkey("value_inference.rs", fn),
+    "runs always in the default suite (its `#[ignore]` was removed at the " +
+      "whole-function FlowReturn landing, a8eef6202, which Q1 reclassifies " +
+      "as PARTIAL); the registry identity was removed instead of re-statused " +
+      "and is restored per Q4 (2026-08-04) as running_unratified until Q2 " +
+      "ratification lifts it",
+  ]),
+]);
+
 function consumedMechsForBlock(blockVar) {
   // A row/block's consumed mechanisms = the dominant mechanisms of its
   // block's DIRECT prerequisites.
@@ -2662,10 +3012,10 @@ function parsePartition(partitionText) {
   } catch (error) {
     throw new SystemExit(1, `typeinfo row partition is not valid JSON: ${error.message}`);
   }
-  if (value?.schema !== "verter.typeinfo-row-block-partition.v1" || !Array.isArray(value.rows)) {
+  if (value?.schema !== "verter.typeinfo-row-block-partition.v2" || !Array.isArray(value.rows)) {
     throw new SystemExit(
       1,
-      "typeinfo row partition must use schema verter.typeinfo-row-block-partition.v1 and carry a rows array",
+      "typeinfo row partition must use schema verter.typeinfo-row-block-partition.v2 and carry a rows array",
     );
   }
 
@@ -2675,6 +3025,7 @@ function parsePartition(partitionText) {
     const fn_ = row?.function;
     const block = row?.block;
     const cap = row?.capability;
+    const status = row?.status;
     if (
       typeof file_ !== "string" ||
       !/^[a-z0-9_]+\.rs$/.test(file_) ||
@@ -2683,32 +3034,191 @@ function parsePartition(partitionText) {
       typeof block !== "string" ||
       !BLOCK_TEXT_TO_VARIANT.has(block) ||
       typeof cap !== "string" ||
-      !/^[A-Za-z]+$/.test(cap)
+      !/^[A-Za-z]+$/.test(cap) ||
+      !ROW_STATUS_VALUES.has(status)
     ) {
       throw new SystemExit(1, `invalid typeinfo row partition entry at rows[${index}]`);
+    }
+    if (status === "superseded") {
+      // Supersession preserves the identity and requires a NAMED
+      // equivalent-or-stronger successor identity on the row.
+      const sFile = row?.superseded_by_file;
+      const sFn = row?.superseded_by_function;
+      if (
+        typeof sFile !== "string" ||
+        !/^[a-z0-9_]+\.rs$/.test(sFile) ||
+        typeof sFn !== "string" ||
+        !/^[A-Za-z0-9_]+$/.test(sFn)
+      ) {
+        throw new SystemExit(
+          1,
+          `superseded row ${file_} :: ${fn_} must name its successor via ` +
+            `superseded_by_file / superseded_by_function`,
+        );
+      }
     }
     const key = tkey(file_, fn_);
     if (out.has(key)) {
       throw new SystemExit(1, `duplicate typeinfo row partition entry: ${file_} :: ${fn_}`);
     }
-    out.set(key, [block, cap]);
+    out.set(key, {
+      block,
+      cap,
+      status,
+      supersededByFile: row?.superseded_by_file,
+      supersededByFn: row?.superseded_by_function,
+    });
   }
   return out;
 }
 
+// The closed row-registry status vocabulary (Q4): `ignored` (live
+// `#[ignore]`), `running_unratified` (the test runs in the default suite but
+// its programme obligation is not yet ratified `Lifted`), `lifted`
+// (oracle-backed lift), `superseded` (identity preserved; a named
+// equivalent-or-stronger successor row carries the obligation).
+const ROW_STATUS_VALUES = new Set(["ignored", "running_unratified", "lifted", "superseded"]);
+
+function parseReconciliation(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new SystemExit(1, `typeinfo programme reconciliation is not valid JSON: ${error.message}`);
+  }
+  if (
+    value?.schema !== "verter.typeinfo-programme-reconciliation.v1" ||
+    !Array.isArray(value.blocks) ||
+    !Array.isArray(value.amendments) ||
+    !Array.isArray(value.landing_transactions) ||
+    !Array.isArray(value.restored_rows)
+  ) {
+    throw new SystemExit(
+      1,
+      "typeinfo programme reconciliation must use schema " +
+        "verter.typeinfo-programme-reconciliation.v1 and carry blocks / amendments / " +
+        "landing_transactions / restored_rows arrays",
+    );
+  }
+  const statusByBlock = new Map();
+  const evidenceByBlock = new Map();
+  for (const entry of value.blocks) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(entry?.block);
+    if (blockVar === undefined) {
+      throw new SystemExit(1, `reconciliation names unknown block ${pyRepr(String(entry?.block))}`);
+    }
+    if (!BLOCK_STATUS_VALUES.has(entry?.status)) {
+      throw new SystemExit(
+        1,
+        `reconciliation block ${entry.block} carries invalid status ${pyRepr(String(entry?.status))}`,
+      );
+    }
+    if (statusByBlock.has(blockVar)) {
+      throw new SystemExit(1, `duplicate reconciliation entry for block ${entry.block}`);
+    }
+    const evidence = entry?.evidence;
+    if (!Array.isArray(evidence) || evidence.some((e) => typeof e !== "string" || e.length === 0)) {
+      throw new SystemExit(1, `reconciliation block ${entry.block} evidence must be a string array`);
+    }
+    if ((entry.status === "landed" || entry.status === "landing_unverified") && evidence.length === 0) {
+      throw new SystemExit(
+        1,
+        `reconciliation block ${entry.block} records status ${entry.status} with no evidence`,
+      );
+    }
+    statusByBlock.set(blockVar, entry.status);
+    evidenceByBlock.set(blockVar, evidence);
+  }
+  for (const blockVar of BLOCK_TO_MECHANISM.keys()) {
+    if (!statusByBlock.has(blockVar)) {
+      throw new SystemExit(1, `reconciliation is missing a status entry for block ${blockVar}`);
+    }
+  }
+  if (statusByBlock.size !== BLOCK_TO_MECHANISM.size) {
+    throw new SystemExit(1, `reconciliation carries a block entry outside the contract DAG`);
+  }
+  const registryLabels = new Set(GUARD_REGISTRY_DATA.map(([label]) => label));
+  for (const a of value.amendments) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(a?.block);
+    if (blockVar === undefined || typeof a?.guard !== "string" || typeof a?.authority !== "string") {
+      throw new SystemExit(1, `malformed reconciliation amendment: ${JSON.stringify(a)}`);
+    }
+    if (!["remove", "replace", "add"].includes(a?.action)) {
+      throw new SystemExit(1, `amendment for ${a.guard} carries invalid action ${pyRepr(String(a?.action))}`);
+    }
+    if (a.action === "remove" || a.action === "replace") {
+      if (registryLabels.has(a.guard)) {
+        throw new SystemExit(
+          1,
+          `amendment ${a.action}s guard ${a.guard} but the guard registry still lists it — ` +
+            `an amended-away label may not stay a live requirement`,
+        );
+      }
+    } else if (!registryLabels.has(a.guard)) {
+      throw new SystemExit(1, `amendment adds guard ${a.guard} which the guard registry does not list`);
+    }
+    if (a.action === "replace" && !registryLabels.has(a?.replacement)) {
+      throw new SystemExit(
+        1,
+        `amendment replaces ${a.guard} with ${pyRepr(String(a?.replacement))}, which the guard registry does not list`,
+      );
+    }
+  }
+  const seenTx = new Set();
+  for (const tx of value.landing_transactions) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(tx?.block);
+    if (blockVar === undefined || typeof tx?.commit !== "string" || !/^[0-9a-f]{7,40}$/.test(tx.commit)) {
+      throw new SystemExit(1, `malformed landing transaction: ${JSON.stringify(tx)}`);
+    }
+    if (seenTx.has(blockVar)) {
+      throw new SystemExit(1, `duplicate landing transaction for block ${tx.block}`);
+    }
+    seenTx.add(blockVar);
+    if (statusByBlock.get(blockVar) !== "landed") {
+      throw new SystemExit(
+        1,
+        `landing transaction recorded for ${tx.block}, whose status is not landed`,
+      );
+    }
+  }
+  return {
+    statusByBlock,
+    evidenceByBlock,
+    amendments: value.amendments,
+    transactions: value.landing_transactions,
+    restoredRows: value.restored_rows,
+  };
+}
+
+const BLOCK_STATUS_VALUES = new Set([
+  "pending",
+  "landing_unverified",
+  "implemented_unlanded_rebase_required",
+  "landed",
+]);
+
+const BLOCK_STATUS_TO_VARIANT = new Map([
+  ["pending", "Pending"],
+  ["landing_unverified", "LandingUnverified"],
+  ["implemented_unlanded_rebase_required", "ImplementedUnlandedRebaseRequired"],
+  ["landed", "Landed"],
+]);
+
 const GENERATED_HEADER =
   "// Auto-generated by `scripts/gen-typeinfo-ignore-manifest.mjs`\n" +
   "// (`pnpm gen:typeinfo-manifest`). DO NOT hand-edit. The machine-readable\n" +
-  "// row->block partition in `scripts/manifests/typeinfo-row-block-partition.json`\n" +
-  "// is the authoritative source ONLY for each IgnoredTestRow's\n" +
-  "// `block_id` (READ by the generator, joined with the live\n" +
-  "// `#[ignore]` discovery + the Capability Map). This includes LIFTED\n" +
-  "// rows: their `block_id` comes from that partition too — there is NO\n" +
-  "// generator-side block override. The AdditionalProofRow\n" +
-  "// table and the TYPEINFO_PARITY_BLOCKS DAG (each block's\n" +
-  "// required_guards/verification_labels/prereqs/mechanisms) are\n" +
-  "// authored in the generator's own data maps, NOT in the row partition.\n" +
-  "// The Rust guards only diff/fail; they never write this file.\n";
+  "// append-only row registry in\n" +
+  "// `scripts/manifests/typeinfo-row-block-partition.json` is the\n" +
+  "// authoritative source for each IgnoredTestRow's `block_id` AND `status`\n" +
+  "// (READ by the generator, joined with the live `#[ignore]` discovery +\n" +
+  "// the Capability Map); block landing statuses / amendments / landing\n" +
+  "// transactions come from\n" +
+  "// `scripts/manifests/typeinfo-programme-reconciliation.json`. The\n" +
+  "// AdditionalProofRow table, the TYPEINFO_PARITY_BLOCKS DAG (each block's\n" +
+  "// required_guards/verification_labels/prereqs/mechanisms), and the\n" +
+  "// GuardId registry are authored in the generator's own data maps, NOT in\n" +
+  "// the row registry. The Rust guards only diff/fail; they never write\n" +
+  "// this file.\n";
 
 function emitIgnoredRows(rows) {
   const out = [
@@ -2771,7 +3281,7 @@ function emitAdditionalRows(rows) {
   return out.join("\n") + "\n";
 }
 
-function emitBlockRows() {
+function emitBlockRows(statusByBlock) {
   const out = [
     GENERATED_HEADER,
     "",
@@ -2787,13 +3297,15 @@ function emitBlockRows() {
       .map((m) => `MechanismId::${m}`)
       .join(", ");
     const guards = BLOCK_TO_REQUIRED_GUARDS.get(block)
-      .map((g) => `"${g}"`)
+      .map((g) => `GuardId::${toGuardVariant(g)}`)
       .join(", ");
+    const status = BLOCK_STATUS_TO_VARIANT.get(statusByBlock.get(block));
     out.push(
       "    BlockContractRow { " +
         `block_id: TypeInfoParityBlockId::${block}, ` +
         `owning_u_block: UBlock::${BLOCK_TO_UBLOCK.get(block)}, ` +
         `organ: ArchitectureOrgan::${BLOCK_TO_ORGAN.get(block)}, ` +
+        `status: BlockLandingStatus::${status}, ` +
         `prereqs: &[${prereqs}], ` +
         `mechanism_id: MechanismId::${BLOCK_TO_MECHANISM.get(block)}, ` +
         `consumed_mechanisms: &[${consumed}], ` +
@@ -2802,6 +3314,357 @@ function emitBlockRows() {
     );
   }
   out.push("];");
+  return out.join("\n") + "\n";
+}
+
+/** All 36 block variants in DAG declaration order. */
+function allBlockVars() {
+  return [...BLOCK_TO_MECHANISM.keys()];
+}
+
+function computeRowRegistryCounts(partition) {
+  const total = { baseline: 0, ignored: 0, running: 0, lifted: 0, superseded: 0 };
+  const perBlock = new Map(allBlockVars().map((b) => [b, { total: 0, ignored: 0, running: 0, lifted: 0, superseded: 0 }]));
+  for (const { block, status } of partition.values()) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(block);
+    const bucket = perBlock.get(blockVar);
+    total.baseline += 1;
+    bucket.total += 1;
+    if (status === "ignored") {
+      total.ignored += 1;
+      bucket.ignored += 1;
+    } else if (status === "running_unratified") {
+      total.running += 1;
+      bucket.running += 1;
+    } else if (status === "lifted") {
+      total.lifted += 1;
+      bucket.lifted += 1;
+    } else {
+      total.superseded += 1;
+      bucket.superseded += 1;
+    }
+  }
+  return { total, perBlock };
+}
+
+function emitGuardRegistry(counts, recon) {
+  const out = [
+    GENERATED_HEADER,
+    "",
+    "/// Typed identifier for one reconciled required guard. One variant per",
+    "/// retained (live or owed) guard obligation; amendment-removed labels have",
+    "/// no variant. The executable meaning of a variant is its `GuardSpec` row",
+    "/// in [`GUARD_REGISTRY`] plus, for a live guard, the fn-pointer binding in",
+    "/// its target's binding table.",
+    "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
+    "#[allow(dead_code)]",
+    "#[rustfmt::skip]",
+    "enum GuardId {",
+  ];
+  for (const [label] of GUARD_REGISTRY_DATA) {
+    out.push(`    ${toGuardVariant(label)},`);
+  }
+  out.push(
+    "}",
+    "",
+    "/// Every [`GuardId`] variant, in registry declaration order.",
+    "#[rustfmt::skip]",
+    "#[allow(dead_code)]",
+    "const GUARD_ID_ALL: &[GuardId] = &[",
+  );
+  for (const [label] of GUARD_REGISTRY_DATA) {
+    out.push(`    GuardId::${toGuardVariant(label)},`);
+  }
+  out.push(
+    "];",
+    "",
+    "/// The test target a live guard's `#[test]` fn is compiled into. Both",
+    "/// targets are members of the canonical default gate: the integration",
+    "/// binary runs under `cargo nextest run --workspace` AND `cargo test -p",
+    "/// verter_session --tests`; the lib unit-test binary runs under `cargo",
+    "/// nextest run --workspace` AND `cargo test -p verter_session --lib`.",
+    "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
+    "#[allow(dead_code)]",
+    "enum GuardTarget {",
+    "    SessionIntegration,",
+    "    SessionLib,",
+    "}",
+    "",
+    "/// Disposition of a registry guard: `Live` (an executable `#[test]`",
+    "/// binding exists in `target`'s binding table and is verified against",
+    "/// that target's own harness inventory) or `Owed` (a retained valid",
+    "/// requirement with no implementing test yet — owed work for its owning",
+    "/// block; a block requiring an `Owed` guard cannot hold",
+    "/// `BlockLandingStatus::Landed`).",
+    "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
+    "#[allow(dead_code)]",
+    "enum GuardDisposition {",
+    "    Live { target: GuardTarget },",
+    "    Owed,",
+    "}",
+    "",
+    "/// One registry row per [`GuardId`]: the owning block (the block that",
+    "/// must implement an `Owed` guard / owns a live guard's invariant) and",
+    "/// the disposition.",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct GuardSpec {",
+    "    id: GuardId,",
+    "    owner: TypeInfoParityBlockId,",
+    "    disposition: GuardDisposition,",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    "const GUARD_REGISTRY: &[GuardSpec] = &[",
+  );
+  for (const [label, owner, disp] of GUARD_REGISTRY_DATA) {
+    const dispTok =
+      disp === "owed"
+        ? "GuardDisposition::Owed"
+        : `GuardDisposition::Live { target: GuardTarget::${
+            disp === "lib" ? "SessionLib" : "SessionIntegration"
+          } }`;
+    out.push(
+      `    GuardSpec { id: GuardId::${toGuardVariant(label)}, ` +
+        `owner: TypeInfoParityBlockId::${owner}, disposition: ${dispTok} },`,
+    );
+  }
+  out.push(
+    "];",
+    "",
+    "/// Landing lifecycle status of a block contract (reconciliation-recorded;",
+    "/// see `scripts/manifests/typeinfo-programme-reconciliation.json`).",
+    "/// `LandingUnverified` = a historically recorded landing awaiting",
+    "/// retrospective ratification; `ImplementedUnlandedRebaseRequired` =",
+    "/// implemented on an unlanded branch (never landed); `Landed` requires a",
+    "/// recorded landing transaction whose commit carries the",
+    "/// `Typeinfo-Block:` trailer.",
+    "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
+    "#[allow(dead_code)]",
+    "enum BlockLandingStatus {",
+    "    Pending,",
+    "    LandingUnverified,",
+    "    ImplementedUnlandedRebaseRequired,",
+    "    Landed,",
+    "}",
+    "",
+    "/// A recorded contract amendment: the sole sanctioned mechanism for",
+    "/// removing, replacing, or adding a required-guard obligation.",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "enum AmendmentAction {",
+    "    Removed,",
+    "    Replaced,",
+    "    Added,",
+    "}",
+    "",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct ContractAmendment {",
+    "    block_id: TypeInfoParityBlockId,",
+    "    action: AmendmentAction,",
+    "    guard_label: &'static str,",
+    "    replacement: Option<GuardId>,",
+    "    authority: &'static str,",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    "const CONTRACT_AMENDMENTS: &[ContractAmendment] = &[",
+  );
+  for (const a of recon.amendments) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(a.block);
+    const action =
+      a.action === "remove" ? "Removed" : a.action === "replace" ? "Replaced" : "Added";
+    const replacement =
+      a.action === "replace"
+        ? `Some(GuardId::${toGuardVariant(a.replacement)})`
+        : "None";
+    out.push(
+      `    ContractAmendment { block_id: TypeInfoParityBlockId::${blockVar}, ` +
+        `action: AmendmentAction::${action}, guard_label: "${escapeRustStringLiteral(a.guard)}", ` +
+        `replacement: ${replacement}, authority: "${escapeRustStringLiteral(a.authority)}" },`,
+    );
+  }
+  out.push(
+    "];",
+    "",
+    "/// One recorded landing transaction per `Landed` block: the single",
+    "/// squash-merge commit whose message carries the",
+    "/// `Typeinfo-Block: <block-id>` trailer. Enforced prospectively — no",
+    "/// historical landing has a transaction, which is exactly why no block",
+    "/// currently holds `BlockLandingStatus::Landed`.",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct LandingTransaction {",
+    "    block_id: TypeInfoParityBlockId,",
+    "    commit: &'static str,",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    "const LANDING_TRANSACTIONS: &[LandingTransaction] = &[",
+  );
+  for (const tx of recon.transactions) {
+    const blockVar = BLOCK_TEXT_TO_VARIANT.get(tx.block);
+    out.push(
+      `    LandingTransaction { block_id: TypeInfoParityBlockId::${blockVar}, ` +
+        `commit: "${escapeRustStringLiteral(tx.commit)}" },`,
+    );
+  }
+  out.push(
+    "];",
+    "",
+    "/// Reconciliation evidence references for every block whose status is",
+    "/// `Landed` or `LandingUnverified` (verifiable commits / doc records /",
+    "/// row-state facts; recorded in the reconciliation JSON).",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct BlockStatusEvidence {",
+    "    block_id: TypeInfoParityBlockId,",
+    "    refs: &'static [&'static str],",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    "const BLOCK_STATUS_EVIDENCE: &[BlockStatusEvidence] = &[",
+  );
+  for (const block of allBlockVars()) {
+    const refs = recon.evidenceByBlock.get(block) ?? [];
+    if (refs.length === 0) {
+      continue;
+    }
+    const refsTok = refs.map((r) => `"${escapeRustStringLiteral(r)}"`).join(", ");
+    out.push(
+      `    BlockStatusEvidence { block_id: TypeInfoParityBlockId::${block}, refs: &[${refsTok}] },`,
+    );
+  }
+  out.push(
+    "];",
+    "",
+    "/// Row-registry counts, DERIVED from the append-only partition registry",
+    "/// (`scripts/manifests/typeinfo-row-block-partition.json`) — never frozen",
+    "/// literals. `baseline` is the registry cardinality (the append-only",
+    "/// cohort); the per-status counts partition it.",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct RowRegistryCounts {",
+    "    baseline: usize,",
+    "    ignored: usize,",
+    "    running_unratified: usize,",
+    "    lifted: usize,",
+    "    superseded: usize,",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    `const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: ${counts.total.baseline}, ignored: ${counts.total.ignored}, running_unratified: ${counts.total.running}, lifted: ${counts.total.lifted}, superseded: ${counts.total.superseded} };`,
+    "",
+    "/// Per-block row-registry counts (same derivation; every block appears,",
+    "/// zero-row blocks included).",
+    "#[derive(Clone, Copy, Debug)]",
+    "#[allow(dead_code)]",
+    "struct RowRegistryBlockCounts {",
+    "    block_id: TypeInfoParityBlockId,",
+    "    total: usize,",
+    "    ignored: usize,",
+    "    running_unratified: usize,",
+    "    lifted: usize,",
+    "    superseded: usize,",
+    "}",
+    "",
+    "#[rustfmt::skip]",
+    "const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[",
+  );
+  for (const block of allBlockVars()) {
+    const b = counts.perBlock.get(block);
+    out.push(
+      `    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::${block}, ` +
+        `total: ${b.total}, ignored: ${b.ignored}, running_unratified: ${b.running}, ` +
+        `lifted: ${b.lifted}, superseded: ${b.superseded} },`,
+    );
+  }
+  out.push("];");
+  return out.join("\n") + "\n";
+}
+
+function emitGuardRegistryLib() {
+  const out = [
+    GENERATED_HEADER,
+    "",
+    "/// Lib-test-target mirror of the typed guard registry: the `GuardId`",
+    "/// enum (same variant list as the integration-side registry — both are",
+    "/// emitted from the SAME generator data map, so they cannot diverge) and",
+    "/// the set of ids whose live executable binding is owed by THIS target",
+    "/// (`cargo test -p verter_session --lib` / the workspace nextest run).",
+    "#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]",
+    "#[allow(dead_code)]",
+    "#[rustfmt::skip]",
+    "enum GuardId {",
+  ];
+  for (const [label] of GUARD_REGISTRY_DATA) {
+    out.push(`    ${toGuardVariant(label)},`);
+  }
+  out.push(
+    "}",
+    "",
+    "/// Every [`GuardId`] variant, in registry declaration order.",
+    "#[rustfmt::skip]",
+    "#[allow(dead_code)]",
+    "const GUARD_ID_ALL: &[GuardId] = &[",
+  );
+  for (const [label] of GUARD_REGISTRY_DATA) {
+    out.push(`    GuardId::${toGuardVariant(label)},`);
+  }
+  out.push(
+    "];",
+    "",
+    "/// The ids whose disposition is `Live { target: SessionLib }` in the",
+    "/// integration-side `GUARD_REGISTRY`.",
+    "#[rustfmt::skip]",
+    "const LIB_LIVE_GUARD_IDS: &[GuardId] = &[",
+  );
+  for (const [label, , disp] of GUARD_REGISTRY_DATA) {
+    if (disp === "lib") {
+      out.push(`    GuardId::${toGuardVariant(label)},`);
+    }
+  }
+  out.push("];");
+  return out.join("\n") + "\n";
+}
+
+function emitCountsDoc(counts) {
+  const out = [
+    "<!-- Auto-generated by `scripts/gen-typeinfo-ignore-manifest.mjs`",
+    "     (`pnpm gen:typeinfo-manifest`). DO NOT hand-edit: every count on this",
+    "     page is DERIVED from the append-only row registry",
+    "     `scripts/manifests/typeinfo-row-block-partition.json`. -->",
+    "",
+    "# Typeinfo row-registry counts (derived)",
+    "",
+    "The append-only `IgnoredTestRow` registry is the sole source of these",
+    "counts; no independent count literal exists in the generator or the",
+    "guards. Statuses: `ignored` (live `#[ignore]`), `running_unratified`",
+    "(runs in the default suite, programme obligation not yet ratified",
+    "`Lifted`), `lifted` (oracle-backed lift), `superseded` (identity",
+    "preserved by a named equivalent-or-stronger successor row).",
+    "",
+    "| Count | Value |",
+    "| --- | --- |",
+    `| baseline (registry cardinality) | ${counts.total.baseline} |`,
+    `| ignored | ${counts.total.ignored} |`,
+    `| running_unratified | ${counts.total.running} |`,
+    `| lifted | ${counts.total.lifted} |`,
+    `| superseded | ${counts.total.superseded} |`,
+    "",
+    "## Per block",
+    "",
+    "| Block | Total | Ignored | Running unratified | Lifted | Superseded |",
+    "| --- | --- | --- | --- | --- | --- |",
+  ];
+  const variantToText = new Map([...BLOCK_TEXT_TO_VARIANT].map(([text, v]) => [v, text]));
+  for (const block of allBlockVars()) {
+    const b = counts.perBlock.get(block);
+    out.push(
+      `| ${variantToText.get(block)} | ${b.total} | ${b.ignored} | ${b.running} | ${b.lifted} | ${b.superseded} |`,
+    );
+  }
   return out.join("\n") + "\n";
 }
 
@@ -2888,6 +3751,49 @@ function main(checkOnly = false) {
     join(repoRoot, "scripts/manifests/typeinfo-row-block-partition.json"),
   );
   const partition = parsePartition(partitionSource);
+  const recon = parseReconciliation(
+    readTextNormalized(join(repoRoot, "scripts/manifests/typeinfo-programme-reconciliation.json")),
+  );
+
+  // Guard-registry closure: every required label resolves to exactly one
+  // registry entry, and every registry entry is required somewhere.
+  {
+    const registryLabels = new Map();
+    for (const [label] of GUARD_REGISTRY_DATA) {
+      if (registryLabels.has(label)) {
+        throw new SystemExit(1, `duplicate GUARD_REGISTRY_DATA entry: ${label}`);
+      }
+      registryLabels.set(label, 0);
+    }
+    const variants = new Set();
+    for (const [label] of GUARD_REGISTRY_DATA) {
+      const v = toGuardVariant(label);
+      if (variants.has(v)) {
+        throw new SystemExit(1, `GuardId variant collision: ${v}`);
+      }
+      variants.add(v);
+    }
+    for (const [block, labels] of BLOCK_TO_REQUIRED_GUARDS) {
+      for (const label of labels) {
+        if (!registryLabels.has(label)) {
+          throw new SystemExit(
+            1,
+            `block ${block} requires guard ${label}, which has no GUARD_REGISTRY_DATA entry — ` +
+              `add the entry (live or owed) or record an amendment`,
+          );
+        }
+        registryLabels.set(label, registryLabels.get(label) + 1);
+      }
+    }
+    const unrequired = [...registryLabels].filter(([, n]) => n === 0).map(([l]) => l);
+    if (unrequired.length > 0) {
+      throw new SystemExit(
+        1,
+        `guard registry entries required by NO block contract (dead obligations):\n  ` +
+          unrequired.join("\n  "),
+      );
+    }
+  }
 
   // Discover live ignore sites + reasons.
   const discovered = new Map();
@@ -2918,61 +3824,112 @@ function main(checkOnly = false) {
     return 3;
   }
 
-  // Cross-check discovery vs the machine-readable row partition.
+  // Cross-check discovery vs the machine-readable row registry: the
+  // registry's per-status identity sets must EXACTLY match their
+  // authorities — `ignored` ⇔ the live `#[ignore]` discovery, `lifted` ⇔
+  // `LIFTED_ROW_OVERRIDES`, `running_unratified` ⇔
+  // `RUNNING_UNRATIFIED_UNBLOCKERS` ⇔ the reconciliation `restored_rows`.
   const discKeys = new Set(discovered.keys());
-  const partKeys = new Set(partition.keys());
   const liftedKeys = new Set(LIFTED_ROW_OVERRIDES.keys());
-
-  // Python `sorted(set ...)` — code-POINT order on the joined `"file fn"` keys.
-  const liftedNotInPartition = [...liftedKeys]
-    .filter((k) => !partKeys.has(k))
-    .sort(codePointCompare);
-  const liftedStillIgnored = [...liftedKeys].filter((k) => discKeys.has(k)).sort(codePointCompare);
-  if (liftedNotInPartition.length > 0 || liftedStillIgnored.length > 0) {
-    process.stderr.write("error: lifted-row override set is inconsistent:\n");
-    for (const k of liftedNotInPartition) {
-      const [f, fnn] = k.split(" ");
-      process.stderr.write(`  lifted row absent from row partition: ${f} :: ${fnn}\n`);
+  const runningKeys = new Set(RUNNING_UNRATIFIED_UNBLOCKERS.keys());
+  const statusOf = (k) => partition.get(k)?.status;
+  const problems = [];
+  for (const [k, entry] of partition) {
+    const [f, fnn] = [k.slice(0, k.indexOf(" ")), k.slice(k.indexOf(" ") + 1)];
+    switch (entry.status) {
+      case "ignored":
+        if (!discKeys.has(k)) {
+          problems.push(`registry row ${f} :: ${fnn} is 'ignored' but carries no live #[ignore]`);
+        }
+        break;
+      case "lifted":
+        if (!liftedKeys.has(k)) {
+          problems.push(`registry row ${f} :: ${fnn} is 'lifted' but has no LIFTED_ROW_OVERRIDES entry`);
+        }
+        if (discKeys.has(k)) {
+          problems.push(`lifted registry row ${f} :: ${fnn} still carries a live #[ignore]`);
+        }
+        break;
+      case "running_unratified":
+        if (!runningKeys.has(k)) {
+          problems.push(
+            `registry row ${f} :: ${fnn} is 'running_unratified' but has no ` +
+              `RUNNING_UNRATIFIED_UNBLOCKERS entry`,
+          );
+        }
+        if (discKeys.has(k)) {
+          problems.push(`running_unratified registry row ${f} :: ${fnn} still carries a live #[ignore]`);
+        }
+        break;
+      case "superseded": {
+        const successor = tkey(entry.supersededByFile, entry.supersededByFn);
+        const successorStatus = statusOf(successor);
+        if (successorStatus === undefined || successorStatus === "superseded") {
+          problems.push(
+            `superseded registry row ${f} :: ${fnn} names successor ` +
+              `${entry.supersededByFile} :: ${entry.supersededByFn}, which is not a live registry row`,
+          );
+        }
+        break;
+      }
+      default:
+        problems.push(`registry row ${f} :: ${fnn} carries unknown status ${entry.status}`);
     }
-    for (const k of liftedStillIgnored) {
-      const [f, fnn] = k.split(" ");
-      process.stderr.write(`  lifted row still carries a live \`#[ignore]\`: ${f} :: ${fnn}\n`);
+  }
+  for (const k of discKeys) {
+    if (statusOf(k) !== "ignored") {
+      const [f, fnn] = [k.slice(0, k.indexOf(" ")), k.slice(k.indexOf(" ") + 1)];
+      problems.push(`live #[ignore] ${f} :: ${fnn} has no 'ignored' registry row`);
+    }
+  }
+  for (const k of liftedKeys) {
+    if (statusOf(k) !== "lifted") {
+      const [f, fnn] = [k.slice(0, k.indexOf(" ")), k.slice(k.indexOf(" ") + 1)];
+      problems.push(`LIFTED_ROW_OVERRIDES entry ${f} :: ${fnn} has no 'lifted' registry row`);
+    }
+  }
+  for (const k of runningKeys) {
+    if (statusOf(k) !== "running_unratified") {
+      const [f, fnn] = [k.slice(0, k.indexOf(" ")), k.slice(k.indexOf(" ") + 1)];
+      problems.push(
+        `RUNNING_UNRATIFIED_UNBLOCKERS entry ${f} :: ${fnn} has no 'running_unratified' registry row`,
+      );
+    }
+  }
+  {
+    const restored = new Set(recon.restoredRows.map((r) => tkey(r.file, r.function)));
+    for (const k of restored) {
+      if (!runningKeys.has(k)) {
+        problems.push(`reconciliation restored row ${k} is not a running_unratified registry row`);
+      }
+    }
+    for (const k of runningKeys) {
+      if (!restored.has(k)) {
+        problems.push(`running_unratified registry row ${k} has no reconciliation restored_rows record`);
+      }
+    }
+  }
+  if (problems.length > 0) {
+    process.stderr.write("error: typeinfo row registry does not match its status authorities:\n");
+    for (const p of problems.sort(codePointCompare)) {
+      process.stderr.write(`  ${p}\n`);
     }
     return 4;
   }
-  const onlyDisc = [...discKeys].filter((k) => !partKeys.has(k)).sort(codePointCompare);
-  const onlyPart = [...partKeys]
-    .filter((k) => !discKeys.has(k) && !liftedKeys.has(k))
-    .sort(codePointCompare);
-  if (onlyDisc.length > 0 || onlyPart.length > 0) {
-    process.stderr.write("error: typeinfo row partition does not match the live ignore set:\n");
-    for (const k of onlyDisc) {
-      const [f, fnn] = k.split(" ");
-      process.stderr.write(`  live-only (no partition row): ${f} :: ${fnn}\n`);
-    }
-    for (const k of onlyPart) {
-      const [f, fnn] = k.split(" ");
-      process.stderr.write(`  partition-only (no live ignore, not lifted): ${f} :: ${fnn}\n`);
-    }
-    return 4;
-  }
 
-  // Build the IgnoredTestRows in (file, function) sorted order.
-  const allKeyPairs = [];
-  const seenPair = new Set();
-  for (const k of [...discKeys, ...liftedKeys]) {
-    if (seenPair.has(k)) {
-      continue;
-    }
-    seenPair.add(k);
+  // Build the IgnoredTestRows over EVERY registry identity, in
+  // (file, function) sorted order.
+  const allKeyPairs = [...partition.keys()].map((k) => {
     const sep = k.indexOf(" ");
-    allKeyPairs.push([k.slice(0, sep), k.slice(sep + 1)]);
-  }
+    return [k.slice(0, sep), k.slice(sep + 1)];
+  });
   allKeyPairs.sort(pairLess);
 
   const rows = [];
   for (const [file_, fnName] of allKeyPairs) {
-    const [blockText, cap] = partition.get(tkey(file_, fnName));
+    const entry = partition.get(tkey(file_, fnName));
+    const blockText = entry.block;
+    const cap = entry.cap;
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(blockText);
     const override = LIFTED_ROW_OVERRIDES.get(tkey(file_, fnName));
     let mech;
@@ -2981,13 +3938,39 @@ function main(checkOnly = false) {
     let unblocker;
     let rowKeys;
     let rowConsumed;
-    if (override) {
+    let oracleQueryOrdinals;
+    if (entry.status === "lifted") {
       mech = override.mech;
       proof = override.proof;
       status = "IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::" + `${blockVar} }`;
       unblocker = escapeRustStringLiteral(override.unblocker);
       rowKeys = [...override.semantic_queries];
       rowConsumed = [...override.consumed_mechanisms];
+      oracleQueryOrdinals = 1;
+    } else if (entry.status === "running_unratified") {
+      mech = mechanismForRow(cap, file_, fnName);
+      proof =
+        `ProofRequirement::RowTestGuard { file: "${file_}", ` + `function: "${fnName}" }`;
+      status =
+        "IgnoreStatus::RunningUnratified { block_id: TypeInfoParityBlockId::" + `${blockVar} }`;
+      unblocker = escapeRustStringLiteral(RUNNING_UNRATIFIED_UNBLOCKERS.get(tkey(file_, fnName)));
+      rowKeys = keysForRow(mech);
+      rowConsumed = consumedMechsForBlock(blockVar);
+      oracleQueryOrdinals = 0;
+    } else if (entry.status === "superseded") {
+      mech = mechanismForRow(cap, file_, fnName);
+      proof =
+        `ProofRequirement::RowTestGuard { file: "${entry.supersededByFile}", ` +
+        `function: "${entry.supersededByFn}" }`;
+      status =
+        "IgnoreStatus::SupersededBy { successor_file: " +
+        `"${entry.supersededByFile}", successor_function: "${entry.supersededByFn}" }`;
+      unblocker = escapeRustStringLiteral(
+        `superseded by ${entry.supersededByFile}::${entry.supersededByFn} (named equivalent-or-stronger proof)`,
+      );
+      rowKeys = keysForRow(mech);
+      rowConsumed = consumedMechsForBlock(blockVar);
+      oracleQueryOrdinals = 0;
     } else {
       mech = mechanismForRow(cap, file_, fnName);
       proof = proofForCapability(cap);
@@ -2995,8 +3978,8 @@ function main(checkOnly = false) {
       unblocker = escapeRustStringLiteral(discovered.get(tkey(file_, fnName)).reason);
       rowKeys = keysForRow(mech);
       rowConsumed = consumedMechsForBlock(blockVar);
+      oracleQueryOrdinals = 0;
     }
-    const oracleQueryOrdinals = override ? 1 : 0;
     rows.push({
       file: file_,
       fn: fnName,
@@ -3015,8 +3998,10 @@ function main(checkOnly = false) {
     });
   }
 
-  if (rows.length !== 348) {
-    process.stderr.write(`error: expected 348 IgnoredTestRows, built ${rows.length}\n`);
+  if (rows.length !== partition.size) {
+    process.stderr.write(
+      `error: built ${rows.length} IgnoredTestRows for ${partition.size} registry identities\n`,
+    );
     return 5;
   }
 
@@ -3095,24 +4080,43 @@ function main(checkOnly = false) {
   }
 
   const additional = buildAdditionalRows();
+  const counts = computeRowRegistryCounts(partition);
 
-  // The generated artifacts, computed in memory.
+  // The generated artifacts, computed in memory, keyed by repo-relative path.
   const generated = new Map([
-    ["typeinfo_ignored_test_manifest_rows.rs", emitIgnoredRows(rows)],
-    ["typeinfo_additional_proof_rows.rs", emitAdditionalRows(additional)],
-    ["typeinfo_parity_blocks.rs", emitBlockRows()],
+    [
+      "crates/verter_session/tests/cases/manifest_data/typeinfo_ignored_test_manifest_rows.rs",
+      emitIgnoredRows(rows),
+    ],
+    [
+      "crates/verter_session/tests/cases/manifest_data/typeinfo_additional_proof_rows.rs",
+      emitAdditionalRows(additional),
+    ],
+    [
+      "crates/verter_session/tests/cases/manifest_data/typeinfo_parity_blocks.rs",
+      emitBlockRows(recon.statusByBlock),
+    ],
+    [
+      "crates/verter_session/tests/cases/manifest_data/typeinfo_guard_registry.rs",
+      emitGuardRegistry(counts, recon),
+    ],
+    [
+      "crates/verter_session/tests/cases/manifest_data/typeinfo_guard_registry_lib.rs",
+      emitGuardRegistryLib(),
+    ],
+    ["docs/arch/typeinfo-row-registry-counts.md", emitCountsDoc(counts)],
   ]);
 
   if (checkOnly) {
     const drifted = [];
-    for (const [name, content] of generated) {
-      const path = join(outDir, name);
+    for (const [relPath, content] of generated) {
+      const path = join(repoRoot, relPath);
       // Compare against the CRLF-normalized committed file: this makes
       // `--check` pass on a CRLF working-tree checkout while still catching
       // genuine content drift (the generator always emits `\n`).
       const committed = existsSync(path) ? readTextNormalized(path) : null;
       if (committed !== content) {
-        drifted.push(name);
+        drifted.push(relPath);
       }
     }
     if (drifted.length > 0) {
@@ -3120,8 +4124,8 @@ function main(checkOnly = false) {
         "error: committed typeinfo manifest is STALE vs the generator " +
           "for the following file(s):\n",
       );
-      for (const name of drifted) {
-        process.stderr.write(`  - crates/verter_session/tests/cases/manifest_data/${name}\n`);
+      for (const relPath of drifted) {
+        process.stderr.write(`  - ${relPath}\n`);
       }
       process.stderr.write("Regenerate with `pnpm gen:typeinfo-manifest` and commit the result.\n");
       return 6;
@@ -3130,19 +4134,20 @@ function main(checkOnly = false) {
       `check: ${generated.size} generated manifest file(s) match the ` +
         `regenerated output (${rows.length} IgnoredTestRows, ` +
         `${additional.length} AdditionalProofRows, ` +
-        `${BLOCK_TO_MECHANISM.size} BlockContractRows)\n`,
+        `${BLOCK_TO_MECHANISM.size} BlockContractRows, ` +
+        `${GUARD_REGISTRY_DATA.length} GuardSpecs)\n`,
     );
     return 0;
   }
 
-  for (const [name, content] of generated) {
+  for (const [relPath, content] of generated) {
     // Explicit UTF-8 (mirrors Python `Path.write_text`, which encodes UTF-8).
-    writeFileSync(join(outDir, name), content, "utf8");
+    writeFileSync(join(repoRoot, relPath), content, "utf8");
   }
 
   process.stderr.write(
     `wrote ${rows.length} IgnoredTestRows, ${additional.length} AdditionalProofRows, ` +
-      `${BLOCK_TO_MECHANISM.size} BlockContractRows\n`,
+      `${BLOCK_TO_MECHANISM.size} BlockContractRows, ${GUARD_REGISTRY_DATA.length} GuardSpecs\n`,
   );
   return 0;
 }

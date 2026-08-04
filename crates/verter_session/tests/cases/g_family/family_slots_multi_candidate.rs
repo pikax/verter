@@ -161,7 +161,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
 /// ANY single value: one of the two per-family probe / occupancy pairs
 /// fails.
 #[test]
-fn cache_candidate_cap_is_per_family_not_uniform() {
+pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
     let host = host();
     let canonical = "/multi_candidate/per_family_cap/owner.ts";
     upsert(&host, canonical, "export type Bar = { x: number };\n");
@@ -423,7 +423,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
 /// promoted candidate (100) stays at the front and is evicted by the
 /// next at-cap publish.
 #[test]
-fn family_eviction_prefers_invalid_then_lru_valid_hit() {
+pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
 

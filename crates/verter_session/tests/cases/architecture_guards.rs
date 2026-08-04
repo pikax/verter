@@ -4875,7 +4875,7 @@ mod cosmetic_reprinter_guard {
 // exercise the predicate against fabricated fixtures without writing a
 // real violation into the production tree.
 
-mod foundations_guards {
+pub(crate) mod foundations_guards {
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -5390,7 +5390,7 @@ mod foundations_guards {
     }
 
     #[test]
-    fn external_corpus_paths_not_present_outside_gated_tests() {
+    pub(crate) fn external_corpus_paths_not_present_outside_gated_tests() {
         let violations = guard4_violations();
         assert!(
             violations.is_empty(),

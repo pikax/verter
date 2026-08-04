@@ -84,7 +84,7 @@ fn relate_key(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_key_covers_relation_kind_policy_freshness_and_context() {
+pub(crate) fn relate_key_covers_relation_kind_policy_freshness_and_context() {
     let s = SemanticNodeId(1);
     let t = SemanticNodeId(2);
     let base = relate_key(
@@ -290,7 +290,7 @@ fn relate_key_covers_relation_kind_policy_freshness_and_context() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
+pub(crate) fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -490,7 +490,7 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
+pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let s = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -680,7 +680,7 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn relate_query_value_carries_relation_proof_and_budget_state() {
+pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
     let binding = verter_session::semantic_query::InferBinding {
         name: Arc::from("T"),
         param: SemanticNodeId(2),

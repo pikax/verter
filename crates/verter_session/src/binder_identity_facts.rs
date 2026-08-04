@@ -904,7 +904,7 @@ pub(crate) fn produce_binder_identity_facts(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::semantic_query::{
         DeclarationSlotSeed, ResolvedDeclSlotIdentity, SemanticSymbolSpace,
     };
@@ -935,7 +935,7 @@ mod tests {
     /// routes through the same choke point; env enters only the
     /// (content-free) query key, never the seed.
     #[test]
-    fn slot_finalization_enters_env_only_in_query_key() {
+    pub(crate) fn slot_finalization_enters_env_only_in_query_key() {
         let host = host();
         upsert_ts(&host, "/w/a.ts", "export interface Foo { x: string }");
         let _ = host.analyze_with_audit("/w/a.ts");

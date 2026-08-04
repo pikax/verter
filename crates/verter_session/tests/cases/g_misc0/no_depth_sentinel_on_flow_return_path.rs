@@ -62,7 +62,7 @@ fn violations(root: &Path) -> Vec<String> {
 }
 
 #[test]
-fn no_depth_sentinel_on_flow_return_path() {
+pub(crate) fn no_depth_sentinel_on_flow_return_path() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let root = root.canonicalize().expect("workspace root");
     let found = violations(&root);

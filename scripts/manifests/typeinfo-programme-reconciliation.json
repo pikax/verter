@@ -1,0 +1,384 @@
+{
+  "schema": "verter.typeinfo-programme-reconciliation.v1",
+  "comment": "One-time retrospective reconciliation record (arch rulings Q2/Q4, u-programme-arch-out.txt + F1/F4, u-programme-arch-followup-out.txt, 2026-08-04). Block statuses, contract amendments, landing transactions, and the restored row identities are recorded here as data; scripts/gen-typeinfo-ignore-manifest.mjs reads this file and emits the typed Rust metadata. Landing evidence commits are verifiable in git history; no Typeinfo-Block trailer exists for any historical landing, which is why no block may hold status `landed` without a landing transaction.",
+  "blocks": [
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/native-typeinfo-parity.md#10.3 (LANDED SHAPE (U0-FINISH-B))",
+        "doc:docs/arch/native-typeinfo-parity-u2-reducers.md (STATUS: (1) landed under U0-FINISH-B)"
+      ]
+    },
+    {
+      "block": "U2.QUERY_VALUE_DOMAIN",
+      "status": "landing_unverified",
+      "evidence": [
+        "rows:all 21 owned partition rows carry status lifted",
+        "guards:crates/verter_session/tests/cases/g_block/u2_demand_lattice_guards.rs + u2_spec_table_guards.rs"
+      ]
+    },
+    {
+      "block": "U2.BINDER_IDENTITY_FACTS",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:0a6c3bd9b",
+        "commit:29155de2c",
+        "guards:crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs"
+      ]
+    },
+    {
+      "block": "U8.WIRE_SURFACE_CLOSURE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U12.EXPORTER",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U13.PROJECTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.RELATION_INFER",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:2ee921b9c",
+        "rows:relation_semantics.rs::relation_optional_property_not_assignable_to_required removed from the partition at 2ee921b9c"
+      ]
+    },
+    {
+      "block": "U2.UTILITIES",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.INDEXED_ACCESS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.MAPPED_TEMPLATE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.CLASS_SURFACES",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.ENUMS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U2.MODULE_AUGMENTATION",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (codex STEP-0 ruling SPINEMODAUG: what U2.MODULE_AUGMENTATION actually landed, branch mom/u2-module-aug)"
+      ]
+    },
+    {
+      "block": "U2.JSX_FOUNDATIONS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "status": "landing_unverified",
+      "evidence": [
+        "commit:a8eef6202",
+        "rows:3 value_inference.rs partition identities removed at a8eef6202",
+        "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)"
+      ]
+    },
+    {
+      "block": "U6.NARROW_TYPEOF",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_EQUALITY",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_TRUTHINESS",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_IN",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_INSTANCEOF",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_DISCRIMINATED",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_SUBSTITUTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.NARROW_INVALIDATION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.PREDICATE_ASSERTION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.CALL_RESOLVE",
+      "status": "implemented_unlanded_rebase_required",
+      "evidence": [
+        "ruling:F1 (hold as IMPLEMENTED_UNLANDED / REBASE_REQUIRED; never landed)",
+        "worktree:branch block/u6-call-resolve"
+      ]
+    },
+    {
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.VALUE_INFERENCE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.ASYNC_GENERATOR",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.CROSS_FILE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U6.LOOP_CLOSURE",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U3.CACHE_FACT_MODEL",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U3.ADAPTIVE_FAMILY_RETENTION",
+      "status": "landing_unverified",
+      "evidence": [
+        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (Landed bridge block — U3.ADAPTIVE_FAMILY_RETENTION (LANDED))",
+        "guards:crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs"
+      ]
+    },
+    {
+      "block": "U10.RESULT_DB",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U11.PUBLIC_RELATION_SESSION",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U14.MACRO_ADAPTER",
+      "status": "pending",
+      "evidence": []
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "status": "pending",
+      "evidence": []
+    }
+  ],
+  "amendments": [
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "replace",
+      "guard": "ignored_test_row_table_holds_exactly_356_rows",
+      "replacement": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label additionally named a test fn that never existed on this tree (phantom, E9)."
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "action": "replace",
+      "guard": "ignored_test_row_table_holds_exactly_356_rows",
+      "replacement": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): same amendment as U0.MANIFEST_SUBSTRATE."
+    },
+    {
+      "block": "U15.FINAL_LIFT",
+      "action": "remove",
+      "guard": "svelte_adapter_stop_gate_is_registered_out_of_scope",
+      "authority": "F4 (u-programme-arch-followup-out.txt, 2026-08-04): U15 removes svelte_adapter_stop_gate.rs; Svelte is co-equal and may not retain a STOP-gate. Only the unchanged React STOP-gate registration remains a U15 obligation."
+    },
+    {
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "action": "add",
+      "guard": "no_depth_sentinel_on_flow_return_path",
+      "authority": "F1 (u-programme-arch-followup-out.txt, 2026-08-04): restore no_depth_sentinel_on_flow_return_path as a substrate-owned required guard before either U6 block lands. The test fn is live on this tree (crates/verter_session/tests/cases/g_misc0/no_depth_sentinel_on_flow_return_path.rs)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "landed_typeinfo_blocks_have_required_guards",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): executable contract enforcement."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "no_landed_typeinfo_block_has_live_ignored_rows",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): done-predicate row part; the label previously existed only as a forward-declared U15 string."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "no_vacuous_parent_u_block_landing",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): parent-aggregate landing is derived-only, never row-vacuous."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "zero_row_blocks_land_exactly_once",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): zero-row block lifecycle enforcement."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): the landing-transaction check; Typeinfo-Block trailers are enforced prospectively, never fabricated for history."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_counts_derive_from_partition",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): counts derive from the append-only registry."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_matches_discovered_tests",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): independent discovery cross-check so generation is not self-validating."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_is_append_only_against_head",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): the 362 baseline is append-only; identity removal is the failure class that erased 14 rows."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "guard_registry_live_integration_bindings_are_complete",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (integration target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "live_integration_guards_are_harness_registered_and_not_ignored",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): execution/default-gate-membership proof from the harness inventory (integration target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "guard_registry_lib_bindings_are_complete",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (lib target)."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "live_lib_guards_are_harness_registered_and_not_ignored",
+      "authority": "Q2 (u-programme-arch-out.txt, 2026-08-04): execution/default-gate-membership proof from the harness inventory (lib target)."
+    }
+  ],
+  "landing_transactions": [],
+  "restored_rows": [
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_aug_patch_edit_surfaces_augmented_shape",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_excludes_prior_leaf_from_v2_footprint",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_barrel_edit_redirects_route_to_new_leaf",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_basic_selected_leaf_edit_flips_published_surface",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "cache_invalidation.rs",
+      "function": "cache_invalidation_unselected_leaf_edit_keeps_warm_cache",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "footprint.rs",
+      "function": "typeinfo_footprint_is_attached_for_named_symbol_request",
+      "removed_at": "fe1f59497"
+    },
+    {
+      "file": "relation_semantics.rs",
+      "function": "relation_optional_property_not_assignable_to_required",
+      "removed_at": "2ee921b9c"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_symbol_key_access_projects_wrapped_value_type",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "branded_types.rs",
+      "function": "branded_unique_symbol_wrapper_publishes_branded_surface",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_indexed_access_via_typeof_returns_literal_value",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "unique_symbol.rs",
+      "function": "unique_symbol_string_key_access_returns_sibling_value",
+      "removed_at": "64e6c6745"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_arrow_expression_body_publishes_return_shape",
+      "removed_at": "a8eef6202"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_arrow_expression_body_substitutes_parameter_references",
+      "removed_at": "a8eef6202"
+    },
+    {
+      "file": "value_inference.rs",
+      "function": "value_inference_function_body_return_union_from_return_statements",
+      "removed_at": "a8eef6202"
+    }
+  ]
+}

@@ -457,7 +457,7 @@ fn contextual_type_at_execute_is_non_producing_miss() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn flow_contextual_keys_return_program_analysis_value() {
+pub(crate) fn flow_contextual_keys_return_program_analysis_value() {
     let specs = semantic_query_key_specs();
     for variant in [
         SemanticQueryKeyTag::FlowNarrowingAt,
@@ -491,7 +491,7 @@ fn flow_contextual_keys_return_program_analysis_value() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn every_semantic_query_key_maps_to_exactly_one_value_domain() {
+pub(crate) fn every_semantic_query_key_maps_to_exactly_one_value_domain() {
     let specs = semantic_query_key_specs();
     for tag in SemanticQueryKeyTag::ALL {
         let rows: Vec<_> = specs.iter().filter(|s| s.variant == *tag).collect();

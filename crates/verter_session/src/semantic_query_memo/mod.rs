@@ -3995,6 +3995,6 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 #[cfg(test)]
 mod cancellation_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 mod wait_cycle_tests;

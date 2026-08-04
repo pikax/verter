@@ -208,7 +208,7 @@ const NODE_TAXONOMY_ARMS: &[&str] = &[
 ];
 
 #[test]
-fn node_taxonomy_complete() {
+pub(crate) fn node_taxonomy_complete() {
     // The `GraphTypeNode.kind` oneof is the closed node taxonomy. This
     // guard pins the EXACT arm set (32 arms) plus the `reserved 34 to 100`
     // additive window. Discriminating: add, drop, or rename any arm and
@@ -255,7 +255,7 @@ fn node_taxonomy_complete() {
 /// the `relation_proof` name trips the reserved-statement checks; editing
 /// either reserved directive out fails the contains checks.
 #[test]
-fn relation_proofs_not_graph_type_nodes() {
+pub(crate) fn relation_proofs_not_graph_type_nodes() {
     let proto = read_proto();
     let arms = proto_oneof_arms(&proto, "GraphTypeNode", "kind");
     assert!(
@@ -295,7 +295,7 @@ fn relation_proofs_not_graph_type_nodes() {
 /// Discriminating: dropping/renaming/retagging field 13, or narrowing the
 /// four-shape `GraphRelationProofEntry.kind` oneof, fails the checks.
 #[test]
-fn typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node() {
+pub(crate) fn typeinfo_relate_payload_exposes_relation_proof_without_graph_type_node() {
     let proto = read_proto();
     let body = proto_block_body(&proto, "message", "SemanticTypeGraph");
     let stripped = strip_proto_comments(body);

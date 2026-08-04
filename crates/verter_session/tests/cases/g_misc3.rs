@@ -30,7 +30,7 @@ mod legacy_accumulate_dispatch_dep_signature_gone;
 #[path = "g_misc3/mapper_fingerprint_content_addressed.rs"]
 mod mapper_fingerprint_content_addressed;
 #[path = "g_misc3/module_augmentation_stitching.rs"]
-mod module_augmentation_stitching;
+pub(crate) mod module_augmentation_stitching;
 #[path = "g_misc3/no_declared_component_meta.rs"]
 mod no_declared_component_meta;
 #[path = "g_misc3/no_legacy_trace_surface.rs"]

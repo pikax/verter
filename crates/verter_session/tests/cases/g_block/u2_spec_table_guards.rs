@@ -85,7 +85,7 @@ fn scan_item_enum_variants(items: &[syn::Item], ident: &str) -> BTreeSet<String>
 // ---------------------------------------------------------------------------
 
 #[test]
-fn semantic_query_key_spec_table_equals_enum() {
+pub(crate) fn semantic_query_key_spec_table_equals_enum() {
     let specs = semantic_query_key_specs();
 
     // (1) FRESHNESS — in-memory render byte-equals the committed artifact.

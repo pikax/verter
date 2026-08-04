@@ -1399,7 +1399,7 @@ fn invalidate_canonical_evicts_project_path_entries_through_touched_subtree() {
 /// the Expanded request would wrongly HIT — this guard catches exactly
 /// that silent-soundness collapse.
 #[test]
-fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
+pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     use crate::semantic_query::demand::{
         Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
     };
@@ -1769,7 +1769,7 @@ fn navigate_compute_does_not_serve_or_backfill_shallow_request() {
 /// recorded-point backfill (Navigate slot stays empty because
 /// `Shallow ⊅ Navigate`).
 #[test]
-fn backfill_writes_only_recorded_materialized_points() {
+pub(crate) fn backfill_writes_only_recorded_materialized_points() {
     use crate::semantic_query::demand::{Demand, MaterializedSet, ProjectionPath};
 
     let host = ctx_host();
