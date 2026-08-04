@@ -178,6 +178,38 @@ pub(crate) const ENFORCED_APP_CONTAINER_POLICY: AppContainerPolicyMaterial =
         profile_ace_inheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
     };
 
+#[cfg(test)]
+thread_local! {
+    static TEST_POLICY_OVERRIDE: std::cell::Cell<Option<AppContainerPolicyMaterial>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn enforced_app_container_policy() -> AppContainerPolicyMaterial {
+    #[cfg(test)]
+    if let Some(policy) = TEST_POLICY_OVERRIDE.with(std::cell::Cell::get) {
+        return policy;
+    }
+    ENFORCED_APP_CONTAINER_POLICY
+}
+
+#[cfg(test)]
+pub(crate) fn with_app_container_policy_for_test<T>(
+    policy: AppContainerPolicyMaterial,
+    run: impl FnOnce() -> T,
+) -> T {
+    TEST_POLICY_OVERRIDE.with(|slot| {
+        assert!(
+            slot.replace(Some(policy)).is_none(),
+            "policy override nested"
+        );
+    });
+    let result = run();
+    TEST_POLICY_OVERRIDE.with(|slot| {
+        slot.replace(None).expect("policy override installed");
+    });
+    result
+}
+
 impl AppContainerPolicyMaterial {
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(40);
@@ -371,17 +403,18 @@ pub(crate) fn hash_app_container_policy(material: &AppContainerPolicyMaterial) -
 /// Digests the AppContainer policy this module actually applies at launch, so the
 /// attested profile hash changes if and only if the enforced policy changes.
 pub(crate) fn sandbox_profile_hash() -> [u8; 32] {
-    hash_app_container_policy(&ENFORCED_APP_CONTAINER_POLICY)
+    hash_app_container_policy(&enforced_app_container_policy())
 }
 
 pub(crate) fn spawn_denied_worker(
     source_executable: &Path,
     launch_nonce: &[u8; 16],
 ) -> Result<SpawnedWorker, BrokerError> {
+    let policy = enforced_app_container_policy();
     let profile_string = format!("Verter.Processor.{}", hex(launch_nonce));
     let profile_name = wide(&profile_string);
     let mut sid = null_mut();
-    let profile_capability_count = ENFORCED_APP_CONTAINER_POLICY.capability_count;
+    let profile_capability_count = policy.capability_count;
     applied_policy::record_capability_count(profile_capability_count);
     let hr = unsafe {
         CreateAppContainerProfile(
@@ -401,7 +434,8 @@ pub(crate) fn spawn_denied_worker(
         sid,
         keep: false,
     };
-    let executable = app_container_executable(&profile_string, source_executable, profile.sid)?;
+    let executable =
+        app_container_executable(&profile_string, source_executable, profile.sid, &policy)?;
     let pipe_name = wide(format!(r"\\.\pipe\verter-processor-{}", hex(launch_nonce)));
     let server = unsafe {
         CreateNamedPipeW(
@@ -443,11 +477,11 @@ pub(crate) fn spawn_denied_worker(
         return Err(io_error("SetHandleInformation"));
     }
 
-    let job = create_job()?;
+    let job = create_job(&policy)?;
     let job_guard = OwnedHandle(job);
     let mut attributes = AttributeList::new(2)?;
     let handles = [client];
-    if handles.len() != ENFORCED_APP_CONTAINER_POLICY.inherited_handle_count as usize {
+    if handles.len() != policy.inherited_handle_count as usize {
         return Err(BrokerError::Protocol(
             "inherited handle list diverges from the enforced AppContainer policy",
         ));
@@ -461,7 +495,7 @@ pub(crate) fn spawn_denied_worker(
         handles.as_ptr().cast(),
         handle_list_bytes,
     )?;
-    let mitigations = ENFORCED_APP_CONTAINER_POLICY.process_mitigation_policy;
+    let mitigations = policy.process_mitigation_policy;
     applied_policy::record_process_mitigation_policy(mitigations);
     attributes.update(
         PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
@@ -479,13 +513,12 @@ pub(crate) fn spawn_denied_worker(
         executable.path().display()
     ));
     let mut process = PROCESS_INFORMATION::default();
-    if ENFORCED_APP_CONTAINER_POLICY.environment_block_u16s < 2 {
+    if policy.environment_block_u16s < 2 {
         return Err(BrokerError::Protocol(
             "enforced environment block cannot terminate a unicode environment",
         ));
     }
-    let mut empty_environment =
-        vec![0_u16; ENFORCED_APP_CONTAINER_POLICY.environment_block_u16s as usize];
+    let mut empty_environment = vec![0_u16; policy.environment_block_u16s as usize];
     applied_policy::record_environment_block_u16s(empty_environment.len() as u32);
     let current_directory = wide(
         executable
@@ -493,7 +526,7 @@ pub(crate) fn spawn_denied_worker(
             .parent()
             .ok_or(BrokerError::Protocol("worker executable has no parent"))?,
     );
-    let token = create_lowbox_token(profile.sid)?;
+    let token = create_lowbox_token(profile.sid, &policy)?;
     let created = unsafe {
         CreateProcessAsUserW(
             token.0,
@@ -544,6 +577,7 @@ pub(crate) fn spawn_denied_worker(
 
 fn create_lowbox_token(
     profile_sid: windows_sys::Win32::Security::PSID,
+    policy: &AppContainerPolicyMaterial,
 ) -> Result<OwnedHandle, BrokerError> {
     let mut current_token = null_mut();
     if unsafe {
@@ -561,8 +595,8 @@ fn create_lowbox_token(
     }
     let current_token = OwnedHandle(current_token);
     let mut lowbox_token = null_mut();
-    let lowbox_capability_count = ENFORCED_APP_CONTAINER_POLICY.capability_count;
-    let lowbox_handle_count = ENFORCED_APP_CONTAINER_POLICY.lowbox_handle_count;
+    let lowbox_capability_count = policy.capability_count;
+    let lowbox_handle_count = policy.lowbox_handle_count;
     applied_policy::record_capability_count(lowbox_capability_count);
     applied_policy::record_lowbox_handle_count(lowbox_handle_count);
     let status = unsafe {
@@ -728,15 +762,14 @@ pub(crate) fn wait_pid_gone_for_test(pid: u32, timeout: Duration) -> bool {
     false
 }
 
-fn create_job() -> Result<HANDLE, BrokerError> {
+fn create_job(policy: &AppContainerPolicyMaterial) -> Result<HANDLE, BrokerError> {
     let job = unsafe { CreateJobObjectW(null(), null()) };
     if job.is_null() {
         return Err(io_error("CreateJobObjectW"));
     }
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = ENFORCED_APP_CONTAINER_POLICY.job_limit_flags;
-    limits.BasicLimitInformation.ActiveProcessLimit =
-        ENFORCED_APP_CONTAINER_POLICY.job_active_process_limit;
+    limits.BasicLimitInformation.LimitFlags = policy.job_limit_flags;
+    limits.BasicLimitInformation.ActiveProcessLimit = policy.job_active_process_limit;
     applied_policy::record_job_limits(
         limits.BasicLimitInformation.LimitFlags,
         limits.BasicLimitInformation.ActiveProcessLimit,
@@ -760,11 +793,12 @@ fn app_container_executable(
     profile_name: &str,
     source_executable: &Path,
     profile_sid: windows_sys::Win32::Security::PSID,
+    policy: &AppContainerPolicyMaterial,
 ) -> Result<StagedExecutable, BrokerError> {
     let public = std::env::var_os("PUBLIC").ok_or(BrokerError::Protocol("PUBLIC unavailable"))?;
     let executable_root = PathBuf::from(public).join("Documents").join(profile_name);
     std::fs::create_dir(&executable_root)?;
-    if let Err(error) = grant_profile_read_execute(&executable_root, profile_sid) {
+    if let Err(error) = grant_profile_read_execute(&executable_root, profile_sid, policy) {
         let _ = std::fs::remove_dir(&executable_root);
         return Err(error);
     }
@@ -779,6 +813,7 @@ fn app_container_executable(
 fn grant_profile_read_execute(
     path: &Path,
     profile_sid: windows_sys::Win32::Security::PSID,
+    policy: &AppContainerPolicyMaterial,
 ) -> Result<(), BrokerError> {
     let path = wide(path);
     let mut old_dacl = null_mut();
@@ -800,9 +835,9 @@ fn grant_profile_read_execute(
     }
     let security_descriptor = LocalAllocation(security_descriptor);
     let access = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: ENFORCED_APP_CONTAINER_POLICY.profile_access_mask,
+        grfAccessPermissions: policy.profile_access_mask,
         grfAccessMode: GRANT_ACCESS,
-        grfInheritance: ENFORCED_APP_CONTAINER_POLICY.profile_ace_inheritance,
+        grfInheritance: policy.profile_ace_inheritance,
         Trustee: TRUSTEE_W {
             pMultipleTrustee: null_mut(),
             MultipleTrusteeOperation: 0,

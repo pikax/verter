@@ -167,7 +167,7 @@ fn correlation_rejects_cross_context_work_channel_and_malformed_ids() {
     );
 }
 
-fn launch() -> Result<DeniedWorkerSession, BrokerError> {
+pub(crate) fn launch() -> Result<DeniedWorkerSession, BrokerError> {
     let executable = worker_executable();
     let launch = DeniedWorkerLaunch::new(
         &executable,

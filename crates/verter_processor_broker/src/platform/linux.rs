@@ -119,7 +119,8 @@ pub(crate) struct LinuxSandboxPolicyMaterial {
     pub(crate) audit_arch: u32,
 }
 
-pub(crate) fn enforced_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
+fn default_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
+    let audit_arch = native_audit_arch();
     LinuxSandboxPolicyMaterial {
         unshare_flags: libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWNET,
         root_mount_flags: libc::MS_NOSUID | libc::MS_NODEV,
@@ -133,14 +134,99 @@ pub(crate) fn enforced_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
         setgroups_denied: true,
         close_range_first_swept_fd: 3,
         close_range_flags: libc::CLOSE_RANGE_CLOEXEC,
-        launch_filter: encode_seccomp_filter(SeccompStage::Launch),
-        worker_filter: encode_seccomp_filter(SeccompStage::Worker),
-        audit_arch: native_audit_arch(),
+        launch_filter: encode_seccomp_filter(SeccompStage::Launch, audit_arch),
+        worker_filter: encode_seccomp_filter(SeccompStage::Worker, audit_arch),
+        audit_arch,
     }
 }
 
-fn encode_seccomp_filter(stage: SeccompStage) -> Vec<u8> {
-    let filters = seccomp_program(stage);
+#[cfg(test)]
+thread_local! {
+    static TEST_POLICY_OVERRIDE: std::cell::RefCell<Option<LinuxSandboxPolicyMaterial>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn enforced_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
+    #[cfg(test)]
+    if let Some(policy) = TEST_POLICY_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return policy;
+    }
+    default_linux_sandbox_policy()
+}
+
+#[cfg(test)]
+pub(crate) fn with_linux_sandbox_policy_for_test<T>(
+    policy: LinuxSandboxPolicyMaterial,
+    run: impl FnOnce() -> T,
+) -> T {
+    TEST_POLICY_OVERRIDE.with(|slot| {
+        assert!(
+            slot.replace(Some(policy)).is_none(),
+            "policy override nested"
+        );
+    });
+    let result = run();
+    TEST_POLICY_OVERRIDE.with(|slot| {
+        slot.replace(None).expect("policy override installed");
+    });
+    result
+}
+
+fn encode_seccomp_filter(stage: SeccompStage, audit_arch: u32) -> Vec<u8> {
+    encode_filters(&seccomp_program(stage, audit_arch))
+}
+
+#[cfg(test)]
+pub(crate) fn deny_launch_syscall_for_test(
+    material: &mut LinuxSandboxPolicyMaterial,
+    syscall: libc::c_long,
+) -> usize {
+    let deny_pair = [
+        jump(0x15, syscall as u32, 0, 1),
+        stmt(
+            0x06,
+            libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32 & libc::SECCOMP_RET_DATA),
+        ),
+    ];
+    let allow = encode_filters(&[stmt(0x06, libc::SECCOMP_RET_ALLOW)]);
+    assert!(material.launch_filter.ends_with(&allow));
+    material
+        .launch_filter
+        .truncate(material.launch_filter.len() - allow.len());
+    material
+        .launch_filter
+        .extend_from_slice(&encode_filters(&deny_pair));
+    material.launch_filter.extend_from_slice(&allow);
+    count_filter_pair(&material.launch_filter, &deny_pair)
+}
+
+#[cfg(test)]
+pub(crate) fn count_launch_syscall_denials_for_test(
+    material: &LinuxSandboxPolicyMaterial,
+    syscall: libc::c_long,
+) -> usize {
+    count_filter_pair(
+        &material.launch_filter,
+        &[
+            jump(0x15, syscall as u32, 0, 1),
+            stmt(
+                0x06,
+                libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32 & libc::SECCOMP_RET_DATA),
+            ),
+        ],
+    )
+}
+
+#[cfg(test)]
+fn count_filter_pair(bytes: &[u8], pair: &[libc::sock_filter; 2]) -> usize {
+    let encoded = encode_filters(pair);
+    bytes
+        .windows(encoded.len())
+        .filter(|window| *window == encoded)
+        .count()
+}
+
+fn encode_filters(filters: &[libc::sock_filter]) -> Vec<u8> {
     let mut out = Vec::with_capacity(filters.len() * 8);
     for filter in filters {
         out.extend_from_slice(&filter.code.to_be_bytes());
@@ -289,7 +375,7 @@ pub(crate) fn apply_worker_sandbox() -> Result<(), BrokerError> {
     let policy = enforced_linux_sandbox_policy();
     set_no_new_privileges(policy.no_new_privileges)
         .map_err(|error| unavailable("PR_SET_NO_NEW_PRIVS(worker)", error.raw_os_error()))?;
-    install_seccomp(SeccompStage::Worker)
+    install_seccomp(&policy, SeccompStage::Worker)
         .map_err(|error| unavailable("seccomp filter(worker)", error.raw_os_error()))
 }
 
@@ -447,7 +533,7 @@ unsafe fn setup_namespaces_and_root(
         return Err(io::Error::last_os_error());
     }
     set_no_new_privileges(policy.no_new_privileges)?;
-    install_seccomp(SeccompStage::Launch)?;
+    install_seccomp(policy, SeccompStage::Launch)?;
     Ok(())
 }
 
@@ -531,7 +617,7 @@ fn set_no_new_privileges(value: i32) -> io::Result<()> {
     }
 }
 
-fn seccomp_program(stage: SeccompStage) -> Vec<libc::sock_filter> {
+fn seccomp_program(stage: SeccompStage, audit_arch: u32) -> Vec<libc::sock_filter> {
     const LOAD_ARCH: libc::sock_filter = stmt(0x20, 4);
     const LOAD_SYSCALL: libc::sock_filter = stmt(0x20, 0);
     const ALLOW: libc::sock_filter = stmt(0x06, libc::SECCOMP_RET_ALLOW);
@@ -543,7 +629,7 @@ fn seccomp_program(stage: SeccompStage) -> Vec<libc::sock_filter> {
     let denied = denied_syscalls(stage);
     let mut filters = Vec::with_capacity(5 + denied.len() * 2);
     filters.push(LOAD_ARCH);
-    filters.push(jump(0x15, native_audit_arch(), 1, 0));
+    filters.push(jump(0x15, audit_arch, 1, 0));
     filters.push(KILL);
     filters.push(LOAD_SYSCALL);
     for syscall in denied {
@@ -554,8 +640,8 @@ fn seccomp_program(stage: SeccompStage) -> Vec<libc::sock_filter> {
     filters
 }
 
-fn install_seccomp(stage: SeccompStage) -> io::Result<()> {
-    let mut filters = seccomp_program(stage);
+fn install_seccomp(policy: &LinuxSandboxPolicyMaterial, stage: SeccompStage) -> io::Result<()> {
+    let mut filters = decode_seccomp_filter(policy, stage)?;
     let program = libc::sock_fprog {
         len: u16::try_from(filters.len())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,
@@ -573,6 +659,39 @@ fn install_seccomp(stage: SeccompStage) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+fn decode_seccomp_filter(
+    policy: &LinuxSandboxPolicyMaterial,
+    stage: SeccompStage,
+) -> io::Result<Vec<libc::sock_filter>> {
+    let encoded = match stage {
+        SeccompStage::Launch => &policy.launch_filter,
+        SeccompStage::Worker => &policy.worker_filter,
+    };
+    if encoded.is_empty() || encoded.len() % 8 != 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let filters: Vec<_> = encoded
+        .chunks_exact(8)
+        .map(|bytes| libc::sock_filter {
+            code: u16::from_be_bytes([bytes[0], bytes[1]]),
+            jt: bytes[2],
+            jf: bytes[3],
+            k: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        })
+        .collect();
+    let audit_check = filters
+        .get(1)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if audit_check.code != 0x15
+        || audit_check.jt != 1
+        || audit_check.jf != 0
+        || audit_check.k != policy.audit_arch
+    {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    Ok(filters)
 }
 
 fn denied_syscalls(stage: SeccompStage) -> Vec<libc::c_long> {

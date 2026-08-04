@@ -337,6 +337,96 @@ fn windows_launch_enforcement_applies_the_exact_policy_material_the_attested_has
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_enforcement_path_mutation_moves_the_attested_hash() {
+    use crate::platform::{
+        enforced_app_container_policy, take_applied_app_container_policy_for_test,
+        with_app_container_policy_for_test, ENFORCED_APP_CONTAINER_POLICY,
+    };
+
+    let control = launch_required();
+    drop(control);
+    assert_eq!(
+        take_applied_app_container_policy_for_test(),
+        ENFORCED_APP_CONTAINER_POLICY,
+        "the unplanted enforcement control must apply the baseline policy"
+    );
+    let baseline_hash = crate::platform::sandbox_profile_hash();
+    let mut mutated = ENFORCED_APP_CONTAINER_POLICY;
+    assert_eq!(mutated.environment_block_u16s, 2, "mutation is new");
+    mutated.environment_block_u16s = 3;
+
+    with_app_container_policy_for_test(mutated, || {
+        assert_eq!(
+            enforced_app_container_policy(),
+            mutated,
+            "the planted policy must be present at the enforcement source"
+        );
+        assert_ne!(
+            crate::platform::sandbox_profile_hash(),
+            baseline_hash,
+            "the attested hash must move with the enforcement-path mutation"
+        );
+        let session = launch_required();
+        drop(session);
+        assert_eq!(
+            take_applied_app_container_policy_for_test(),
+            mutated,
+            "enforcement must apply the planted three-unit environment block"
+        );
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_enforcement_path_mutation_moves_the_attested_hash_and_denies_exec() {
+    use crate::platform::{
+        count_launch_syscall_denials_for_test, deny_launch_syscall_for_test,
+        enforced_linux_sandbox_policy, with_linux_sandbox_policy_for_test,
+    };
+
+    let control = launch_required();
+    drop(control);
+    let baseline_hash = crate::platform::sandbox_profile_hash();
+    let mut mutated = enforced_linux_sandbox_policy();
+    assert_eq!(
+        count_launch_syscall_denials_for_test(&mutated, libc::SYS_execve),
+        0,
+        "the execve denial must be new"
+    );
+    assert_eq!(
+        deny_launch_syscall_for_test(&mut mutated, libc::SYS_execve),
+        1,
+        "the planted execve denial must be present and unique"
+    );
+
+    with_linux_sandbox_policy_for_test(mutated.clone(), || {
+        assert_eq!(
+            enforced_linux_sandbox_policy(),
+            mutated,
+            "the planted filter must be present at the enforcement source"
+        );
+        assert_ne!(
+            crate::platform::sandbox_profile_hash(),
+            baseline_hash,
+            "the attested hash must move with the enforcement-path mutation"
+        );
+        let outcome = crate::tests::launch();
+        match outcome {
+            Err(BrokerError::SandboxUnavailable(evidence)) => {
+                assert_eq!(evidence.operation(), "namespace/mount/seccomp launch");
+                assert_eq!(evidence.os_error(), Some(libc::EPERM));
+            }
+            Err(error) => panic!("planted execve denial returned the wrong error: {error:?}"),
+            Ok(session) => {
+                drop(session);
+                panic!("launch ignored the planted execve denial")
+            }
+        }
+    });
+}
+
 // (d) Live recheck comparisons against independently recorded launch facts.
 
 #[test]
