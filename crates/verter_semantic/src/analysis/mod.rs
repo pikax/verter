@@ -32,6 +32,7 @@ mod decl_dependencies_tests;
 mod exports;
 mod fact_projection;
 pub mod file_usage;
+pub mod flow;
 pub mod framework_facts;
 pub mod function_program;
 mod function_program_hash;
