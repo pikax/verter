@@ -32,6 +32,7 @@ enum GuardId {
     RowRegistryCountsDeriveFromPartition,
     RowRegistryMatchesDiscoveredTests,
     RowRegistryIsAppendOnlyAgainstHead,
+    RowRegistryContainsPinnedBaselineCohort,
     LandedTypeinfoBlocksHaveRequiredGuards,
     NoLandedTypeinfoBlockHasLiveIgnoredRows,
     NoVacuousParentUBlockLanding,
@@ -182,6 +183,7 @@ const GUARD_ID_ALL: &[GuardId] = &[
     GuardId::RowRegistryCountsDeriveFromPartition,
     GuardId::RowRegistryMatchesDiscoveredTests,
     GuardId::RowRegistryIsAppendOnlyAgainstHead,
+    GuardId::RowRegistryContainsPinnedBaselineCohort,
     GuardId::LandedTypeinfoBlocksHaveRequiredGuards,
     GuardId::NoLandedTypeinfoBlockHasLiveIgnoredRows,
     GuardId::NoVacuousParentUBlockLanding,
@@ -366,6 +368,7 @@ const GUARD_REGISTRY: &[GuardSpec] = &[
     GuardSpec { id: GuardId::RowRegistryCountsDeriveFromPartition, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
     GuardSpec { id: GuardId::RowRegistryMatchesDiscoveredTests, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
     GuardSpec { id: GuardId::RowRegistryIsAppendOnlyAgainstHead, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
+    GuardSpec { id: GuardId::RowRegistryContainsPinnedBaselineCohort, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
     GuardSpec { id: GuardId::LandedTypeinfoBlocksHaveRequiredGuards, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
     GuardSpec { id: GuardId::NoLandedTypeinfoBlockHasLiveIgnoredRows, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
     GuardSpec { id: GuardId::NoVacuousParentUBlockLanding, owner: TypeInfoParityBlockId::U0ManifestSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
@@ -541,7 +544,7 @@ struct ContractAmendment {
 
 #[rustfmt::skip]
 const CONTRACT_AMENDMENTS: &[ContractAmendment] = &[
-    ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Replaced, guard_label: "ignored_test_row_table_holds_exactly_356_rows", replacement: Some(GuardId::RowRegistryCountsDeriveFromPartition), authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label additionally named a test fn that never existed on this tree (phantom, E9)." },
+    ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Replaced, guard_label: "ignored_test_row_table_holds_exactly_356_rows", replacement: Some(GuardId::RowRegistryCountsDeriveFromPartition), authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label named fn ignored_test_row_table_holds_exactly_356_rows, which existed at a39f95687 but was absent at the reconciliation base (E9)." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U15FinalLift, action: AmendmentAction::Replaced, guard_label: "ignored_test_row_table_holds_exactly_356_rows", replacement: Some(GuardId::RowRegistryCountsDeriveFromPartition), authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): same amendment as U0.MANIFEST_SUBSTRATE." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U15FinalLift, action: AmendmentAction::Removed, guard_label: "svelte_adapter_stop_gate_is_registered_out_of_scope", replacement: None, authority: "F4 (u-programme-arch-followup-out.txt, 2026-08-04): U15 removes svelte_adapter_stop_gate.rs; Svelte is co-equal and may not retain a STOP-gate. Only the unchanged React STOP-gate registration remains a U15 obligation." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, action: AmendmentAction::Added, guard_label: "no_depth_sentinel_on_flow_return_path", replacement: None, authority: "F1 (u-programme-arch-followup-out.txt, 2026-08-04): restore no_depth_sentinel_on_flow_return_path as a substrate-owned required guard before either U6 block lands. The test fn is live on this tree (crates/verter_session/tests/cases/g_misc0/no_depth_sentinel_on_flow_return_path.rs)." },
@@ -553,6 +556,7 @@ const CONTRACT_AMENDMENTS: &[ContractAmendment] = &[
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "row_registry_counts_derive_from_partition", replacement: None, authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): counts derive from the append-only registry." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "row_registry_matches_discovered_tests", replacement: None, authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): independent discovery cross-check so generation is not self-validating." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "row_registry_is_append_only_against_head", replacement: None, authority: "Q4 (u-programme-arch-out.txt, 2026-08-04): the 362 baseline is append-only; identity removal is the failure class that erased 14 rows." },
+    ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "row_registry_contains_pinned_baseline_cohort", replacement: None, authority: "Q4 (u-programme-arch-out.txt, 2026-08-04) append-only intent, closed against committed removals: the HEAD-diff check only fires on uncommitted dirty-tree removals and self-heals once an erasing commit lands, so the registry is asserted to CONTAIN the pinned immutable baseline cohort (scripts/manifests/typeinfo-row-baseline-cohort.json), which no regeneration can rewrite or shrink." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "guard_registry_live_integration_bindings_are_complete", replacement: None, authority: "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (integration target)." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "live_integration_guards_are_harness_registered_and_not_ignored", replacement: None, authority: "Q2 (u-programme-arch-out.txt, 2026-08-04): execution/default-gate-membership proof from the harness inventory (integration target)." },
     ContractAmendment { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, action: AmendmentAction::Added, guard_label: "guard_registry_lib_bindings_are_complete", replacement: None, authority: "Q2 (u-programme-arch-out.txt, 2026-08-04): typed GuardId registry executable-binding completeness (lib target)." },

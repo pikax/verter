@@ -214,7 +214,7 @@
       "action": "replace",
       "guard": "ignored_test_row_table_holds_exactly_356_rows",
       "replacement": "row_registry_counts_derive_from_partition",
-      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label additionally named a test fn that never existed on this tree (phantom, E9)."
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): frozen 348/356/362 count literals are stale bookkeeping states; every count derives from the append-only row registry. The 356 label named fn ignored_test_row_table_holds_exactly_356_rows, which existed at a39f95687 but was absent at the reconciliation base (E9)."
     },
     {
       "block": "U15.FINAL_LIFT",
@@ -282,6 +282,12 @@
       "action": "add",
       "guard": "row_registry_is_append_only_against_head",
       "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04): the 362 baseline is append-only; identity removal is the failure class that erased 14 rows."
+    },
+    {
+      "block": "U0.MANIFEST_SUBSTRATE",
+      "action": "add",
+      "guard": "row_registry_contains_pinned_baseline_cohort",
+      "authority": "Q4 (u-programme-arch-out.txt, 2026-08-04) append-only intent, closed against committed removals: the HEAD-diff check only fires on uncommitted dirty-tree removals and self-heals once an erasing commit lands, so the registry is asserted to CONTAIN the pinned immutable baseline cohort (scripts/manifests/typeinfo-row-baseline-cohort.json), which no regeneration can rewrite or shrink."
     },
     {
       "block": "U0.MANIFEST_SUBSTRATE",

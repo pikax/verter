@@ -567,6 +567,7 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "typeinfo_block_landing_transactions_are_atomic_and_trailer_backed",
       "row_registry_matches_discovered_tests",
       "row_registry_is_append_only_against_head",
+      "row_registry_contains_pinned_baseline_cohort",
       "guard_registry_live_integration_bindings_are_complete",
       "live_integration_guards_are_harness_registered_and_not_ignored",
       "guard_registry_lib_bindings_are_complete",
@@ -868,9 +869,12 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
   ],
 ]);
 
-// ── Per-block VERIFICATION COMMAND LABELS (§9) ──
+// ── Per-block VERIFICATION COMMAND LABELS (§9). The first label targets
+//    the consolidated verter_session integration binary (`tests/main.rs`,
+//    target `main`) filtered to the manifest module — there is NO cargo
+//    target named `typeinfo_ignored_test_manifest`. ──
 const BLOCK_VERIFICATION_LABELS = [
-  "cargo test -p verter_session --test typeinfo_ignored_test_manifest",
+  "cargo test -p verter_session --test main cases::typeinfo_ignored_test_manifest",
   "cargo nextest run --workspace",
   "cargo test -p verter_session --tests",
   "cargo clippy --workspace -- -D warnings",
@@ -908,6 +912,7 @@ const GUARD_REGISTRY_DATA = [
   ["row_registry_counts_derive_from_partition", "U0ManifestSubstrate", "integration"],
   ["row_registry_matches_discovered_tests", "U0ManifestSubstrate", "integration"],
   ["row_registry_is_append_only_against_head", "U0ManifestSubstrate", "integration"],
+  ["row_registry_contains_pinned_baseline_cohort", "U0ManifestSubstrate", "integration"],
   ["landed_typeinfo_blocks_have_required_guards", "U0ManifestSubstrate", "integration"],
   ["no_landed_typeinfo_block_has_live_ignored_rows", "U0ManifestSubstrate", "integration"],
   ["no_vacuous_parent_u_block_landing", "U0ManifestSubstrate", "integration"],
@@ -926,9 +931,17 @@ const GUARD_REGISTRY_DATA = [
   ["guard_registry_lib_bindings_are_complete", "U0ManifestSubstrate", "lib"],
   ["live_lib_guards_are_harness_registered_and_not_ignored", "U0ManifestSubstrate", "lib"],
   // U2.QUERY_VALUE_DOMAIN — live integration guards.
-  ["every_semantic_query_key_maps_to_exactly_one_value_domain", "U2QueryValueDomain", "integration"],
+  [
+    "every_semantic_query_key_maps_to_exactly_one_value_domain",
+    "U2QueryValueDomain",
+    "integration",
+  ],
   ["flow_contextual_keys_return_program_analysis_value", "U2QueryValueDomain", "integration"],
-  ["relate_query_value_carries_relation_proof_and_budget_state", "U2QueryValueDomain", "integration"],
+  [
+    "relate_query_value_carries_relation_proof_and_budget_state",
+    "U2QueryValueDomain",
+    "integration",
+  ],
   [
     "resolve_class_surface_key_covers_side_demand_type_args_and_context",
     "U2QueryValueDomain",
@@ -936,21 +949,45 @@ const GUARD_REGISTRY_DATA = [
   ],
   ["apparent_type_key_covers_lib_env_demand_and_context", "U2QueryValueDomain", "integration"],
   ["template_literal_reduce_key_covers_context", "U2QueryValueDomain", "integration"],
-  ["relate_key_covers_relation_kind_policy_freshness_and_context", "U2QueryValueDomain", "integration"],
+  [
+    "relate_key_covers_relation_kind_policy_freshness_and_context",
+    "U2QueryValueDomain",
+    "integration",
+  ],
   [
     "relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit",
     "U2QueryValueDomain",
     "integration",
   ],
-  ["relate_same_nodes_different_inference_context_do_not_warm_hit", "U2QueryValueDomain", "integration"],
+  [
+    "relate_same_nodes_different_inference_context_do_not_warm_hit",
+    "U2QueryValueDomain",
+    "integration",
+  ],
   ["semantic_query_key_spec_table_equals_enum", "U2QueryValueDomain", "integration"],
-  ["query_modes_are_presets_over_projection_demand_eval_policy", "U2QueryValueDomain", "integration"],
-  ["skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode", "U2QueryValueDomain", "integration"],
+  [
+    "query_modes_are_presets_over_projection_demand_eval_policy",
+    "U2QueryValueDomain",
+    "integration",
+  ],
+  [
+    "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
+    "U2QueryValueDomain",
+    "integration",
+  ],
   ["cache_key_axes_are_minimal_and_normalized", "U2QueryValueDomain", "integration"],
-  ["reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check", "U2QueryValueDomain", "owed"],
+  [
+    "reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check",
+    "U2QueryValueDomain",
+    "owed",
+  ],
   // U2.BINDER_IDENTITY_FACTS — live guards (7 integration + 1 lib).
   ["binder_identity_facts_are_pre_u2_and_not_n0_owned", "U2BinderIdentityFacts", "integration"],
-  ["declaration_slots_are_stable_symbol_space_scoped_facts", "U2BinderIdentityFacts", "integration"],
+  [
+    "declaration_slots_are_stable_symbol_space_scoped_facts",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
   [
     "binder_scope_ids_are_cosmetic_stable_and_insertion_non_aliasing",
     "U2BinderIdentityFacts",
@@ -962,8 +999,16 @@ const GUARD_REGISTRY_DATA = [
     "U2BinderIdentityFacts",
     "integration",
   ],
-  ["binder_provenance_served_from_artifact_in_authored_order", "U2BinderIdentityFacts", "integration"],
-  ["binder_scope_id_enters_context_sensitive_query_identity", "U2BinderIdentityFacts", "integration"],
+  [
+    "binder_provenance_served_from_artifact_in_authored_order",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
+  [
+    "binder_scope_id_enters_context_sensitive_query_identity",
+    "U2BinderIdentityFacts",
+    "integration",
+  ],
   [
     "negative_name_lookup_requires_recorded_completeness_or_returnonly",
     "U2BinderIdentityFacts",
@@ -988,7 +1033,11 @@ const GUARD_REGISTRY_DATA = [
   ],
   ["no_infer_not_type_parameter_metadata", "U8WireSurfaceClosure", "owed"],
   ["typeinfo_graph_response_payload_arm_is_additive_not_retyped", "U8WireSurfaceClosure", "owed"],
-  ["framework_surface_payload_graph_payload_is_additive_not_retyped", "U8WireSurfaceClosure", "owed"],
+  [
+    "framework_surface_payload_graph_payload_is_additive_not_retyped",
+    "U8WireSurfaceClosure",
+    "owed",
+  ],
   ["all_public_semantic_type_graph_embeddings_are_payload_wrapped", "U8WireSurfaceClosure", "owed"],
   // U2.RELATION_INFER — live lib guards + owed relation/inference work.
   ["freshness_tracks_per_property_spread_taint", "U2RelationInfer", "lib"],
@@ -1048,7 +1097,11 @@ const GUARD_REGISTRY_DATA = [
   ["function_flow_graph_built_once_per_function_skeleton", "U6FlowReturnSubstrate", "owed"],
   ["flow_slice_is_graph_reachability_not_procedural_walk", "U6FlowReturnSubstrate", "owed"],
   ["flow_graph_effect_edges_stay_live_past_value_writes", "U6FlowReturnSubstrate", "owed"],
-  ["flow_graph_build_is_shallow_interned_no_lowering_lazy_regions", "U6FlowReturnSubstrate", "owed"],
+  [
+    "flow_graph_build_is_shallow_interned_no_lowering_lazy_regions",
+    "U6FlowReturnSubstrate",
+    "owed",
+  ],
   ["flow_return_routes_through_project_semantic_dispatch", "U6FlowReturnSubstrate", "owed"],
   ["flow_slice_lowered_body_does_not_compute_slice_hash", "U6FlowReturnSubstrate", "owed"],
   ["flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash", "U6FlowReturnSubstrate", "owed"],
@@ -1064,7 +1117,11 @@ const GUARD_REGISTRY_DATA = [
   ["narrowing_facts_are_program_analysis_not_graph_type_nodes", "U6FlowReturnSubstrate", "owed"],
   ["array_isarray_narrowing_reads_lib_intrinsic_not_text", "U6FlowReturnSubstrate", "owed"],
   // U6.PREDICATE_ASSERTION — owed.
-  ["predicate_signature_without_body_audits_signature_only_outcome", "U6PredicateAssertion", "owed"],
+  [
+    "predicate_signature_without_body_audits_signature_only_outcome",
+    "U6PredicateAssertion",
+    "owed",
+  ],
   [
     "predicate_assertion_effect_is_signature_metadata_not_published_type_node",
     "U6PredicateAssertion",
@@ -1078,13 +1135,29 @@ const GUARD_REGISTRY_DATA = [
     "U6CallResolve",
     "owed",
   ],
-  ["resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit", "U6CallResolve", "owed"],
+  [
+    "resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit",
+    "U6CallResolve",
+    "owed",
+  ],
   ["checker_reentry_graph_spans_flow_call_contextual_narrowing", "U6CallResolve", "owed"],
-  ["cross_engine_cycle_discharge_admits_only_stable_deterministic_results", "U6CallResolve", "owed"],
+  [
+    "cross_engine_cycle_discharge_admits_only_stable_deterministic_results",
+    "U6CallResolve",
+    "owed",
+  ],
   // U6.CONTEXTUAL_CALLBACK — owed.
   ["callback_contextual_typing_does_not_pollute_caller_frame", "U6ContextualCallback", "owed"],
-  ["contextual_callback_input_signature_differentiates_cache_candidates", "U6ContextualCallback", "owed"],
-  ["this_type_contextual_object_literal_binding_in_contextual_type_at", "U6ContextualCallback", "owed"],
+  [
+    "contextual_callback_input_signature_differentiates_cache_candidates",
+    "U6ContextualCallback",
+    "owed",
+  ],
+  [
+    "this_type_contextual_object_literal_binding_in_contextual_type_at",
+    "U6ContextualCallback",
+    "owed",
+  ],
   // U6.VALUE_INFERENCE — owed.
   ["satisfies_does_not_widen_returned_value", "U6ValueInference", "owed"],
   ["flow_return_spread_reduces_left_to_right_later_write_wins", "U6ValueInference", "owed"],
@@ -1110,7 +1183,11 @@ const GUARD_REGISTRY_DATA = [
   ["architecture_minimizes_fallback_entry_not_fallback_cost", "U3CacheFactModel", "owed"],
   // U3.ADAPTIVE_FAMILY_RETENTION — live.
   ["cache_candidate_cap_is_per_family_not_uniform", "U3AdaptiveFamilyRetention", "integration"],
-  ["family_eviction_prefers_invalid_then_lru_valid_hit", "U3AdaptiveFamilyRetention", "integration"],
+  [
+    "family_eviction_prefers_invalid_then_lru_valid_hit",
+    "U3AdaptiveFamilyRetention",
+    "integration",
+  ],
   // U10.RESULT_DB — live lib guards + owed published-boundary work.
   ["cache_satisfaction_is_materialized_point_not_nominal_demand", "U10ResultDb", "lib"],
   ["backfill_writes_only_recorded_materialized_points", "U10ResultDb", "lib"],
@@ -3079,12 +3156,69 @@ function parsePartition(partitionText) {
 // equivalent-or-stronger successor row carries the obligation).
 const ROW_STATUS_VALUES = new Set(["ignored", "running_unratified", "lifted", "superseded"]);
 
+// Frozen cardinality of the pinned historical baseline cohort. IMMUTABLE
+// ANCHOR DATA, not a live count: live totals stay registry-derived
+// (`computeRowRegistryCounts`); this floor freezes the historical identity
+// set that makes the registry genuinely append-only. Never derive it from
+// the registry or the cohort file — deriving is the self-heal that lets a
+// committed erasure re-pin a smaller set.
+const BASELINE_COHORT_FLOOR = 362;
+
+function parseBaselineCohort(text) {
+  // The pinned historical baseline cohort. This generator only READS it:
+  // the file is generator INPUT (it is absent from the `generated` output
+  // map), so regeneration can never rewrite or shrink it.
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new SystemExit(1, `typeinfo baseline cohort is not valid JSON: ${error.message}`);
+  }
+  if (value?.schema !== "verter.typeinfo-row-baseline-cohort.v1" || !Array.isArray(value.cohort)) {
+    throw new SystemExit(
+      1,
+      "typeinfo baseline cohort must use schema verter.typeinfo-row-baseline-cohort.v1 " +
+        "and carry a cohort array",
+    );
+  }
+  const out = new Set();
+  for (const [index, row] of value.cohort.entries()) {
+    const file_ = row?.file;
+    const fn_ = row?.function;
+    if (
+      typeof file_ !== "string" ||
+      !/^[a-z0-9_]+\.rs$/.test(file_) ||
+      typeof fn_ !== "string" ||
+      !/^[A-Za-z0-9_]+$/.test(fn_)
+    ) {
+      throw new SystemExit(1, `invalid typeinfo baseline cohort entry at cohort[${index}]`);
+    }
+    const key = tkey(file_, fn_);
+    if (out.has(key)) {
+      throw new SystemExit(1, `duplicate typeinfo baseline cohort entry: ${file_} :: ${fn_}`);
+    }
+    out.add(key);
+  }
+  if (out.size < BASELINE_COHORT_FLOOR) {
+    throw new SystemExit(
+      1,
+      `typeinfo baseline cohort SHRANK below its frozen floor: ${out.size} < ` +
+        `${BASELINE_COHORT_FLOOR}. The cohort is immutable historical data — it may gain ` +
+        `identities (append-only), never lose them.`,
+    );
+  }
+  return out;
+}
+
 function parseReconciliation(text) {
   let value;
   try {
     value = JSON.parse(text);
   } catch (error) {
-    throw new SystemExit(1, `typeinfo programme reconciliation is not valid JSON: ${error.message}`);
+    throw new SystemExit(
+      1,
+      `typeinfo programme reconciliation is not valid JSON: ${error.message}`,
+    );
   }
   if (
     value?.schema !== "verter.typeinfo-programme-reconciliation.v1" ||
@@ -3118,9 +3252,15 @@ function parseReconciliation(text) {
     }
     const evidence = entry?.evidence;
     if (!Array.isArray(evidence) || evidence.some((e) => typeof e !== "string" || e.length === 0)) {
-      throw new SystemExit(1, `reconciliation block ${entry.block} evidence must be a string array`);
+      throw new SystemExit(
+        1,
+        `reconciliation block ${entry.block} evidence must be a string array`,
+      );
     }
-    if ((entry.status === "landed" || entry.status === "landing_unverified") && evidence.length === 0) {
+    if (
+      (entry.status === "landed" || entry.status === "landing_unverified") &&
+      evidence.length === 0
+    ) {
       throw new SystemExit(
         1,
         `reconciliation block ${entry.block} records status ${entry.status} with no evidence`,
@@ -3140,11 +3280,18 @@ function parseReconciliation(text) {
   const registryLabels = new Set(GUARD_REGISTRY_DATA.map(([label]) => label));
   for (const a of value.amendments) {
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(a?.block);
-    if (blockVar === undefined || typeof a?.guard !== "string" || typeof a?.authority !== "string") {
+    if (
+      blockVar === undefined ||
+      typeof a?.guard !== "string" ||
+      typeof a?.authority !== "string"
+    ) {
       throw new SystemExit(1, `malformed reconciliation amendment: ${JSON.stringify(a)}`);
     }
     if (!["remove", "replace", "add"].includes(a?.action)) {
-      throw new SystemExit(1, `amendment for ${a.guard} carries invalid action ${pyRepr(String(a?.action))}`);
+      throw new SystemExit(
+        1,
+        `amendment for ${a.guard} carries invalid action ${pyRepr(String(a?.action))}`,
+      );
     }
     if (a.action === "remove" || a.action === "replace") {
       if (registryLabels.has(a.guard)) {
@@ -3155,7 +3302,10 @@ function parseReconciliation(text) {
         );
       }
     } else if (!registryLabels.has(a.guard)) {
-      throw new SystemExit(1, `amendment adds guard ${a.guard} which the guard registry does not list`);
+      throw new SystemExit(
+        1,
+        `amendment adds guard ${a.guard} which the guard registry does not list`,
+      );
     }
     if (a.action === "replace" && !registryLabels.has(a?.replacement)) {
       throw new SystemExit(
@@ -3167,7 +3317,11 @@ function parseReconciliation(text) {
   const seenTx = new Set();
   for (const tx of value.landing_transactions) {
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(tx?.block);
-    if (blockVar === undefined || typeof tx?.commit !== "string" || !/^[0-9a-f]{7,40}$/.test(tx.commit)) {
+    if (
+      blockVar === undefined ||
+      typeof tx?.commit !== "string" ||
+      !/^[0-9a-f]{7,40}$/.test(tx.commit)
+    ) {
       throw new SystemExit(1, `malformed landing transaction: ${JSON.stringify(tx)}`);
     }
     if (seenTx.has(blockVar)) {
@@ -3324,7 +3478,9 @@ function allBlockVars() {
 
 function computeRowRegistryCounts(partition) {
   const total = { baseline: 0, ignored: 0, running: 0, lifted: 0, superseded: 0 };
-  const perBlock = new Map(allBlockVars().map((b) => [b, { total: 0, ignored: 0, running: 0, lifted: 0, superseded: 0 }]));
+  const perBlock = new Map(
+    allBlockVars().map((b) => [b, { total: 0, ignored: 0, running: 0, lifted: 0, superseded: 0 }]),
+  );
   for (const { block, status } of partition.values()) {
     const blockVar = BLOCK_TEXT_TO_VARIANT.get(block);
     const bucket = perBlock.get(blockVar);
@@ -3476,9 +3632,7 @@ function emitGuardRegistry(counts, recon) {
     const action =
       a.action === "remove" ? "Removed" : a.action === "replace" ? "Replaced" : "Added";
     const replacement =
-      a.action === "replace"
-        ? `Some(GuardId::${toGuardVariant(a.replacement)})`
-        : "None";
+      a.action === "replace" ? `Some(GuardId::${toGuardVariant(a.replacement)})` : "None";
     out.push(
       `    ContractAmendment { block_id: TypeInfoParityBlockId::${blockVar}, ` +
         `action: AmendmentAction::${action}, guard_label: "${escapeRustStringLiteral(a.guard)}", ` +
@@ -3755,6 +3909,28 @@ function main(checkOnly = false) {
     readTextNormalized(join(repoRoot, "scripts/manifests/typeinfo-programme-reconciliation.json")),
   );
 
+  // Append-only containment gate: every pinned baseline-cohort identity
+  // must still be a registry row. Failing HERE means a shrunken registry
+  // can never regenerate manifests that ratify the shrink — the erasure
+  // has to be reverted (or the row re-statused with lineage) before any
+  // regeneration succeeds.
+  {
+    const cohort = parseBaselineCohort(
+      readTextNormalized(join(repoRoot, "scripts/manifests/typeinfo-row-baseline-cohort.json")),
+    );
+    const removed = [...cohort].filter((k) => !partition.has(k)).sort(codePointCompare);
+    if (removed.length > 0) {
+      throw new SystemExit(
+        1,
+        `the row registry is APPEND-ONLY: ${removed.length} pinned baseline-cohort ` +
+          `identit(y/ies) are missing from ` +
+          `scripts/manifests/typeinfo-row-block-partition.json. Re-status a row (with ` +
+          `lineage) instead of erasing it. Removed:\n  ` +
+          removed.map((k) => k.replace(" ", " :: ")).join("\n  "),
+      );
+    }
+  }
+
   // Guard-registry closure: every required label resolves to exactly one
   // registry entry, and every registry entry is required somewhere.
   {
@@ -3844,7 +4020,9 @@ function main(checkOnly = false) {
         break;
       case "lifted":
         if (!liftedKeys.has(k)) {
-          problems.push(`registry row ${f} :: ${fnn} is 'lifted' but has no LIFTED_ROW_OVERRIDES entry`);
+          problems.push(
+            `registry row ${f} :: ${fnn} is 'lifted' but has no LIFTED_ROW_OVERRIDES entry`,
+          );
         }
         if (discKeys.has(k)) {
           problems.push(`lifted registry row ${f} :: ${fnn} still carries a live #[ignore]`);
@@ -3858,7 +4036,9 @@ function main(checkOnly = false) {
           );
         }
         if (discKeys.has(k)) {
-          problems.push(`running_unratified registry row ${f} :: ${fnn} still carries a live #[ignore]`);
+          problems.push(
+            `running_unratified registry row ${f} :: ${fnn} still carries a live #[ignore]`,
+          );
         }
         break;
       case "superseded": {
@@ -3905,7 +4085,9 @@ function main(checkOnly = false) {
     }
     for (const k of runningKeys) {
       if (!restored.has(k)) {
-        problems.push(`running_unratified registry row ${k} has no reconciliation restored_rows record`);
+        problems.push(
+          `running_unratified registry row ${k} has no reconciliation restored_rows record`,
+        );
       }
     }
   }
@@ -3949,8 +4131,7 @@ function main(checkOnly = false) {
       oracleQueryOrdinals = 1;
     } else if (entry.status === "running_unratified") {
       mech = mechanismForRow(cap, file_, fnName);
-      proof =
-        `ProofRequirement::RowTestGuard { file: "${file_}", ` + `function: "${fnName}" }`;
+      proof = `ProofRequirement::RowTestGuard { file: "${file_}", ` + `function: "${fnName}" }`;
       status =
         "IgnoreStatus::RunningUnratified { block_id: TypeInfoParityBlockId::" + `${blockVar} }`;
       unblocker = escapeRustStringLiteral(RUNNING_UNRATIFIED_UNBLOCKERS.get(tkey(file_, fnName)));

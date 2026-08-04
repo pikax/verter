@@ -72,7 +72,11 @@
 //! `typeinfo_block_landing_transactions_are_atomic_and_trailer_backed`)
 //! plus the Q4 independence rails
 //! (`row_registry_matches_discovered_tests`,
-//! `row_registry_is_append_only_against_head`) and the live-guard binding
+//! `row_registry_contains_pinned_baseline_cohort` — the append-only rail,
+//! containment against the pinned immutable cohort in
+//! `scripts/manifests/typeinfo-row-baseline-cohort.json`, git-independent —
+//! and `row_registry_is_append_only_against_head`, the early dirty-tree
+//! tripwire) and the live-guard binding
 //! meta-guards (`guard_registry_live_integration_bindings_are_complete`,
 //! `live_integration_guards_are_harness_registered_and_not_ignored`; the
 //! lib-target twins live in
@@ -4867,16 +4871,40 @@ fn zero_row_engine_is_discriminating() {
 // append-only enforcement.
 // ══════════════════════════════════════════════════════════════════
 
+/// Workspace-relative path (portable `/` separators) for a path under
+/// the workspace root — the discovery-side identity key. Keying by full
+/// repo-relative path (never bare basename) means a future subdirectory
+/// or a second discovery root can never silently MERGE two same-named
+/// files into one identity.
+fn workspace_rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .expect("discovered path lies under the workspace root")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Repo-relative discovery key for a registry row's `file` column (the
+/// registry stores bare file names; every registry file lives directly in
+/// the typeinfo parity test dir).
+fn registry_row_rel_path(file: &str) -> String {
+    format!("crates/verter_session/src/typeinfo/typeinfo_tests/{file}")
+}
+
 /// Discover EVERY literal `#[test]` fn in the typeinfo parity tree with
 /// its ignore flag, by walking each fn's contiguous attribute/doc block
 /// backwards. Macro-internal `fn $name` patterns do not parse as fn
 /// sites; every `Lifted` / `RunningUnratified` registry row is a literal
-/// `#[test] fn`, which is what this discovery serves.
+/// `#[test] fn`, which is what this discovery serves. Keys are
+/// (repo-relative path, fn name); a duplicate key is an identity-integrity
+/// failure, never a silent merge.
 fn collect_all_test_sites() -> BTreeMap<(String, String), bool> {
+    let root = workspace_root();
     let mut out: BTreeMap<(String, String), bool> = BTreeMap::new();
     for path in read_dir_files(&typeinfo_tests_dir()) {
         let source = fs::read_to_string(&path).expect("read file");
-        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let rel_path = workspace_rel_path(&root, &path);
         let lines: Vec<&str> = source.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let Some(name) = parse_fn_name(line) else {
@@ -4904,7 +4932,15 @@ fn collect_all_test_sites() -> BTreeMap<(String, String), bool> {
                 }
             }
             if has_test {
-                out.insert((file_name.clone(), name), has_ignore);
+                let key = (rel_path.clone(), name);
+                assert!(
+                    !out.contains_key(&key),
+                    "duplicate discovered test-site identity {} :: {} — two \
+                     #[test] fns share one (path, name) identity",
+                    key.0,
+                    key.1,
+                );
+                out.insert(key, has_ignore);
             }
         }
     }
@@ -4930,7 +4966,7 @@ fn row_registry_matches_discovered_tests() {
         .collect();
     let mut failures: Vec<String> = Vec::new();
     for row in EXPECTED_IGNORE_MANIFEST {
-        let key = (row.file.to_string(), row.function.to_string());
+        let key = (registry_row_rel_path(row.file), row.function.to_string());
         match row.status {
             IgnoreStatus::Ignored => match sites.get(&key) {
                 None => failures.push(format!(
@@ -5005,7 +5041,10 @@ fn discovered_test_sites_oracle_is_discriminating() {
         .find(|r| matches!(r.status, IgnoreStatus::RunningUnratified { .. }))
         .expect("restored running_unratified rows exist");
     assert_eq!(
-        sites.get(&(running.file.to_string(), running.function.to_string())),
+        sites.get(&(
+            registry_row_rel_path(running.file),
+            running.function.to_string()
+        )),
         Some(&false),
         "a RunningUnratified row must be discovered as a non-ignored #[test]",
     );
@@ -5014,25 +5053,131 @@ fn discovered_test_sites_oracle_is_discriminating() {
         .find(|r| matches!(r.status, IgnoreStatus::Ignored))
         .expect("Ignored rows exist");
     assert_eq!(
-        sites.get(&(ignored.file.to_string(), ignored.function.to_string())),
+        sites.get(&(
+            registry_row_rel_path(ignored.file),
+            ignored.function.to_string()
+        )),
         Some(&true),
         "an Ignored row must be discovered as an ignored #[test]",
     );
     assert!(
         !sites.contains_key(&(
-            "value_inference.rs".to_string(),
+            registry_row_rel_path("value_inference.rs"),
             "fabricated_row_that_does_not_exist".to_string()
         )),
         "a fabricated identity must NOT be discovered",
     );
 }
 
-/// Q4 append-only rail: the worktree row registry must contain EVERY
-/// identity present in the registry at `HEAD` — an identity may change
-/// status (with lineage) but may never be REMOVED. This is the guard that
-/// fails on exactly the erasure class that removed 14 identities from the
-/// 362 baseline. Skips gracefully when git (or the repo object) is
-/// unavailable, mirroring the node-skip in the freshness guard.
+/// The frozen cardinality of the pinned historical baseline cohort
+/// (`scripts/manifests/typeinfo-row-baseline-cohort.json`). This literal
+/// is IMMUTABLE ANCHOR DATA, not a live count: Q4 deleted the frozen
+/// 348/356/362 COUNT literals because live totals must derive from the
+/// registry (`ROW_REGISTRY_COUNTS`), and they still do. The cohort floor
+/// is different in kind — it freezes the historical identity set that
+/// makes the registry genuinely append-only, which the registry-derived
+/// counts cannot do (they shrink right along with an erased registry).
+/// Do NOT "fix" this back into a derived value: deriving it from the
+/// registry or the cohort file is exactly the self-heal that let
+/// committed erasures pass.
+const BASELINE_COHORT_FLOOR: usize = 362;
+
+/// Q4 append-only rail: the worktree row registry must CONTAIN every
+/// identity in the pinned historical baseline cohort
+/// (`scripts/manifests/typeinfo-row-baseline-cohort.json`). The cohort is
+/// immutable data: the generator only READS it (it is generator input,
+/// never output — regeneration cannot rewrite or shrink it, and the
+/// generator itself refuses to emit manifests when the registry no longer
+/// contains the cohort). Because the assertion is containment against
+/// pinned data, a COMMITTED registry-row removal fails here on a clean
+/// tree with no git dependency — the erasure class that removed 14
+/// identities and then self-healed, because every other rail
+/// (`ROW_REGISTRY_COUNTS`, freshness, discovery cross-check) derives from
+/// the very registry that shrank. An identity may change status (with
+/// lineage) but may never be removed.
+#[test]
+fn row_registry_contains_pinned_baseline_cohort() {
+    const REGISTRY_PATH: &str = "scripts/manifests/typeinfo-row-block-partition.json";
+    const COHORT_PATH: &str = "scripts/manifests/typeinfo-row-baseline-cohort.json";
+
+    let root = workspace_root();
+    let registry: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(REGISTRY_PATH)).expect("worktree registry readable"),
+    )
+    .expect("registry JSON parses");
+    let worktree_ids: BTreeSet<(String, String)> = registry["rows"]
+        .as_array()
+        .expect("registry rows array")
+        .iter()
+        .map(|row| {
+            (
+                row["file"].as_str().expect("row file").to_string(),
+                row["function"].as_str().expect("row function").to_string(),
+            )
+        })
+        .collect();
+
+    let cohort_doc: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(COHORT_PATH)).expect("pinned baseline cohort readable"),
+    )
+    .expect("cohort JSON parses");
+    assert_eq!(
+        cohort_doc["schema"].as_str(),
+        Some("verter.typeinfo-row-baseline-cohort.v1"),
+        "pinned cohort schema mismatch",
+    );
+    let cohort_rows = cohort_doc["cohort"].as_array().expect("cohort array");
+    let cohort: BTreeSet<(String, String)> = cohort_rows
+        .iter()
+        .map(|row| {
+            (
+                row["file"].as_str().expect("cohort file").to_string(),
+                row["function"]
+                    .as_str()
+                    .expect("cohort function")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cohort.len(),
+        cohort_rows.len(),
+        "pinned cohort carries duplicate identities",
+    );
+    assert!(
+        cohort.len() >= BASELINE_COHORT_FLOOR,
+        "the pinned baseline cohort SHRANK below its frozen floor: {} < {} — \
+         the cohort is immutable historical data; it may gain identities \
+         (append-only), never lose them",
+        cohort.len(),
+        BASELINE_COHORT_FLOOR,
+    );
+
+    let removed: Vec<&(String, String)> = cohort.difference(&worktree_ids).collect();
+    assert!(
+        removed.is_empty(),
+        "the row registry is APPEND-ONLY: {} pinned baseline-cohort \
+         identit(y/ies) are missing from the worktree registry. Re-status \
+         a row (with lineage) instead of erasing it. Removed:\n  {}",
+        removed.len(),
+        removed
+            .iter()
+            .map(|(f, fnm)| format!("{f} :: {fnm}"))
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+}
+
+/// Early dirty-tree tripwire, NOT the append-only rail: it compares the
+/// worktree registry against `HEAD`, so it can only fire on an
+/// UNCOMMITTED removal in a dirty tree. In CI the tree is clean and HEAD
+/// is the commit under test, so `head − worktree` is always empty there —
+/// a COMMITTED removal passes this check and, once landed, becomes the
+/// baseline for every later run (self-healing). The rail that fails on
+/// committed removals regardless of git state is
+/// `row_registry_contains_pinned_baseline_cohort`. Skips gracefully when
+/// git (or the repo object) is unavailable, mirroring the node-skip in
+/// the freshness guard.
 #[test]
 fn row_registry_is_append_only_against_head() {
     const REGISTRY_PATH: &str = "scripts/manifests/typeinfo-row-block-partition.json";
@@ -5133,6 +5278,7 @@ static INTEGRATION_LIVE_GUARD_BINDINGS: &[LiveGuardBinding] = &[
     live_guard!(RowRegistryCountsDeriveFromPartition => crate::cases::typeinfo_ignored_test_manifest::row_registry_counts_derive_from_partition),
     live_guard!(RowRegistryMatchesDiscoveredTests => crate::cases::typeinfo_ignored_test_manifest::row_registry_matches_discovered_tests),
     live_guard!(RowRegistryIsAppendOnlyAgainstHead => crate::cases::typeinfo_ignored_test_manifest::row_registry_is_append_only_against_head),
+    live_guard!(RowRegistryContainsPinnedBaselineCohort => crate::cases::typeinfo_ignored_test_manifest::row_registry_contains_pinned_baseline_cohort),
     live_guard!(LandedTypeinfoBlocksHaveRequiredGuards => crate::cases::typeinfo_ignored_test_manifest::landed_typeinfo_blocks_have_required_guards),
     live_guard!(NoLandedTypeinfoBlockHasLiveIgnoredRows => crate::cases::typeinfo_ignored_test_manifest::no_landed_typeinfo_block_has_live_ignored_rows),
     live_guard!(NoVacuousParentUBlockLanding => crate::cases::typeinfo_ignored_test_manifest::no_vacuous_parent_u_block_landing),
