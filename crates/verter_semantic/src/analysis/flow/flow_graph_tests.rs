@@ -104,11 +104,11 @@ fn flow_graph_builds_typed_edges_from_skeleton_alone() {
     let a_name = skeleton.name_id("a").expect("a interned");
     let b_name = skeleton.name_id("b").expect("b interned");
     assert_eq!(
-        path_write_path(&path_writes[0]),
+        path_write_path(path_writes[0]),
         vec![SkeletonPathSegment::Static(a_name)]
     );
     assert_eq!(
-        path_write_path(&path_writes[1]),
+        path_write_path(path_writes[1]),
         vec![SkeletonPathSegment::Static(b_name)]
     );
 

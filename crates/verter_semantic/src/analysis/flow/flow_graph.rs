@@ -62,6 +62,7 @@ impl FlowNodeId {
         self.0 as usize
     }
 
+    #[cfg(test)]
     pub(crate) fn from_index(index: u32) -> Self {
         Self(index)
     }
