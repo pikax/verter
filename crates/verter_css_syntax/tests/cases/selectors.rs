@@ -3,7 +3,7 @@ use std::sync::Arc;
 use verter_css_syntax::{
     parse_lossless, parse_selector_structure, AttributeMatcher, CombinatorKind, CssDialect,
     CssEntryPoint, CssParseMode, CssSource, NthExpression, PseudoFunctionKind,
-    SelectorComponentKind, TokenFlags, TokenKind,
+    SelectorComponentKind, SelectorTrust, TokenFlags, TokenKind,
 };
 
 #[test]
@@ -104,6 +104,17 @@ fn interpolated_class_is_dynamic_with_positioned_fragments() {
     let safe = &structure.list().selectors()[1].compounds()[0].components()[0];
     assert_eq!(safe.kind(), SelectorComponentKind::Class);
     assert_eq!(source.slice(safe.name_span().unwrap()), "safe");
+}
+
+// @ai-generated - Regression for interpolation trust escaping non-class and nested components.
+#[test]
+fn interpolation_anywhere_in_selector_tree_degrades_trust() {
+    for input in ["a#{$x}", "#id#{$x}", "[data-#{$x}]", ".a:not(.#{$x})"] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let structure = parse_selector_structure(&source, CssDialect::Scss).unwrap();
+        assert_ne!(structure.facts().trust(), SelectorTrust::Static, "{input}");
+        assert!(!structure.facts().is_complete_static(), "{input}");
+    }
 }
 
 #[test]

@@ -20,6 +20,272 @@ fn concrete_classes(ir: &verter_css_syntax::StyleSyntaxIr) -> Vec<String> {
         .collect()
 }
 
+fn rules<'a>(statements: &'a [StyleStatement], output: &mut Vec<&'a verter_css_syntax::StyleRule>) {
+    for statement in statements {
+        match statement {
+            StyleStatement::Rule(rule) => {
+                output.push(rule);
+                rules(rule.body().statements(), output);
+            }
+            StyleStatement::AtRule(value) => {
+                if let Some(body) = value.body() {
+                    rules(body.statements(), output);
+                }
+            }
+            StyleStatement::MixinOrFunction(value) => {
+                if let Some(body) = value.body() {
+                    rules(body.statements(), output);
+                }
+            }
+            StyleStatement::Unknown(value) => {
+                if let Some(body) = value.body() {
+                    rules(body.statements(), output);
+                }
+            }
+            StyleStatement::Declaration(_) => {}
+        }
+    }
+}
+
+fn rule_texts(parsed: &verter_css_syntax::StyleSyntaxIr) -> Vec<String> {
+    let mut found = Vec::new();
+    rules(parsed.statements(), &mut found);
+    found
+        .into_iter()
+        .map(|rule| {
+            parsed
+                .source()
+                .slice(rule.selector_list().span())
+                .trim()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn declaration_v_binds(parsed: &verter_css_syntax::StyleSyntaxIr) -> Vec<String> {
+    fn visit_values(source: &CssSource, values: &[ComponentValue], output: &mut Vec<String>) {
+        for value in values {
+            match value {
+                ComponentValue::Function(function) => {
+                    if source.slice(function.name_span()) == "v-bind" {
+                        output.push(source.slice(function.full_span()).to_owned());
+                    }
+                    visit_values(source, function.values(), output);
+                }
+                ComponentValue::Block(block) => visit_values(source, block.values(), output),
+                ComponentValue::Interpolation(interpolation) => {
+                    visit_values(source, interpolation.values(), output)
+                }
+                ComponentValue::Token(_)
+                | ComponentValue::String(_)
+                | ComponentValue::Comment(_) => {}
+            }
+        }
+    }
+
+    fn visit_statements(
+        source: &CssSource,
+        statements: &[StyleStatement],
+        output: &mut Vec<String>,
+    ) {
+        for statement in statements {
+            match statement {
+                StyleStatement::Declaration(declaration) => {
+                    visit_values(source, declaration.value().values(), output)
+                }
+                StyleStatement::Rule(rule) => {
+                    visit_statements(source, rule.body().statements(), output)
+                }
+                StyleStatement::AtRule(value) => {
+                    if let Some(body) = value.body() {
+                        visit_statements(source, body.statements(), output);
+                    }
+                }
+                StyleStatement::MixinOrFunction(value) => {
+                    if let Some(body) = value.body() {
+                        visit_statements(source, body.statements(), output);
+                    }
+                }
+                StyleStatement::Unknown(value) => {
+                    if let Some(body) = value.body() {
+                        visit_statements(source, body.statements(), output);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    visit_statements(parsed.source(), parsed.statements(), &mut output);
+    output
+}
+
+// @ai-generated - Exact adversarial repros for pseudo selectors swallowed as declarations.
+#[test]
+fn braced_pseudo_selectors_remain_rules_in_every_supported_dialect() {
+    for dialect in [CssDialect::Scss, CssDialect::Less] {
+        let parsed = ir(".nav {\n  .link:hover {\n    color: red;\n  }\n}", dialect);
+        assert_eq!(
+            concrete_classes(&parsed),
+            vec!["nav", "link"],
+            "{dialect:?}"
+        );
+        assert!(rule_texts(&parsed).iter().any(|text| text == ".link:hover"));
+        assert!(parsed.diagnostics().is_empty(), "{dialect:?}");
+    }
+
+    for (dialect, input, expected) in [
+        (
+            CssDialect::Scss,
+            ".a { &::before { color: red; } }",
+            "&::before",
+        ),
+        (
+            CssDialect::Scss,
+            ".a { :deep(.child) { color: red; } }",
+            ":deep(.child)",
+        ),
+        (
+            CssDialect::Stylus,
+            ".link:hover { color: red; }",
+            ".link:hover",
+        ),
+        (CssDialect::Sass, ".b:hover { color: red; }", ".b:hover"),
+    ] {
+        let parsed = ir(input, dialect);
+        assert!(
+            rule_texts(&parsed).iter().any(|text| text == expected),
+            "{dialect:?}: {:#?}",
+            parsed.statements()
+        );
+        assert!(parsed.diagnostics().is_empty(), "{dialect:?}");
+    }
+}
+
+// @ai-generated - Exact minimal pair proving formatting cannot choose the SCSS/Less parser.
+#[test]
+fn closing_brace_indentation_does_not_change_parser_mode() {
+    let indented = ".nav {\n  .link:hover {\n    color: red;\n  }\n}";
+    let flush = ".nav {\n  .link:hover {\n    color: red;\n}\n}";
+    for dialect in [CssDialect::Scss, CssDialect::Less] {
+        let indented = ir(indented, dialect);
+        let flush = ir(flush, dialect);
+        assert_eq!(
+            concrete_classes(&indented),
+            vec!["nav", "link"],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            concrete_classes(&indented),
+            concrete_classes(&flush),
+            "{dialect:?}"
+        );
+        assert_eq!(rule_texts(&indented), rule_texts(&flush), "{dialect:?}");
+    }
+}
+
+// @ai-generated - Exact trust-rule repros must not publish complete bogus facts.
+#[test]
+fn ambiguous_sass_forms_never_publish_complete_selector_or_declaration_facts() {
+    let nested_property = ir(".a\n  font:\n    family: serif", CssDialect::Sass);
+    assert!(
+        !rule_texts(&nested_property)
+            .iter()
+            .any(|text| text == "font:"),
+        "{:#?}",
+        nested_property.statements()
+    );
+    let parent = match &nested_property.statements()[0] {
+        StyleStatement::Rule(rule) => rule,
+        other => panic!("expected .a rule, got {other:#?}"),
+    };
+    assert!(
+        !parent.body().statements().is_empty(),
+        "nested-property containment must survive"
+    );
+
+    let old_form = ir(".a\n  :color red", CssDialect::Sass);
+    let parent = match &old_form.statements()[0] {
+        StyleStatement::Rule(rule) => rule,
+        other => panic!("expected .a rule, got {other:#?}"),
+    };
+    assert!(matches!(
+        parent.body().statements()[0],
+        StyleStatement::Unknown(ref value) if value.kind() == UnknownStatementKind::Ambiguous
+    ));
+    assert!(!old_form.diagnostics().is_empty());
+}
+
+// @ai-generated - Exact declaration-owned-block repro must retain its nested statements.
+#[test]
+fn declaration_classification_never_discards_an_indented_block() {
+    let parsed = ir(
+        ".a\n  input[type=\"text\"]\n    color red",
+        CssDialect::Stylus,
+    );
+    let texts = rule_texts(&parsed);
+    assert!(
+        texts.iter().any(|text| text == "input[type=\"text\"]"),
+        "{:#?}",
+        parsed.statements()
+    );
+    let mut found = Vec::new();
+    rules(parsed.statements(), &mut found);
+    let input = found
+        .into_iter()
+        .find(|rule| {
+            parsed.source().slice(rule.selector_list().span()).trim() == "input[type=\"text\"]"
+        })
+        .unwrap();
+    assert!(!input.body().statements().is_empty());
+}
+
+// @ai-generated - Exact Stylus attribute-selector repros cannot classify as variables.
+#[test]
+fn stylus_attribute_selectors_with_equals_are_rules() {
+    for selector in ["[data-role=\"nav\"]", "[class~=\"x\"]", "[type=\"text\"]"] {
+        let input = format!("{selector}\n  color red");
+        let parsed = ir(&input, CssDialect::Stylus);
+        assert!(
+            matches!(parsed.statements()[0], StyleStatement::Rule(_)),
+            "{selector}: {:#?}",
+            parsed.statements()
+        );
+        assert!(rule_texts(&parsed).iter().any(|text| text == selector));
+    }
+}
+
+// @ai-generated - Exact multiline-value repro keeps continuation values in declarations.
+#[test]
+fn multiline_declaration_values_remain_one_value_tree() {
+    let family = ir(
+        ".a {\n  font-family:\n    Helvetica,\n    Arial;\n}",
+        CssDialect::Scss,
+    );
+    assert!(
+        family.diagnostics().is_empty(),
+        "{:#?}",
+        family.diagnostics()
+    );
+    let StyleStatement::Rule(rule) = &family.statements()[0] else {
+        panic!("expected .a rule");
+    };
+    assert_eq!(rule.body().statements().len(), 1);
+    assert!(matches!(
+        rule.body().statements()[0],
+        StyleStatement::Declaration(_)
+    ));
+
+    let bindings = ir(
+        ".a {\n  color:\n    v-bind(tone);\n  box-shadow: 0 0 v-bind(blur) red;\n}",
+        CssDialect::Scss,
+    );
+    assert_eq!(
+        declaration_v_binds(&bindings),
+        vec!["v-bind(tone)", "v-bind(blur)"]
+    );
+}
+
 // @ai-generated - Covers structural and opaque containment for all five dialects.
 #[test]
 fn five_dialects_share_one_structural_authority() {

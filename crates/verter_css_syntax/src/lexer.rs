@@ -612,7 +612,10 @@ impl Lexer<'_> {
                         self.bytes[start - 1],
                         b'-' | b'_' | b')' | b']' | b'#' | b'.' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
                     );
-                if self.dialect == CssDialect::Stylus && adjacent_fragment {
+                if self.dialect == CssDialect::Stylus
+                    && adjacent_fragment
+                    && self.stylus_brace_is_interpolation(start)
+                {
                     Some(self.make(
                         TokenKind::StylusInterpolationStart,
                         TokenFlags::DIALECT_EXTENSION,
@@ -632,6 +635,39 @@ impl Lexer<'_> {
                 Some(self.make(TokenKind::Delim, 0, start, self.cursor))
             }
         }
+    }
+
+    fn stylus_brace_is_interpolation(&self, start: usize) -> bool {
+        let mut cursor = start + 1;
+        let mut nested = 0usize;
+        while let Some(byte) = self.bytes.get(cursor).copied() {
+            match byte {
+                b'\n' | b'\r' | b'\x0c' | b':' | b';' if nested == 0 => return false,
+                b'{' => nested += 1,
+                b'}' if nested == 0 => return cursor > start + 1,
+                b'}' => nested -= 1,
+                b'"' | b'\'' => {
+                    let quote = byte;
+                    cursor += 1;
+                    while let Some(inner) = self.bytes.get(cursor).copied() {
+                        if inner == b'\\' {
+                            cursor = cursor.saturating_add(2);
+                            continue;
+                        }
+                        if inner == quote {
+                            break;
+                        }
+                        if matches!(inner, b'\n' | b'\r' | b'\x0c') {
+                            return false;
+                        }
+                        cursor += 1;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        false
     }
 }
 

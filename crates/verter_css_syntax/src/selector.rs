@@ -69,6 +69,7 @@ pub struct NthExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorComponent {
     kind: SelectorComponentKind,
+    facts: SelectorFacts,
     full_span: Span,
     name_span: Option<Span>,
     attribute: Option<SelectorAttribute>,
@@ -82,6 +83,11 @@ impl SelectorComponent {
     #[inline]
     pub const fn kind(&self) -> SelectorComponentKind {
         self.kind
+    }
+
+    #[inline]
+    pub const fn facts(&self) -> SelectorFacts {
+        self.facts
     }
 
     #[inline]
@@ -642,17 +648,7 @@ impl SelectorSink {
                     })
                     .collect();
                 let facts = components.iter().fold(recovered_facts, |facts, component| {
-                    let trust = match component.kind {
-                        SelectorComponentKind::DynamicClass => SelectorTrust::DynamicSelector,
-                        SelectorComponentKind::Interpolation | SelectorComponentKind::Nesting => {
-                            SelectorTrust::EvaluationRequired
-                        }
-                        _ => SelectorTrust::Static,
-                    };
-                    facts.combine(SelectorFacts {
-                        trust,
-                        completeness: SelectorCompleteness::Complete,
-                    })
+                    facts.combine(component.facts)
                 });
                 Some(BuiltSelectorNode::Compound(SelectorCompound {
                     span,
@@ -753,8 +749,30 @@ impl SelectorSink {
                         complete: closed && !recovered,
                     });
                 }
+                let own_trust = match component_kind {
+                    SelectorComponentKind::DynamicClass => SelectorTrust::DynamicSelector,
+                    SelectorComponentKind::Interpolation | SelectorComponentKind::Nesting => {
+                        SelectorTrust::EvaluationRequired
+                    }
+                    _ => SelectorTrust::Static,
+                };
+                let mut facts = SelectorFacts {
+                    trust: own_trust,
+                    completeness: if recovered {
+                        SelectorCompleteness::Recovered
+                    } else {
+                        SelectorCompleteness::Complete
+                    },
+                };
+                for nested in &nested_components {
+                    facts = facts.combine(nested.facts);
+                }
+                if let Some(list) = pseudo.as_ref().and_then(SelectorPseudo::selector_list) {
+                    facts = facts.combine(list.facts);
+                }
                 Some(BuiltSelectorNode::Component(SelectorComponent {
                     kind: component_kind,
+                    facts,
                     full_span: span,
                     name_span,
                     attribute,

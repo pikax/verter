@@ -53,6 +53,8 @@ Bug or slowdown in one surface → fix in shared substrate so other consumers be
 
 `StyleSyntaxIr` retains positioned containment and balanced values without evaluating or compiling preprocessors. Imports, modules, plugins, guards, mixin/function arguments, and control expressions remain opaque-but-positioned.
 
+Stylesheet parser mode is deterministic by dialect and structural tokens. CSS always uses brace grammar. Sass and Stylus use the layout-capable grammar, which also recognizes explicit braced blocks. SCSS and Less use brace grammar whenever the lexer emits any plain `LeftBrace`; only a brace-free source with an actual deeper-indented line pair uses layout grammar. Closing-brace indentation and other incidental formatting never select the parser. Selector trust folds every component descendant and functional-pseudo selector list; complete literal class components may still publish from an otherwise evaluation-dependent selector such as `&.active`. A declaration may own a retained `StyleBlock` (for example, an indented Sass nested-property namespace); the IR sink never discards such a block.
+
 **Module structure:**
 
 ```

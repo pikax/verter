@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    decode_css_identifier, parse_lossless, parse_selector_structure, parse_with_sink, CssDialect,
-    CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink,
-    SelectorComponentKind, SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
+    decode_css_identifier, parse_lossless, parse_selector_structure, parse_style_ir,
+    parse_with_sink, CssDialect, CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags,
+    ParseEvent, ParseEventSink, SelectorComponentKind, StyleCompleteness, StyleStatement,
+    SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
 };
 
 fn tokens(source: &CssSource, dialect: CssDialect) -> Vec<(TokenKind, u16, u32, u32)> {
@@ -139,6 +140,55 @@ fn layout_newlines_and_stylus_interpolation_are_lexical_facts() {
         .collect();
     assert_eq!(interpolations, vec!["{", "${"]);
     assert_eq!(source.slice_tokens(stylus), input);
+}
+
+// @ai-generated - Regression for adjacent Stylus rule braces being mistaken for interpolation.
+#[test]
+fn adjacent_stylus_rule_braces_are_plain_braces() {
+    for input in [
+        ".btn{\n  color: red;\n}",
+        "#hero{\n  color: red;\n}",
+        "foo(){\n  color: red;\n}",
+    ] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::LeftBrace),
+            "{input}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::StylusInterpolationStart),
+            "{input}"
+        );
+        let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{input}: {:#?}",
+            parsed.diagnostics()
+        );
+        assert!(
+            matches!(
+                parsed.statements().first(),
+                Some(StyleStatement::Rule(rule))
+                    if rule.completeness() == StyleCompleteness::Complete
+            ) | matches!(
+                parsed.statements().first(),
+                Some(StyleStatement::MixinOrFunction(value))
+                    if value.completeness() == StyleCompleteness::Complete
+            ),
+            "{input}: {:#?}",
+            parsed.statements()
+        );
+    }
+
+    let compact = CssSource::new(Arc::from(".btn{color:red}"), 0).unwrap();
+    assert!(
+        Lexer::new(&compact, CssDialect::Stylus).any(|token| token.kind() == TokenKind::LeftBrace)
+    );
 }
 
 #[test]

@@ -3,8 +3,9 @@ use std::sync::Arc;
 use verter_css_syntax::{
     parse_component_value_tree, parse_selector_structure, parse_style_ir, AttributeMatcher,
     CombinatorKind, ComplexSelector, ComplexSelectorPart, ComponentValue, ComponentValueTree,
-    CssDialect, CssParseMode, CssSource, PseudoFunctionKind, SelectorComponent,
-    SelectorComponentKind, SelectorTrust, StyleCompleteness, StyleStatement, TokenKind,
+    CssDialect, CssParseMode, CssSource, PseudoFunctionKind, SelectorCompleteness,
+    SelectorComponent, SelectorComponentKind, SelectorTrust, StyleCompleteness, StyleStatement,
+    TokenKind,
 };
 use verter_span::Span;
 
@@ -88,21 +89,26 @@ impl Projection<'_> {
                     self.analysis.rule_count = self.analysis.rule_count.saturating_add(1);
                     let mut first_selector = None;
                     for selector in rule.selector_list().selectors() {
-                        if !selector.facts().is_complete_static() {
+                        if selector.facts().completeness() != SelectorCompleteness::Complete {
                             continue;
                         }
-                        let Some(structure) = convert_complex(self.source, selector) else {
+                        let structure = convert_complex(self.source, selector);
+                        if selector.facts().trust() == SelectorTrust::Static && structure.is_none()
+                        {
                             continue;
-                        };
+                        }
                         let selector_index = u32::try_from(self.analysis.selectors.len()).ok();
                         first_selector = first_selector.or(selector_index);
                         self.collect_selector_facts(selector, selector_index);
                         let span = trim_span(self.source, selector.span());
                         self.analysis.selectors.push(AnalyzedSelector {
                             text: self.source.slice(span).to_owned(),
-                            specificity: compute_structured_specificity(&structure),
+                            specificity: structure.as_ref().map_or_else(
+                                || selector_specificity(selector),
+                                compute_structured_specificity,
+                            ),
                             span,
-                            structure: Some(structure),
+                            structure,
                             rule_body_span: (rule.body().completeness()
                                 == StyleCompleteness::Complete)
                                 .then(|| rule.body().span()),
@@ -118,6 +124,9 @@ impl Projection<'_> {
                             declaration.value(),
                             parent_selector,
                         );
+                    }
+                    if let Some(body) = declaration.body() {
+                        self.statements(body.statements(), parent_selector, inside_keyframes);
                     }
                 }
                 StyleStatement::AtRule(directive) => {
@@ -175,28 +184,30 @@ impl Projection<'_> {
         component: &SelectorComponent,
         selector_index: Option<u32>,
     ) {
-        match component.kind() {
-            SelectorComponentKind::Class => {
-                if let Some(span) = component.name_span() {
-                    self.analysis.classes.push(AnalyzedCssClass {
-                        name: self.source.slice(span).to_owned(),
-                        span,
-                        selector_index,
-                    });
+        if component.facts().is_complete_static() {
+            match component.kind() {
+                SelectorComponentKind::Class => {
+                    if let Some(span) = component.name_span() {
+                        self.analysis.classes.push(AnalyzedCssClass {
+                            name: self.source.slice(span).to_owned(),
+                            span,
+                            selector_index,
+                        });
+                    }
                 }
-            }
-            SelectorComponentKind::Id => {
-                if let Some(span) = component.name_span() {
-                    self.analysis.ids.push(AnalyzedCssId {
-                        name: self.source.slice(span).to_owned(),
-                        span,
-                    });
+                SelectorComponentKind::Id => {
+                    if let Some(span) = component.name_span() {
+                        self.analysis.ids.push(AnalyzedCssId {
+                            name: self.source.slice(span).to_owned(),
+                            span,
+                        });
+                    }
                 }
+                SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo => {
+                    self.collect_special_pseudo(component, selector_index);
+                }
+                _ => {}
             }
-            SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo => {
-                self.collect_special_pseudo(component, selector_index);
-            }
-            _ => {}
         }
         for nested in component.nested_components() {
             self.collect_component_fact(nested, selector_index);
@@ -281,6 +292,60 @@ impl Projection<'_> {
                 );
         }
     }
+}
+
+fn selector_specificity(selector: &ComplexSelector) -> (u32, u32, u32) {
+    let mut total = (0u32, 0u32, 0u32);
+    for compound in selector.compounds() {
+        for component in compound.components() {
+            add_specificity(&mut total, component_specificity(component));
+        }
+    }
+    total
+}
+
+fn component_specificity(component: &SelectorComponent) -> (u32, u32, u32) {
+    match component.kind() {
+        SelectorComponentKind::Id => (1, 0, 0),
+        SelectorComponentKind::Class
+        | SelectorComponentKind::Attribute
+        | SelectorComponentKind::PseudoClass => (0, 1, 0),
+        SelectorComponentKind::Type | SelectorComponentKind::PseudoElement => (0, 0, 1),
+        SelectorComponentKind::FunctionalPseudo => {
+            let Some(pseudo) = component.pseudo() else {
+                return (0, 1, 0);
+            };
+            let nested = pseudo.selector_list().map_or((0, 0, 0), |list| {
+                list.selectors()
+                    .iter()
+                    .map(selector_specificity)
+                    .max()
+                    .unwrap_or((0, 0, 0))
+            });
+            match pseudo.kind() {
+                PseudoFunctionKind::Where => (0, 0, 0),
+                PseudoFunctionKind::Is | PseudoFunctionKind::Not | PseudoFunctionKind::Has => {
+                    nested
+                }
+                PseudoFunctionKind::NthChild | PseudoFunctionKind::NthLastChild => {
+                    let mut value = (0, 1, 0);
+                    add_specificity(&mut value, nested);
+                    value
+                }
+                PseudoFunctionKind::Unknown => (0, 1, 0),
+            }
+        }
+        SelectorComponentKind::DynamicClass
+        | SelectorComponentKind::Namespace
+        | SelectorComponentKind::Nesting
+        | SelectorComponentKind::Interpolation => (0, 0, 0),
+    }
+}
+
+fn add_specificity(total: &mut (u32, u32, u32), value: (u32, u32, u32)) {
+    total.0 = total.0.saturating_add(value.0);
+    total.1 = total.1.saturating_add(value.1);
+    total.2 = total.2.saturating_add(value.2);
 }
 
 fn convert_complex(source: &CssSource, selector: &ComplexSelector) -> Option<StructuredSelector> {

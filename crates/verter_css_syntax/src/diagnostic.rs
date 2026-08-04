@@ -31,6 +31,7 @@ pub enum CssDiagnosticKind {
     BadUrl,
     InconsistentIndentation,
     UnexpectedIndentation,
+    AmbiguousStatement,
     UnterminatedInterpolation,
 }
 

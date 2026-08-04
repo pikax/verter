@@ -13,32 +13,17 @@ use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
 use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenFlags, TokenKind};
 
 pub(crate) fn should_use_layout(source: &CssSource, dialect: CssDialect) -> bool {
-    if matches!(dialect, CssDialect::Sass | CssDialect::Stylus) {
-        return true;
-    }
-    if !matches!(dialect, CssDialect::Scss | CssDialect::Less) {
-        return false;
-    }
-    let tokens: Vec<_> = Lexer::new(source, dialect).collect();
-    for (index, token) in tokens.iter().enumerate() {
-        if token.flags & TokenFlags::CONTAINS_NEWLINE == 0 {
-            continue;
-        }
-        let Some(next) = next_significant(&tokens, index + 1) else {
-            continue;
-        };
-        if indent_prefix(source, &tokens, next).is_empty() {
-            continue;
-        }
-        let line_start = previous_newline_boundary(&tokens, index);
-        if !tokens[line_start..index]
-            .iter()
-            .any(|value| value.kind() == TokenKind::LeftBrace)
-        {
-            return true;
+    match dialect {
+        CssDialect::Css => false,
+        CssDialect::Sass | CssDialect::Stylus => true,
+        CssDialect::Scss | CssDialect::Less => {
+            let tokens: Vec<_> = Lexer::new(source, dialect).collect();
+            !tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::LeftBrace)
+                && has_indentation_structure(source, &tokens)
         }
     }
-    false
 }
 
 pub(crate) fn parse_layout(
@@ -234,6 +219,14 @@ impl<'a> LayoutParser<'a> {
         };
         let start = self.tokens[start_index].start;
         self.start(sink, outer_kind, start, class == StatementClass::Ambiguous)?;
+        if class == StatementClass::Ambiguous {
+            self.diagnostic(
+                sink,
+                CssDiagnosticKind::AmbiguousStatement,
+                Span::new(start, self.tokens[header_end - 1].end),
+                RecoveryKind::None,
+            )?;
+        }
 
         match class {
             StatementClass::Rule => self.emit_selector_range(sink, start_index, header_end)?,
@@ -374,11 +367,7 @@ impl<'a> LayoutParser<'a> {
             };
         }
         if self.dialect == CssDialect::Stylus
-            && self.tokens[start..end].windows(2).any(|pair| {
-                pair[0].kind() == TokenKind::Delim
-                    && self.source.token_text(pair[0]) == "="
-                    && pair[1].kind() != TokenKind::Delim
-            })
+            && has_top_level_assignment(&self.tokens[start..end], self.source)
         {
             return StatementClass::Variable;
         }
@@ -389,12 +378,17 @@ impl<'a> LayoutParser<'a> {
             .map(|offset| start + offset);
         let selector_lead = is_selector_lead(first, self.source);
         if has_body {
-            if self.dialect == CssDialect::Sass && first.kind() == TokenKind::Colon {
-                return StatementClass::Ambiguous;
+            if explicit_colon.is_some_and(|colon| {
+                colon_starts_declaration(&self.tokens[start..end], colon - start)
+            }) {
+                return StatementClass::Declaration;
             }
             if selector_lead || explicit_colon.is_none() {
                 return StatementClass::Rule;
             }
+        }
+        if self.dialect == CssDialect::Sass && first.kind() == TokenKind::Colon {
+            return StatementClass::Ambiguous;
         }
         if explicit_colon.is_some() {
             return StatementClass::Declaration;
@@ -490,12 +484,10 @@ impl<'a> LayoutParser<'a> {
 
     fn find_boundary(&self, start: usize) -> Boundary {
         let mut delimiters: Vec<(TokenKind, bool)> = Vec::new();
-        let mut saw_colon = false;
         let mut index = start;
         while index < self.tokens.len() {
             let token = self.tokens[index];
             match token.kind() {
-                TokenKind::Colon if delimiters.is_empty() => saw_colon = true,
                 TokenKind::Function | TokenKind::LeftParen => {
                     delimiters.push((TokenKind::RightParen, false));
                 }
@@ -507,7 +499,7 @@ impl<'a> LayoutParser<'a> {
                 | TokenKind::StylusInterpolationStart => {
                     delimiters.push((TokenKind::RightBrace, true));
                 }
-                TokenKind::LeftBrace if delimiters.is_empty() && !saw_colon => {
+                TokenKind::LeftBrace if delimiters.is_empty() => {
                     return Boundary {
                         kind: BoundaryKind::Block,
                         index,
@@ -540,7 +532,7 @@ impl<'a> LayoutParser<'a> {
                 _ if token.flags & TokenFlags::CONTAINS_NEWLINE != 0
                     && (delimiters.is_empty()
                         || delimiters.iter().any(|(_, interpolation)| *interpolation))
-                    && !continues_after(&self.tokens, start, index, self.source) =>
+                    && !continues_after(&self.tokens, start, index, self.source, self.dialect) =>
                 {
                     return Boundary {
                         kind: BoundaryKind::Newline,
@@ -703,11 +695,30 @@ fn next_significant(tokens: &[SyntaxToken], start: usize) -> Option<usize> {
     (start..tokens.len()).find(|index| !tokens[*index].kind().is_trivia())
 }
 
-fn previous_newline_boundary(tokens: &[SyntaxToken], end: usize) -> usize {
-    (0..end)
-        .rev()
-        .find(|index| tokens[*index].flags & TokenFlags::CONTAINS_NEWLINE != 0)
-        .map_or(0, |index| index + 1)
+fn has_indentation_structure(source: &CssSource, tokens: &[SyntaxToken]) -> bool {
+    let mut previous_line_indent: Option<Vec<u8>> = None;
+    let mut previous_significant = None;
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind().is_trivia() {
+            continue;
+        }
+        let starts_line = previous_significant.is_none_or(|previous| {
+            tokens[previous + 1..index]
+                .iter()
+                .any(|trivia| trivia.flags & TokenFlags::CONTAINS_NEWLINE != 0)
+        });
+        if starts_line {
+            let indent = indent_prefix(source, tokens, index);
+            if previous_line_indent.as_ref().is_some_and(|previous| {
+                indent.starts_with(previous) && indent.len() > previous.len()
+            }) {
+                return true;
+            }
+            previous_line_indent = Some(indent);
+        }
+        previous_significant = Some(index);
+    }
+    false
 }
 
 fn indent_prefix(source: &CssSource, tokens: &[SyntaxToken], significant: usize) -> Vec<u8> {
@@ -772,11 +783,57 @@ fn is_less_mixin_header(tokens: &[SyntaxToken], source: &CssSource) -> bool {
         && second.start == first.end
 }
 
+fn has_top_level_assignment(tokens: &[SyntaxToken], source: &CssSource) -> bool {
+    let mut closing = Vec::new();
+    for token in tokens {
+        match token.kind() {
+            TokenKind::Function | TokenKind::LeftParen => closing.push(TokenKind::RightParen),
+            TokenKind::LeftBracket => closing.push(TokenKind::RightBracket),
+            TokenKind::LeftBrace
+            | TokenKind::ScssInterpolationStart
+            | TokenKind::LessInterpolationStart
+            | TokenKind::StylusInterpolationStart => closing.push(TokenKind::RightBrace),
+            kind if closing.last().is_some_and(|expected| *expected == kind) => {
+                closing.pop();
+            }
+            TokenKind::Delim if closing.is_empty() && source.token_text(*token) == "=" => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn colon_starts_declaration(tokens: &[SyntaxToken], colon: usize) -> bool {
+    let significant_before: Vec<_> = tokens[..colon]
+        .iter()
+        .filter(|token| !token.kind().is_trivia())
+        .collect();
+    if significant_before.len() != 1
+        || !matches!(
+            significant_before[0].kind(),
+            TokenKind::Ident | TokenKind::ScssVariable | TokenKind::LessVariable
+        )
+    {
+        return false;
+    }
+    let separator = tokens[colon];
+    let Some(next) = tokens[colon + 1..]
+        .iter()
+        .find(|token| !token.kind().is_trivia())
+    else {
+        return true;
+    };
+    next.start != separator.end
+}
+
 fn continues_after(
     tokens: &[SyntaxToken],
     start: usize,
     newline: usize,
     source: &CssSource,
+    dialect: CssDialect,
 ) -> bool {
     let Some(previous) = tokens[start..newline]
         .iter()
@@ -785,7 +842,8 @@ fn continues_after(
     else {
         return false;
     };
-    previous.kind() == TokenKind::Comma
+    (previous.kind() == TokenKind::Colon && dialect != CssDialect::Sass)
+        || previous.kind() == TokenKind::Comma
         || (previous.kind() == TokenKind::Delim
             && matches!(
                 source.token_text(*previous),

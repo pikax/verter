@@ -80,6 +80,7 @@ pub struct StyleDeclaration {
     span: Span,
     name_span: Span,
     value: ComponentValueTree,
+    body: Option<StyleBlock>,
     completeness: StyleCompleteness,
 }
 
@@ -94,6 +95,10 @@ impl StyleDeclaration {
 
     pub fn value(&self) -> &ComponentValueTree {
         &self.value
+    }
+
+    pub fn body(&self) -> Option<&StyleBlock> {
+        self.body.as_ref()
     }
 
     pub const fn completeness(&self) -> StyleCompleteness {
@@ -431,7 +436,9 @@ fn collect_complete_static_classes(
         match statement {
             StyleStatement::Rule(rule) => {
                 for selector in rule.selector_list.selectors() {
-                    if selector.facts().is_complete_static() {
+                    if selector.facts().completeness()
+                        == crate::selector::SelectorCompleteness::Complete
+                    {
                         for compound in selector.compounds() {
                             for component in compound.components() {
                                 collect_static_class_component(component, output);
@@ -456,7 +463,11 @@ fn collect_complete_static_classes(
                     collect_complete_static_classes(body.statements(), output);
                 }
             }
-            StyleStatement::Declaration(_) => {}
+            StyleStatement::Declaration(value) => {
+                if let Some(body) = value.body() {
+                    collect_complete_static_classes(body.statements(), output);
+                }
+            }
         }
     }
 }
@@ -465,7 +476,7 @@ fn collect_static_class_component(
     component: &SelectorComponent,
     output: &mut Vec<StaticClassFact>,
 ) {
-    if component.kind() == SelectorComponentKind::Class {
+    if component.kind() == SelectorComponentKind::Class && component.facts().is_complete_static() {
         if let Some(name_span) = component.name_span() {
             output.push(StaticClassFact { name_span });
         }
@@ -475,7 +486,7 @@ fn collect_static_class_component(
     }
     if let Some(list) = component.pseudo().and_then(|pseudo| pseudo.selector_list()) {
         for selector in list.selectors() {
-            if selector.facts().is_complete_static() {
+            if selector.facts().completeness() == crate::selector::SelectorCompleteness::Complete {
                 for compound in selector.compounds() {
                     for nested in compound.components() {
                         collect_static_class_component(nested, output);
@@ -495,7 +506,9 @@ fn collect_statement_components<'a>(
             StyleStatement::Rule(rule) => {
                 for selector in rule.selector_list.selectors() {
                     for compound in selector.compounds() {
-                        output.extend(compound.components());
+                        for component in compound.components() {
+                            collect_component_refs(component, output);
+                        }
                     }
                 }
                 collect_statement_components(&rule.body.statements, output);
@@ -515,7 +528,30 @@ fn collect_statement_components<'a>(
                     collect_statement_components(&body.statements, output);
                 }
             }
-            StyleStatement::Declaration(_) => {}
+            StyleStatement::Declaration(value) => {
+                if let Some(body) = &value.body {
+                    collect_statement_components(&body.statements, output);
+                }
+            }
+        }
+    }
+}
+
+fn collect_component_refs<'a>(
+    component: &'a SelectorComponent,
+    output: &mut Vec<&'a SelectorComponent>,
+) {
+    output.push(component);
+    for nested in component.nested_components() {
+        collect_component_refs(nested, output);
+    }
+    if let Some(list) = component.pseudo().and_then(|pseudo| pseudo.selector_list()) {
+        for selector in list.selectors() {
+            for compound in selector.compounds() {
+                for nested in compound.components() {
+                    collect_component_refs(nested, output);
+                }
+            }
         }
     }
 }
@@ -706,6 +742,7 @@ impl StyleSyntaxIrSink {
                     value: frame
                         .value_tree
                         .unwrap_or_else(|| ComponentValueTree::empty(end)),
+                    body: frame.block,
                     completeness,
                 });
                 self.push_statement(statement);

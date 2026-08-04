@@ -1004,15 +1004,15 @@ fn nested_selector_text_does_not_contain_declarations() {
     // Find all selectors
     let selector_texts: Vec<&str> = css.selectors.iter().map(|s| s.text.as_str()).collect();
 
-    // The complete parent is available, but evaluation-dependent nesting is not concrete.
+    // Positive: should contain the parent and nested selectors.
     assert!(
         selector_texts.contains(&".ns-popover"),
         "should contain .ns-popover selector: {:?}",
         selector_texts
     );
     assert!(
-        !selector_texts.iter().any(|s| s.contains("&__content")),
-        "evaluation-dependent nesting must fail closed: {:?}",
+        selector_texts.iter().any(|s| s.contains("&__content")),
+        "should contain &__content nested selector: {:?}",
         selector_texts
     );
 
@@ -1427,7 +1427,7 @@ fn scss_nested_classes_have_exact_spans_and_css_some() {
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("class {name} missing"))
     };
-    for name in ["card", "title"] {
+    for name in ["card", "title", "active"] {
         let cls = class_at(name);
         assert_eq!(
             &src[cls.span.start as usize..cls.span.end as usize],
@@ -1435,15 +1435,18 @@ fn scss_nested_classes_have_exact_spans_and_css_some() {
             "span of {name} must cover exactly the authored name"
         );
     }
-    assert!(!css.classes.iter().any(|class| class.name == "active"));
 }
 
 #[test]
-fn scss_amp_selector_fails_closed_without_publishing_a_concrete_class() {
+fn scss_amp_selector_fails_closed_on_structure_but_extracts_literal_class() {
     let analysis = analyze_scss(".card { &.active { color: blue; } }");
     let css = analysis.css.as_ref().unwrap();
-    assert!(!css.selectors.iter().any(|s| s.text == "&.active"));
-    assert!(!css.classes.iter().any(|c| c.name == "active"));
+    let amp_sel = css.selectors.iter().find(|s| s.text == "&.active").unwrap();
+    assert!(
+        amp_sel.structure.is_none(),
+        "an &-selector has no self-contained structure"
+    );
+    assert!(css.classes.iter().any(|c| c.name == "active"));
 }
 
 #[test]
