@@ -9,9 +9,17 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::attestation::domain_hash;
+use crate::channel::ChannelError;
 use crate::lifecycle::{BrokerError, SandboxUnavailableEvidence};
 use crate::platform::SpawnedWorker;
 use crate::policy::ProcessorSandboxKindV1;
+
+/// tmpfs mount data for the private empty worker root.
+const ROOT_TMPFS_DATA: &str = "size=32m,mode=0755\0";
+/// `PR_SET_NO_NEW_PRIVS` value applied at both sandbox stages.
+const NO_NEW_PRIVILEGES_VALUE: i32 = 1;
+/// First file descriptor the `close_range` sweep retains.
+const CLOSE_RANGE_FIRST_RETAINED_FD: u32 = 4;
 
 pub(crate) type PlatformStream = UnixStream;
 
@@ -85,18 +93,88 @@ pub(crate) fn random_fill(bytes: &mut [u8]) -> Result<(), BrokerError> {
     Ok(())
 }
 
+/// The concrete namespace/seccomp configuration the launch path actually enforces.
+///
+/// Every field is consumed by an enforcement site in this module, so the profile
+/// hash changes iff the enforced policy changes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LinuxSandboxPolicyMaterial {
+    /// `unshare` flags applied in `pre_exec`.
+    pub(crate) unshare_flags: i32,
+    /// `mount` flags for the private empty root tmpfs.
+    pub(crate) root_mount_flags: u64,
+    /// tmpfs mount data for that root.
+    pub(crate) root_mount_data: &'static str,
+    /// Remount flags applied to every read-only bind mount.
+    pub(crate) bind_remount_flags: u64,
+    /// `PR_SET_NO_NEW_PRIVS` value.
+    pub(crate) no_new_privileges: i32,
+    /// Whether supplementary groups are denied before the uid/gid maps are written.
+    pub(crate) setgroups_denied: bool,
+    /// First fd retained by the `close_range` sweep.
+    pub(crate) close_range_first_retained_fd: u32,
+    /// The launch-stage seccomp filter program bytes.
+    pub(crate) launch_filter: Vec<u8>,
+    /// The worker-stage seccomp filter program bytes.
+    pub(crate) worker_filter: Vec<u8>,
+    /// The audit arch the filter pins.
+    pub(crate) audit_arch: u32,
+}
+
+pub(crate) fn enforced_linux_sandbox_policy() -> LinuxSandboxPolicyMaterial {
+    LinuxSandboxPolicyMaterial {
+        unshare_flags: libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWNET,
+        root_mount_flags: libc::MS_NOSUID | libc::MS_NODEV,
+        root_mount_data: ROOT_TMPFS_DATA,
+        bind_remount_flags: libc::MS_BIND
+            | libc::MS_REMOUNT
+            | libc::MS_RDONLY
+            | libc::MS_NOSUID
+            | libc::MS_NODEV,
+        no_new_privileges: NO_NEW_PRIVILEGES_VALUE,
+        setgroups_denied: true,
+        close_range_first_retained_fd: CLOSE_RANGE_FIRST_RETAINED_FD,
+        launch_filter: encode_seccomp_filter(SeccompStage::Launch),
+        worker_filter: encode_seccomp_filter(SeccompStage::Worker),
+        audit_arch: native_audit_arch(),
+    }
+}
+
+fn encode_seccomp_filter(stage: SeccompStage) -> Vec<u8> {
+    let filters = seccomp_program(stage);
+    let mut out = Vec::with_capacity(filters.len() * 8);
+    for filter in filters {
+        out.extend_from_slice(&filter.code.to_be_bytes());
+        out.push(filter.jt);
+        out.push(filter.jf);
+        out.extend_from_slice(&filter.k.to_be_bytes());
+    }
+    out
+}
+
+pub(crate) fn hash_linux_sandbox_policy(material: &LinuxSandboxPolicyMaterial) -> [u8; 32] {
+    let mut encoded =
+        Vec::with_capacity(material.launch_filter.len() + material.worker_filter.len() + 64);
+    encoded.extend_from_slice(&material.unshare_flags.to_be_bytes());
+    encoded.extend_from_slice(&material.root_mount_flags.to_be_bytes());
+    encoded.extend_from_slice(&(material.root_mount_data.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(material.root_mount_data.as_bytes());
+    encoded.extend_from_slice(&material.bind_remount_flags.to_be_bytes());
+    encoded.extend_from_slice(&material.no_new_privileges.to_be_bytes());
+    encoded.push(u8::from(material.setgroups_denied));
+    encoded.extend_from_slice(&material.close_range_first_retained_fd.to_be_bytes());
+    encoded.extend_from_slice(&(material.launch_filter.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&material.launch_filter);
+    encoded.extend_from_slice(&(material.worker_filter.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(&material.worker_filter);
+    encoded.extend_from_slice(&material.audit_arch.to_be_bytes());
+    domain_hash(b"linux-namespace-seccomp-enforced-policy\0", &[&encoded])
+}
+
+/// Digests the namespace and seccomp configuration this module actually installs, so
+/// the attested profile hash changes if and only if the enforced policy changes.
 pub(crate) fn sandbox_profile_hash() -> [u8; 32] {
-    domain_hash(
-        b"linux-namespace-seccomp-profile\0",
-        &[
-            b"user+mount+network-namespaces",
-            b"private-empty-root",
-            b"no-new-privileges",
-            b"seccomp-deny-file+network+process+escape",
-            b"closed-fds-except-broker-ipc",
-            b"empty-environment",
-        ],
-    )
+    hash_linux_sandbox_policy(&enforced_linux_sandbox_policy())
 }
 
 pub(crate) fn spawn_denied_worker(
@@ -149,17 +227,16 @@ pub(crate) fn spawn_denied_worker(
     })
 }
 
-pub(crate) fn wait_readable(
+pub(crate) fn read_some_by_deadline(
     stream: &mut PlatformStream,
-    child: &mut PlatformChild,
-    timeout: Duration,
-) -> Result<(), BrokerError> {
-    let deadline = Instant::now() + timeout;
+    mut child: Option<&mut PlatformChild>,
+    buffer: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, ChannelError> {
+    use std::io::Read;
+
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(BrokerError::WorkerTimeout);
-        }
         let mut descriptor = libc::pollfd {
             fd: stream.as_raw_fd(),
             events: libc::POLLIN,
@@ -168,10 +245,21 @@ pub(crate) fn wait_readable(
         let millis = i32::try_from(remaining.as_millis().min(10)).unwrap_or(10);
         let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
         if result > 0 && descriptor.revents & libc::POLLIN != 0 {
-            return Ok(());
+            let read = stream.read(buffer)?;
+            if read == 0 {
+                return Err(ChannelError::Io("worker stream reached end of file".into()));
+            }
+            return Ok(read);
         }
-        if let Some(status) = child.has_exited() {
-            return Err(BrokerError::WorkerCrashed(Some(status)));
+        if let Some(child) = child.as_deref_mut() {
+            if let Some(status) = child.has_exited() {
+                return Err(ChannelError::Io(format!(
+                    "worker exited with status {status}"
+                )));
+            }
+        }
+        if remaining.is_zero() {
+            return Err(ChannelError::ReadDeadlineExceeded);
         }
     }
 }
@@ -284,7 +372,7 @@ unsafe fn setup_namespaces_and_root(
     if libc::setsid() < 0 {
         return Err(io::Error::last_os_error());
     }
-    if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWNET) != 0 {
+    if libc::unshare(enforced_linux_sandbox_policy().unshare_flags) != 0 {
         return Err(io::Error::last_os_error());
     }
     write_proc(b"/proc/self/setgroups\0", b"deny")?;
@@ -309,8 +397,8 @@ unsafe fn setup_namespaces_and_root(
         cstr(b"tmpfs\0"),
         root.as_ptr(),
         cstr(b"tmpfs\0"),
-        libc::MS_NOSUID | libc::MS_NODEV,
-        cstr(b"size=32m,mode=0755\0").cast(),
+        enforced_linux_sandbox_policy().root_mount_flags as libc::c_ulong,
+        cstr(ROOT_TMPFS_DATA.as_bytes()).cast(),
     ) != 0
     {
         return Err(io::Error::last_os_error());
@@ -331,7 +419,12 @@ unsafe fn setup_namespaces_and_root(
     if libc::chroot(root.as_ptr()) != 0 || libc::chdir(cstr(b"/\0")) != 0 {
         return Err(io::Error::last_os_error());
     }
-    let close_result = libc::syscall(libc::SYS_close_range, 0_u32, u32::MAX, 4_u32);
+    let close_result = libc::syscall(
+        libc::SYS_close_range,
+        0_u32,
+        u32::MAX,
+        CLOSE_RANGE_FIRST_RETAINED_FD,
+    );
     if close_result != 0 && last_errno() != Some(libc::ENOSYS) {
         return Err(io::Error::last_os_error());
     }
@@ -384,11 +477,16 @@ unsafe fn bind_mount(source: *const i8, target: *const i8, recursive: bool) -> i
     if libc::mount(source, target, std::ptr::null(), flags, std::ptr::null()) != 0 {
         return Err(io::Error::last_os_error());
     }
+    let remount = if recursive {
+        enforced_linux_sandbox_policy().bind_remount_flags as libc::c_ulong | libc::MS_REC
+    } else {
+        enforced_linux_sandbox_policy().bind_remount_flags as libc::c_ulong
+    };
     if libc::mount(
         std::ptr::null(),
         target,
         std::ptr::null(),
-        flags | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        remount,
         std::ptr::null(),
     ) != 0
     {
@@ -411,14 +509,14 @@ enum SeccompStage {
 }
 
 fn set_no_new_privileges() -> io::Result<()> {
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == 0 {
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, NO_NEW_PRIVILEGES_VALUE, 0, 0, 0) } == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
     }
 }
 
-fn install_seccomp(stage: SeccompStage) -> io::Result<()> {
+fn seccomp_program(stage: SeccompStage) -> Vec<libc::sock_filter> {
     const LOAD_ARCH: libc::sock_filter = stmt(0x20, 4);
     const LOAD_SYSCALL: libc::sock_filter = stmt(0x20, 0);
     const ALLOW: libc::sock_filter = stmt(0x06, libc::SECCOMP_RET_ALLOW);
@@ -438,6 +536,11 @@ fn install_seccomp(stage: SeccompStage) -> io::Result<()> {
         filters.push(DENY);
     }
     filters.push(ALLOW);
+    filters
+}
+
+fn install_seccomp(stage: SeccompStage) -> io::Result<()> {
+    let mut filters = seccomp_program(stage);
     let program = libc::sock_fprog {
         len: u16::try_from(filters.len())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?,

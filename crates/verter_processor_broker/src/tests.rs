@@ -236,7 +236,7 @@ fn sandbox_launch_outcomes_have_no_passing_skip_on_a_supported_platform() {
     assert_eq!(launch_gate(&launch()), LaunchGate::Run);
 }
 
-fn execution_descriptor(
+pub(crate) fn execution_descriptor(
     initial_output: &[u8],
     dependencies: &[(DependencyReadKind, &[u8])],
 ) -> Vec<u8> {

@@ -1,4 +1,14 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+/// Maximum live correlation entries one registry retains.
+pub const MAX_CORRELATION_ENTRIES: usize = 4096;
+
+/// How long a consumed correlation entry is retained for replay rejection.
+pub const CONSUMED_CORRELATION_TTL: Duration = Duration::from_secs(300);
+
+const MAX_CORRELATION_AUDIT_EVENTS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DependencyRequestIdV1([u8; 16]);
@@ -19,6 +29,17 @@ pub enum CorrelationError {
     ContextMismatch,
     WorkMismatch,
     ChannelMismatch,
+    /// The registry is at capacity with only pending entries; registration is refused.
+    CapacityExhausted,
+}
+
+/// Typed audit record for every correlation-entry eviction or destruction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CorrelationAuditEvent {
+    ConsumedEvictedByTtl { id: DependencyRequestIdV1 },
+    ConsumedEvictedByCapacity { id: DependencyRequestIdV1 },
+    RegistrationRefusedAtCapacity { id: DependencyRequestIdV1 },
+    DestroyedOnTeardown { pending: usize, consumed: usize },
 }
 
 impl DependencyRequestIdV1 {
@@ -109,6 +130,10 @@ impl BlockContentWorkTokenV1 {
 pub struct CorrelationRegistry {
     channel_binding_hash: [u8; 32],
     entries: HashMap<DependencyRequestIdV1, CorrelationState>,
+    capacity: usize,
+    consumed_ttl: Duration,
+    audit_events: VecDeque<CorrelationAuditEvent>,
+    audit_events_dropped: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -117,16 +142,125 @@ enum CorrelationState {
         context: BlockContentResolveContextTokenV1,
         work: BlockContentWorkTokenV1,
     },
-    Consumed,
+    Consumed {
+        at: Instant,
+    },
 }
 
 impl CorrelationRegistry {
     #[must_use]
     pub fn new(channel_binding_hash: [u8; 32]) -> Self {
+        Self::with_limits(
+            channel_binding_hash,
+            MAX_CORRELATION_ENTRIES,
+            CONSUMED_CORRELATION_TTL,
+        )
+    }
+
+    fn with_limits(
+        channel_binding_hash: [u8; 32],
+        capacity: usize,
+        consumed_ttl: Duration,
+    ) -> Self {
         Self {
             channel_binding_hash,
             entries: HashMap::new(),
+            capacity,
+            consumed_ttl,
+            audit_events: VecDeque::new(),
+            audit_events_dropped: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_limits_for_test(
+        channel_binding_hash: [u8; 32],
+        capacity: usize,
+        consumed_ttl: Duration,
+    ) -> Self {
+        Self::with_limits(channel_binding_hash, capacity, consumed_ttl)
+    }
+
+    /// Drains the typed eviction/destruction audit events recorded so far.
+    pub fn drain_audit_events(&mut self) -> Vec<CorrelationAuditEvent> {
+        self.audit_events.drain(..).collect()
+    }
+
+    /// Number of audit events dropped because the bounded audit buffer overflowed.
+    #[must_use]
+    pub const fn audit_events_dropped(&self) -> u64 {
+        self.audit_events_dropped
+    }
+
+    /// Destroys every correlation entry on session teardown, recording one audit event.
+    pub fn destroy_for_teardown(&mut self) {
+        let (pending, consumed) = self.counts();
+        self.entries.clear();
+        self.record_audit(CorrelationAuditEvent::DestroyedOnTeardown { pending, consumed });
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        let pending = self
+            .entries
+            .values()
+            .filter(|state| matches!(state, CorrelationState::Pending { .. }))
+            .count();
+        (pending, self.entries.len() - pending)
+    }
+
+    /// Drops consumed entries whose replay-rejection window has elapsed.
+    fn evict_expired(&mut self, now: Instant) {
+        let expired: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(id, state)| match state {
+                CorrelationState::Consumed { at }
+                    if now.saturating_duration_since(*at) >= self.consumed_ttl =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in expired {
+            self.entries.remove(&id);
+            self.record_audit(CorrelationAuditEvent::ConsumedEvictedByTtl { id });
+        }
+    }
+
+    /// Reclaims one slot by dropping the oldest consumed entry, if any exists.
+    fn evict_oldest_consumed(&mut self) -> bool {
+        let oldest = self
+            .entries
+            .iter()
+            .filter_map(|(id, state)| match state {
+                CorrelationState::Consumed { at } => Some((*at, *id)),
+                CorrelationState::Pending { .. } => None,
+            })
+            .min_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.1 .0.cmp(&right.1 .0))
+            });
+        let Some((_, id)) = oldest else {
+            return false;
+        };
+        self.entries.remove(&id);
+        self.record_audit(CorrelationAuditEvent::ConsumedEvictedByCapacity { id });
+        true
+    }
+
+    fn record_audit(&mut self, event: CorrelationAuditEvent) {
+        if self.audit_events.len() >= MAX_CORRELATION_AUDIT_EVENTS {
+            self.audit_events.pop_front();
+            self.audit_events_dropped = self.audit_events_dropped.saturating_add(1);
+        }
+        self.audit_events.push_back(event);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_counts_for_test(&self) -> (usize, usize) {
+        self.counts()
     }
 
     pub fn register(
@@ -135,16 +269,23 @@ impl CorrelationRegistry {
         context: BlockContentResolveContextTokenV1,
         work: BlockContentWorkTokenV1,
     ) -> Result<(), CorrelationError> {
-        match self.entries.entry(id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(CorrelationState::Pending { context, work });
-                Ok(())
+        self.evict_expired(Instant::now());
+        match self.entries.get(&id) {
+            Some(CorrelationState::Pending { .. }) => {
+                return Err(CorrelationError::DuplicatePending);
             }
-            std::collections::hash_map::Entry::Occupied(entry) => match entry.get() {
-                CorrelationState::Pending { .. } => Err(CorrelationError::DuplicatePending),
-                CorrelationState::Consumed => Err(CorrelationError::ReplayConsumed),
-            },
+            Some(CorrelationState::Consumed { .. }) => {
+                return Err(CorrelationError::ReplayConsumed);
+            }
+            None => {}
         }
+        if self.entries.len() >= self.capacity && !self.evict_oldest_consumed() {
+            self.record_audit(CorrelationAuditEvent::RegistrationRefusedAtCapacity { id });
+            return Err(CorrelationError::CapacityExhausted);
+        }
+        self.entries
+            .insert(id, CorrelationState::Pending { context, work });
+        Ok(())
     }
 
     pub fn consume(
@@ -162,7 +303,7 @@ impl CorrelationRegistry {
             .get_mut(&id)
             .ok_or(CorrelationError::UnknownRequest)?;
         match *state {
-            CorrelationState::Consumed => Err(CorrelationError::ReplayConsumed),
+            CorrelationState::Consumed { .. } => Err(CorrelationError::ReplayConsumed),
             CorrelationState::Pending {
                 context: expected_context,
                 work: expected_work,
@@ -173,7 +314,7 @@ impl CorrelationRegistry {
                 if work != expected_work {
                     return Err(CorrelationError::WorkMismatch);
                 }
-                *state = CorrelationState::Consumed;
+                *state = CorrelationState::Consumed { at: Instant::now() };
                 Ok(())
             }
         }

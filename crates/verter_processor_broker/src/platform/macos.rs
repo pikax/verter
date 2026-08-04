@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::attestation::domain_hash;
+use crate::channel::ChannelError;
 use crate::lifecycle::{BrokerError, SandboxUnavailableEvidence};
 use crate::platform::SpawnedWorker;
 use crate::policy::ProcessorSandboxKindV1;
@@ -131,17 +132,16 @@ pub(crate) fn spawn_denied_worker(
     })
 }
 
-pub(crate) fn wait_readable(
+pub(crate) fn read_some_by_deadline(
     stream: &mut PlatformStream,
-    child: &mut PlatformChild,
-    timeout: Duration,
-) -> Result<(), BrokerError> {
-    let deadline = Instant::now() + timeout;
+    mut child: Option<&mut PlatformChild>,
+    buffer: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, ChannelError> {
+    use std::io::Read;
+
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(BrokerError::WorkerTimeout);
-        }
         let mut descriptor = libc::pollfd {
             fd: stream.as_raw_fd(),
             events: libc::POLLIN,
@@ -151,10 +151,21 @@ pub(crate) fn wait_readable(
         if unsafe { libc::poll(&mut descriptor, 1, millis) } > 0
             && descriptor.revents & libc::POLLIN != 0
         {
-            return Ok(());
+            let read = stream.read(buffer)?;
+            if read == 0 {
+                return Err(ChannelError::Io("worker stream reached end of file".into()));
+            }
+            return Ok(read);
         }
-        if let Some(status) = child.has_exited() {
-            return Err(BrokerError::WorkerCrashed(Some(status)));
+        if let Some(child) = child.as_deref_mut() {
+            if let Some(status) = child.has_exited() {
+                return Err(ChannelError::Io(format!(
+                    "worker exited with status {status}"
+                )));
+            }
+        }
+        if remaining.is_zero() {
+            return Err(ChannelError::ReadDeadlineExceeded);
         }
     }
 }

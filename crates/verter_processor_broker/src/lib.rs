@@ -16,8 +16,9 @@ pub use attestation::{
 };
 pub use channel::{ChannelError, TrustedBrokerChannelBindingV1, ValidatedBrokerChannel};
 pub use correlation::{
-    BlockContentResolveContextTokenV1, BlockContentWorkTokenV1, CorrelationError,
-    CorrelationRegistry, DependencyRequestIdV1,
+    BlockContentResolveContextTokenV1, BlockContentWorkTokenV1, CorrelationAuditEvent,
+    CorrelationError, CorrelationRegistry, DependencyRequestIdV1, CONSUMED_CORRELATION_TTL,
+    MAX_CORRELATION_ENTRIES,
 };
 pub use lifecycle::{
     AttestedDeniedWorker, BrokerError, DeniedWorkerBroker, DeniedWorkerLaunch, DeniedWorkerSession,
@@ -41,5 +42,7 @@ pub fn worker_main() -> i32 {
     lifecycle::worker_entry()
 }
 
+#[cfg(test)]
+mod hardening_tests;
 #[cfg(test)]
 mod tests;

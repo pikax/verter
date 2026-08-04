@@ -51,6 +51,7 @@ use windows_sys::Win32::System::WindowsProgramming::{
 };
 
 use crate::attestation::domain_hash;
+use crate::channel::ChannelError;
 use crate::lifecycle::{BrokerError, SandboxUnavailableEvidence};
 use crate::platform::SpawnedWorker;
 use crate::policy::ProcessorSandboxKindV1;
@@ -134,18 +135,70 @@ pub(crate) fn random_fill(bytes: &mut [u8]) -> Result<(), BrokerError> {
     }
 }
 
-pub(crate) fn sandbox_profile_hash() -> [u8; 32] {
+/// The concrete AppContainer policy dimensions the spawn path actually enforces.
+///
+/// Every field is read by the enforcement sites in this module; the profile hash
+/// digests exactly these values, so it changes iff the enforced policy changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppContainerPolicyMaterial {
+    /// Capability SIDs granted to the AppContainer profile and lowbox token.
+    pub(crate) capability_count: u32,
+    /// `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY` payload applied at process creation.
+    pub(crate) process_mitigation_policy: u64,
+    /// Job object basic limit flags.
+    pub(crate) job_limit_flags: u32,
+    /// Job object active-process ceiling.
+    pub(crate) job_active_process_limit: u32,
+    /// Length of the explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    pub(crate) inherited_handle_count: u32,
+    /// UTF-16 units in the environment block passed to `CreateProcessAsUserW`.
+    pub(crate) environment_block_u16s: u32,
+    /// Access mask granted to the profile SID on the staged executable directory.
+    pub(crate) profile_access_mask: u32,
+    /// ACE inheritance flags on that grant.
+    pub(crate) profile_ace_inheritance: u32,
+}
+
+pub(crate) const ENFORCED_APP_CONTAINER_POLICY: AppContainerPolicyMaterial =
+    AppContainerPolicyMaterial {
+        capability_count: 0,
+        process_mitigation_policy: (PROCESS_CREATION_MITIGATION_POLICY_DEP_ENABLE
+            | PROCESS_CREATION_MITIGATION_POLICY_SEHOP_ENABLE)
+            as u64,
+        job_limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+        job_active_process_limit: 1,
+        inherited_handle_count: 1,
+        environment_block_u16s: 2,
+        profile_access_mask: FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        profile_ace_inheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+    };
+
+impl AppContainerPolicyMaterial {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(36);
+        out.extend_from_slice(&self.capability_count.to_be_bytes());
+        out.extend_from_slice(&self.process_mitigation_policy.to_be_bytes());
+        out.extend_from_slice(&self.job_limit_flags.to_be_bytes());
+        out.extend_from_slice(&self.job_active_process_limit.to_be_bytes());
+        out.extend_from_slice(&self.inherited_handle_count.to_be_bytes());
+        out.extend_from_slice(&self.environment_block_u16s.to_be_bytes());
+        out.extend_from_slice(&self.profile_access_mask.to_be_bytes());
+        out.extend_from_slice(&self.profile_ace_inheritance.to_be_bytes());
+        out
+    }
+}
+
+pub(crate) fn hash_app_container_policy(material: &AppContainerPolicyMaterial) -> [u8; 32] {
     domain_hash(
-        b"windows-app-container-profile\0",
-        &[
-            b"empty-capabilities",
-            b"explicit-handle-list",
-            b"empty-environment",
-            b"appcontainer-lowbox-token",
-            b"dep+sehop-mitigations",
-            b"job-active-process-1+kill-on-close",
-        ],
+        b"windows-app-container-enforced-policy\0",
+        &[&material.encode()],
     )
+}
+
+/// Digests the AppContainer policy this module actually applies at launch, so the
+/// attested profile hash changes if and only if the enforced policy changes.
+pub(crate) fn sandbox_profile_hash() -> [u8; 32] {
+    hash_app_container_policy(&ENFORCED_APP_CONTAINER_POLICY)
 }
 
 pub(crate) fn spawn_denied_worker(
@@ -338,15 +391,18 @@ fn create_lowbox_token(
     Ok(OwnedHandle(lowbox_token))
 }
 
-pub(crate) fn wait_readable(
+pub(crate) fn read_some_by_deadline(
     stream: &mut PlatformStream,
-    child: &mut PlatformChild,
-    timeout: Duration,
-) -> Result<(), BrokerError> {
-    let deadline = Instant::now() + timeout;
+    mut child: Option<&mut PlatformChild>,
+    buffer: &mut [u8],
+    deadline: Instant,
+) -> Result<usize, ChannelError> {
+    use std::io::Read;
+
+    const ERROR_BROKEN_PIPE: u32 = 109;
     loop {
         let mut available = 0_u32;
-        if unsafe {
+        let peeked = unsafe {
             PeekNamedPipe(
                 stream.as_raw_handle() as HANDLE,
                 null_mut(),
@@ -355,16 +411,27 @@ pub(crate) fn wait_readable(
                 &mut available,
                 null_mut(),
             )
-        } != 0
-            && available >= 4
-        {
-            return Ok(());
+        };
+        if peeked != 0 && available > 0 {
+            let take = buffer.len().min(available as usize);
+            let read = stream.read(&mut buffer[..take])?;
+            if read == 0 {
+                return Err(ChannelError::Io("worker stream reached end of file".into()));
+            }
+            return Ok(read);
         }
-        if let Some(status) = child.has_exited() {
-            return Err(BrokerError::WorkerCrashed(Some(status)));
+        if peeked == 0 && unsafe { GetLastError() } == ERROR_BROKEN_PIPE {
+            return Err(ChannelError::Io("worker stream closed".into()));
+        }
+        if let Some(child) = child.as_deref_mut() {
+            if let Some(status) = child.has_exited() {
+                return Err(ChannelError::Io(format!(
+                    "worker exited with status {status}"
+                )));
+            }
         }
         if Instant::now() >= deadline {
-            return Err(BrokerError::WorkerTimeout);
+            return Err(ChannelError::ReadDeadlineExceeded);
         }
         std::thread::sleep(Duration::from_millis(2));
     }

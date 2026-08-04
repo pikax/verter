@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use crate::channel::{
 };
 use crate::correlation::{CorrelationError, CorrelationRegistry, DependencyRequestIdV1};
 use crate::execution::{WorkerExecutionEnvelope, WorkerExecutionEvent, WorkerExecutionMachine};
-use crate::platform::{self, PlatformChild, PlatformStream};
+use crate::platform::{self, DeadlineStream, PlatformChild, PlatformStream};
 use crate::policy::{ProcessorSandboxKindV1, TrustedProcessorCapabilityManifest};
 use crate::protocol::{
     Bootstrap, BrokerToWorkerFrame, WorkScope, WorkerProbe, WorkerToBrokerFrame, BOOTSTRAP_MAX,
@@ -26,6 +26,10 @@ use crate::work::{
 };
 
 const APPLICATION_CHUNK_BYTES: usize = 48 * 1024;
+/// How long a worker may sit idle between broker requests before its read expires.
+const WORKER_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long one in-flight frame may take to arrive on the worker side.
+const WORKER_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxUnavailableEvidence {
@@ -77,6 +81,8 @@ pub enum BrokerError {
     WorkerTimeout,
     WorkerCrashed(Option<i32>),
     WorkerFrameRejected(WorkerFrameRejection),
+    /// The session was torn down by an earlier fatal failure; the channel is never reusable.
+    SessionTerminated,
     Protocol(&'static str),
     Io(String),
 }
@@ -198,8 +204,12 @@ impl DeniedWorkerBroker {
         platform::random_fill(&mut launch_secret)?;
         let broker_key = generate_ephemeral_keypair()?;
         let mut spawned = platform::spawn_denied_worker(&launch.executable, &launch_nonce)?;
-        let attestation =
-            build_attestation(self.instance, launch_nonce, &spawned.executable, &launch)?;
+        let launch_facts = SessionLaunchFacts {
+            broker_instance: self.instance,
+            launch_nonce,
+            os_sandbox_kind: ProcessorSandboxKindV1::current(),
+        };
+        let attestation = build_attestation(launch_facts, &spawned.executable, &launch)?;
         let broker_public: [u8; 32] = broker_key
             .public
             .as_slice()
@@ -217,9 +227,16 @@ impl DeniedWorkerBroker {
             sandbox_profile_hash: launch.manifest.sandbox_profile_hash(),
             manifest: launch.manifest.clone(),
         };
-        write_bounded(&mut spawned.stream, &bootstrap.encode())?;
-        platform::wait_readable(&mut spawned.stream, &mut spawned.child, timeout)?;
-        let worker_hello = read_bounded(&mut spawned.stream, 4096)?;
+        let mut bootstrap_stream =
+            DeadlineStream::new(&mut spawned.stream, Some(&mut spawned.child));
+        write_bounded(bootstrap_stream.writer(), &bootstrap.encode())?;
+        let worker_hello = read_bounded_by_deadline(
+            &mut bootstrap_stream,
+            4096,
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or(BrokerError::Protocol("launch deadline overflow"))?,
+        )?;
         if let Some(message) = worker_hello.strip_prefix(b"ERROR:") {
             return Err(BrokerError::Io(
                 String::from_utf8_lossy(message).into_owned(),
@@ -247,13 +264,19 @@ impl DeniedWorkerBroker {
             &transcript,
             &launch_secret,
         )?;
+        let mut handshake_stream =
+            DeadlineStream::new(&mut spawned.stream, Some(&mut spawned.child));
         write_bounded(
-            &mut spawned.stream,
+            handshake_stream.writer(),
             &write_handshake_message(&mut handshake, b"broker-attested")?,
         )?;
-        platform::wait_readable(&mut spawned.stream, &mut spawned.child, timeout)?;
-        let response =
-            read_handshake_message(&mut handshake, &read_bounded(&mut spawned.stream, 65_535)?)?;
+        let handshake_deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(BrokerError::Protocol("launch deadline overflow"))?;
+        let response = read_handshake_message(
+            &mut handshake,
+            &read_bounded_by_deadline(&mut handshake_stream, 65_535, handshake_deadline)?,
+        )?;
         if response != b"worker-attested" {
             return Err(BrokerError::Protocol("worker handshake payload mismatch"));
         }
@@ -261,8 +284,14 @@ impl DeniedWorkerBroker {
             .into_transport_mode()
             .map_err(|_| ChannelError::HandshakeAuthenticationFailed)?;
         let mut channel = ValidatedBrokerChannel::new(binding, transport);
-        platform::wait_readable(&mut spawned.stream, &mut spawned.child, timeout)?;
-        let admission = channel.read_frame(&mut spawned.stream)?;
+        let mut admission_stream =
+            DeadlineStream::new(&mut spawned.stream, Some(&mut spawned.child));
+        let admission = channel.read_frame(
+            &mut admission_stream,
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or(BrokerError::Protocol("launch deadline overflow"))?,
+        )?;
         if admission.as_slice() != binding_admission(&channel, &attestation) {
             return Err(BrokerError::Protocol("worker admission mismatch"));
         }
@@ -277,7 +306,9 @@ impl DeniedWorkerBroker {
             _stream: spawned.stream,
             launch,
             launched_executable: spawned.executable,
+            launch_facts,
             correlation,
+            terminated: false,
             #[cfg(test)]
             evidence_mutation_point: None,
             #[cfg(test)]
@@ -308,6 +339,15 @@ impl AttestedDeniedWorker {
     }
 }
 
+/// Launch facts recorded by the broker at spawn time, independent of the
+/// attestation they are later rechecked against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionLaunchFacts {
+    broker_instance: ProcessorBrokerInstanceId,
+    launch_nonce: [u8; 16],
+    os_sandbox_kind: ProcessorSandboxKindV1,
+}
+
 /// The paired sealed worker and mutually authenticated broker channel.
 pub struct DeniedWorkerSession {
     worker: AttestedDeniedWorker,
@@ -315,7 +355,9 @@ pub struct DeniedWorkerSession {
     _stream: PlatformStream,
     launch: DeniedWorkerLaunch,
     launched_executable: PathBuf,
+    launch_facts: SessionLaunchFacts,
     correlation: CorrelationRegistry,
+    terminated: bool,
     #[cfg(test)]
     evidence_mutation_point: Option<EvidenceMutationPoint>,
     #[cfg(test)]
@@ -335,13 +377,51 @@ impl DeniedWorkerSession {
         &self.channel
     }
 
+    /// Terminates this session: the worker tree is killed, the correlation registry is
+    /// destroyed, and every later entry point refuses with `SessionTerminated`.
+    fn teardown(&mut self) {
+        self.terminated = true;
+        self.worker.child.kill_tree();
+        self.worker.child.wait_bounded(Duration::from_secs(5));
+        self.correlation.destroy_for_teardown();
+    }
+
+    const fn ensure_live(&self) -> Result<(), BrokerError> {
+        if self.terminated {
+            Err(BrokerError::SessionTerminated)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Maps a channel failure to a typed broker error, tearing the session down first.
+    ///
+    /// Any framing, authentication, replay or deadline failure on a mutually
+    /// authenticated channel makes that channel untrustworthy, so it is never reusable.
+    fn channel_failure(&mut self, error: ChannelError) -> BrokerError {
+        match error {
+            ChannelError::Io(_) => {
+                let status = self.worker.child.wait_bounded(Duration::from_secs(5));
+                self.teardown();
+                BrokerError::WorkerCrashed(status)
+            }
+            ChannelError::ReadDeadlineExceeded => {
+                self.teardown();
+                BrokerError::WorkerTimeout
+            }
+            other => {
+                self.teardown();
+                BrokerError::Channel(other)
+            }
+        }
+    }
+
+    /// Rebuilds the current attestation from the launch facts the broker recorded at
+    /// spawn time — independently of the attestation being checked — plus a fresh read
+    /// of the executable, config, module graph and manifest.
     fn recheck_evidence(&mut self) -> Result<(), BrokerError> {
-        let current = build_attestation(
-            self.worker.attestation.broker_instance(),
-            self.worker.attestation.launch_nonce(),
-            &self.launched_executable,
-            &self.launch,
-        )?;
+        let current =
+            build_attestation(self.launch_facts, &self.launched_executable, &self.launch)?;
         let expected = &self.worker.attestation;
         let mismatch = if current.broker_instance() != expected.broker_instance() {
             Some(LaunchEvidenceError::BrokerInstanceMismatch)
@@ -370,8 +450,7 @@ impl DeniedWorkerSession {
 
     fn recheck_or_teardown(&mut self) -> Result<(), BrokerError> {
         if let Err(error) = self.recheck_evidence() {
-            self.worker.child.kill_tree();
-            self.worker.child.wait_bounded(Duration::from_secs(5));
+            self.teardown();
             return Err(error);
         }
         Ok(())
@@ -384,10 +463,10 @@ impl DeniedWorkerSession {
         authority: &mut impl DependencyReadAuthority,
         timeout: Duration,
     ) -> Result<TrustedBrokerWorkResult, BrokerError> {
+        self.ensure_live()?;
         let result = self.submit_work_inner(work, authority, timeout);
         if matches!(result, Err(BrokerError::WorkerFrameRejected(_))) {
-            self.worker.child.kill_tree();
-            self.worker.child.wait_bounded(Duration::from_secs(5));
+            self.teardown();
         }
         result
     }
@@ -616,22 +695,13 @@ impl DeniedWorkerSession {
         let remaining = timeout
             .checked_sub(started.elapsed())
             .ok_or(BrokerError::WorkerTimeout)?;
-        match platform::wait_readable(&mut self._stream, &mut self.worker.child, remaining) {
-            Ok(()) => {}
-            Err(BrokerError::WorkerTimeout) => {
-                self.worker.child.kill_tree();
-                self.worker.child.wait_bounded(Duration::from_secs(5));
-                return Err(BrokerError::WorkerTimeout);
-            }
-            Err(error) => return Err(error),
-        }
-        let payload = match self.channel.read_frame(&mut self._stream) {
+        let deadline = Instant::now()
+            .checked_add(remaining)
+            .ok_or(BrokerError::WorkerTimeout)?;
+        let mut reader = DeadlineStream::new(&mut self._stream, Some(&mut self.worker.child));
+        let payload = match self.channel.read_frame(&mut reader, deadline) {
             Ok(payload) => payload,
-            Err(ChannelError::Io(_)) => {
-                let status = self.worker.child.wait_bounded(Duration::from_secs(5));
-                return Err(BrokerError::WorkerCrashed(status));
-            }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(self.channel_failure(error)),
         };
         decode_worker_application_payload(&payload)
     }
@@ -649,6 +719,45 @@ impl DeniedWorkerSession {
                 self.evidence_mutation_point = Some(point);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutate_launch_fact_for_test(&mut self, mutation: LaunchFactMutation) {
+        match mutation {
+            LaunchFactMutation::BrokerInstance => {
+                let mut bytes = *self.launch_facts.broker_instance.as_bytes();
+                bytes[0] ^= 0x01;
+                self.launch_facts.broker_instance = ProcessorBrokerInstanceId::from_bytes(bytes);
+            }
+            LaunchFactMutation::LaunchNonce => {
+                self.launch_facts.launch_nonce[0] ^= 0x01;
+            }
+            LaunchFactMutation::SandboxKind => {
+                self.launch_facts.os_sandbox_kind = match self.launch_facts.os_sandbox_kind {
+                    ProcessorSandboxKindV1::LinuxNamespaceSeccomp => {
+                        ProcessorSandboxKindV1::MacSandbox
+                    }
+                    ProcessorSandboxKindV1::MacSandbox => {
+                        ProcessorSandboxKindV1::WindowsAppContainer
+                    }
+                    ProcessorSandboxKindV1::WindowsAppContainer => {
+                        ProcessorSandboxKindV1::LinuxNamespaceSeccomp
+                    }
+                };
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn correlation_counts_for_test(&self) -> (usize, usize) {
+        self.correlation.state_counts_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_correlation_audit_for_test(
+        &mut self,
+    ) -> Vec<crate::correlation::CorrelationAuditEvent> {
+        self.correlation.drain_audit_events()
     }
 
     #[cfg(test)]
@@ -678,8 +787,7 @@ impl DeniedWorkerSession {
             })
             .err();
         if let Some(error) = rejection {
-            self.worker.child.kill_tree();
-            self.worker.child.wait_bounded(Duration::from_secs(5));
+            self.teardown();
             return Err(error);
         }
         Ok(())
@@ -735,26 +843,18 @@ impl DeniedWorkerSession {
         probe: WorkerProbe,
         timeout: Duration,
     ) -> Result<bool, BrokerError> {
-        self.recheck_evidence()?;
+        self.ensure_live()?;
+        self.recheck_or_teardown()?;
         self.write_application_frame(&BrokerToWorkerFrame::Probe(probe))?;
-        match platform::wait_readable(&mut self._stream, &mut self.worker.child, timeout) {
-            Ok(()) => {}
-            Err(BrokerError::WorkerTimeout) => {
-                self.worker.child.kill_tree();
-                self.worker.child.wait_bounded(Duration::from_secs(5));
-                return Err(BrokerError::WorkerTimeout);
-            }
-            Err(error) => return Err(error),
-        }
-        let response = match self.channel.read_frame(&mut self._stream) {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(BrokerError::WorkerTimeout)?;
+        let mut reader = DeadlineStream::new(&mut self._stream, Some(&mut self.worker.child));
+        let response = match self.channel.read_frame(&mut reader, deadline) {
             Ok(response) => response,
-            Err(ChannelError::Io(_)) => {
-                let status = self.worker.child.wait_bounded(Duration::from_secs(5));
-                return Err(BrokerError::WorkerCrashed(status));
-            }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(self.channel_failure(error)),
         };
-        self.recheck_evidence()?;
+        self.recheck_or_teardown()?;
         match decode_worker_application_payload(&response)? {
             WorkerToBrokerFrame::ProbeResult(result) => Ok(result),
             _ => Err(WorkerFrameRejection::OutOfWindow.into()),
@@ -769,6 +869,14 @@ pub(crate) enum EvidenceMutationPoint {
     Success,
     Failure,
     FrameRejected,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchFactMutation {
+    BrokerInstance,
+    LaunchNonce,
+    SandboxKind,
 }
 
 fn validate_scope(expected: WorkScope, received: WorkScope) -> Result<(), BrokerError> {
@@ -824,8 +932,7 @@ impl Drop for DeniedWorkerSession {
 }
 
 fn build_attestation(
-    broker_instance: ProcessorBrokerInstanceId,
-    launch_nonce: [u8; 16],
+    facts: SessionLaunchFacts,
     executable: &Path,
     launch: &DeniedWorkerLaunch,
 ) -> Result<TrustedProcessorAttestation, BrokerError> {
@@ -834,12 +941,12 @@ fn build_attestation(
         return Err(LaunchEvidenceError::ExecutableHashMismatch.into());
     }
     Ok(TrustedProcessorAttestation::new(AttestationFields {
-        broker_instance,
-        launch_nonce,
+        broker_instance: facts.broker_instance,
+        launch_nonce: facts.launch_nonce,
         executable_hash,
         config_hash: config_hash(&launch.canonical_config),
         module_graph_hash: launch.module_graph.hash(),
-        os_sandbox_kind: ProcessorSandboxKindV1::current(),
+        os_sandbox_kind: facts.os_sandbox_kind,
         sandbox_profile_hash: launch.manifest.sandbox_profile_hash(),
         manifest_hash: manifest_hash(&launch.manifest),
     }))
@@ -865,16 +972,26 @@ fn write_bounded(writer: &mut impl Write, bytes: &[u8]) -> Result<(), BrokerErro
     Ok(())
 }
 
-fn read_bounded(reader: &mut impl Read, maximum: usize) -> Result<Vec<u8>, BrokerError> {
+fn read_bounded_by_deadline(
+    reader: &mut DeadlineStream<'_>,
+    maximum: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, BrokerError> {
     let mut length = [0_u8; 4];
-    reader.read_exact(&mut length)?;
+    reader.read_exact_by_deadline(&mut length, deadline)?;
     let length = u32::from_be_bytes(length) as usize;
     if length > maximum {
         return Err(BrokerError::Protocol("bounded message too large"));
     }
     let mut message = vec![0_u8; length];
-    reader.read_exact(&mut message)?;
+    reader.read_exact_by_deadline(&mut message, deadline)?;
     Ok(message)
+}
+
+fn worker_deadline(timeout: Duration) -> Result<Instant, BrokerError> {
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or(BrokerError::Protocol("worker read deadline overflow"))
 }
 
 pub(crate) fn worker_run(
@@ -886,7 +1003,11 @@ pub(crate) fn worker_run(
     }
     let worker_executable_hash = executable_hash(executable)?;
     platform::apply_worker_sandbox()?;
-    let bootstrap = Bootstrap::decode(&read_bounded(stream, BOOTSTRAP_MAX)?)?;
+    let bootstrap = Bootstrap::decode(&read_bounded_by_deadline(
+        &mut DeadlineStream::new(stream, None),
+        BOOTSTRAP_MAX,
+        worker_deadline(WORKER_IDLE_READ_TIMEOUT)?,
+    )?)?;
     if bootstrap.sandbox_kind != ProcessorSandboxKindV1::current() {
         return Err(LaunchEvidenceError::SandboxKindMismatch.into());
     }
@@ -933,7 +1054,14 @@ pub(crate) fn worker_run(
         &transcript,
         &bootstrap.launch_secret,
     )?;
-    let request = read_handshake_message(&mut handshake, &read_bounded(stream, 65_535)?)?;
+    let request = read_handshake_message(
+        &mut handshake,
+        &read_bounded_by_deadline(
+            &mut DeadlineStream::new(stream, None),
+            65_535,
+            worker_deadline(WORKER_FRAME_READ_TIMEOUT)?,
+        )?,
+    )?;
     if request != b"broker-attested" {
         return Err(BrokerError::Protocol("broker handshake payload mismatch"));
     }
@@ -947,11 +1075,13 @@ pub(crate) fn worker_run(
     let mut channel = ValidatedBrokerChannel::new(binding, transport);
     channel.write_frame(stream, &binding_admission(&channel, &attestation))?;
     loop {
-        let payload = match channel.read_frame(stream) {
-            Ok(request) => request,
-            Err(ChannelError::Io(_)) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
+        let idle_deadline = worker_deadline(WORKER_IDLE_READ_TIMEOUT)?;
+        let payload =
+            match channel.read_frame(&mut DeadlineStream::new(stream, None), idle_deadline) {
+                Ok(request) => request,
+                Err(ChannelError::Io(_)) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
         let request = match BrokerToWorkerFrame::decode(&payload) {
             Ok(request) => request,
             Err(rejection) => {
@@ -968,6 +1098,19 @@ pub(crate) fn worker_run(
                 std::thread::park();
             },
             BrokerToWorkerFrame::Probe(WorkerProbe::Crash) => std::process::abort(),
+            BrokerToWorkerFrame::Probe(WorkerProbe::StallMidFrame) => {
+                stream.write_all(&64_u32.to_be_bytes())?;
+                stream.flush()?;
+                loop {
+                    std::thread::park();
+                }
+            }
+            BrokerToWorkerFrame::Probe(WorkerProbe::CorruptAuthFrame) => {
+                write_tampered_worker_frame(&mut channel, stream, FrameTamper::Ciphertext)?;
+            }
+            BrokerToWorkerFrame::Probe(WorkerProbe::ReplaySequenceFrame) => {
+                write_tampered_worker_frame(&mut channel, stream, FrameTamper::WireSequence)?;
+            }
             BrokerToWorkerFrame::Probe(other) => write_worker_application_frame(
                 &mut channel,
                 stream,
@@ -1016,7 +1159,10 @@ fn read_worker_work_descriptor(
         .map_err(|_| BrokerError::Protocol("work descriptor length overflow"))?;
     let mut descriptor = Vec::with_capacity(total);
     loop {
-        let payload = channel.read_frame(stream)?;
+        let payload = channel.read_frame(
+            &mut DeadlineStream::new(stream, None),
+            worker_deadline(WORKER_FRAME_READ_TIMEOUT)?,
+        )?;
         let frame = match BrokerToWorkerFrame::decode(&payload) {
             Ok(frame) => frame,
             Err(rejection) => {
@@ -1130,7 +1276,10 @@ fn read_worker_dependency_response(
     scope: WorkScope,
     id: DependencyRequestIdV1,
 ) -> Result<Result<Vec<u8>, TrustedBrokerProcessingFailure>, BrokerError> {
-    let payload = channel.read_frame(stream)?;
+    let payload = channel.read_frame(
+        &mut DeadlineStream::new(stream, None),
+        worker_deadline(WORKER_FRAME_READ_TIMEOUT)?,
+    )?;
     let frame = match BrokerToWorkerFrame::decode(&payload) {
         Ok(frame) => frame,
         Err(rejection) => {
@@ -1203,7 +1352,10 @@ fn read_worker_dependency_bytes(
     };
     let mut output = Vec::with_capacity(total);
     loop {
-        let payload = channel.read_frame(stream)?;
+        let payload = channel.read_frame(
+            &mut DeadlineStream::new(stream, None),
+            worker_deadline(WORKER_FRAME_READ_TIMEOUT)?,
+        )?;
         let frame = match BrokerToWorkerFrame::decode(&payload) {
             Ok(frame) => frame,
             Err(rejection) => {
@@ -1351,6 +1503,32 @@ fn scope_rejection(expected: WorkScope, received: WorkScope) -> Option<WorkerFra
     }
 }
 
+/// The wire fault a probe-driven worker injects into one authenticated frame.
+enum FrameTamper {
+    Ciphertext,
+    WireSequence,
+}
+
+fn write_tampered_worker_frame(
+    channel: &mut ValidatedBrokerChannel,
+    stream: &mut PlatformStream,
+    tamper: FrameTamper,
+) -> Result<(), BrokerError> {
+    let mut frame = channel.encode(&WorkerToBrokerFrame::ProbeResult(false).encode())?;
+    match tamper {
+        FrameTamper::Ciphertext => {
+            let last = frame.len() - 1;
+            frame[last] ^= 0x01;
+        }
+        FrameTamper::WireSequence => {
+            frame[11] ^= 0x01;
+        }
+    }
+    stream.write_all(&frame)?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn run_probe(probe: WorkerProbe) -> bool {
     match probe {
         WorkerProbe::ReadOutsideGrant(path) => std::fs::read(path).is_ok(),
@@ -1361,7 +1539,11 @@ fn run_probe(probe: WorkerProbe) -> bool {
         WorkerProbe::DirectOpen => platform::attempt_direct_open(),
         #[cfg(target_os = "linux")]
         WorkerProbe::OpenAt2 => platform::attempt_openat2(),
-        WorkerProbe::Hang | WorkerProbe::Crash => false,
+        WorkerProbe::Hang
+        | WorkerProbe::Crash
+        | WorkerProbe::StallMidFrame
+        | WorkerProbe::CorruptAuthFrame
+        | WorkerProbe::ReplaySequenceFrame => false,
     }
 }
 

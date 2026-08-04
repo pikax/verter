@@ -97,6 +97,12 @@ pub(crate) enum WorkerProbe {
     OpenAt2,
     Hang,
     Crash,
+    /// Sends a bare length header then parks: exercises the broker's mid-frame read deadline.
+    StallMidFrame,
+    /// Sends a frame whose AEAD ciphertext is corrupted: exercises authentication teardown.
+    CorruptAuthFrame,
+    /// Sends a frame whose wire sequence is tampered: exercises replay/reorder teardown.
+    ReplaySequenceFrame,
 }
 
 impl WorkerProbe {
@@ -116,6 +122,9 @@ impl WorkerProbe {
             8 => Self::OpenAt2,
             5 => Self::Hang,
             6 => Self::Crash,
+            9 => Self::StallMidFrame,
+            10 => Self::CorruptAuthFrame,
+            11 => Self::ReplaySequenceFrame,
             _ => return Err(LaunchEvidenceError::Io("unknown worker probe".into())),
         };
         if !input.is_empty() {
@@ -435,6 +444,9 @@ impl WorkerProbe {
             Self::Environment => output.push(4),
             Self::Hang => output.push(5),
             Self::Crash => output.push(6),
+            Self::StallMidFrame => output.push(9),
+            Self::CorruptAuthFrame => output.push(10),
+            Self::ReplaySequenceFrame => output.push(11),
             #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
             Self::DirectOpen => output.push(7),
             #[cfg(target_os = "linux")]
@@ -610,6 +622,7 @@ const fn encode_correlation_error(value: CorrelationError) -> u8 {
         CorrelationError::ContextMismatch => 6,
         CorrelationError::WorkMismatch => 7,
         CorrelationError::ChannelMismatch => 8,
+        CorrelationError::CapacityExhausted => 9,
     }
 }
 
@@ -623,6 +636,7 @@ fn decode_correlation_error(value: u8) -> Result<CorrelationError, WorkerFrameRe
         6 => Ok(CorrelationError::ContextMismatch),
         7 => Ok(CorrelationError::WorkMismatch),
         8 => Ok(CorrelationError::ChannelMismatch),
+        9 => Ok(CorrelationError::CapacityExhausted),
         _ => Err(WorkerFrameRejection::Malformed),
     }
 }

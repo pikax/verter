@@ -1,9 +1,11 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use snow::{Builder, HandshakeState, TransportState};
 
 use crate::attestation::{domain_hash, ProcessorBrokerInstanceId};
+use crate::platform::DeadlineStream;
 
 const NOISE_PATTERN: &str = "Noise_KKpsk0_25519_ChaChaPoly_SHA256";
 const MAX_FRAME_PAYLOAD: usize = 60 * 1024;
@@ -86,8 +88,13 @@ pub enum ChannelError {
     FrameTooLarge,
     TruncatedFrame,
     AuthenticationFailed,
-    ReplayOrReorder { expected: u64, received: u64 },
+    ReplayOrReorder {
+        expected: u64,
+        received: u64,
+    },
     SequenceExhausted,
+    /// A blocking frame read did not complete before its deadline.
+    ReadDeadlineExceeded,
     Io(String),
     Poisoned,
 }
@@ -215,16 +222,24 @@ impl ValidatedBrokerChannel {
         Ok(())
     }
 
-    pub(crate) fn read_frame(&mut self, reader: &mut impl Read) -> Result<Vec<u8>, ChannelError> {
+    /// Reads one authenticated frame, bounding every blocking read by `deadline`.
+    ///
+    /// A worker that writes a length header and then stalls expires the read instead
+    /// of parking the reading thread; the caller turns that into worker teardown.
+    pub(crate) fn read_frame(
+        &mut self,
+        reader: &mut DeadlineStream<'_>,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, ChannelError> {
         let mut length = [0_u8; 4];
-        reader.read_exact(&mut length)?;
+        reader.read_exact_by_deadline(&mut length, deadline)?;
         let length = u32::from_be_bytes(length) as usize;
         if length > MAX_NOISE_MESSAGE + 8 {
             return Err(ChannelError::FrameTooLarge);
         }
         let mut frame = vec![0_u8; 4 + length];
         frame[..4].copy_from_slice(&(length as u32).to_be_bytes());
-        reader.read_exact(&mut frame[4..])?;
+        reader.read_exact_by_deadline(&mut frame[4..], deadline)?;
         self.decode(&frame)
     }
 
