@@ -189,6 +189,50 @@ fn adjacent_stylus_rule_braces_are_plain_braces() {
     assert!(
         Lexer::new(&compact, CssDialect::Stylus).any(|token| token.kind() == TokenKind::LeftBrace)
     );
+
+    for input in [".btn{ color red }", ".btn{color red}", ".btn{ }"] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::LeftBrace),
+            "{input}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::StylusInterpolationStart),
+            "{input}"
+        );
+        let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+        assert!(
+            matches!(parsed.statements().first(), Some(StyleStatement::Rule(_))),
+            "{input}: {:#?}",
+            parsed.statements()
+        );
+        let classes: Vec<_> = parsed
+            .complete_static_classes()
+            .map(|class| parsed.source().slice(class.name_span()).to_owned())
+            .collect();
+        assert_eq!(classes, vec!["btn"], "{input}");
+    }
+}
+
+// @ai-generated - Exact r2 ternary interpolation repro cannot become a concrete braced rule.
+#[test]
+fn stylus_ternary_brace_remains_interpolation() {
+    let input = "p{a ? b : c}\n  color red";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+    assert!(tokens
+        .iter()
+        .any(|token| token.kind() == TokenKind::StylusInterpolationStart));
+    assert!(!tokens
+        .iter()
+        .any(|token| token.kind() == TokenKind::LeftBrace));
+    let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+    assert!(parsed.has_dynamic_selectors());
 }
 
 #[test]

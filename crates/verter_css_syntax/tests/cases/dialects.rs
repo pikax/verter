@@ -214,6 +214,29 @@ fn ambiguous_sass_forms_never_publish_complete_selector_or_declaration_facts() {
         StyleStatement::Unknown(ref value) if value.kind() == UnknownStatementKind::Ambiguous
     ));
     assert!(!old_form.diagnostics().is_empty());
+
+    let old_form_with_body = ir(".a\n  :color red\n    x: y", CssDialect::Sass);
+    let parent = match &old_form_with_body.statements()[0] {
+        StyleStatement::Rule(rule) => rule,
+        other => panic!("expected .a rule, got {other:#?}"),
+    };
+    assert!(matches!(
+        parent.body().statements()[0],
+        StyleStatement::Unknown(ref value) if value.kind() == UnknownStatementKind::Ambiguous
+    ));
+    assert!(old_form_with_body
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.kind == CssDiagnosticKind::AmbiguousStatement));
+
+    let nested_pseudo = ir(".a\n  :hover\n    color: red", CssDialect::Sass);
+    assert!(
+        rule_texts(&nested_pseudo)
+            .iter()
+            .any(|text| text == ":hover"),
+        "{:#?}",
+        nested_pseudo.statements()
+    );
 }
 
 // @ai-generated - Exact declaration-owned-block repro must retain its nested statements.
@@ -472,4 +495,21 @@ fn dynamic_selector_trust_is_typed_and_disjoint_static_classes_survive() {
         .expect("dynamic class fact");
     assert_eq!(dynamic.name_span(), None);
     assert!(parsed.has_dynamic_selectors());
+}
+
+// @ai-generated - Pins the IR collector's per-component descent through functional pseudo lists.
+#[test]
+fn functional_pseudo_class_collection_is_per_component() {
+    let parsed = ir(".x:is(.a, .#{$y}) { color: red; }", CssDialect::Scss);
+    assert_eq!(concrete_classes(&parsed), vec!["x", "a"]);
+    let component_classes: Vec<_> = parsed
+        .selector_components()
+        .filter(|component| {
+            component.kind() == SelectorComponentKind::Class
+                && component.facts().is_complete_static()
+        })
+        .filter_map(|component| component.name_span())
+        .map(|span| parsed.source().slice(span).to_owned())
+        .collect();
+    assert_eq!(component_classes, vec!["x", "a"]);
 }

@@ -1538,6 +1538,77 @@ fn special_pseudo_deep_and_slotted_recorded() {
     assert!(flags.contains(StyleAnalysisFlags::HAS_SLOTTED));
 }
 
+// @ai-generated - Exact r2 pair: interpolation taints only its component, not the pseudo kind or literal siblings.
+#[test]
+fn interpolated_special_pseudos_preserve_kind_flags_and_disjoint_classes() {
+    for (name, kind, flag) in [
+        (
+            "global",
+            SpecialPseudoKind::Global,
+            StyleAnalysisFlags::HAS_GLOBAL,
+        ),
+        (
+            "deep",
+            SpecialPseudoKind::Deep,
+            StyleAnalysisFlags::HAS_DEEP,
+        ),
+    ] {
+        for (argument, expected_classes) in [(".a .b", vec!["a", "b"]), (".a .#{$x}", vec!["a"])] {
+            let source = format!(":{name}({argument}) {{ color: red; }}");
+            let analysis = build_scanned_style_analysis(
+                StyleAnalysisLang::Scss,
+                &source,
+                VueStyleInput::default(),
+                true,
+                false,
+                None,
+                0,
+            );
+            let css = analysis.css.as_ref().expect("SCSS analysis");
+            let classes: Vec<_> = css
+                .classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .collect();
+            assert_eq!(classes, expected_classes, "{source}");
+            assert_eq!(
+                analysis
+                    .special_pseudos
+                    .iter()
+                    .map(|pseudo| pseudo.kind)
+                    .collect::<Vec<_>>(),
+                vec![kind],
+                "{source}"
+            );
+            assert!(analysis.analysis_flags().contains(flag), "{source}");
+        }
+    }
+}
+
+// @ai-generated - Exact r2 pair: an ambiguous Stylus child cannot recover its intact rule owner.
+#[test]
+fn stylus_colonless_declaration_preserves_rule_body_span() {
+    for source in [".a\n  color: red", ".a\n  color red"] {
+        let analysis = build_scanned_style_analysis(
+            StyleAnalysisLang::Stylus,
+            source,
+            VueStyleInput::default(),
+            true,
+            false,
+            None,
+            0,
+        );
+        let css = analysis.css.as_ref().expect("Stylus analysis");
+        let selector = css.selectors.first().expect(".a selector");
+        assert_eq!(selector.text, ".a", "{source}");
+        assert_eq!(
+            selector.rule_body_span,
+            Some(Span::new(2, source.len() as u32)),
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn plain_selector_records_no_special_pseudos() {
     let analysis = build_css_style_analysis(

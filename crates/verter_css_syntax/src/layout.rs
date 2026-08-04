@@ -377,6 +377,12 @@ impl<'a> LayoutParser<'a> {
             .position(|token| token.kind() == TokenKind::Colon)
             .map(|offset| start + offset);
         let selector_lead = is_selector_lead(first, self.source);
+        if self.dialect == CssDialect::Sass
+            && first.kind() == TokenKind::Colon
+            && (!has_body || has_whitespace_between_significant(&self.tokens[start..end]))
+        {
+            return StatementClass::Ambiguous;
+        }
         if has_body {
             if explicit_colon.is_some_and(|colon| {
                 colon_starts_declaration(&self.tokens[start..end], colon - start)
@@ -386,9 +392,6 @@ impl<'a> LayoutParser<'a> {
             if selector_lead || explicit_colon.is_none() {
                 return StatementClass::Rule;
             }
-        }
-        if self.dialect == CssDialect::Sass && first.kind() == TokenKind::Colon {
-            return StatementClass::Ambiguous;
         }
         if explicit_colon.is_some() {
             return StatementClass::Declaration;

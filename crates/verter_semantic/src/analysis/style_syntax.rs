@@ -184,30 +184,28 @@ impl Projection<'_> {
         component: &SelectorComponent,
         selector_index: Option<u32>,
     ) {
-        if component.facts().is_complete_static() {
-            match component.kind() {
-                SelectorComponentKind::Class => {
-                    if let Some(span) = component.name_span() {
-                        self.analysis.classes.push(AnalyzedCssClass {
-                            name: self.source.slice(span).to_owned(),
-                            span,
-                            selector_index,
-                        });
-                    }
+        match component.kind() {
+            SelectorComponentKind::Class if component.facts().is_complete_static() => {
+                if let Some(span) = component.name_span() {
+                    self.analysis.classes.push(AnalyzedCssClass {
+                        name: self.source.slice(span).to_owned(),
+                        span,
+                        selector_index,
+                    });
                 }
-                SelectorComponentKind::Id => {
-                    if let Some(span) = component.name_span() {
-                        self.analysis.ids.push(AnalyzedCssId {
-                            name: self.source.slice(span).to_owned(),
-                            span,
-                        });
-                    }
-                }
-                SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo => {
-                    self.collect_special_pseudo(component, selector_index);
-                }
-                _ => {}
             }
+            SelectorComponentKind::Id if component.facts().is_complete_static() => {
+                if let Some(span) = component.name_span() {
+                    self.analysis.ids.push(AnalyzedCssId {
+                        name: self.source.slice(span).to_owned(),
+                        span,
+                    });
+                }
+            }
+            SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo => {
+                self.collect_special_pseudo(component, selector_index);
+            }
+            _ => {}
         }
         for nested in component.nested_components() {
             self.collect_component_fact(nested, selector_index);
@@ -249,9 +247,7 @@ impl Projection<'_> {
             if let Ok(source) = CssSource::new(Arc::from(self.source.slice(span)), span.start) {
                 if let Ok(structure) = parse_selector_structure(&source, CssDialect::Css) {
                     for nested in structure.list().selectors() {
-                        if nested.facts().is_complete_static() {
-                            self.collect_selector_facts(nested, selector_index);
-                        }
+                        self.collect_selector_facts(nested, selector_index);
                     }
                 }
             }

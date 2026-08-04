@@ -486,11 +486,9 @@ fn collect_static_class_component(
     }
     if let Some(list) = component.pseudo().and_then(|pseudo| pseudo.selector_list()) {
         for selector in list.selectors() {
-            if selector.facts().completeness() == crate::selector::SelectorCompleteness::Complete {
-                for compound in selector.compounds() {
-                    for nested in compound.components() {
-                        collect_static_class_component(nested, output);
-                    }
+            for compound in selector.compounds() {
+                for nested in compound.components() {
+                    collect_static_class_component(nested, output);
                 }
             }
         }
@@ -923,8 +921,10 @@ impl ParseEventSink for StyleSyntaxIrSink {
             }
             ParseEvent::Diagnostic(diagnostic) => {
                 self.diagnostics.push(diagnostic);
-                for frame in &mut self.open {
-                    frame.recovered = true;
+                if diagnostic.kind != crate::diagnostic::CssDiagnosticKind::AmbiguousStatement {
+                    for frame in &mut self.open {
+                        frame.recovered = true;
+                    }
                 }
             }
         }
@@ -958,4 +958,51 @@ pub fn parse_component_value_tree(
     Ok(sink
         .root_value_tree
         .unwrap_or_else(|| ComponentValueTree::empty(source.origin())))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::parser::{parse_with_sink, CssEntryPoint};
+    use crate::selector::{SelectorCompleteness, SelectorSink};
+
+    // @ai-generated - Pins pseudo-list descent to component trust, not enclosing selector completeness.
+    #[test]
+    fn recovered_pseudo_selector_keeps_disjoint_complete_class_fact() {
+        let source = CssSource::new(Arc::from(":is(.a .b#{$x"), 0).unwrap();
+        let mut sink = SelectorSink::new(source.clone());
+        parse_with_sink(
+            &source,
+            CssDialect::Scss,
+            CssEntryPoint::SelectorList,
+            CssParseMode::Recover,
+            &mut sink,
+        )
+        .unwrap();
+        let structure = sink.finish();
+        let pseudo = structure
+            .components()
+            .into_iter()
+            .find(|component| component.kind() == SelectorComponentKind::FunctionalPseudo)
+            .expect("functional pseudo component");
+        let nested = pseudo
+            .pseudo()
+            .and_then(|pseudo| pseudo.selector_list())
+            .and_then(|list| list.selectors().first())
+            .expect("nested recovered selector");
+        assert_eq!(
+            nested.facts().completeness(),
+            SelectorCompleteness::Recovered
+        );
+
+        let mut classes = Vec::new();
+        collect_static_class_component(pseudo, &mut classes);
+        let names: Vec<_> = classes
+            .iter()
+            .map(|class| source.slice(class.name_span()).to_owned())
+            .collect();
+        assert_eq!(names, vec!["a"]);
+    }
 }

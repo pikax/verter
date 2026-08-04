@@ -640,13 +640,36 @@ impl Lexer<'_> {
     fn stylus_brace_is_interpolation(&self, start: usize) -> bool {
         let mut cursor = start + 1;
         let mut nested = 0usize;
+        let mut has_content = false;
+        let mut has_top_level_whitespace = false;
+        let mut has_expression_operator = false;
+        let mut has_question = false;
         while let Some(byte) = self.bytes.get(cursor).copied() {
             match byte {
-                b'\n' | b'\r' | b'\x0c' | b':' | b';' if nested == 0 => return false,
-                b'{' => nested += 1,
-                b'}' if nested == 0 => return cursor > start + 1,
+                b'\n' | b'\r' | b'\x0c' | b';' if nested == 0 => return false,
+                b':' if nested == 0 && !has_question => return false,
+                b'\t' | b' ' if nested == 0 => has_top_level_whitespace = true,
+                b'?' if nested == 0 => {
+                    has_content = true;
+                    has_question = true;
+                    has_expression_operator = true;
+                }
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'=' | b'!' | b'&' | b'|'
+                    if nested == 0 =>
+                {
+                    has_content = true;
+                    has_expression_operator = true;
+                }
+                b'{' => {
+                    has_content = true;
+                    nested += 1;
+                }
+                b'}' if nested == 0 => {
+                    return has_content && (!has_top_level_whitespace || has_expression_operator);
+                }
                 b'}' => nested -= 1,
                 b'"' | b'\'' => {
+                    has_content = true;
                     let quote = byte;
                     cursor += 1;
                     while let Some(inner) = self.bytes.get(cursor).copied() {
@@ -663,6 +686,7 @@ impl Lexer<'_> {
                         cursor += 1;
                     }
                 }
+                _ if !is_css_whitespace(byte) => has_content = true,
                 _ => {}
             }
             cursor += 1;
