@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // Campaign-gate execution-proof orchestrator for the scanners-replacement
-// cutover (plan §8.4 `b4` profile, non-broker scope). Run manually by the
+// cutover (plan §8.4 `b4` profile). Run manually by the
 // orchestrator at plan gates — it is NOT a CI job. The durable enforcement is
 // the in-suite structural rails (trybuild/privacy/seals plus the
 // `cases::scanners_replacement` suite) that already run in normal CI; this
@@ -11,8 +11,7 @@
 // every declared phase must run, select non-zero work, and record its child
 // exit codes; a missing, failed, or zero-selection phase FAILS — never a
 // silent skip. The run ends with one terminal input-bound summary (tip sha,
-// profile, per-phase counts). The broker/VSIX worker-attestation portions of
-// §8.4 stay EXCLUDED under the recorded user deferral.
+// profile, per-phase counts).
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";

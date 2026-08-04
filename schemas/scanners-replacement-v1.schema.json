@@ -34,7 +34,6 @@
   "grammars": {
     "PublicHashV1": "^sha256:[0-9a-f]{64}$",
     "ClientRequestNonceV1": "canonical unpadded base64url; 16 decoded nonzero bytes",
-    "WorkerRequestNonceV1": "canonical unpadded base64url; 16 decoded nonzero bytes",
     "ClientOpenEpochTokenV1": "canonical unpadded base64url; 16 decoded nonzero bytes",
     "OpaqueCapabilityTokenV1": "canonical unpadded base64url; 32 decoded nonzero authority-random bytes",
     "Base64UrlStringV1": "canonical unpadded RFC4648 base64url; decode-reencode equality",
@@ -318,41 +317,6 @@
         }
       ]
     },
-    "DeniedCapabilityV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "Denied",
-          "number": 1
-        }
-      ]
-    },
-    "DynamicModuleAuthorityV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "DependencyReadOnly",
-          "number": 1
-        }
-      ]
-    },
-    "ProcessorSandboxKindV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "LinuxNamespaceSeccomp",
-          "number": 1
-        },
-        {
-          "name": "MacSandbox",
-          "number": 2
-        },
-        {
-          "name": "WindowsAppContainer",
-          "number": 3
-        }
-      ]
-    },
     "QualifiedMapFidelityV1": {
       "kind": "enum",
       "values": [
@@ -363,76 +327,6 @@
         {
           "name": "Approximate",
           "number": 2
-        }
-      ]
-    },
-    "DependencyReadKindV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "ExternalSource",
-          "number": 1
-        },
-        {
-          "name": "ProcessorBinary",
-          "number": 2
-        },
-        {
-          "name": "ProcessorConfig",
-          "number": 3
-        },
-        {
-          "name": "ImportedDependency",
-          "number": 4
-        },
-        {
-          "name": "Include",
-          "number": 5
-        },
-        {
-          "name": "PluginLoad",
-          "number": 6
-        },
-        {
-          "name": "SourceMapOnly",
-          "number": 7
-        }
-      ]
-    },
-    "DependencyRequestCorrelationRejectV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "Malformed",
-          "number": 1
-        },
-        {
-          "name": "Zero",
-          "number": 2
-        },
-        {
-          "name": "Oversized",
-          "number": 3
-        },
-        {
-          "name": "DuplicatePending",
-          "number": 4
-        },
-        {
-          "name": "Replay",
-          "number": 5
-        },
-        {
-          "name": "CrossResolveContext",
-          "number": 6
-        },
-        {
-          "name": "CrossWork",
-          "number": 7
-        },
-        {
-          "name": "ResponseMismatch",
-          "number": 8
         }
       ]
     },
@@ -481,93 +375,12 @@
           "number": 3
         },
         {
-          "name": "TransformChainMismatch",
-          "number": 4
-        },
-        {
-          "name": "DependencySetMismatch",
-          "number": 5
-        },
-        {
-          "name": "ProcessorIdentityMismatch",
-          "number": 6
-        },
-        {
-          "name": "ProcessorConfigMismatch",
-          "number": 7
-        },
-        {
-          "name": "ProcessorUnavailable",
-          "number": 8
-        },
-        {
-          "name": "ProcessorExecutionFailed",
-          "number": 9
-        },
-        {
           "name": "InvalidSourceMap",
           "number": 10
         },
         {
           "name": "UnsupportedNestedLanguage",
           "number": 11
-        }
-      ]
-    },
-    "TrustedBrokerProcessingFailureV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "SandboxUnavailable",
-          "number": 1
-        },
-        {
-          "name": "SandboxAttestationMismatch",
-          "number": 2
-        },
-        {
-          "name": "ChannelAuthenticationFailed",
-          "number": 3
-        },
-        {
-          "name": "ProcessorExecutableUnavailable",
-          "number": 4
-        },
-        {
-          "name": "ProcessorExecutionFailed",
-          "number": 5
-        },
-        {
-          "name": "DependencyReadFailed",
-          "number": 6
-        },
-        {
-          "name": "DependencyCycle",
-          "number": 7
-        },
-        {
-          "name": "DependencyBudgetExceeded",
-          "number": 8
-        },
-        {
-          "name": "UndeclaredDependency",
-          "number": 9
-        },
-        {
-          "name": "CapabilityViolation",
-          "number": 10
-        },
-        {
-          "name": "OutputHashMismatch",
-          "number": 11
-        },
-        {
-          "name": "OutputLengthMismatch",
-          "number": 12
-        },
-        {
-          "name": "InvalidImmediateMap",
-          "number": 13
         }
       ]
     },
@@ -593,11 +406,6 @@
       "storage": "String",
       "grammar": "ClientRequestNonceV1"
     },
-    "WorkerRequestNonceV1": {
-      "kind": "newtype",
-      "storage": "String",
-      "grammar": "WorkerRequestNonceV1"
-    },
     "ClientOpenEpochTokenV1": {
       "kind": "newtype",
       "storage": "String",
@@ -606,11 +414,6 @@
     "ClientRequestTokenV1": {
       "kind": "newtype",
       "storage": "ClientRequestNonceV1"
-    },
-    "DependencyRequestIdV1": {
-      "kind": "newtype",
-      "storage": "WorkerRequestNonceV1",
-      "capability": false
     },
     "PublicHashV1": {
       "kind": "newtype",
@@ -654,10 +457,6 @@
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
     },
-    "BlockContentWorkTokenV1": {
-      "kind": "newtype",
-      "storage": "OpaqueCapabilityTokenV1"
-    },
     "BlockContentBasisTokenV1": {
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
@@ -682,10 +481,6 @@
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
     },
-    "DependencyTokenV1": {
-      "kind": "newtype",
-      "storage": "OpaqueCapabilityTokenV1"
-    },
     "ResolverContextTokenV1": {
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
@@ -702,15 +497,7 @@
       "kind": "newtype",
       "storage": "PublicHashV1"
     },
-    "DependencyFingerprintV1": {
-      "kind": "newtype",
-      "storage": "PublicHashV1"
-    },
     "BlockContentOriginFingerprintV1": {
-      "kind": "newtype",
-      "storage": "PublicHashV1"
-    },
-    "TransformChainFingerprintV1": {
       "kind": "newtype",
       "storage": "PublicHashV1"
     },
@@ -739,48 +526,6 @@
         }
       ]
     },
-    "DependencyResolverKindV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "Workspace",
-          "number": 1
-        },
-        {
-          "name": "Filesystem",
-          "number": 2
-        },
-        {
-          "name": "Package",
-          "number": 3
-        },
-        {
-          "name": "Url",
-          "number": 4
-        },
-        {
-          "name": "ProcessorConfig",
-          "number": 5
-        }
-      ]
-    },
-    "DependencyReadNegativeReasonV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "NotFound",
-          "number": 1
-        },
-        {
-          "name": "ScopeDenied",
-          "number": 2
-        },
-        {
-          "name": "UnsupportedScheme",
-          "number": 3
-        }
-      ]
-    },
     "TextDocumentIdentifierV1": {
       "kind": "record",
       "fields": [
@@ -788,29 +533,6 @@
           "name": "uri",
           "type": "DocumentUriV1",
           "tag": 1,
-          "presence": "R"
-        }
-      ]
-    },
-    "PreprocessorIdentityV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "tool",
-          "type": "String",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "version",
-          "type": "String",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "config_fingerprint",
-          "type": "PublicHashV1",
-          "tag": 3,
           "presence": "R"
         }
       ]
@@ -868,69 +590,6 @@
         {
           "name": "external",
           "type": "BlockContentOriginV1External",
-          "tag": 2
-        }
-      ]
-    },
-    "DependencyReadFactOutcomeV1Resolved": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "dependency_token",
-          "type": "DependencyTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "source_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 2,
-          "presence": "O"
-        },
-        {
-          "name": "canonical_identity_hash",
-          "type": "PublicHashV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "content_hash",
-          "type": "ContentHashV1",
-          "tag": 4,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyReadFactOutcomeV1Missing": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "lookup_identity_hash",
-          "type": "PublicHashV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "reason",
-          "type": "DependencyReadNegativeReasonV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyReadFactOutcomeV1": {
-      "kind": "sum",
-      "representation": "required_oneof",
-      "group": "outcome",
-      "variants": [
-        {
-          "name": "resolved",
-          "type": "DependencyReadFactOutcomeV1Resolved",
-          "tag": 1
-        },
-        {
-          "name": "missing",
-          "type": "DependencyReadFactOutcomeV1Missing",
           "tag": 2
         }
       ]
@@ -2160,140 +1819,6 @@
         }
       ]
     },
-    "PreprocessorStepV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "identity",
-          "type": "PreprocessorIdentityV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "trusted_attestation_hash",
-          "type": "PublicHashV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "input_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "output_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "input_hash",
-          "type": "ContentHashV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "output_hash",
-          "type": "ContentHashV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "map_hash",
-          "type": "QualifiedSourceMapHashV1",
-          "tag": 7,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyResolutionProvenanceV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "resolver_kind",
-          "type": "DependencyResolverKindV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "importer_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 2,
-          "presence": "O"
-        },
-        {
-          "name": "authored_specifier",
-          "type": "String",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "resolver_context_token",
-          "type": "ResolverContextTokenV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "config_context_token",
-          "type": "ConfigContextTokenV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "resolver_environment_fingerprint",
-          "type": "PublicHashV1",
-          "tag": 6,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyReadFactV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "ordinal",
-          "type": "u32",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "kind",
-          "type": "DependencyReadKindV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "outcome",
-          "type": "DependencyReadFactOutcomeV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "provenance",
-          "type": "DependencyResolutionProvenanceV1",
-          "tag": 4,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyReadSetV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "fingerprint",
-          "type": "DependencyFingerprintV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "ordered_reads",
-          "type": "DependencyReadFactV1",
-          "tag": 2,
-          "presence": "L"
-        }
-      ]
-    },
     "QualifiedMapSegmentV1": {
       "kind": "record",
       "fields": [
@@ -2359,344 +1884,6 @@
           "name": "origin_fingerprint",
           "type": "BlockContentOriginFingerprintV1",
           "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "transforms",
-          "type": "PreprocessorStepV1",
-          "tag": 3,
-          "presence": "L"
-        },
-        {
-          "name": "transform_chain_fingerprint",
-          "type": "TransformChainFingerprintV1",
-          "tag": 4,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadRequestV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "request_token",
-          "type": "ClientRequestTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_request_id",
-          "type": "DependencyRequestIdV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "importer_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 5,
-          "presence": "O"
-        },
-        {
-          "name": "authored_specifier_or_url",
-          "type": "String",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "read_kind",
-          "type": "DependencyReadKindV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "resolver_context_token",
-          "type": "ResolverContextTokenV1",
-          "tag": 8,
-          "presence": "R"
-        },
-        {
-          "name": "config_context_token",
-          "type": "ConfigContextTokenV1",
-          "tag": 9,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadEchoV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "request_token",
-          "type": "ClientRequestTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_request_id",
-          "type": "DependencyRequestIdV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "importer_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 5,
-          "presence": "O"
-        },
-        {
-          "name": "resolver_context_token",
-          "type": "ResolverContextTokenV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "config_context_token",
-          "type": "ConfigContextTokenV1",
-          "tag": 7,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedBrokerWorkRequestV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "channel",
-          "type": "TrustedBrokerChannelBindingV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "request_token",
-          "type": "ClientRequestTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "uri",
-          "type": "DocumentUriV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "client_open_epoch",
-          "type": "ClientOpenEpochTokenV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "expected_client_version",
-          "type": "ClientVersionV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "document_revision_token",
-          "type": "DocumentRevisionTokenV1",
-          "tag": 8,
-          "presence": "R"
-        },
-        {
-          "name": "artifact_token",
-          "type": "FrameworkArtifactTokenV1",
-          "tag": 9,
-          "presence": "R"
-        },
-        {
-          "name": "block_token",
-          "type": "ArtifactBlockTokenV1",
-          "tag": 10,
-          "presence": "R"
-        },
-        {
-          "name": "basis_token",
-          "type": "BlockContentBasisTokenV1",
-          "tag": 11,
-          "presence": "R"
-        },
-        {
-          "name": "selected_input",
-          "type": "SelectedBlockInputV1",
-          "tag": 12,
-          "presence": "R"
-        },
-        {
-          "name": "input_language",
-          "type": "ResolvedLanguageV1",
-          "tag": 13,
-          "presence": "R"
-        },
-        {
-          "name": "dialect",
-          "type": "ResolvedDialectV1",
-          "tag": 14,
-          "presence": "R"
-        },
-        {
-          "name": "parser_mode",
-          "type": "NestedParserModeV1",
-          "tag": 15,
-          "presence": "R"
-        },
-        {
-          "name": "origin",
-          "type": "BlockContentOriginV1",
-          "tag": 16,
-          "presence": "R"
-        },
-        {
-          "name": "prior_transforms",
-          "type": "PreprocessorStepV1",
-          "tag": 17,
-          "presence": "L"
-        },
-        {
-          "name": "work",
-          "type": "PreprocessorWorkSpecV1",
-          "tag": 18,
-          "presence": "R"
-        },
-        {
-          "name": "trusted_processor_manifest",
-          "type": "TrustedProcessorCapabilityManifestV1",
-          "tag": 19,
-          "presence": "R"
-        },
-        {
-          "name": "trusted_processor_attestation",
-          "type": "TrustedProcessorAttestationV1",
-          "tag": 20,
-          "presence": "R"
-        },
-        {
-          "name": "resolver_context_token",
-          "type": "ResolverContextTokenV1",
-          "tag": 21,
-          "presence": "R"
-        },
-        {
-          "name": "config_context_token",
-          "type": "ConfigContextTokenV1",
-          "tag": 22,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_basis",
-          "type": "DependencyReadSetV1",
-          "tag": 23,
-          "presence": "R"
-        },
-        {
-          "name": "validated_input_space",
-          "type": "SourceSpaceDescriptorV1",
-          "tag": 24,
-          "presence": "R"
-        },
-        {
-          "name": "map_basis",
-          "type": "QualifiedSourceMapV1",
-          "tag": 25,
-          "presence": "L"
-        }
-      ]
-    },
-    "TrustedBrokerWorkEchoV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "channel",
-          "type": "TrustedBrokerChannelBindingV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "request_token",
-          "type": "ClientRequestTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "client_open_epoch",
-          "type": "ClientOpenEpochTokenV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "expected_client_version",
-          "type": "ClientVersionV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "document_revision_token",
-          "type": "DocumentRevisionTokenV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "artifact_token",
-          "type": "FrameworkArtifactTokenV1",
-          "tag": 8,
-          "presence": "R"
-        },
-        {
-          "name": "block_token",
-          "type": "ArtifactBlockTokenV1",
-          "tag": 9,
-          "presence": "R"
-        },
-        {
-          "name": "basis_token",
-          "type": "BlockContentBasisTokenV1",
-          "tag": 10,
           "presence": "R"
         }
       ]
@@ -2829,80 +2016,6 @@
         }
       ]
     },
-    "BlockContentDependencyReadResponseV1": {
-      "kind": "sum",
-      "representation": "required_oneof",
-      "group": "response",
-      "variants": [
-        {
-          "name": "resolved",
-          "type": "BlockContentDependencyReadResponseV1Resolved",
-          "tag": 1
-        },
-        {
-          "name": "not_found",
-          "type": "BlockContentDependencyReadResponseV1NotFound",
-          "tag": 2
-        },
-        {
-          "name": "scope_denied",
-          "type": "BlockContentDependencyReadResponseV1ScopeDenied",
-          "tag": 3
-        },
-        {
-          "name": "cycle",
-          "type": "BlockContentDependencyReadResponseV1Cycle",
-          "tag": 4
-        },
-        {
-          "name": "budget_exceeded",
-          "type": "BlockContentDependencyReadResponseV1BudgetExceeded",
-          "tag": 5
-        },
-        {
-          "name": "stale",
-          "type": "BlockContentDependencyReadResponseV1Stale",
-          "tag": 6
-        },
-        {
-          "name": "cancelled",
-          "type": "BlockContentDependencyReadResponseV1Cancelled",
-          "tag": 7
-        },
-        {
-          "name": "failed",
-          "type": "BlockContentDependencyReadResponseV1Failed",
-          "tag": 8
-        },
-        {
-          "name": "correlation_rejected",
-          "type": "BlockContentDependencyReadResponseV1CorrelationRejected",
-          "tag": 9
-        }
-      ]
-    },
-    "TrustedBrokerWorkResultV1": {
-      "kind": "sum",
-      "representation": "required_oneof",
-      "group": "result",
-      "variants": [
-        {
-          "name": "success",
-          "type": "TrustedBrokerWorkResultV1Success",
-          "tag": 1
-        },
-        {
-          "name": "failed",
-          "type": "TrustedBrokerWorkResultV1Failed",
-          "tag": 2
-        },
-        {
-          "name": "cancelled",
-          "type": "TrustedBrokerWorkResultV1Cancelled",
-          "tag": 3
-        }
-      ]
-    },
     "Base64UrlStringV1": {
       "kind": "newtype",
       "storage": "String"
@@ -2911,15 +2024,7 @@
       "kind": "newtype",
       "storage": "String"
     },
-    "CanonicalConfigBytesV1": {
-      "kind": "newtype",
-      "storage": "Base64UrlStringV1"
-    },
     "ContentArtifactTokenV1": {
-      "kind": "newtype",
-      "storage": "OpaqueCapabilityTokenV1"
-    },
-    "ProcessorBrokerInstanceTokenV1": {
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
     },
@@ -3131,18 +2236,6 @@
           "number": 2
         },
         {
-          "name": "ProcessorPlanChanged",
-          "number": 3
-        },
-        {
-          "name": "ConfigChanged",
-          "number": 4
-        },
-        {
-          "name": "DependencyChanged",
-          "number": 5
-        },
-        {
           "name": "BasisExpired",
           "number": 6
         }
@@ -3164,104 +2257,8 @@
           "number": 3
         },
         {
-          "name": "ProcessorAuthorityUnavailable",
-          "number": 4
-        },
-        {
           "name": "BasisCaptureUnavailable",
           "number": 5
-        }
-      ]
-    },
-    "DependencyReadBudgetKindV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "ReadCount",
-          "number": 1
-        },
-        {
-          "name": "TotalUtf8Bytes",
-          "number": 2
-        },
-        {
-          "name": "Depth",
-          "number": 3
-        }
-      ]
-    },
-    "DependencyReadFailureV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "ResolverFailed",
-          "number": 1
-        },
-        {
-          "name": "ReadFailed",
-          "number": 2
-        },
-        {
-          "name": "InvalidUtf8",
-          "number": 3
-        },
-        {
-          "name": "ContentHashMismatch",
-          "number": 4
-        },
-        {
-          "name": "ProvenanceMismatch",
-          "number": 5
-        }
-      ]
-    },
-    "DependencyReadOutcomeKindV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "Resolved",
-          "number": 1
-        },
-        {
-          "name": "NotFound",
-          "number": 2
-        },
-        {
-          "name": "ScopeDenied",
-          "number": 3
-        },
-        {
-          "name": "Cycle",
-          "number": 4
-        },
-        {
-          "name": "BudgetExceeded",
-          "number": 5
-        },
-        {
-          "name": "Stale",
-          "number": 6
-        },
-        {
-          "name": "Cancelled",
-          "number": 7
-        },
-        {
-          "name": "Failed",
-          "number": 8
-        }
-      ]
-    },
-    "DependencyReadTerminalCauseV1": {
-      "kind": "enum",
-      "values": [
-        {
-          "name": "Cancelled",
-          "number": 1
-        },
-        {
-          "name": "Closed",
-          "number": 2
         }
       ]
     },
@@ -3501,177 +2498,6 @@
         }
       ]
     },
-    "TrustedProcessorCapabilityManifestV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "schema_version",
-          "type": "u32",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "processor_binary_hash",
-          "type": "PublicHashV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "sandbox_profile_hash",
-          "type": "PublicHashV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "permitted_dependency_kinds",
-          "type": "DependencyReadKindV1",
-          "tag": 4,
-          "presence": "L"
-        },
-        {
-          "name": "ambient_filesystem",
-          "type": "DeniedCapabilityV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "ambient_network",
-          "type": "DeniedCapabilityV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "child_process",
-          "type": "DeniedCapabilityV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "native_addon_loading",
-          "type": "DeniedCapabilityV1",
-          "tag": 8,
-          "presence": "R"
-        },
-        {
-          "name": "environment_access",
-          "type": "DeniedCapabilityV1",
-          "tag": 9,
-          "presence": "R"
-        },
-        {
-          "name": "ambient_package_resolution",
-          "type": "DeniedCapabilityV1",
-          "tag": 10,
-          "presence": "R"
-        },
-        {
-          "name": "dynamic_module_loading",
-          "type": "DynamicModuleAuthorityV1",
-          "tag": 11,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedProcessorAttestationV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "broker_instance_token",
-          "type": "ProcessorBrokerInstanceTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "launch_nonce",
-          "type": "Base64UrlStringV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "executable_hash",
-          "type": "PublicHashV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "config_hash",
-          "type": "PublicHashV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "module_graph_hash",
-          "type": "PublicHashV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "os_sandbox_kind",
-          "type": "ProcessorSandboxKindV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "sandbox_profile_hash",
-          "type": "PublicHashV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "manifest_hash",
-          "type": "PublicHashV1",
-          "tag": 8,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedBrokerChannelBindingV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "broker_instance_token",
-          "type": "ProcessorBrokerInstanceTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "broker_ephemeral_public_key",
-          "type": "Base64UrlStringV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "worker_ephemeral_public_key",
-          "type": "Base64UrlStringV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "launch_nonce",
-          "type": "Base64UrlStringV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "handshake_transcript_hash",
-          "type": "PublicHashV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "broker_attestation_hash",
-          "type": "PublicHashV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "worker_attestation_hash",
-          "type": "PublicHashV1",
-          "tag": 7,
-          "presence": "R"
-        }
-      ]
-    },
     "SelectedBlockInputV1": {
       "kind": "record",
       "fields": [
@@ -3703,59 +2529,6 @@
           "name": "input_hash",
           "type": "ContentHashV1",
           "tag": 5,
-          "presence": "R"
-        }
-      ]
-    },
-    "PreprocessorWorkSpecV1": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "identity",
-          "type": "PreprocessorIdentityV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "canonical_config_bytes",
-          "type": "CanonicalConfigBytesV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "input_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "assigned_output_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "expected_input_language",
-          "type": "ResolvedLanguageV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "output_language",
-          "type": "ResolvedLanguageV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "output_dialect",
-          "type": "ResolvedDialectV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "output_parser_mode",
-          "type": "NestedParserModeV1",
-          "tag": 8,
           "presence": "R"
         }
       ]
@@ -3839,12 +2612,6 @@
           "name": "provenance",
           "type": "BlockContentProvenanceV1",
           "tag": 13,
-          "presence": "R"
-        },
-        {
-          "name": "dependencies",
-          "type": "DependencyReadSetV1",
-          "tag": 14,
           "presence": "R"
         }
       ]
@@ -4009,413 +2776,6 @@
           "type": "BlockContentCapturedEchoV1",
           "tag": 1,
           "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1Resolved": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_token",
-          "type": "DependencyTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "source_space",
-          "type": "SourceSpaceDescriptorV1",
-          "tag": 3,
-          "presence": "O"
-        },
-        {
-          "name": "content",
-          "type": "Utf8TextV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "content_hash",
-          "type": "ContentHashV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "encoding",
-          "type": "SourceEncodingV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "provenance",
-          "type": "DependencyResolutionProvenanceV1",
-          "tag": 7,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1NotFound": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "provenance",
-          "type": "DependencyResolutionProvenanceV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1ScopeDenied": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "provenance",
-          "type": "DependencyResolutionProvenanceV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1Cycle": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "cycle_tokens",
-          "type": "DependencyTokenV1",
-          "tag": 2,
-          "presence": "L"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1BudgetExceeded": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "limit",
-          "type": "DependencyReadBudgetKindV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1Stale": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1Cancelled": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1Failed": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "failure",
-          "type": "DependencyReadFailureV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "BlockContentDependencyReadResponseV1CorrelationRejected": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "BlockContentDependencyReadEchoV1",
-          "tag": 1,
-          "presence": "O"
-        },
-        {
-          "name": "candidate_id_hash",
-          "type": "PublicHashV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "reason",
-          "type": "DependencyRequestCorrelationRejectV1",
-          "tag": 3,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedBrokerWorkResultV1Success": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "TrustedBrokerWorkEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "identity",
-          "type": "PreprocessorIdentityV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "trusted_attestation_hash",
-          "type": "PublicHashV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "generated_content",
-          "type": "Utf8TextV1",
-          "tag": 4,
-          "presence": "R"
-        },
-        {
-          "name": "generated_content_hash",
-          "type": "ContentHashV1",
-          "tag": 5,
-          "presence": "R"
-        },
-        {
-          "name": "assigned_output_space_token",
-          "type": "SourceSpaceTokenV1",
-          "tag": 6,
-          "presence": "R"
-        },
-        {
-          "name": "output_utf8_byte_len",
-          "type": "Utf8ByteLengthV1",
-          "tag": 7,
-          "presence": "R"
-        },
-        {
-          "name": "immediate_map",
-          "type": "QualifiedSourceMapV1",
-          "tag": 8,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_delta",
-          "type": "DependencyReadSetV1",
-          "tag": 9,
-          "presence": "R"
-        },
-        {
-          "name": "resolved_language",
-          "type": "ResolvedLanguageV1",
-          "tag": 10,
-          "presence": "R"
-        },
-        {
-          "name": "dialect",
-          "type": "ResolvedDialectV1",
-          "tag": 11,
-          "presence": "R"
-        },
-        {
-          "name": "parser_mode",
-          "type": "NestedParserModeV1",
-          "tag": 12,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedBrokerWorkResultV1Failed": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "TrustedBrokerWorkEchoV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "failure",
-          "type": "TrustedBrokerProcessingFailureV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "TrustedBrokerWorkResultV1Cancelled": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "echo",
-          "type": "TrustedBrokerWorkEchoV1",
-          "tag": 1,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyRequestCorrelationAuditEventV1Pending": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_request_id",
-          "type": "DependencyRequestIdV1",
-          "tag": 3,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyRequestCorrelationAuditEventV1Consumed": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "dependency_request_id",
-          "type": "DependencyRequestIdV1",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "outcome",
-          "type": "DependencyReadOutcomeKindV1",
-          "tag": 4,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyRequestCorrelationAuditEventV1Rejected": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "candidate_id_hash",
-          "type": "PublicHashV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "reason",
-          "type": "DependencyRequestCorrelationRejectV1",
-          "tag": 2,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyRequestCorrelationAuditEventV1OutstandingDestroyed": {
-      "kind": "record",
-      "fields": [
-        {
-          "name": "resolve_context_token",
-          "type": "BlockContentResolveContextTokenV1",
-          "tag": 1,
-          "presence": "R"
-        },
-        {
-          "name": "work_token",
-          "type": "BlockContentWorkTokenV1",
-          "tag": 2,
-          "presence": "R"
-        },
-        {
-          "name": "count",
-          "type": "u32",
-          "tag": 3,
-          "presence": "R"
-        },
-        {
-          "name": "cause",
-          "type": "DependencyReadTerminalCauseV1",
-          "tag": 4,
-          "presence": "R"
-        }
-      ]
-    },
-    "DependencyRequestCorrelationAuditEventV1": {
-      "kind": "sum",
-      "representation": "required_oneof",
-      "group": "event",
-      "variants": [
-        {
-          "name": "pending",
-          "type": "DependencyRequestCorrelationAuditEventV1Pending",
-          "tag": 1
-        },
-        {
-          "name": "consumed",
-          "type": "DependencyRequestCorrelationAuditEventV1Consumed",
-          "tag": 2
-        },
-        {
-          "name": "rejected",
-          "type": "DependencyRequestCorrelationAuditEventV1Rejected",
-          "tag": 3
-        },
-        {
-          "name": "outstanding_destroyed",
-          "type": "DependencyRequestCorrelationAuditEventV1OutstandingDestroyed",
-          "tag": 4
         }
       ]
     },
@@ -7699,7 +6059,6 @@
     "decoded_value_key": "exact source-space/range/closed recipe; private lazy cache is noncanonical",
     "source_space_table": "id equals table index; exact UTF-8 bytes/hash/length/sealed identity; validate before spans/maps",
     "qualified_map_algebra": "source/destination space qualified half-open ranges; declared tokens complete; exact/approximate fidelity; compose and invert only after bounds/hash/acyclic validation",
-    "origin_transform_dependency_identity": "origin fingerprint plus ordered trusted-attested transform chain plus ordered dependency read set including negative facts and duplicates",
     "stable_grammar_fingerprint": "SHA-256 over domain-separated versioned canonical adapter id/semantic version/language/config/parser grammar version; excludes live grammar authority namespace",
     "live_authority": "source and grammar namespaces remain sealed in FrameworkArtifactId for ABA prevention",
     "constructors": "source snapshots accepted source+grammar registered structures capabilities and authority ids are private; serialization cannot mint",
@@ -7709,7 +6068,6 @@
       "Terminal"
     ],
     "publication_lane": "entered before persistent lookup/deserialization/parse; one leader; waiters reuse exact terminal Arc",
-    "processor_trust": "mutually authenticated authority-broker IPC; fresh attested denied-by-default worker; public client cannot answer work",
     "basis_handshake": "pre-capture echo is tokenless; authority atomically captures then emits captured echo with basis token exactly once",
     "document_freshness": "URI/open epoch/exact client version checked before and after await; close/reopen lifetime cannot alias",
     "root_cardinality": "each arena root belongs to exactly one block relation; no global root vector; descendants inherit owner"
@@ -7722,16 +6080,7 @@
     "server_to_client": [
       "DocumentStructureResponseV1",
       "BlockContentResolveResponseV1"
-    ],
-    "authority_broker_to_worker": [
-      "TrustedBrokerWorkRequestV1",
-      "BlockContentDependencyReadResponseV1"
-    ],
-    "worker_to_authority_broker": [
-      "TrustedBrokerWorkResultV1",
-      "BlockContentDependencyReadRequestV1"
-    ],
-    "public_processor_callback": false
+    ]
   },
   "component_meta_cutover": {
     "schema_version": 8,
@@ -7821,18 +6170,6 @@
       "BlockContentArtifactSchemaVersion",
       "BlockContentBasisTokenV1",
       "BlockContentCapturedEchoV1",
-      "BlockContentDependencyReadEchoV1",
-      "BlockContentDependencyReadRequestV1",
-      "BlockContentDependencyReadResponseV1",
-      "BlockContentDependencyReadResponseV1BudgetExceeded",
-      "BlockContentDependencyReadResponseV1Cancelled",
-      "BlockContentDependencyReadResponseV1CorrelationRejected",
-      "BlockContentDependencyReadResponseV1Cycle",
-      "BlockContentDependencyReadResponseV1Failed",
-      "BlockContentDependencyReadResponseV1NotFound",
-      "BlockContentDependencyReadResponseV1Resolved",
-      "BlockContentDependencyReadResponseV1ScopeDenied",
-      "BlockContentDependencyReadResponseV1Stale",
       "BlockContentOriginFingerprintV1",
       "BlockContentOriginV1",
       "BlockContentOriginV1External",
@@ -7857,10 +6194,8 @@
       "BlockContentResolveResponseV1PreCaptureStale",
       "BlockContentResolveResponseV1PreCaptureUnavailable",
       "BlockContentResolveResponseV1Resolved",
-      "BlockContentWorkTokenV1",
       "BlockRecoveryReasonV1",
       "CacheClusterSchemaVersion",
-      "CanonicalConfigBytesV1",
       "CanonicalRangeV1",
       "CanonicalRangeV1Lsp",
       "CanonicalRangeV1Offset",
@@ -7894,29 +6229,6 @@
       "ContractDegradation",
       "ContractDegradationCode",
       "ContractExactness",
-      "DeniedCapabilityV1",
-      "DependencyFingerprintV1",
-      "DependencyReadBudgetKindV1",
-      "DependencyReadFactOutcomeV1",
-      "DependencyReadFactOutcomeV1Missing",
-      "DependencyReadFactOutcomeV1Resolved",
-      "DependencyReadFactV1",
-      "DependencyReadFailureV1",
-      "DependencyReadKindV1",
-      "DependencyReadNegativeReasonV1",
-      "DependencyReadOutcomeKindV1",
-      "DependencyReadSetV1",
-      "DependencyReadTerminalCauseV1",
-      "DependencyRequestCorrelationAuditEventV1",
-      "DependencyRequestCorrelationAuditEventV1Consumed",
-      "DependencyRequestCorrelationAuditEventV1OutstandingDestroyed",
-      "DependencyRequestCorrelationAuditEventV1Pending",
-      "DependencyRequestCorrelationAuditEventV1Rejected",
-      "DependencyRequestCorrelationRejectV1",
-      "DependencyRequestIdV1",
-      "DependencyResolutionProvenanceV1",
-      "DependencyResolverKindV1",
-      "DependencyTokenV1",
       "DescriptorHandle",
       "DescriptorManifestToken",
       "DirectiveArgumentV1",
@@ -7940,7 +6252,6 @@
       "DocumentStructureV1",
       "DocumentUnavailableReasonV1",
       "DocumentUriV1",
-      "DynamicModuleAuthorityV1",
       "EachHead",
       "EntityDecodeRecipeV1",
       "EntityDecodeRecipeV1Html5Attribute",
@@ -8001,11 +6312,6 @@
       "PositionEncodingSessionTokenV1",
       "PostCaptureProcessingFailureV1",
       "PreCaptureValidationFailureV1",
-      "PreprocessorIdentityV1",
-      "PreprocessorStepV1",
-      "PreprocessorWorkSpecV1",
-      "ProcessorBrokerInstanceTokenV1",
-      "ProcessorSandboxKindV1",
       "ProviderProtocolVersion",
       "PublicCallSignature",
       "PublicDerivedHandlerShape",
@@ -8158,17 +6464,6 @@
       "TerminalTypeDisplayFormat",
       "TextDocumentIdentifierV1",
       "TextSyntax",
-      "TransformChainFingerprintV1",
-      "TrustedBrokerChannelBindingV1",
-      "TrustedBrokerProcessingFailureV1",
-      "TrustedBrokerWorkEchoV1",
-      "TrustedBrokerWorkRequestV1",
-      "TrustedBrokerWorkResultV1",
-      "TrustedBrokerWorkResultV1Cancelled",
-      "TrustedBrokerWorkResultV1Failed",
-      "TrustedBrokerWorkResultV1Success",
-      "TrustedProcessorAttestationV1",
-      "TrustedProcessorCapabilityManifestV1",
       "TypeExactness",
       "TypePublicationMeta",
       "TypeReferenceLookupFailure",
@@ -8188,8 +6483,7 @@
       "Utf8ByteLengthV1",
       "Utf8TextV1",
       "VueDirectiveKindV1",
-      "WasmSchemaVersion",
-      "WorkerRequestNonceV1"
+      "WasmSchemaVersion"
     ],
     "projection_bijection": "closed canonical_to_v1 plus exhaustive authority_materialized_fields",
     "component_public_contract_schema_version": "envelope-owned only"

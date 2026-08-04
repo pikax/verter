@@ -87,14 +87,14 @@
             "pre_registration_probe": 1,
             "public_projection": 1,
             "carrier_parser": 6,
-            "synthetic_carrier": 6,
+            "stamped_content_handoff": 8,
+            "synthetic_carrier": 1,
             "shipped_bundle": 8,
-            "trusted_processor": 3,
             "standalone_compile": 1
         },
         "by_disposition": {
-            "delete": 35,
-            "migrate": 9,
+            "delete": 27,
+            "migrate": 17,
             "allowed_nested": 2,
             "allowed_standalone": 1
         }
@@ -396,7 +396,7 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471 (fail-closed at 72d7608a9: typed ExternalBlockContentDeferred(B-23); DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471 (typed ExternalBlockContentDeferred; VFS read and native parse migration owned by the native-content cutover)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
@@ -444,10 +444,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L1207 (OPEN at 72d7608a9 — surface DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate); interim contract: docs/arch/scanners-replacement-preprocessor-interim.md)",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
@@ -460,7 +460,7 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280 (fail-closed at 72d7608a9: external-src style analysis is typed-deferred B-23; DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280 (external-src style analysis is typed-deferred; VFS read and native parse migration owned by the native-content cutover)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
@@ -476,7 +476,7 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L3018 (OPEN at 72d7608a9 — storage DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate) with the callback surface; the block_splice synthetic-source half is deleted)",
+            "candidate_evidence": "tracked_source@0f28184d76:L3018 (synthetic content-override cache deletion owned by the SCH-ADD sealed-token handoff cutover; the block_splice synthetic-source half is deleted)",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
@@ -492,10 +492,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
@@ -556,10 +556,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "generated_manifest (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "generated_manifest (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "compiler.spec.ts::overrides style content without re-upsert",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
@@ -572,10 +572,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "compiler.spec.ts::overrides style content without re-upsert",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
@@ -668,10 +668,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — preprocessor callback lane, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-94",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
@@ -700,10 +700,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface type, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
@@ -716,10 +716,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface option, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
@@ -754,7 +754,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -770,7 +770,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -786,7 +786,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -802,7 +802,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -818,7 +818,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -828,10 +828,10 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM JS arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
             "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
             "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"

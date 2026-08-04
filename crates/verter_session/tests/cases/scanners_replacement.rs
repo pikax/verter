@@ -56,18 +56,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "BlockContentArtifactSchemaVersion",
     "BlockContentBasisTokenV1",
     "BlockContentCapturedEchoV1",
-    "BlockContentDependencyReadEchoV1",
-    "BlockContentDependencyReadRequestV1",
-    "BlockContentDependencyReadResponseV1",
-    "BlockContentDependencyReadResponseV1BudgetExceeded",
-    "BlockContentDependencyReadResponseV1Cancelled",
-    "BlockContentDependencyReadResponseV1CorrelationRejected",
-    "BlockContentDependencyReadResponseV1Cycle",
-    "BlockContentDependencyReadResponseV1Failed",
-    "BlockContentDependencyReadResponseV1NotFound",
-    "BlockContentDependencyReadResponseV1Resolved",
-    "BlockContentDependencyReadResponseV1ScopeDenied",
-    "BlockContentDependencyReadResponseV1Stale",
     "BlockContentOriginFingerprintV1",
     "BlockContentOriginV1",
     "BlockContentOriginV1External",
@@ -92,10 +80,8 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "BlockContentResolveResponseV1PreCaptureStale",
     "BlockContentResolveResponseV1PreCaptureUnavailable",
     "BlockContentResolveResponseV1Resolved",
-    "BlockContentWorkTokenV1",
     "BlockRecoveryReasonV1",
     "CacheClusterSchemaVersion",
-    "CanonicalConfigBytesV1",
     "CanonicalRangeV1",
     "CanonicalRangeV1Lsp",
     "CanonicalRangeV1Offset",
@@ -129,29 +115,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "ContractDegradation",
     "ContractDegradationCode",
     "ContractExactness",
-    "DeniedCapabilityV1",
-    "DependencyFingerprintV1",
-    "DependencyReadBudgetKindV1",
-    "DependencyReadFactOutcomeV1",
-    "DependencyReadFactOutcomeV1Missing",
-    "DependencyReadFactOutcomeV1Resolved",
-    "DependencyReadFactV1",
-    "DependencyReadFailureV1",
-    "DependencyReadKindV1",
-    "DependencyReadNegativeReasonV1",
-    "DependencyReadOutcomeKindV1",
-    "DependencyReadSetV1",
-    "DependencyReadTerminalCauseV1",
-    "DependencyRequestCorrelationAuditEventV1",
-    "DependencyRequestCorrelationAuditEventV1Consumed",
-    "DependencyRequestCorrelationAuditEventV1OutstandingDestroyed",
-    "DependencyRequestCorrelationAuditEventV1Pending",
-    "DependencyRequestCorrelationAuditEventV1Rejected",
-    "DependencyRequestCorrelationRejectV1",
-    "DependencyRequestIdV1",
-    "DependencyResolutionProvenanceV1",
-    "DependencyResolverKindV1",
-    "DependencyTokenV1",
     "DescriptorHandle",
     "DescriptorManifestToken",
     "DirectiveArgumentV1",
@@ -175,7 +138,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "DocumentStructureV1",
     "DocumentUnavailableReasonV1",
     "DocumentUriV1",
-    "DynamicModuleAuthorityV1",
     "EachHead",
     "EntityDecodeRecipeV1",
     "EntityDecodeRecipeV1Html5Attribute",
@@ -236,11 +198,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "PositionEncodingSessionTokenV1",
     "PostCaptureProcessingFailureV1",
     "PreCaptureValidationFailureV1",
-    "PreprocessorIdentityV1",
-    "PreprocessorStepV1",
-    "PreprocessorWorkSpecV1",
-    "ProcessorBrokerInstanceTokenV1",
-    "ProcessorSandboxKindV1",
     "ProviderProtocolVersion",
     "PublicCallSignature",
     "PublicDerivedHandlerShape",
@@ -393,17 +350,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "TerminalTypeDisplayFormat",
     "TextDocumentIdentifierV1",
     "TextSyntax",
-    "TransformChainFingerprintV1",
-    "TrustedBrokerChannelBindingV1",
-    "TrustedBrokerProcessingFailureV1",
-    "TrustedBrokerWorkEchoV1",
-    "TrustedBrokerWorkRequestV1",
-    "TrustedBrokerWorkResultV1",
-    "TrustedBrokerWorkResultV1Cancelled",
-    "TrustedBrokerWorkResultV1Failed",
-    "TrustedBrokerWorkResultV1Success",
-    "TrustedProcessorAttestationV1",
-    "TrustedProcessorCapabilityManifestV1",
     "TypeExactness",
     "TypePublicationMeta",
     "TypeReferenceLookupFailure",
@@ -424,7 +370,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "Utf8TextV1",
     "VueDirectiveKindV1",
     "WasmSchemaVersion",
-    "WorkerRequestNonceV1",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -641,29 +586,6 @@ fn validate_frozen_schema(schema: &Value) -> Result<(), String> {
     if schema["grammars"]["PublicHashV1"] != "^sha256:[0-9a-f]{64}$" {
         return Err("PublicHashV1 grammar drifted".into());
     }
-    if schema["declarations"]["PreprocessorStepV1"]["fields"]
-        != serde_json::json!([
-            {"name":"identity","type":"PreprocessorIdentityV1","tag":1,"presence":"R"},
-            {"name":"trusted_attestation_hash","type":"PublicHashV1","tag":2,"presence":"R"},
-            {"name":"input_space_token","type":"SourceSpaceTokenV1","tag":3,"presence":"R"},
-            {"name":"output_space_token","type":"SourceSpaceTokenV1","tag":4,"presence":"R"},
-            {"name":"input_hash","type":"ContentHashV1","tag":5,"presence":"R"},
-            {"name":"output_hash","type":"ContentHashV1","tag":6,"presence":"R"},
-            {"name":"map_hash","type":"QualifiedSourceMapHashV1","tag":7,"presence":"R"}
-        ])
-    {
-        return Err("PreprocessorStepV1 tag/presence ledger drifted".into());
-    }
-    if schema["declarations"]["DependencyResolutionProvenanceV1"]["fields"]
-        .as_array()
-        .is_none_or(|fields| {
-            fields.len() != 6
-                || fields[1]
-                    != serde_json::json!({"name":"importer_space_token","type":"SourceSpaceTokenV1","tag":2,"presence":"O"})
-        })
-    {
-        return Err("DependencyResolutionProvenanceV1 tag/presence ledger drifted".into());
-    }
     if schema["declarations"]["PreCaptureValidationFailureV1"]["values"]
         != serde_json::json!([
             {"name":"MissingOwner","number":1},
@@ -745,30 +667,6 @@ fn scanners_replacement_schema_mutations_fail_completeness() {
         .unwrap_err()
         .contains("PublicationPolicyExactOnly"));
 
-    let mut dropped_attestation = schema.clone();
-    dropped_attestation["declarations"]["PreprocessorStepV1"]["fields"]
-        .as_array_mut()
-        .unwrap()
-        .remove(1);
-    assert!(validate_frozen_schema(&dropped_attestation)
-        .unwrap_err()
-        .contains("PreprocessorStepV1 tag/presence"));
-
-    let mut representation_only = schema.clone();
-    representation_only["declarations"]["DependencyResolutionProvenanceV1"]["fields"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "name": "resolved_display_url",
-            "type": "String",
-            "tag": 7,
-            "presence": "O"
-        }));
-    assert_eq!(
-        validate_frozen_schema(&representation_only).unwrap_err(),
-        "DependencyResolutionProvenanceV1 tag/presence ledger drifted"
-    );
-
     let mut flat_range = schema.clone();
     flat_range["declarations"]["CanonicalRangeV1"]["representation"] =
         Value::String("record".into());
@@ -780,7 +678,7 @@ fn scanners_replacement_schema_mutations_fail_completeness() {
     cross_phase["declarations"]["PreCaptureValidationFailureV1"]["values"]
         .as_array_mut()
         .unwrap()
-        .push(serde_json::json!({"name":"ProcessorExecutionFailed","number":7}));
+        .push(serde_json::json!({"name":"PostCaptureFailure","number":7}));
     assert_eq!(
         validate_frozen_schema(&cross_phase).unwrap_err(),
         "pre-capture phase algebra drifted"
