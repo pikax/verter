@@ -16,6 +16,13 @@
 //! from the skeleton ALONE ([`flow_graph::build_function_flow_graph`] takes
 //! only `&FunctionBodySkeleton`), so a graph build can never re-walk the AST
 //! or observe a query demand.
+//!
+//! On top of the graph: [`peeker::ReturnPathPeeker`] plans a demand slice
+//! as graph reachability (the two-frontier rule as edge classes) into a
+//! [`flow_ir::ReturnSlicePlan`]; [`hashing::compute_flow_slice_hash`]
+//! folds exactly that selected subgraph into the opaque
+//! [`hashing::FlowSliceHash`]; and [`lower::lower_slice_plan`] lowers only
+//! the plan into the arena-free [`flow_ir::FlowSliceIR`].
 
 use std::sync::Arc;
 
@@ -32,6 +39,10 @@ use verter_no_typeexpr::NoTypeExpr;
 use crate::analysis::function_program::static_property_key_name;
 
 pub mod flow_graph;
+pub mod flow_ir;
+pub mod hashing;
+pub mod lower;
+pub mod peeker;
 
 #[cfg(test)]
 #[path = "skeleton_tests.rs"]
