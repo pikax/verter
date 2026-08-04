@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use verter_css_syntax::{
     parse_lossless, parse_with_sink, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure,
-    CssParseMode, CssSource, LosslessCst, LosslessCstSink, NodeFlags, ParseEvent, ParseEventSink,
-    SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TokenKind,
+    CssParseMode, CssSource, CssSyntaxGrammarVersion, LosslessCst, LosslessCstSink, NodeFlags,
+    ParseEvent, ParseEventSink, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TokenKind,
 };
 
 use crate::measure_allocations;
@@ -20,6 +20,26 @@ struct RuntimeSink {
     custom_properties: usize,
     qualified_rules: usize,
     unicode_ranges: usize,
+}
+
+// @ai-generated - Pins the cache-visible grammar identity and the extended single taxonomy.
+#[test]
+fn grammar_version_and_extended_syntax_kinds_are_public_and_total() {
+    assert!(CssSyntaxGrammarVersion::CURRENT.as_u32() > 0);
+    for kind in [
+        SyntaxKind::ClassSelector,
+        SyntaxKind::IdSelector,
+        SyntaxKind::TypeSelector,
+        SyntaxKind::Interpolation,
+        SyntaxKind::IndentedBlock,
+        SyntaxKind::AmbiguousStatement,
+        SyntaxKind::VariableDeclaration,
+        SyntaxKind::MixinOrFunctionHeader,
+        SyntaxKind::ControlDirective,
+    ] {
+        assert_eq!(SyntaxKind::from_raw(kind as u16), kind);
+        assert_ne!(kind, SyntaxKind::Recovery);
+    }
 }
 
 impl ParseEventSink for RuntimeSink {

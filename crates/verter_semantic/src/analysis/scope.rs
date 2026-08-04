@@ -185,9 +185,9 @@ impl AnalysisScope {
         )
     }
 
-    /// Returns `true` if full CSS analysis (scanner-based) should run.
+    /// Returns `true` if full style syntax analysis should run.
     /// When only `STYLE_VBIND` or `STYLE_SCOPED` is set, we can skip
-    /// the CSS scanner and use lightweight extraction.
+    /// the full syntax projection and use lightweight extraction.
     pub fn needs_full_css_analysis(self) -> bool {
         self.contains(Self::STYLE_CSS)
     }

@@ -4315,6 +4315,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "static_assertions",
+ "verter_css_syntax",
  "verter_language",
  "verter_no_typeexpr",
  "verter_parser",

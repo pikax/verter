@@ -49,6 +49,63 @@ fn wpt_selector_structure_and_spans() {
     );
 }
 
+// @ai-generated - Proves list/complex/compound hierarchy and exact selector-name spans.
+#[test]
+fn selector_structure_exposes_hierarchical_type_class_and_id_components() {
+    let input = "svg.card#hero > .label, button.primary";
+    let source = CssSource::new(Arc::from(input), 9).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+
+    assert_eq!(structure.list().selectors().len(), 2);
+    let first = &structure.list().selectors()[0];
+    assert_eq!(first.compounds().len(), 2);
+    assert_eq!(first.combinators().len(), 1);
+
+    let components: Vec<_> = first
+        .compounds()
+        .iter()
+        .flat_map(|compound| compound.components())
+        .collect();
+    assert_eq!(components[0].kind(), SelectorComponentKind::Type);
+    assert_eq!(source.slice(components[0].name_span().unwrap()), "svg");
+    assert_eq!(components[1].kind(), SelectorComponentKind::Class);
+    assert_eq!(source.slice(components[1].name_span().unwrap()), "card");
+    assert_eq!(components[2].kind(), SelectorComponentKind::Id);
+    assert_eq!(source.slice(components[2].name_span().unwrap()), "hero");
+    assert!(structure.facts().is_complete_static());
+}
+
+// @ai-generated - Proves interpolation keeps fragments but never publishes a concrete class.
+#[test]
+fn interpolated_class_is_dynamic_with_positioned_fragments() {
+    let input = ".icon-#{tone}-active, .safe";
+    let source = CssSource::new(Arc::from(input), 20).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Scss).unwrap();
+    let dynamic = structure.list().selectors()[0].compounds()[0]
+        .components()
+        .iter()
+        .find(|component| component.kind() == SelectorComponentKind::DynamicClass)
+        .expect("interpolated class is typed dynamic");
+
+    assert_eq!(dynamic.name_span(), None);
+    let fragments: Vec<_> = dynamic
+        .static_fragments()
+        .iter()
+        .map(|span| source.slice(*span))
+        .collect();
+    assert_eq!(fragments, vec!["icon-", "-active"]);
+    assert_eq!(dynamic.interpolations().len(), 1);
+    assert_eq!(
+        source.slice(dynamic.interpolations()[0].full_span()),
+        "#{tone}"
+    );
+    assert!(structure.facts().is_dynamic());
+
+    let safe = &structure.list().selectors()[1].compounds()[0].components()[0];
+    assert_eq!(safe.kind(), SelectorComponentKind::Class);
+    assert_eq!(source.slice(safe.name_span().unwrap()), "safe");
+}
+
 #[test]
 fn nth_child_and_nth_last_child_of_are_structural() {
     let input = ":nth-child(2n + 1 of .item, [hidden=\"a,b\"]), :nth-last-child(odd of :is(.a,.b))";
@@ -56,7 +113,7 @@ fn nth_child_and_nth_last_child_of_are_structural() {
     let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
     let nth: Vec<_> = structure
         .pseudos()
-        .iter()
+        .into_iter()
         .filter(|pseudo| {
             matches!(
                 pseudo.kind(),
@@ -375,7 +432,7 @@ fn nth_formulas_respect_token_boundaries_signs_comments_and_of_lists() {
         let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
         let pseudo = structure
             .pseudos()
-            .iter()
+            .into_iter()
             .find(|pseudo| {
                 matches!(
                     pseudo.kind(),
@@ -455,7 +512,7 @@ fn unknown_functional_pseudos_keep_lossless_component_values() {
     let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
     let pseudo = structure
         .pseudos()
-        .iter()
+        .into_iter()
         .find(|pseudo| pseudo.kind() == PseudoFunctionKind::Unknown)
         .unwrap();
 
@@ -506,7 +563,7 @@ fn selector_facts_come_from_canonical_tokens_and_events() {
         .filter(|component| component.kind() == SelectorComponentKind::Namespace)
         .map(|component| source.slice(component.span()).to_owned())
         .collect();
-    let mut pseudos: Vec<_> = structure.pseudos().iter().collect();
+    let mut pseudos: Vec<_> = structure.pseudos();
     pseudos.sort_by_key(|pseudo| pseudo.span().start);
 
     assert_eq!(namespaces, vec!["|element", "*|x", "|att", "*|att"]);
@@ -535,7 +592,7 @@ fn comments_are_transparent_for_selector_adjacency_but_whitespace_is_not() {
     let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
     let pseudo = structure
         .pseudos()
-        .iter()
+        .into_iter()
         .find(|pseudo| pseudo.kind() == PseudoFunctionKind::Is)
         .unwrap();
     let namespaces: Vec<_> = structure
@@ -625,7 +682,7 @@ fn dialect_interpolations_balance_in_selector_grammar() {
             .nodes()
             .iter()
             .find(|node| {
-                node.kind() == verter_css_syntax::SyntaxKind::ComponentValueBlock
+                node.kind() == verter_css_syntax::SyntaxKind::Interpolation
                     && node.flags & verter_css_syntax::NodeFlags::DIALECT_EXTENSION.0 != 0
             })
             .unwrap();

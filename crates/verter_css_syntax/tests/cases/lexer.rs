@@ -53,7 +53,12 @@ fn css_syntax_wpt_tokenization_is_exact() {
             (TokenKind::Colon, 0, 36, 37),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 37, 38),
             (TokenKind::BadString, TokenFlags::UNTERMINATED, 38, 40),
-            (TokenKind::Whitespace, TokenFlags::TRIVIA, 40, 41),
+            (
+                TokenKind::Whitespace,
+                TokenFlags::TRIVIA | TokenFlags::CONTAINS_NEWLINE,
+                40,
+                41,
+            ),
             (TokenKind::Semicolon, 0, 41, 42),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 42, 43),
             (TokenKind::Ident, 0, 43, 44),
@@ -63,7 +68,12 @@ fn css_syntax_wpt_tokenization_is_exact() {
             (TokenKind::Semicolon, 0, 54, 55),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 55, 56),
             (TokenKind::RightBrace, 0, 56, 57),
-            (TokenKind::Whitespace, TokenFlags::TRIVIA, 57, 59),
+            (
+                TokenKind::Whitespace,
+                TokenFlags::TRIVIA | TokenFlags::CONTAINS_NEWLINE,
+                57,
+                59,
+            ),
         ]
     );
     assert_eq!(
@@ -106,6 +116,29 @@ fn css_and_dialect_extensions_are_distinct_and_lossless() {
         source.slice_tokens(Lexer::new(&source, CssDialect::Less)),
         source.text()
     );
+}
+
+// @ai-generated - Verifies layout facts and Stylus interpolation remain lexical and lossless.
+#[test]
+fn layout_newlines_and_stylus_interpolation_are_lexical_facts() {
+    let input = ".icon-{name}\n  color red\n.value-${tone}\n";
+    let source = CssSource::new(Arc::from(input), 11).unwrap();
+    let stylus: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+
+    let newline_tokens: Vec<_> = stylus
+        .iter()
+        .filter(|token| token.flags & TokenFlags::CONTAINS_NEWLINE != 0)
+        .map(|token| source.token_text(*token))
+        .collect();
+    assert_eq!(newline_tokens, vec!["\n  ", "\n", "\n"]);
+
+    let interpolations: Vec<_> = stylus
+        .iter()
+        .filter(|token| token.kind() == TokenKind::StylusInterpolationStart)
+        .map(|token| source.token_text(*token))
+        .collect();
+    assert_eq!(interpolations, vec!["{", "${"]);
+    assert_eq!(source.slice_tokens(stylus), input);
 }
 
 #[test]
@@ -185,7 +218,7 @@ fn strings_consume_shared_css_escapes_and_escaped_newlines() {
             "\"\\a\nx\"",
             CssDialect::Css,
             TokenKind::String,
-            TokenFlags::CONTAINS_ESCAPE,
+            TokenFlags::CONTAINS_ESCAPE | TokenFlags::CONTAINS_NEWLINE,
         ),
         (
             "\"\\123456x\"",
@@ -197,7 +230,7 @@ fn strings_consume_shared_css_escapes_and_escaped_newlines() {
             "\"x\\\r\ny\"",
             CssDialect::Css,
             TokenKind::String,
-            TokenFlags::CONTAINS_ESCAPE,
+            TokenFlags::CONTAINS_ESCAPE | TokenFlags::CONTAINS_NEWLINE,
         ),
         (
             "~\"\\41 B\"",

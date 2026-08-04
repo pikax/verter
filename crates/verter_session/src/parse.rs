@@ -877,7 +877,7 @@ fn build_svelte_snapshot_from_eval_source(
     // Svelte style + markup class facts — the carrier analog of the Vue
     // style-analysis / template-element class inventory. Svelte styles are
     // scoped by default; per-selector `:global(...)` opt-outs are recorded by
-    // the scanner as special pseudos.
+    // the style syntax projection as special pseudos.
     snapshot.style_analyses = build_style_analyses_from_inventory(
         &artifact.common.inventory,
         source,
@@ -1885,9 +1885,8 @@ fn build_style_analyses_from_inventory(
 
             let sfc_source_len = source.len() as u32;
             let analysis_lang = analysis_lang(dialect, lang_attr);
-            // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
-            // and selector facts exist for every brace-based style block; indented
-            // languages (Sass, Stylus) keep the Vue-features-only analysis.
+            // All five authored dialects use the shared style syntax authority.
+            // Only complete static nodes are projected as concrete semantic facts.
             let mut analysis = verter_semantic::analysis::build_scanned_style_analysis(
                 analysis_lang,
                 css_content,
@@ -3787,14 +3786,19 @@ watch(count, (value, oldValue) => {
         assert_eq!(snapshot.markup_class_tokens[0].name, "card");
     }
 
-    /// Indented Sass stays fail-closed: Vue features only, no scanned CSS.
+    /// Indented Sass uses the shared syntax authority without preprocessing.
     #[test]
-    fn sass_style_block_stays_unscanned() {
+    fn sass_style_block_uses_shared_syntax_authority() {
         let source =
             "<template><div>x</div></template>\n<style lang=\"sass\">\n.a\n  color: red\n</style>";
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
         assert_eq!(snap.style_analyses.len(), 1);
-        assert!(snap.style_analyses[0].css.is_none());
+        let css = snap.style_analyses[0]
+            .css
+            .as_ref()
+            .expect("authored Sass has structural analysis");
+        assert_eq!(css.classes.len(), 1);
+        assert_eq!(css.classes[0].name, "a");
     }
 
     /// @ai-generated - preprocessor request for custom block with lang

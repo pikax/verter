@@ -1762,8 +1762,7 @@ fn style_override_remaps_preprocessed_block_preserves_css_block() {
     let css_block_before = &analysis_before.styles[0];
     let css_classes_before = css_block_before.css.as_ref().unwrap().classes.clone();
 
-    // The Sass block (index 1) initially has no CSS analysis
-    // because `build_preprocessor_style_analysis` is used for non-CSS langs
+    // The authored Sass block is parsed structurally before an optional compiled override.
     let sass_block_before = &analysis_before.styles[1];
     let _sass_css_before = sass_block_before.css.as_ref();
 

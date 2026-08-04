@@ -29,6 +29,9 @@ pub enum CssDiagnosticKind {
     BadString,
     UnterminatedUrl,
     BadUrl,
+    InconsistentIndentation,
+    UnexpectedIndentation,
+    UnterminatedInterpolation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
