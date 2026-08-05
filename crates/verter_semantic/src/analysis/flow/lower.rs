@@ -129,6 +129,7 @@ pub fn lower_slice_plan(
                 name: Arc::from(skeleton.name(record.name)),
                 kind: record.kind,
                 binding: *binding,
+                span: record.span,
                 value_selected: *value_selected,
                 defs: Arc::from(defs.into_boxed_slice()),
             }

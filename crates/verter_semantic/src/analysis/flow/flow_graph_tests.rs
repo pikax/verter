@@ -313,6 +313,71 @@ fn flow_graph_region_membership_and_nesting() {
     ));
 }
 
+/// Lexical binding identity (defect D): a read resolves to the binding of
+/// its NEAREST enclosing region — a shadowed same-named OUTER binding gets
+/// NO read edge, so an irrelevant outer initializer can never enter a
+/// demand slice through name-keyed fan-out. A hoisted `var` declared in a
+/// non-enclosing region still resolves (the conservative hoisting
+/// fallback).
+#[test]
+fn flow_graph_read_edges_resolve_nearest_enclosing_binding() {
+    let skeleton =
+        skeleton_of("function fD(notFn: number) { const x = notFn(); { const x = 1; return x; } }");
+    let graph = build_function_flow_graph(&skeleton);
+
+    let x_name = skeleton.name_id("x").expect("x interned");
+    let bindings: Vec<SkeletonBindingId> = skeleton.bindings_named(x_name).collect();
+    assert_eq!(bindings.len(), 2, "two shadowing x bindings");
+    // Declaration order: the outer `const x = notFn()` first, the inner
+    // block's `const x = 1` second.
+    let (outer, inner) = (bindings[0], bindings[1]);
+    assert_ne!(
+        skeleton.binding(outer).region,
+        skeleton.binding(inner).region,
+        "the fixture shadows across regions"
+    );
+
+    // The return argument's read site: `return x` inside the block.
+    let read_site = skeleton.return_sites[0].argument.expect("argument");
+    let read_node = graph.expr_site_node(read_site);
+    assert!(
+        has_edge_class(
+            &graph,
+            read_node,
+            graph.binding_node(inner),
+            FlowEdgeClass::ValueDef
+        ),
+        "the inner-block read binds the inner (nearest-enclosing) x"
+    );
+    assert!(
+        !has_edge_class(
+            &graph,
+            read_node,
+            graph.binding_node(outer),
+            FlowEdgeClass::ValueDef
+        ),
+        "the shadowed outer x gets NO read edge — the defect-D fan-out"
+    );
+
+    // Hoisting fallback: a `var` declared in a sibling block still serves
+    // a root-region read (the enclosing chain misses; the conservative
+    // all-same-name fallback keeps the hoisted binding reachable).
+    let hoisted = skeleton_of("function fh() { { var y = 1; } return y; }");
+    let hoisted_graph = build_function_flow_graph(&hoisted);
+    let y_name = hoisted.name_id("y").expect("y interned");
+    let y_binding = hoisted.bindings_named(y_name).next().expect("y binds once");
+    let hoisted_read = hoisted.return_sites[0].argument.expect("argument");
+    assert!(
+        has_edge_class(
+            &hoisted_graph,
+            hoisted_graph.expr_site_node(hoisted_read),
+            hoisted_graph.binding_node(y_binding),
+            FlowEdgeClass::ValueDef
+        ),
+        "a hoisted var in a non-enclosing region stays reachable"
+    );
+}
+
 #[test]
 fn flow_graph_is_arena_free_send_sync_static() {
     fn assert_arena_free<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}

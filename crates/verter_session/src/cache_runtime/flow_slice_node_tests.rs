@@ -158,14 +158,23 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 /// `FlowSliceHash` has no other producer, so the hash structurally
 /// precedes the lowered lookup); the lowered node serves the IR of
 /// exactly the selected slice. Registry-live guard
-/// (`GuardId::FlowSliceLoweredBodyDoesNotComputeSliceHash`): the
-/// hash-then-lower split is pinned by the opaque `FlowSliceHash`
-/// type-state — the lowered node's key REQUIRES a minted hash and the
-/// type has no byte export and no constructor outside
-/// `compute_flow_slice_hash`, so the lowered compute structurally
-/// cannot re-derive it.
+/// (`GuardId::FlowSliceLoweredBodyDoesNotComputeSliceHash`) — TWO rails:
+///
+/// - STRUCTURAL (hash-before-lowered-KEY): the lowered node's key
+///   REQUIRES a minted `FlowSliceHash`, which has no byte export and no
+///   constructor outside `compute_flow_slice_hash` — the lowered store
+///   is unaddressable until the hasher ran.
+/// - BEHAVIORAL (the lowered COMPUTE hashes nothing): the type-state
+///   alone cannot pin this half — `compute_flow_slice_hash` is a public
+///   producer any compute could call — so the guard binds it to the
+///   per-thread invocation counter: the lowered-node lookup below
+///   performs ZERO hash computations (a `compute_flow_slice_hash` call
+///   inserted into `FlowSliceLoweredBodyNode::compute` flips exactly
+///   this assertion).
 #[test]
 pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
+    use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash_thread_invocations;
+
     let function = function_key("/fixtures/my-type.ts", "myType", 1);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
@@ -174,14 +183,29 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
+    let invocations_before_hash = compute_flow_slice_hash_thread_invocations();
     let outcome = lookup(&rig.hash_node, key.clone(), ctx).expect("hash lookup");
     let planned = planned(outcome);
+    assert_eq!(
+        compute_flow_slice_hash_thread_invocations(),
+        invocations_before_hash + 1,
+        "the hash node's cold compute performs exactly one slice-hash \
+         computation (the counter binding is live, not vacuous)"
+    );
 
     let lowered_key = FlowSliceLoweredKey {
         hash_key: key.clone(),
         slice_hash: planned,
     };
+    let invocations_before_lowered = compute_flow_slice_hash_thread_invocations();
     let ir = lookup(&rig.lowered_node, lowered_key, ctx).expect("lowered lookup");
+    assert_eq!(
+        compute_flow_slice_hash_thread_invocations(),
+        invocations_before_lowered,
+        "the lowered-body compute performs ZERO slice-hash computations \
+         (hash-then-lower: it re-plans and lowers only — it never \
+         re-derives the slice identity)"
+    );
 
     // The IR covers exactly the demanded member: one `b` entry, one
     // elided sibling, and no slot for `a`.

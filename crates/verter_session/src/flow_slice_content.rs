@@ -58,18 +58,19 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
 
 /// The demand selection one content lowering serves: the value-selected
-/// expression spans and the value-selected slot names of ONE lowered
-/// flow slice. Derived from the content-free `FlowSliceIR` — the plan is
-/// the sole authority for what lowers; this carrier only transports the
-/// selection into the lease-only run.
+/// expression spans and the value-selected slot declaration spans of ONE
+/// lowered flow slice. Derived from the content-free `FlowSliceIR` — the
+/// plan is the sole authority for what lowers; this carrier only
+/// transports the selection into the lease-only run.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowSliceSelection {
     /// Spans of the slice's VALUE-selected expression records.
     value_spans: FxHashSet<verter_span::Span>,
-    /// Names of the slice's VALUE-selected slots (the planner selects
-    /// every same-name binding a read can reach, so name identity is
-    /// exactly as precise as the plan's own resolution).
-    value_slot_names: FxHashSet<Arc<str>>,
+    /// Binding-identifier spans of the slice's VALUE-selected slots —
+    /// DECLARATION-precise identity, so a shadowed same-named sibling
+    /// declarator the plan kept out never lowers (name identity would
+    /// re-conflate what the plan's lexical resolution separated).
+    value_slot_spans: FxHashSet<verter_span::Span>,
 }
 
 impl FlowSliceSelection {
@@ -82,11 +83,11 @@ impl FlowSliceSelection {
                 .filter(|expr| expr.role == FlowExprRole::Value)
                 .map(|expr| expr.span)
                 .collect(),
-            value_slot_names: ir
+            value_slot_spans: ir
                 .slots
                 .iter()
                 .filter(|slot| slot.value_selected)
-                .map(|slot| Arc::clone(&slot.name))
+                .map(|slot| slot.span)
                 .collect(),
         }
     }
@@ -95,8 +96,8 @@ impl FlowSliceSelection {
         self.value_spans.contains(&span)
     }
 
-    fn value_slot(&self, name: &str) -> bool {
-        self.value_slot_names.contains(name)
+    fn value_slot_span(&self, span: verter_span::Span) -> bool {
+        self.value_slot_spans.contains(&span)
     }
 }
 
@@ -582,10 +583,11 @@ impl Lowerer<'_> {
             .is_none_or(|selection| selection.value_span(span.into()))
     }
 
-    /// Whether a binding slot is value-selected by the demand slice.
-    fn slot_selected(&self, name: &str) -> bool {
+    /// Whether a binding slot (identified by its binding-identifier
+    /// span) is value-selected by the demand slice.
+    fn slot_selected(&self, span: oxc_span::Span) -> bool {
         self.selection
-            .is_none_or(|selection| selection.value_slot(name))
+            .is_none_or(|selection| selection.value_slot_span(span.into()))
     }
 
     fn param_ordinal(&self, name: &str) -> Option<u32> {
@@ -704,8 +706,11 @@ impl Lowerer<'_> {
                         // initializer stays cold (no lowering, no
                         // resolution, no budget charge). Its name is
                         // already pre-declared, so classification of later
-                        // reads/calls is unchanged.
-                        if !self.slot_selected(id.name.as_str()) {
+                        // reads/calls is unchanged. The gate is the
+                        // binding-identifier SPAN (declaration-precise),
+                        // never the name — a shadowed same-named sibling
+                        // the plan kept out must not lower.
+                        if !self.slot_selected(id.span) {
                             continue;
                         }
                         let init = declarator

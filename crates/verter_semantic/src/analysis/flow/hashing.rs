@@ -42,17 +42,48 @@ mod hashing_tests;
 const HASH_SALT: &[u8] = b"verter-flow-slice-hash:v1";
 const HASH_SEP: u8 = 0;
 
+thread_local! {
+    /// Per-thread count of [`compute_flow_slice_hash`] executions — the
+    /// behavioral half of the hash-then-lower guard. The opaque
+    /// [`FlowSliceHash`] type-state proves a hash PRECEDES any
+    /// lowered-body KEY, but `compute_flow_slice_hash` itself is a public
+    /// producer, so the type system alone cannot prove a lowered-body
+    /// compute performs no hash computation of its own; the guard binds
+    /// that half to this counter. Thread-local (cache-runtime computes
+    /// run on the demanding thread), observability only: never key
+    /// material, never a fact, never exported hash bytes.
+    static COMPUTE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`compute_flow_slice_hash`] executions performed on the
+/// CALLING thread. Guard observability only — see the thread-local's doc.
+#[must_use]
+pub fn compute_flow_slice_hash_thread_invocations() -> u64 {
+    COMPUTE_INVOCATIONS.with(std::cell::Cell::get)
+}
+
 /// The identity of one selected slice: minted ONLY by
 /// [`compute_flow_slice_hash`]. The private field makes the value
 /// unforgeable — a consumer holding a `FlowSliceHash` provably ran the
 /// planner + hasher first — and there is deliberately NO byte accessor:
-/// a slice hash cannot be converted to raw bytes, so it structurally
-/// cannot be embedded into any fact payload or warm-validity rail (the
-/// sole intra-function rail stays the whole-body
-/// `flow_body_stable_hash`; slice identity keys content-addressed
-/// artifacts only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+/// a slice hash cannot be converted to raw bytes (`Debug` is redacted,
+/// so even diagnostic formatting exports none), so it cannot be embedded
+/// into any fact payload or warm-validity rail (the sole intra-function
+/// rail stays the whole-body `flow_body_stable_hash`; slice identity
+/// keys content-addressed artifacts only). NOTE the type-state pins
+/// hash-BEFORE-lowered-KEY only; "the lowered compute performs no hash
+/// computation" is the separate behavioral half, held by the
+/// [`compute_flow_slice_hash_thread_invocations`] counter binding.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct FlowSliceHash(Hash16);
+
+impl std::fmt::Debug for FlowSliceHash {
+    /// Redacted: the slice identity's bytes never leave the type, not
+    /// even through diagnostic formatting of a containing carrier.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlowSliceHash(..)")
+    }
+}
 
 /// Hash exactly the selected subgraph of `plan`: the demand identity,
 /// the selected node sets with their roles, and every graph edge whose
@@ -64,6 +95,7 @@ pub fn compute_flow_slice_hash(
     graph: &FunctionFlowGraph,
     skeleton: &FunctionBodySkeleton,
 ) -> FlowSliceHash {
+    COMPUTE_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     buf.extend_from_slice(HASH_SALT);
     buf.push(HASH_SEP);

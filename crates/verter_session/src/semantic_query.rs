@@ -1579,6 +1579,12 @@ pub enum FlowReturnDegradation {
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,
+    /// The lowered slice carries a whole-slot write effect targeting a
+    /// parameter or a value-selected slot that the evaluator did not
+    /// apply (write-effect retype application is not implemented): the
+    /// evaluated value may miss the assignment's narrowing, so the
+    /// result fails closed as a degraded success.
+    UnappliedWriteEffect,
 }
 
 /// A typed `FlowReturn` failure — carried through `ReturnOnly` (never

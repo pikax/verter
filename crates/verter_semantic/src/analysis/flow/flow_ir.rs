@@ -144,6 +144,12 @@ pub struct FlowSlot {
     pub kind: SkeletonBindingKind,
     /// The skeleton binding this slot lowers.
     pub binding: SkeletonBindingId,
+    /// The binding identifier's span — the DECLARATION-precise slot
+    /// identity the content lowering gates on (name identity would
+    /// re-conflate shadowing same-named bindings the plan kept
+    /// distinct). Never folded into the slice hash (the hash covers the
+    /// plan's selected subgraph and is span-free).
+    pub span: verter_span::Span,
     /// Whether the slot's value contributes to the demand (`false` =
     /// effect-only: mutated, never value-read by the selected path).
     pub value_selected: bool,

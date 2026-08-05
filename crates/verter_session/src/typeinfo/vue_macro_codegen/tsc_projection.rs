@@ -751,6 +751,15 @@ fn inferred_class_members(
                 owner_canonical,
             ) {
                 crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+                    // A DEGRADED SUCCESS never splices display text: this
+                    // projection is fail-closed (every degraded shape
+                    // refuses), and a modeled-`any` substitution is a
+                    // degraded shape even though it carries a usable value.
+                    if result.degradation.is_some() {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    }
                     let Some((safe, typeof_paths)) =
                         crate::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
                             dispatch,

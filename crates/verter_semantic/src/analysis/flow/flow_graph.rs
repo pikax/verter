@@ -273,13 +273,39 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         }
     }
 
-    let bindings_of_name = |name: super::FlowNameId| {
+    // Lexical binding resolution: a read / callee root / write target of
+    // `name` evaluated in `region` binds to the declaration(s) of the
+    // NEAREST enclosing region carrying that name — an innermost-first
+    // walk of the region parent chain the skeleton already records
+    // (`SkeletonBinding.region`, `SkeletonRegion.parent`). A shadowed
+    // same-named OUTER binding therefore gets NO dependence edge, so an
+    // irrelevant outer initializer can never enter a demand slice through
+    // name-keyed fan-out. Only when the enclosing chain carries NO
+    // declaration does the resolution fall back to EVERY same-name
+    // binding — the conservative arm for genuinely ambiguous hoisting
+    // (`var` / nested function declarations living in non-enclosing
+    // regions still hoist to function scope).
+    let bindings_of_name_in_scope = |name: super::FlowNameId, region: SkeletonRegionId| {
+        let mut current = Some(region);
+        while let Some(enclosing) = current {
+            let mut hits: Vec<SkeletonBindingId> = Vec::new();
+            for (index, binding) in skeleton.bindings.iter().enumerate() {
+                if binding.name == name && binding.region == enclosing {
+                    hits.push(SkeletonBindingId::from_index(index as u32));
+                }
+            }
+            if !hits.is_empty() {
+                return hits;
+            }
+            current = skeleton.regions[enclosing.index()].parent;
+        }
         skeleton
             .bindings
             .iter()
             .enumerate()
-            .filter(move |(_, binding)| binding.name == name)
+            .filter(|(_, binding)| binding.name == name)
             .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
+            .collect()
     };
 
     let mut edges: Vec<(FlowNodeId, FlowNodeId, FlowEdgeKind)> = Vec::new();
@@ -319,7 +345,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         let node = site_node(id);
         edges.push((node, region_node(site.region), FlowEdgeKind::ControlRegion));
         for read in site.reads.iter() {
-            for binding in bindings_of_name(read.name) {
+            for binding in bindings_of_name_in_scope(read.name, site.region) {
                 let to = binding_node(binding);
                 if seen.insert((node.0, to.0, FlowEdgeClass::ValueDef)) {
                     edges.push((node, to, FlowEdgeKind::ValueDef));
@@ -333,7 +359,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 SkeletonCallee::Opaque => None,
             };
             if let Some(root) = root {
-                for binding in bindings_of_name(root) {
+                for binding in bindings_of_name_in_scope(root, site.region) {
                     let to = binding_node(binding);
                     if seen.insert((node.0, to.0, FlowEdgeClass::EvalEffect)) {
                         edges.push((node, to, FlowEdgeKind::EvalEffect));
@@ -390,7 +416,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             continue;
         };
         let provider = site_node(write.value.unwrap_or(write.site));
-        for binding in bindings_of_name(name) {
+        for binding in bindings_of_name_in_scope(name, write.region) {
             let hub = binding_node(binding);
             if write.path.is_empty() && matches!(write.certainty, SkeletonWriteCertainty::Definite)
             {

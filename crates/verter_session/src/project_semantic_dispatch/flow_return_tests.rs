@@ -141,6 +141,24 @@ export function subMemberBareMix(flag: boolean) {
   if (flag) return { b: 1 };
   return;
 }
+
+export function subShadowedOuterInit(notFn: number) {
+  const x = notFn();
+  {
+    const x = 1;
+    return x;
+  }
+}
+
+export function subUnappliedParamWrite(x: string | number) {
+  return { a: (x = "s"), b: x };
+}
+
+export function subWriteToUnreadSlot(x: number) {
+  let dead = 0;
+  dead = x;
+  return 1;
+}
 "#;
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
@@ -1711,6 +1729,129 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(clean_key))),
             1,
             "a clean complete result is the warm-admissible arm"
+        );
+    });
+}
+
+/// Lexical binding identity (defect D): a read resolves to its
+/// NEAREST-ENCLOSING-REGION binding, so an irrelevant same-named OUTER
+/// declarator (whose initializer would degrade) never enters the slice —
+/// the result is clean, correct, and warm-admissible. Before the fix the
+/// name-keyed fan-out selected + lowered the outer `const x = notFn()`
+/// declarator too, forcing a spurious `NonCallableBinding` degradation
+/// (perpetual `ReturnOnly`) onto a clean program.
+#[test]
+fn flow_return_shadowed_outer_initializer_stays_clean_and_admits() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subShadowedOuterInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation, None,
+            "the shadowed outer initializer is lexically unreachable from the \
+             inner read — selecting/lowering it is the defect-D fan-out"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "a clean complete result admits warm — a spurious degradation would \
+             hold it at ReturnOnly forever"
+        );
+    });
+}
+
+/// Unapplied write effects (defect B): the evaluator does not yet apply
+/// `FlowSliceIR.effects` write retypes, so a slice carrying a whole-slot
+/// write into a parameter (or any value-selected slot) MUST fail closed as
+/// the `UnappliedWriteEffect` DEGRADED SUCCESS — a usable value, ReturnOnly,
+/// never warm-admitted. Before the fix `subUnappliedParamWrite` published
+/// `{ a: string, b: string | number }` as COMPLETE + warm-admissible while
+/// tsc says `b: string` (the assignment narrows left-to-right) — wrong +
+/// complete + non-degraded, the worst combination.
+#[test]
+fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subUnappliedParamWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation,
+            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            "a slice with an unapplied write effect into a value-selected \
+             parameter slot must degrade (fail closed), never publish a \
+             wrong type as complete"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "the degraded success is ReturnOnly: zero memo entries"
+        );
+        // The value is still usable (degraded SUCCESS, not a no-value
+        // failure).
+        assert!(host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .is_some());
+    });
+}
+
+/// The B fail-closed rail is SLICE-scoped, not skeleton-scoped: a
+/// whole-slot write into a binding the demanded path never reads
+/// (`subWriteToUnreadSlot`: `dead = x` before `return 1`) stays outside
+/// the lowered slice's effect obligations, so the result stays clean,
+/// non-degraded, and warm-admissible. An over-broad rail scanning the
+/// SKELETON's write summary (instead of the slice's lowered effects)
+/// would spuriously degrade this — the D-class harm all over again.
+#[test]
+fn flow_return_write_to_unread_slot_stays_clean() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subWriteToUnreadSlot",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation, None,
+            "a write outside the demanded slice cannot degrade the result"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean result admits warm"
         );
     });
 }

@@ -1,5 +1,7 @@
 //! Consolidated integration-test group `component`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+#[path = "g_component/component_meta_degraded_flow_interior_not_warm.rs"]
+mod component_meta_degraded_flow_interior_not_warm;
 #[path = "g_component/component_meta_family_producers_observe_cross_file_deps.rs"]
 mod component_meta_family_producers_observe_cross_file_deps;
 #[path = "g_component/component_meta_no_cache_poisoning.rs"]

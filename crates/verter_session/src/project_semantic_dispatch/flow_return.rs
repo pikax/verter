@@ -196,7 +196,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                 match self.execute_flow_return(self.flow_return_key_for(identity)) {
-                    FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
+                    FlowReturnStep::Complete(result) => {
+                        // A DEGRADED SUCCESS stays usable — the consumer
+                        // keeps the value (interning a miss would be the
+                        // opposite collapse) — but the degradation MUST
+                        // fold into BOTH enclosing channels HERE, at the
+                        // ONE sealed consumer entry, so no composition can
+                        // launder a degraded interior into a complete,
+                        // warm-admitted enclosing result (C1/SCC-2:
+                        // degraded success defaults ReturnOnly; warm needs
+                        // an explicit admission row, and none exists):
+                        //   - the request partial sticky
+                        //     (`mark_request_result_partial`) gates
+                        //     component-meta / shape / materialize warm;
+                        //   - the build-local taint (`cache_suppress` +
+                        //     `result_is_partial`) marks the enclosing
+                        //     composition partial / ReturnOnly.
+                        if result.degradation.is_some() {
+                            self.fold_cache_read_rails(true, true);
+                        }
+                        FunctionReturnNode::Flow(result)
+                    }
                     FlowReturnStep::Degraded(failure) => FunctionReturnNode::Degraded(failure),
                     // A hold surfacing at a consumer is a demand reentering
                     // its own in-flight component: undecided here, ReturnOnly.
@@ -1194,6 +1214,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
             demanded_member.as_ref().map(|member| MemberDemandFilter {
                 member: Arc::clone(member),
             });
+        // Unapplied write effects fail CLOSED as a degraded success. The
+        // slice contract (`FlowSliceIR.effects`) says the solver applies
+        // write retypes / widenings before evaluating the value providers
+        // that read the affected slots — that application is future
+        // NARROW_SUBSTITUTION / VALUE_INFERENCE work on this same graph,
+        // and THIS evaluator does not perform it (locals rebuild from
+        // `Binding` statements only; parameters never update). A
+        // whole-slot write targeting a parameter or a value-selected slot
+        // can therefore change the demanded value's type (assignment
+        // narrowing; object members evaluate left-to-right), so
+        // evaluating past it may produce a WRONG type. Seed the typed
+        // `UnappliedWriteEffect` degradation: the evaluation still
+        // returns its usable value, but the result is a DEGRADED SUCCESS
+        // — `ReturnOnly`, never warm-admitted. A projection-path write
+        // (`x.a = v`) never retypes the binding itself and stays clean;
+        // a write whose target slot is neither a parameter nor
+        // value-selected cannot be observed by the demanded value.
+        let unapplied_write_effect = {
+            use verter_semantic::analysis::flow::flow_ir::{FlowEffect, FlowEffectTarget};
+            let retypes_slot = |slot: &verter_semantic::analysis::flow::flow_ir::FlowSlot| {
+                slot.value_selected
+                    || slot.kind == verter_semantic::analysis::flow::SkeletonBindingKind::Param
+            };
+            lowered.effects.iter().any(|effect| {
+                let FlowEffect::Write { target, path, .. } = effect else {
+                    return false;
+                };
+                if !path.is_empty() {
+                    return false;
+                }
+                match target {
+                    FlowEffectTarget::Slot(id) => retypes_slot(lowered.slot(*id)),
+                    // A named root outside the slot table is unselected or
+                    // shadow-ambiguous: degrade only when SOME slot of that
+                    // name could be retyped (the ambiguous arm), never for
+                    // a free / unselected name.
+                    FlowEffectTarget::Named(name) => lowered
+                        .slots
+                        .iter()
+                        .any(|slot| slot.name == *name && retypes_slot(slot)),
+                    FlowEffectTarget::Opaque => false,
+                }
+            })
+        };
         // The demand selection IS the lowered slice: only slice-selected
         // expression content and value-selected slots lower — an
         // unselected binding initializer, sibling member value, or
@@ -1251,7 +1315,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bare_return_seen: false,
             member_filter,
             holds: Vec::new(),
-            degradation: None,
+            degradation: unapplied_write_effect
+                .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             degraded_locals: rustc_hash::FxHashSet::default(),
         };
         let holds;
