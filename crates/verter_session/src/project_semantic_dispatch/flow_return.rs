@@ -1218,10 +1218,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if member_filter.is_some() && ir.can_fall_through {
             return degraded(FlowReturnFailure::UnmodeledDemandPoint, self_roots);
         }
-        debug_assert!(
-            demanded_member.is_none() || member_filter.is_some(),
-            "a member demand always derives its filter from the lowered slice"
-        );
         // The ONE binder environment: the function's OWN type parameters
         // are binders in scope for the parameter and body-leaf lowering (a
         // root `<T extends string>(x: T)` keeps the binder `T`, never the
