@@ -2,7 +2,7 @@
 //!
 //! Two families of rows:
 //!
-//! - Un-ignored `scanner_parity_*` / characterization rows pin the
+//! - Un-ignored `flow_surface_*` / characterization rows pin the
 //!   observable FlowReturn surface: symbolic call returns resolve, the
 //!   `this`-call fallback yields `any`, return-free loops stay fall-through
 //!   transparent, return-bearing loop/switch/try stay degraded, an empty
@@ -109,7 +109,7 @@ fn expr_contains_never(expr: &TypeExpr) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn scanner_parity_symbolic_call_return_resolves_complete() {
+fn flow_surface_symbolic_call_return_resolves_complete() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubCallReturn");
@@ -120,7 +120,7 @@ fn scanner_parity_symbolic_call_return_resolves_complete() {
 }
 
 #[test]
-fn scanner_parity_return_free_loop_stays_fallthrough_transparent() {
+fn flow_surface_return_free_loop_stays_fallthrough_transparent() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubCallAfterLoop");
@@ -131,7 +131,7 @@ fn scanner_parity_return_free_loop_stays_fallthrough_transparent() {
 }
 
 #[test]
-fn scanner_parity_this_call_return_uses_any_fallback() {
+fn flow_surface_this_call_return_uses_any_fallback() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
@@ -140,7 +140,7 @@ fn scanner_parity_this_call_return_uses_any_fallback() {
 }
 
 #[test]
-fn scanner_parity_return_bearing_loop_is_degraded_not_narrowed() {
+fn flow_surface_return_bearing_loop_is_degraded_not_narrowed() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubLoopReturn");
@@ -149,7 +149,7 @@ fn scanner_parity_return_bearing_loop_is_degraded_not_narrowed() {
 }
 
 #[test]
-fn scanner_parity_switch_return_is_degraded_not_narrowed() {
+fn flow_surface_switch_return_is_degraded_not_narrowed() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubSwitchReturn");
@@ -158,7 +158,7 @@ fn scanner_parity_switch_return_is_degraded_not_narrowed() {
 }
 
 #[test]
-fn scanner_parity_try_return_is_degraded_not_narrowed() {
+fn flow_surface_try_return_is_degraded_not_narrowed() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubTryReturn");
