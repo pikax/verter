@@ -70,6 +70,22 @@ enum FlowRootClose {
     Degraded(FlowReturnFailure),
 }
 
+/// One flow frame's evaluation result, before the frame closes.
+struct FlowEvaluationOutcome {
+    /// The frame's decided outcome.
+    outcome: FlowReturnPendingOutcome,
+    /// The frame's own file roots.
+    self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The coinductive hold targets the evaluation met.
+    holds: Vec<FlowReturnKey>,
+    /// The materialised point set the compute ACTUALLY produced (§3.4).
+    materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Whether every one of the frame's OWN return contributors was a
+    /// FRESH literal (and no bare-return / fallthrough arm joined) — the
+    /// post-convergence literal-widening input.
+    fresh_seed: bool,
+}
+
 /// The frame-pop result.
 enum FlowFramePop {
     /// Caller-return for a non-root pop (the provisional member).
@@ -507,8 +523,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         let idx = self.flow_frame_open(&key);
-        let (outcome, self_roots, holds, materialized) = self.evaluate_flow_return(&key);
-        self.flow_frame_close(idx, outcome, holds, self_roots, materialized)
+        let evaluated = self.evaluate_flow_return(&key);
+        self.flow_frame_close(idx, evaluated)
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
@@ -525,8 +541,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> QueryBuildOutput<SemanticQueryValue> {
         let fence = self.project_generation_signature();
         let idx = self.flow_frame_open(key);
-        let (outcome, self_roots, holds, materialized) = self.evaluate_flow_return(key);
-        match self.flow_frame_close_root(idx, outcome, holds, self_roots, materialized) {
+        let evaluated = self.evaluate_flow_return(key);
+        match self.flow_frame_close_root(idx, evaluated) {
             FlowRootClose::Complete(result, scc_self_roots, materialized) => {
                 let degraded = result.degradation.is_some();
                 let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
@@ -587,15 +603,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Close an INLINE frame.
-    fn flow_frame_close(
-        &self,
-        idx: usize,
-        outcome: FlowReturnPendingOutcome,
-        holds: Vec<FlowReturnKey>,
-        self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        materialized: crate::semantic_query::demand::MaterializedSet,
-    ) -> FlowReturnStep {
-        match self.flow_frame_pop(idx, outcome, holds, self_roots, materialized, false) {
+    fn flow_frame_close(&self, idx: usize, evaluated: FlowEvaluationOutcome) -> FlowReturnStep {
+        match self.flow_frame_pop(idx, evaluated, false) {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
                 FlowRootClose::Complete(result, _, _) => FlowReturnStep::Complete(result),
@@ -605,15 +614,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// Close the machinery ROOT frame.
-    fn flow_frame_close_root(
-        &self,
-        idx: usize,
-        outcome: FlowReturnPendingOutcome,
-        holds: Vec<FlowReturnKey>,
-        self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        materialized: crate::semantic_query::demand::MaterializedSet,
-    ) -> FlowRootClose {
-        match self.flow_frame_pop(idx, outcome, holds, self_roots, materialized, true) {
+    fn flow_frame_close_root(&self, idx: usize, evaluated: FlowEvaluationOutcome) -> FlowRootClose {
+        match self.flow_frame_pop(idx, evaluated, true) {
             FlowFramePop::RootClose(close) => close,
             FlowFramePop::Provisional(_) => unreachable!(
                 "the machinery root frame is always its SCC's root: the stack is \
@@ -631,12 +633,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn flow_frame_pop(
         &self,
         idx: usize,
-        outcome: FlowReturnPendingOutcome,
-        holds: Vec<FlowReturnKey>,
-        self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        materialized: crate::semantic_query::demand::MaterializedSet,
+        evaluated: FlowEvaluationOutcome,
         machinery_root: bool,
     ) -> FlowFramePop {
+        let FlowEvaluationOutcome {
+            outcome,
+            self_roots,
+            holds,
+            materialized,
+            fresh_seed,
+        } = evaluated;
         let popped = self.dispatch_txn.borrow_mut().reentry_mut().pop();
         let self_cycle = popped.assumption_targets.contains(&idx);
         let pending_watermark = popped.pending_watermark;
@@ -682,6 +688,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds,
                     self_roots,
                     materialized,
+                    fresh_seed,
                 }),
             });
             return FlowFramePop::Provisional(step);
@@ -722,6 +729,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         holds: state.holds,
                         self_roots: state.self_roots,
                         materialized: state.materialized,
+                        fresh_seed: state.fresh_seed,
                     });
                 }
             }
@@ -732,19 +740,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // together — an EmptyCycle with no discharged target stays
         // `ReturnOnly` and poisons the component.
         let mut outcome = outcome;
-        if !flow_members.is_empty() {
+        // A SELF-cycle (holds targeting only this root, with no drained
+        // member) discharges through the SAME fixed point: the equation
+        // `r = seed ∪ r` converges to the seed, and the shared discharge
+        // owns the post-convergence literal-widening decision.
+        if !flow_members.is_empty() || !holds.is_empty() {
             let mut entries: Vec<super::dispatch_txn::FlowDischargeEntry> =
                 Vec::with_capacity(flow_members.len() + 1);
             entries.push(super::dispatch_txn::FlowDischargeEntry {
                 key: root_key.clone(),
                 outcome: outcome.clone(),
                 holds: holds.clone(),
+                fresh_seed,
             });
             for member in flow_members.iter() {
                 entries.push(super::dispatch_txn::FlowDischargeEntry {
                     key: member.key.clone(),
                     outcome: member.outcome.clone(),
                     holds: member.holds.clone(),
+                    fresh_seed: member.fresh_seed,
                 });
             }
             self.discharge_flow_component_to_fixed_point(&mut entries);
@@ -946,10 +960,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 break;
             }
         }
+        // Post-convergence literal widening. tsc widens a fresh literal
+        // return only when the function's AGGREGATE is a single type;
+        // inside a recursive component the aggregate is only known once
+        // the equation converges. `f = 0 ∪ f` collapses to the single
+        // literal `0` and widens to `number`; `msa = "a" ∪ msb`,
+        // `msb = 1 ∪ msa` converge to two arms and both stay pinned
+        // (`"a" | 1`). Every contributing entry must be a FRESH seed —
+        // one non-fresh contributor anywhere in the component (a `1 as
+        // const`, an annotated binding, a bare return) pins the result.
+        let component_is_fresh = entries.iter().all(|entry| entry.fresh_seed);
         for (entry, discharged) in entries.iter_mut().zip(current) {
-            if let Some(result) = discharged {
-                entry.outcome = FlowReturnPendingOutcome::Complete(result);
+            let Some(mut result) = discharged else {
+                continue;
+            };
+            if component_is_fresh {
+                result.return_type = widen_literal_node(self, result.return_type);
             }
+            entry.outcome = FlowReturnPendingOutcome::Complete(result);
         }
     }
 
@@ -1057,25 +1085,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// compute knows what it served.
     ///
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
-    fn evaluate_flow_return(
-        &self,
-        key: &FlowReturnKey,
-    ) -> (
-        FlowReturnPendingOutcome,
-        Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
-        Vec<FlowReturnKey>,
-        crate::semantic_query::demand::MaterializedSet,
-    ) {
+    fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
         let degraded =
             |failure: FlowReturnFailure,
              self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>| {
-                (
-                    FlowReturnPendingOutcome::Degraded(failure),
+                FlowEvaluationOutcome {
+                    outcome: FlowReturnPendingOutcome::Degraded(failure),
                     self_roots,
-                    Vec::new(),
-                    MaterializedSet::empty(),
-                )
+                    holds: Vec::new(),
+                    materialized: MaterializedSet::empty(),
+                    fresh_seed: false,
+                }
             };
         // Cold-path start event: every cold whole-function evaluation
         // (root and nested inline frames) passes through here; the warm
@@ -1139,14 +1160,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // memo refuses (`ReturnOnly` — the fourth non-admission layer,
         // on top of the planner's typed refusal, the hash node's
         // `ReturnOnly`, and the unaddressable lowered store).
+        let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::from(canonical),
+            function: entry.key.clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash,
+            parse_env_hash: key.context.parse_env_hash,
+            parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
+        };
         let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
-            function: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
-                canonical_id: Arc::from(canonical),
-                function: entry.key.clone(),
-                flow_body_stable_hash: entry.flow_body_stable_hash,
-                parse_env_hash: key.context.parse_env_hash,
-                parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
-            },
+            function: slice_key_function.clone(),
             demand: crate::cache_runtime::flow_slice_node::FlowSliceDemandIdentity {
                 projection_path: match demanded_member.as_ref() {
                     Some(member) => Arc::from(vec![Arc::clone(member)].into_boxed_slice()),
@@ -1264,10 +1286,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // effect-position expression never lowers (no resolution, no
         // budget charge, no fact).
         let selection = crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered);
+        // The content lowering resolves every identifier against the SAME
+        // `FunctionBodySkeleton` the plan above resolved its lexical edges
+        // against — one binding authority, one build per content version
+        // (the graph store memoized it during planning).
+        let Some(skeleton) = flow_slice.skeleton_for(&slice_key_function, self.ctx) else {
+            return degraded(FlowReturnFailure::Unresolved, self_roots);
+        };
         let Some(ir) = indexed
             .shallow_state
             .decl_bodies()
-            .flow_slice_content(entry, selection)
+            .flow_slice_content(entry, selection, skeleton)
         else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
@@ -1309,6 +1338,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             canonical,
             owner,
             params: &params,
+            param_names: &ir.params,
             binder_env: &binder_env,
             locals: rustc_hash::FxHashMap::default(),
             var_locals: rustc_hash::FxHashMap::default(),
@@ -1337,29 +1367,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let contributors = match contributors {
             Ok(contributors) => contributors,
             Err(failure) => {
-                return (
-                    FlowReturnPendingOutcome::Degraded(failure),
+                return FlowEvaluationOutcome {
+                    outcome: FlowReturnPendingOutcome::Degraded(failure),
                     self_roots,
                     holds,
-                    MaterializedSet::empty(),
-                );
+                    materialized: MaterializedSet::empty(),
+                    fresh_seed: false,
+                };
             }
         };
-        let result = match self.join_flow_return_contributors(
+        let (result, fresh_seed) = match self.join_flow_return_contributors(
             contributors,
             ir.can_fall_through,
             bare_return_seen,
             &holds,
             degradation,
         ) {
-            Ok(result) => result,
+            Ok(joined) => joined,
             Err(failure) => {
-                return (
-                    FlowReturnPendingOutcome::Degraded(failure),
+                return FlowEvaluationOutcome {
+                    outcome: FlowReturnPendingOutcome::Degraded(failure),
                     self_roots,
                     holds,
-                    MaterializedSet::empty(),
-                );
+                    materialized: MaterializedSet::empty(),
+                    // An EMPTY cycle contributes NO seed of its own — it
+                    // is fresh-neutral, and vetoing the component's
+                    // literal widening from a seedless member would make
+                    // the outcome depend on which member was demanded
+                    // first. Any other failure poisons the component
+                    // outright, so its bit never reaches a discharge.
+                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
+                };
             }
         };
         // §3.4: record the point this compute ACTUALLY materialised — the
@@ -1368,12 +1406,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the compute, never re-derived from the nominal key at publish.
         let materialized =
             MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()));
-        (
-            FlowReturnPendingOutcome::Complete(result),
+        FlowEvaluationOutcome {
+            outcome: FlowReturnPendingOutcome::Complete(result),
             self_roots,
             holds,
             materialized,
-        )
+            fresh_seed,
+        }
+    }
+
+    /// The union arms of `node`, when it interned as a union — the
+    /// `getAssignmentReducedType` gate (a NON-union declared type
+    /// supplies its binding verbatim).
+    fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
+            _ => None,
+        }
     }
 
     /// Join one function's return-site contributors with the fallthrough
@@ -1384,14 +1433,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `never`.
     fn join_flow_return_contributors(
         &self,
-        contributors: Vec<SemanticNodeId>,
+        contributors: Vec<FlowContribution>,
         can_fall_through: bool,
         bare_return_seen: bool,
         holds: &[FlowReturnKey],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
-    ) -> Result<FlowReturnResult, FlowReturnFailure> {
+    ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
-        let mut arms: Vec<SemanticNodeId> = contributors;
+        // Literal widening is a SINGLE-contributor rule (tsc aggregates
+        // the return-expression types with `pushIfUnique`, then widens
+        // only when the aggregate is one type): `return 1` is `number`,
+        // `if (c) return 1; return 1` deduplicates to one and is
+        // `number`, but `if (c) return 1; return 0` is `0 | 1` and
+        // `if (c) return 1;` is `1 | undefined`. Deduplicate FIRST — the
+        // graph interns identical literals to one node id — then widen a
+        // lone FRESH literal.
+        let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
+        let mut all_fresh = true;
+        for contribution in contributors {
+            if arms.contains(&contribution.node) {
+                continue;
+            }
+            all_fresh &= contribution.fresh_literal;
+            arms.push(contribution.node);
+        }
+        // A recursive HOLD counts as a contributor: the SCC close joins
+        // its discharged return into this result, so the join is not a
+        // lone contributor. Excluding holds would make widening depend on
+        // whether the callee happened to be in flight — i.e. on demand
+        // ORDER — and publish two different values for the same key
+        // (`msa` / `msb` in a mutual cycle).
+        // A FRESH seed is one whose every contributor is a fresh literal
+        // and which joins no bare-return / fallthrough arm. When the
+        // evaluation carries HOLDS the widening decision is deferred: the
+        // component's aggregate is only known once the equation fixed
+        // point converges (`f = 0 ∪ f` collapses to the single literal
+        // `0` and widens; `msa = "a" ∪ msb`, `msb = 1 ∪ msa` converge to
+        // two arms and stay pinned). Deferring is also what makes the
+        // decision demand-ORDER-independent — the fixed point is
+        // computed once per component, not per entry order.
+        let fresh_seed = all_fresh && !bare_return_seen && !can_fall_through;
+        if fresh_seed && arms.len() == 1 && holds.is_empty() {
+            arms[0] = widen_literal_node(self, arms[0]);
+        }
         // Bare-return-as-void (BL12): a body whose only return
         // contributions are bare `return;` statements models as `void`
         // regardless of fallthrough — tsc's rule for expressionless
@@ -1403,11 +1487,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if arms.is_empty() {
                 let return_type =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
-                return Ok(FlowReturnResult {
-                    return_type,
-                    can_fall_through,
-                    degradation,
-                });
+                return Ok((
+                    FlowReturnResult {
+                        return_type,
+                        can_fall_through,
+                        degradation,
+                    },
+                    false,
+                ));
             }
             arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
         }
@@ -1425,11 +1512,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
-        Ok(FlowReturnResult {
-            return_type,
-            can_fall_through,
-            degradation,
-        })
+        Ok((
+            FlowReturnResult {
+                return_type,
+                can_fall_through,
+                degradation,
+            },
+            fresh_seed,
+        ))
     }
 }
 
@@ -1462,6 +1552,26 @@ fn flow_demanded_member_name(
     }
 }
 
+/// Widen one FRESH literal node to its primitive (tsc's
+/// widening-literal-type rule). Every non-literal node passes through
+/// unchanged.
+fn widen_literal_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    let graph = dispatch.graph();
+    let widened = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::Literal(literal)) => match literal {
+            crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
+            crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
+            crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+            crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+        },
+        _ => return node,
+    };
+    graph.intern_node(SemanticNodeData::Primitive(widened))
+}
+
 /// The binder environment for one function's OWN type parameters — see
 /// [`ProjectSemanticDispatch::flow_binder_env`]. Carried by the evaluator
 /// so parameter and body-leaf lowering resolve the function's binders
@@ -1491,6 +1601,11 @@ struct FlowEvaluator<'d, 'b> {
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     params: &'b [SemanticNodeId],
+    /// The frame's formal parameters in the SAME order as `params` —
+    /// their names are the closure-capture key: a nested function value
+    /// reads a captured enclosing parameter BY NAME (its own `params`
+    /// array indexes its own signature).
+    param_names: &'b [crate::flow_slice_content::SliceParam],
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
@@ -1551,21 +1666,17 @@ struct FlowEvaluator<'d, 'b> {
     conditional_arm_nesting: u32,
 }
 
-/// One resolved local read: the bound node with its LAYER-scoped
-/// membership flags (the flags always come from the same layer as the
-/// value, so a block restore can never split a binding from its flags).
+/// One return-site contribution: the evaluated node plus whether it came
+/// from a FRESH literal source (a bare literal return argument, or a read
+/// of a widening-literal `const`). tsc widens a fresh literal return only
+/// when the deduplicated contributor set has exactly ONE member, so the
+/// freshness bit must survive to the join.
 #[derive(Clone, Copy)]
-struct LocalRead {
-    /// The bound reaching definition.
+struct FlowContribution {
+    /// The evaluated contributor node.
     node: SemanticNodeId,
-    /// The binding's initializer failed with a typed flow failure.
-    degraded: bool,
-    /// The binding carries a WIDENING literal.
-    widening: bool,
-    /// The binding's surviving reaching definition was recorded inside a
-    /// conditional arm (the function-scoped layer only — a lexical
-    /// conditional binding never escapes its arm).
-    conditional: bool,
+    /// The contributor is a fresh (widening) literal source.
+    fresh_literal: bool,
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
@@ -1628,27 +1739,100 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         locals.insert(name.to_string(), node);
     }
 
-    /// Resolve a local read across the two scope layers: the lexical
-    /// layer shadows the function-scoped `var` layer while its block is
-    /// live. Returns the bound node with its LAYER-scoped membership —
-    /// the flags always come from the same layer as the value (the
-    /// conditional-definition flag is function-scope-only: a lexical
-    /// conditional binding never escapes its arm).
-    fn lookup_local(&self, name: &str) -> Option<LocalRead> {
-        if let Some(node) = self.locals.get(name) {
-            return Some(LocalRead {
-                node: *node,
-                degraded: self.degraded_locals.contains(name),
-                widening: self.widening_locals.contains(name),
-                conditional: false,
-            });
+    /// READ one local across the two scope layers — the ONLY way to take
+    /// a local's bound node. The lexical layer shadows the function-scoped
+    /// `var` layer while its block is live, and the read FOLDS the
+    /// binding's LAYER-scoped membership flags into this evaluation's
+    /// degradation channel as it goes (a failed initializer, a
+    /// conditionally-defined `var`).
+    ///
+    /// The flags are recorded HERE, not returned, so "take the node
+    /// without folding the flags" is not expressible at any call site:
+    /// every observation of a degraded binding degrades the result, by
+    /// construction rather than by per-site discipline.
+    fn read_local(&mut self, name: &str) -> Option<SemanticNodeId> {
+        // The lexical layer's conditional flag is always false: a
+        // block-scoped conditional binding never escapes its arm.
+        let (node, degraded, conditional) = if let Some(node) = self.locals.get(name) {
+            (*node, self.degraded_locals.contains(name), false)
+        } else {
+            let node = *self.var_locals.get(name)?;
+            (
+                node,
+                self.var_degraded_locals.contains(name),
+                self.var_conditional_locals.contains(name),
+            )
+        };
+        if degraded {
+            // Observing a binding whose initializer FAILED is the
+            // `FailedBindingInitializer` degradation: the value is a
+            // modeled `any`, not the initializer's real type. An
+            // unobserved failed binding degrades nothing.
+            self.record_degradation(
+                crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
+            );
         }
-        self.var_locals.get(name).map(|node| LocalRead {
-            node: *node,
-            degraded: self.var_degraded_locals.contains(name),
-            widening: self.var_widening_locals.contains(name),
-            conditional: self.var_conditional_locals.contains(name),
-        })
+        if conditional {
+            // Observing a function-scoped binding whose surviving
+            // reaching definition was recorded inside a conditional arm
+            // is the `ConditionalVarDefinition` degradation: the value is
+            // the last-evaluated arm's, not the join of every arm (and of
+            // the never-assigned path).
+            self.record_degradation(
+                crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+            );
+        }
+        Some(node)
+    }
+
+    /// tsc's `getAssignmentReducedType`: the union of the DECLARED
+    /// constituents the initializer is comparable to. The survivors are
+    /// DECLARED constituents — never the initializer's own type — so
+    /// `let x: string | number = "s"` is `string` (not `"s"`) and
+    /// `let x: 1 | 2 = 1` is `1`.
+    ///
+    /// Comparability is judged by the crate's SOLE relation authority
+    /// (`execute_relate_pair`); an undecided constituent or an empty
+    /// survivor set fails closed onto the whole declared union with the
+    /// typed `UnreducedDeclaredUnion` degradation — never a guess.
+    fn assignment_reduced_union(
+        &mut self,
+        declared: SemanticNodeId,
+        arms: &[SemanticNodeId],
+        init: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in arms {
+            match self.dispatch.execute_relate_pair(init, *arm) {
+                super::dispatch_txn::RelationStep::Assignable { .. } => survivors.push(*arm),
+                super::dispatch_txn::RelationStep::NotAssignable => {}
+                super::dispatch_txn::RelationStep::Unknown
+                | super::dispatch_txn::RelationStep::BudgetExceeded(_)
+                | super::dispatch_txn::RelationStep::Assumed => {
+                    survivors.clear();
+                    break;
+                }
+            }
+        }
+        if survivors.is_empty() {
+            self.record_degradation(
+                crate::semantic_query::FlowReturnDegradation::UnreducedDeclaredUnion,
+            );
+            return declared;
+        }
+        self.dispatch
+            .intern_normalized_union_or_intersection(&survivors, true)
+    }
+
+    /// Whether one local carries a WIDENING literal, in the layer that
+    /// currently answers reads of `name`. A pure predicate — it folds no
+    /// degradation, because asking about widening is not an observation
+    /// of the binding's value.
+    fn widening_of(&self, name: &str) -> bool {
+        if self.locals.contains_key(name) {
+            return self.widening_locals.contains(name);
+        }
+        self.var_locals.contains_key(name) && self.var_widening_locals.contains(name)
     }
 
     /// Evaluate ONE return site under the member-projection demand: the
@@ -1688,36 +1872,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Widen `node` to its literal's primitive when `expr` is a read of
-    /// a WIDENING-literal local (`const b = 1` — unannotated, no const
-    /// assertion) and the evaluated node is that literal. Every other
-    /// shape passes through unchanged — `as const`, annotated literals,
-    /// parameters, and non-literal values are never rewritten.
+    /// Whether `expr` is a read of a WIDENING-literal local (`const b =
+    /// 1` — unannotated, no const assertion). `as const` / annotated
+    /// literals, parameters, and non-local reads are never widening.
+    fn reads_widening_literal_local(&self, expr: &crate::flow_slice_content::SliceExpr) -> bool {
+        let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr else {
+            return false;
+        };
+        self.widening_of(name.as_ref())
+    }
+
+    /// Widen `node` to its literal's primitive when `expr` is a read of a
+    /// WIDENING-literal local and the evaluated node IS that literal.
+    /// Every other shape passes through unchanged.
     fn widen_if_widening_local_read(
         &self,
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
-        let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr else {
-            return node;
-        };
-        let widening = self
-            .lookup_local(name.as_ref())
-            .is_some_and(|read| read.widening);
-        if !widening {
+        if !self.reads_widening_literal_local(expr) {
             return node;
         }
-        let graph = self.dispatch.graph();
-        let widened = match graph.node_data(node).as_deref() {
-            Some(SemanticNodeData::Literal(literal)) => match literal {
-                crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
-                crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
-                crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-                crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-            },
-            _ => return node,
-        };
-        graph.intern_node(SemanticNodeData::Primitive(widened))
+        widen_literal_node(self.dispatch, node)
     }
 
     /// Lower one body-position `TypeExpr` (a fully lowered expression
@@ -1744,35 +1920,59 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_region(
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
-    ) -> (Result<Vec<SemanticNodeId>, FlowReturnFailure>, bool) {
-        let mut contributors = Vec::new();
+    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
+        let mut contributors: Vec<FlowContribution> = Vec::new();
         for statement in region.statements.iter() {
             match statement {
-                crate::flow_slice_content::SliceStatement::Return { argument } => {
+                crate::flow_slice_content::SliceStatement::Return {
+                    argument,
+                    widening_literal,
+                } => {
                     if self.member_filter.is_some() {
                         // Member-projection demand: evaluate ONLY the
                         // demanded member of a structural object return.
                         match self.eval_member_projected_return(argument.as_ref()) {
-                            Ok(Some(node)) => contributors.push(node),
+                            Ok(Some(node)) => contributors.push(FlowContribution {
+                                node,
+                                fresh_literal: false,
+                            }),
                             Ok(None) => {}
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         }
                         continue;
                     }
                     match argument {
-                        Some(expr) => match self.eval_expr(expr) {
-                            // A widening-literal local read widens to its
-                            // primitive at the return join (tsc's
-                            // widening-literal-type rule: `const b = 1;
-                            // return b;` infers `number`; `as const` /
-                            // annotated literals never enter the set).
-                            Ok(Some(node)) => {
-                                contributors.push(self.widen_if_widening_local_read(expr, node));
+                        Some(expr) => {
+                            // A FRESH literal contribution is a bare literal
+                            // return argument or a read of a
+                            // widening-literal `const`. The join decides
+                            // whether it widens: tsc widens only a lone
+                            // contributor (`return 1` is `number`, but
+                            // `if (c) return 1; return 0` is `0 | 1`).
+                            let mut fresh_literal =
+                                *widening_literal || self.reads_widening_literal_local(expr);
+                            // A `return f(…)` whose callee pops as a
+                            // PROVISIONAL member of this component is
+                            // fresh-NEUTRAL: its value is re-derived by the
+                            // equation fixed point, so the component's own
+                            // freshness (not this arm) decides. Treating it
+                            // as non-fresh would make widening depend on
+                            // whether the callee was already in flight —
+                            // i.e. on demand ORDER.
+                            let holds_before = self.holds.len();
+                            match self.eval_expr(expr) {
+                                Ok(Some(node)) => {
+                                    fresh_literal |= self.holds.len() > holds_before;
+                                    contributors.push(FlowContribution {
+                                        node,
+                                        fresh_literal,
+                                    });
+                                }
+                                // A hold is neither a contributor nor a failure.
+                                Ok(None) => {}
+                                Err(failure) => return (Err(failure), region.can_fall_through),
                             }
-                            // A hold is neither a contributor nor a failure.
-                            Ok(None) => {}
-                            Err(failure) => return (Err(failure), region.can_fall_through),
-                        },
+                        }
                         None => {
                             // Bare `return;` — recorded, never a direct
                             // `undefined` contributor: a bare-only body
@@ -1852,22 +2052,50 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // An authored annotation is the binding's DECLARED
                     // type, seeded HERE (in source order), never at
                     // region entry — a forward reference stays unbound.
-                    // It supplies the value outright when the declarator
-                    // has no initializer (`var y: number | undefined;`
-                    // is `number | undefined`, not the unbound implicit
-                    // `any`) and for an annotated `const`, whose
-                    // initializer would otherwise publish its pinned
-                    // literal (`const y: string = "s"` is `string`).
-                    // `let` / `var` initializers already widened at
-                    // lowering, which is what assignment narrowing into
-                    // the declared type produces for them.
-                    let declared_supplies = declared.is_some()
-                        && (init.is_none()
-                            || *kind == crate::flow_slice_content::SliceBindingKind::Const);
-                    if let (true, Some(declared)) = (declared_supplies, declared.as_ref()) {
-                        let node = self.lower_body_type(declared);
-                        self.bind_local(name, *kind, node, false, false);
-                        continue;
+                    // tsc's `getTypeAtFlowAssignment` decides what an
+                    // annotated declarator's binding holds:
+                    //
+                    //   - no initializer ⇒ the declared type verbatim
+                    //     (`var y: number | undefined;` is
+                    //     `number | undefined`, not the unbound `any`);
+                    //   - an initializer with a NON-UNION declared type ⇒
+                    //     the declared type verbatim, never the
+                    //     initializer's literal and never the widened
+                    //     initializer (`let n: number = 1` is `number`,
+                    //     `let v: "s" = "s"` is `"s"`, `let u: unknown = 1`
+                    //     is `unknown`);
+                    //   - an initializer with a UNION declared type ⇒
+                    //     `getAssignmentReducedType`, below.
+                    if let Some(declared) = declared.as_ref() {
+                        let declared_node = self.lower_body_type(declared);
+                        let arms = self.dispatch.union_arms_of(declared_node);
+                        match (init, arms) {
+                            (None, _) | (Some(_), None) => {
+                                self.bind_local(name, *kind, declared_node, false, false);
+                                continue;
+                            }
+                            (Some(init), Some(arms)) => {
+                                let node = match self.eval_expr(init) {
+                                    Ok(Some(init_node)) => self.assignment_reduced_union(
+                                        declared_node,
+                                        &arms,
+                                        init_node,
+                                    ),
+                                    // A hold / failed initializer cannot
+                                    // select constituents: the whole
+                                    // declared union is the honest
+                                    // superset, degraded.
+                                    Ok(None) | Err(_) => {
+                                        self.record_degradation(
+                                            crate::semantic_query::FlowReturnDegradation::UnreducedDeclaredUnion,
+                                        );
+                                        declared_node
+                                    }
+                                };
+                                self.bind_local(name, *kind, node, false, false);
+                                continue;
+                            }
+                        }
                     }
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
@@ -1934,9 +2162,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Evaluate a nested function value's signature: bind its OWN type
     /// parameters in scope (the SAME binder environment the root
     /// evaluation uses), lower its parameters, evaluate its body in a
-    /// FRESH frame (the nested function's own params / locals; holds the
-    /// nested evaluation met ride the outer frame's hold set), and compose
-    /// the `Signature` node.
+    /// fresh frame seeded with the CAPTURED enclosing bindings (holds the
+    /// nested evaluation met ride the outer frame's hold set), and
+    /// compose the `Signature` node.
+    ///
+    /// Closure capture: the content lowering classified a nested read of
+    /// an ENCLOSING parameter / local as a by-name local read, so the
+    /// nested frame starts from a SNAPSHOT of the enclosing layers taken
+    /// at the function value's own position. Enclosing parameters seed
+    /// the function-scoped layer by name (they are the outermost frame
+    /// scope, and a redeclaring enclosing `var` still wins); the
+    /// enclosing lexical locals seed the lexical layer, so the nested
+    /// frame's own bindings shadow them and the membership flags stay
+    /// layer-exact.
     fn eval_nested_function_signature(
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
@@ -1975,6 +2213,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 span: None,
             });
         }
+        // The captured function-scope layer: the enclosing parameters BY
+        // NAME, overlaid by the enclosing `var` layer (a redeclaring
+        // enclosing `var` shares the parameter's slot and still wins).
+        let mut captured_var_locals = self.var_locals.clone();
+        for (ordinal, param) in self.param_names.iter().enumerate() {
+            let (Some(name), Some(node)) = (param.name.as_ref(), self.params.get(ordinal)) else {
+                continue;
+            };
+            captured_var_locals.entry(name.to_string()).or_insert(*node);
+        }
         let nested_holds;
         let nested_degradation;
         let nested_bare_return_seen;
@@ -1985,11 +2233,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 canonical: self.canonical,
                 owner: self.owner,
                 params: &params,
+                param_names: nested_params,
                 binder_env: &binder_env,
-                locals: rustc_hash::FxHashMap::default(),
-                var_locals: rustc_hash::FxHashMap::default(),
-                widening_locals: rustc_hash::FxHashSet::default(),
-                var_widening_locals: rustc_hash::FxHashSet::default(),
+                locals: self.locals.clone(),
+                var_locals: captured_var_locals,
+                widening_locals: self.widening_locals.clone(),
+                var_widening_locals: self.var_widening_locals.clone(),
                 bare_return_seen: false,
                 // A nested function value always evaluates its WHOLE
                 // return (its signature's return type) — the member
@@ -1997,9 +2246,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 member_filter: None,
                 holds: Vec::new(),
                 degradation: None,
-                degraded_locals: rustc_hash::FxHashSet::default(),
-                var_degraded_locals: rustc_hash::FxHashSet::default(),
-                var_conditional_locals: rustc_hash::FxHashSet::default(),
+                degraded_locals: self.degraded_locals.clone(),
+                var_degraded_locals: self.var_degraded_locals.clone(),
+                var_conditional_locals: self.var_conditional_locals.clone(),
                 conditional_arm_nesting: 0,
             };
             let outcome = nested_evaluator.eval_region(body);
@@ -2015,7 +2264,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.record_degradation(degradation);
         }
         let contributors = contributors?;
-        let result = self.dispatch.join_flow_return_contributors(
+        // A nested function value's body is its own join; its holds ride
+        // the OUTER frame's component, so no fixed point closes here and
+        // the freshness bit has no later consumer.
+        let (result, _fresh_seed) = self.dispatch.join_flow_return_contributors(
             contributors,
             can_fall_through,
             nested_bare_return_seen,
@@ -2049,35 +2301,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .map(Some)
                 .ok_or(FlowReturnFailure::Unresolved),
             crate::flow_slice_content::SliceExpr::Local { name, param } => {
-                // Observing a binding whose initializer FAILED is the
-                // `FailedBindingInitializer` degradation: the value is a
-                // modeled `any`, not the initializer's real type. A plain
-                // unbound local (a not-yet-assigned hoisted `var` / TDZ
-                // forward reference) stays the undegraded implicit-`any`,
-                // EXCEPT when the binding redeclares a parameter — then
-                // the parameter is still the reaching value.
-                match self.lookup_local(name.as_ref()) {
-                    Some(read) => {
-                        if read.degraded {
-                            self.record_degradation(
-                                crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
-                            );
-                        }
-                        // Observing a function-scoped binding whose
-                        // surviving reaching definition was recorded
-                        // inside a conditional arm is the
-                        // `ConditionalVarDefinition` degradation: the
-                        // value is the last-evaluated arm's, not the
-                        // join of every arm (and of the never-assigned
-                        // path). An unobserved conditional `var`
-                        // degrades nothing.
-                        if read.conditional {
-                            self.record_degradation(
-                                crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
-                            );
-                        }
-                        Ok(Some(read.node))
-                    }
+                // The READ folds the binding's membership flags into this
+                // evaluation's degradation channel. A plain unbound local
+                // (a not-yet-assigned hoisted `var` / TDZ forward
+                // reference) stays the undegraded implicit-`any`, EXCEPT
+                // when the binding redeclares a parameter — then the
+                // parameter is still the reaching value.
+                match self.read_local(name.as_ref()) {
+                    Some(node) => Ok(Some(node)),
                     None => Ok(Some(
                         param
                             .and_then(|ordinal| self.params.get(ordinal as usize).copied())
@@ -2284,7 +2515,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     },
                 }
             }
-            crate::flow_slice_content::SliceExpr::CallOnBinding { param, name } => {
+            crate::flow_slice_content::SliceExpr::CallOnBinding {
+                param,
+                name,
+                captured,
+            } => {
                 // A call on a function-typed binding: the call's value is
                 // the binding's signature return. Calling an `any`-typed
                 // or unbound binding is `any` EXACTLY (the implicit-`any`
@@ -2295,13 +2530,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
                 // runs (mirrors the `Local` read).
-                let node = self
-                    .lookup_local(name.as_ref())
-                    .map(|read| read.node)
-                    .or_else(|| {
-                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                    });
+                let node = self.read_local(name.as_ref()).or_else(|| {
+                    param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                });
                 let Some(node) = node else {
+                    // A CAPTURED callee the seeded snapshot does not carry
+                    // has no honest value: fail closed rather than take
+                    // the same-frame implicit-`any` call.
+                    if *captured {
+                        return Err(FlowReturnFailure::UnmodeledBinding);
+                    }
                     return Ok(Some(
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
                     ));
@@ -2417,6 +2655,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::Any => Ok(Some(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             )),
+            crate::flow_slice_content::SliceExpr::CapturedRead { name } => {
+                // A read of an ENCLOSING frame's binding: answered from
+                // the snapshot the nested frame was seeded with. A
+                // capture the snapshot does not carry (the demand slice
+                // selected no definition for it — nested bodies are not
+                // walked by the planner) FAILS CLOSED: it is neither the
+                // same-frame implicit-`any` nor a file-scope name.
+                match self.read_local(name.as_ref()) {
+                    Some(node) => Ok(Some(node)),
+                    None => Err(FlowReturnFailure::UnmodeledBinding),
+                }
+            }
+            // A name the frame's lexical authority resolved to a
+            // function-local binding the content half does not model
+            // (a destructuring element, a local `class` / `enum` /
+            // `namespace` / `import =`, a `catch` parameter, a nested
+            // function declaration read as a value). The name is
+            // RESOLVED — never free — so there is no honest value to
+            // publish: fail closed with the typed no-value failure
+            // rather than bind an unrelated same-named declaration.
+            crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
+                Err(FlowReturnFailure::UnmodeledBinding)
+            }
             // Content the demand slice did not select: never lowered,
             // never evaluable. Reaching one is a planner/content mismatch
             // — undecided, fail closed; never a fabricated `any`.

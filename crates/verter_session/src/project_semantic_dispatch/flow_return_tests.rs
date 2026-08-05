@@ -381,7 +381,7 @@ fn flow_is_miss(dispatch: &ProjectSemanticDispatch<'_>, key: FlowReturnKey) -> b
     )
 }
 
-fn object_prop<'a>(
+pub(crate) fn object_prop<'a>(
     expr: &'a verter_type_expr::TypeExpr,
     name: &str,
 ) -> &'a verter_type_expr::TypeExpr {
@@ -2479,6 +2479,9 @@ fn flow_return_member_demand_with_bare_return_arm_is_typed_miss() {
 
 /// Bare-return-as-void keeps its OTHER half: a bare return ALONGSIDE a
 /// value return contributes `undefined` (never `void`, never dropped).
+/// The `undefined` arm is a CONTRIBUTOR, so the value return's fresh
+/// literal is no longer alone and stays pinned — tsc 7.0.2 on
+/// `subMixedBareValue` is `1 | undefined`, not `number | undefined`.
 #[test]
 fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     let host = make_host();
@@ -2494,14 +2497,18 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
             ),
         );
         let verter_type_expr::TypeExpr::Union(arms) = &expr else {
-            panic!("expected `number | undefined`, got {expr:?}");
+            panic!("expected `1 | undefined`, got {expr:?}");
         };
         assert!(arms.contains(&verter_type_expr::TypeExpr::Primitive(
             verter_type_expr::PrimitiveName::Undefined
         )));
-        assert!(arms.contains(&verter_type_expr::TypeExpr::Primitive(
-            verter_type_expr::PrimitiveName::Number
-        )));
+        assert!(
+            arms.contains(&verter_type_expr::TypeExpr::Literal(
+                verter_type_expr::LiteralValue::Number(1.0)
+            )),
+            "the value return's literal stays pinned beside the \
+             `undefined` arm: {expr:?}"
+        );
     });
 }
 

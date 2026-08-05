@@ -487,6 +487,10 @@ impl ArtifactNode for FlowSliceLoweredBodyNode {
 /// tier.
 pub(crate) struct FlowSliceStores {
     graphs: Arc<FunctionFlowGraphStore>,
+    /// The production skeleton producer — held so the content lowering
+    /// can read the SAME memoized skeleton the plan resolved against
+    /// (one lexical authority, one build per content version).
+    skeletons: Arc<dyn FlowBodySkeletonSource>,
     hash_node: FlowSliceHashNode,
     lowered_node: FlowSliceLoweredBodyNode,
     /// The shared budget cell's store-side handle — held so a
@@ -508,16 +512,34 @@ impl FlowSliceStores {
             Arc::clone(&skeletons),
             Arc::clone(&budget),
         );
-        let lowered_node = FlowSliceLoweredBodyNode::new(graphs.clone(), skeletons, budget.clone());
+        let lowered_node =
+            FlowSliceLoweredBodyNode::new(graphs.clone(), Arc::clone(&skeletons), budget.clone());
         #[cfg(not(test))]
         drop(budget);
         Self {
             graphs,
+            skeletons,
             hash_node,
             lowered_node,
             #[cfg(test)]
             budget,
         }
+    }
+
+    /// The memoized [`FunctionBodySkeleton`] of one function content
+    /// version — the SAME artifact the demand plan resolved its lexical
+    /// edges against, so the content lowering and the plan share ONE
+    /// binding authority. Built at most once per content version (the
+    /// graph store owns the memoization); `None` when the position is
+    /// not served at exactly the pinned version.
+    pub(crate) fn skeleton_for(
+        &self,
+        key: &FlowSliceFunctionKey,
+        resolver: &dyn ResolverContext,
+    ) -> Option<Arc<FunctionBodySkeleton>> {
+        self.graphs
+            .get_or_build(key, self.skeletons.as_ref(), resolver)
+            .map(|bundle| Arc::clone(&bundle.skeleton))
     }
 
     /// The slice-identity node (plan + hash; the fourth budget layer's

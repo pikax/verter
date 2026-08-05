@@ -273,66 +273,14 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
         }
     }
 
-    // Lexical binding resolution: a read / callee root / write target of
-    // `name` evaluated in `region` binds to the declaration(s) of the
-    // NEAREST enclosing region carrying that name — an innermost-first
-    // walk of the region parent chain the skeleton already records
-    // (`SkeletonBinding.region`, `SkeletonRegion.parent`). A shadowed
-    // same-named OUTER binding therefore gets NO dependence edge, so an
-    // irrelevant outer initializer can never enter a demand slice through
-    // name-keyed fan-out. Only when the enclosing chain carries NO
-    // declaration does the resolution fall back to same-name bindings of
-    // the HOISTING kinds only — `var` and nested function declarations
-    // living in non-enclosing regions still hoist to function scope;
-    // block-scoped kinds (`let` / `const` / class / catch-param) never
-    // do, so a kind-blind fallback would value-select a lexically
-    // unreachable sibling-block hub and drag its writes into the slice.
-    let hoisting_bindings_of_name = |name: super::FlowNameId| -> Vec<SkeletonBindingId> {
-        skeleton
-            .bindings
-            .iter()
-            .enumerate()
-            .filter(|(_, binding)| {
-                binding.name == name
-                    && matches!(
-                        binding.kind,
-                        super::SkeletonBindingKind::Var
-                            | super::SkeletonBindingKind::NestedFunction
-                    )
-            })
-            .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
-            .collect()
-    };
-    let bindings_of_name_in_scope = |name: super::FlowNameId, region: SkeletonRegionId| {
-        let mut current = Some(region);
-        while let Some(enclosing) = current {
-            let mut hits: Vec<SkeletonBindingId> = Vec::new();
-            for (index, binding) in skeleton.bindings.iter().enumerate() {
-                if binding.name == name && binding.region == enclosing {
-                    hits.push(SkeletonBindingId::from_index(index as u32));
-                }
-            }
-            if !hits.is_empty() {
-                // The FUNCTION-scope frame is the parameters PLUS every
-                // hoisting-kind binding of the name, wherever it is
-                // written: a `var` redeclaring a parameter shares the
-                // parameter's slot, so a root-region resolution unions
-                // both (`function f(x) { { var x = "s"; } return x }`
-                // must reach the block declarator). Inner block-scoped
-                // frames stay exact — shadowing is preserved.
-                if skeleton.regions[enclosing.index()].parent.is_none() {
-                    for hoisted in hoisting_bindings_of_name(name) {
-                        if !hits.contains(&hoisted) {
-                            hits.push(hoisted);
-                        }
-                    }
-                }
-                return hits;
-            }
-            current = skeleton.regions[enclosing.index()].parent;
-        }
-        hoisting_bindings_of_name(name)
-    };
+    // Lexical binding resolution runs through the skeleton's SINGLE
+    // authority ([`FunctionBodySkeleton::bindings_of_name_in_scope`]) —
+    // the same one the content lowering consumes, so a plan edge and a
+    // lowered read can never disagree about which slot a name denotes.
+    let bindings_of_name_in_scope =
+        |name: super::FlowNameId, region: SkeletonRegionId| -> Vec<SkeletonBindingId> {
+            skeleton.bindings_of_name_in_scope(name, region)
+        };
 
     let mut edges: Vec<(FlowNodeId, FlowNodeId, FlowEdgeKind)> = Vec::new();
     // Read / call-effect edges deduplicate per (from, to, class); write and

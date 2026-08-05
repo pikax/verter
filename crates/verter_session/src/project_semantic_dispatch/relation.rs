@@ -324,6 +324,9 @@ pub(super) struct DrainedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(super) materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Whether the member's own contributors were all FRESH literals —
+    /// the post-convergence literal-widening input.
+    pub(super) fresh_seed: bool,
 }
 
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
@@ -1170,6 +1173,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         holds: state.holds,
                         self_roots: state.self_roots,
                         materialized: state.materialized,
+                        fresh_seed: state.fresh_seed,
                     });
                 }
             }
@@ -1188,6 +1192,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     key: member.key.clone(),
                     outcome: member.outcome.clone(),
                     holds: member.holds.clone(),
+                    fresh_seed: member.fresh_seed,
                 });
             }
             self.discharge_flow_component_to_fixed_point(&mut entries);

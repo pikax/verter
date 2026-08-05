@@ -1218,6 +1218,7 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
+        skeleton: Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
     ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         let service = self.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
@@ -1231,6 +1232,7 @@ impl DeclBodyMemo {
                     p.source_str(),
                     &entry,
                     &selection,
+                    &skeleton,
                 )
             })
         }) else {

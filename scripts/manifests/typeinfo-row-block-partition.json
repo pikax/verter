@@ -2124,6 +2124,20 @@
     },
     {
       "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct05_return_type_contextual_flow",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping",
+      "status": "ignored"
+    },
+    {
+      "file": "contextual_typing.rs",
+      "function": "contextual_typing_ct06_parenthesized_expression_preserves_context",
+      "block": "U6.CONTEXTUAL_CALLBACK",
+      "capability": "ContextualTyping",
+      "status": "ignored"
+    },
+    {
+      "file": "contextual_typing.rs",
       "function": "contextual_typing_ct07_as_cast_erases_context",
       "block": "U6.CONTEXTUAL_CALLBACK",
       "capability": "ContextualTyping",

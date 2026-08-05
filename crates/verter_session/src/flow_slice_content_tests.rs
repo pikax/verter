@@ -65,7 +65,10 @@ fn selection_for(
     memo: &DeclBodyMemo,
     entry: &FunctionProgramEntry,
     path: &[Arc<str>],
-) -> FlowSliceSelection {
+) -> (
+    FlowSliceSelection,
+    Arc<verter_semantic::analysis::flow::FunctionBodySkeleton>,
+) {
     let skeleton = memo
         .function_body_skeleton(entry)
         .expect("the skeleton must build for an indexed function");
@@ -75,15 +78,15 @@ fn selection_for(
         .plan(&demand, &FlowSliceBudget::default())
         .expect("the default budget admits these fixtures");
     let ir = lower_slice_plan(&plan, &graph, &skeleton);
-    FlowSliceSelection::from_slice_ir(&ir)
+    (FlowSliceSelection::from_slice_ir(&ir), Arc::new(skeleton))
 }
 
 fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceContent> {
     let memo = memo_for(source);
     let index = memo.function_program_index();
     let entry = entry_of(&index, name);
-    let selection = selection_for(&memo, entry, path);
-    memo.flow_slice_content(entry, selection)
+    let (selection, skeleton) = selection_for(&memo, entry, path);
+    memo.flow_slice_content(entry, selection, skeleton)
         .expect("slice content must build for an indexed function")
 }
 
@@ -120,10 +123,13 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
         matches!(
             &consequent.statements[0],
             SliceStatement::Return {
-                argument: Some(SliceExpr::Type(TypeExpr::Primitive(PrimitiveName::Number)))
+                argument: Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::Number(_)))),
+                widening_literal: true,
             }
         ),
-        "the then arm returns a widened numeric literal"
+        "a return argument PRESERVES its fresh literal and flags it: tsc \
+         widens only a lone contributor, so the return join owns the \
+         decision (`pick` is `\"two\" | 1`, not `string | number`)"
     );
     let alternate = alternate.as_ref().expect("an else arm exists");
     assert!(!alternate.can_fall_through, "the else arm returns");
@@ -132,10 +138,11 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
         matches!(
             &alternate.statements[0],
             SliceStatement::Return {
-                argument: Some(SliceExpr::Type(TypeExpr::Primitive(PrimitiveName::String)))
+                argument: Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::String(_)))),
+                widening_literal: true,
             }
         ),
-        "the else arm returns a widened string literal"
+        "the else arm likewise preserves its fresh literal"
     );
 }
 
@@ -164,7 +171,10 @@ fn if_without_else_falls_through() {
     assert_eq!(consequent.statements.len(), 1);
     assert!(matches!(
         &consequent.statements[0],
-        SliceStatement::Return { argument: Some(_) }
+        SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }
     ));
 }
 
@@ -175,7 +185,10 @@ fn bare_return_carries_no_argument() {
     assert!(!node.can_fall_through);
     assert_eq!(
         node.body.statements.as_ref(),
-        &[SliceStatement::Return { argument: None }],
+        &[SliceStatement::Return {
+            argument: None,
+            widening_literal: false,
+        }],
     );
 }
 
@@ -198,7 +211,10 @@ fn return_free_loop_is_transparent() {
     ));
     assert!(matches!(
         &node.body.statements[1],
-        SliceStatement::Return { argument: Some(_) }
+        SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }
     ));
 }
 
@@ -276,6 +292,7 @@ fn return_of_parameter_is_param_carrier() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Param { ordinal: 0 }),
+            widening_literal: false,
         }],
     );
 }
@@ -354,6 +371,7 @@ fn local_reaching_definition_is_binding_and_local() {
                 name: Arc::from("x"),
                 param: None,
             }),
+            widening_literal: false,
         },
     );
 }
@@ -366,6 +384,7 @@ fn direct_self_call_is_recursion_hold() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::DirectSelfCall),
+            widening_literal: false,
         }],
     );
 }
@@ -380,6 +399,7 @@ fn symbolic_and_unrepresentable_calls() {
     );
     let [SliceStatement::Return {
         argument: Some(SliceExpr::DirectCall(target)),
+        ..
     }] = node.body.statements.as_ref()
     else {
         panic!(
@@ -402,14 +422,15 @@ fn symbolic_and_unrepresentable_calls() {
     );
     let index = memo.function_program_index();
     let entry = member_entry_of(&index, "Service", 1);
-    let selection = selection_for(&memo, entry, &[]);
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
     let node = memo
-        .flow_slice_content(entry, selection)
+        .flow_slice_content(entry, selection, skeleton)
         .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Any),
+            widening_literal: false,
         }],
         "an unrepresentable callee falls back to any"
     );
@@ -426,6 +447,7 @@ fn object_return_rides_spread_member() {
     );
     let [SliceStatement::Return {
         argument: Some(SliceExpr::Type(TypeExpr::Object(object))),
+        ..
     }] = node.body.statements.as_ref()
     else {
         panic!(
@@ -454,6 +476,7 @@ fn arrow_expression_body_is_single_return() {
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Any),
+            widening_literal: false,
         }],
         "a binary expression is the leaf lowering's any fallback"
     );
@@ -489,7 +512,10 @@ fn unread_binding_is_omitted_from_content() {
     );
     assert!(matches!(
         &node.body.statements[1],
-        SliceStatement::Return { argument: Some(_) }
+        SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }
     ));
 }
 
@@ -509,6 +535,7 @@ fn member_demand_elides_sibling_member_values() {
     );
     let [SliceStatement::Return {
         argument: Some(SliceExpr::Object { members }),
+        ..
     }] = node.body.statements.as_ref()
     else {
         panic!(
@@ -537,13 +564,17 @@ fn locator_miss_is_typed_none() {
     let memo = memo_for("function id(a: number) { return a; }\n");
     let index = memo.function_program_index();
     let entry = entry_of(&index, "id");
-    let selection = selection_for(&memo, entry, &[]);
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
 
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.flow_slice_content(&missing_contributor, selection.clone())
-            .is_none(),
+        memo.flow_slice_content(
+            &missing_contributor,
+            selection.clone(),
+            Arc::clone(&skeleton)
+        )
+        .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -552,7 +583,8 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.flow_slice_content(&bad_descent, selection).is_none(),
+        memo.flow_slice_content(&bad_descent, selection, skeleton)
+            .is_none(),
         "a mismatched descent is a typed miss"
     );
 }

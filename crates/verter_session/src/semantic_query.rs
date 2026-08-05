@@ -1594,6 +1594,15 @@ pub enum FlowReturnDegradation {
     /// never-assigned path). The observation fails closed as a degraded
     /// success; an unobserved conditional `var` degrades nothing.
     ConditionalVarDefinition,
+    /// An annotated declarator whose DECLARED type is a union could not
+    /// be reduced to the constituents its initializer selects
+    /// (tsc's `getAssignmentReducedType`): the relation authority
+    /// returned no decision for some constituent, or no constituent
+    /// survived. The binding holds the whole declared union — an honest
+    /// SUPERSET of the assigned type, never a guess and never the
+    /// initializer's own (fresh or widened) type — and the result fails
+    /// closed as a degraded success.
+    UnreducedDeclaredUnion,
 }
 
 /// A typed `FlowReturn` failure — carried through `ReturnOnly` (never
@@ -1622,6 +1631,15 @@ pub enum FlowReturnFailure {
     /// lowering's depth / work budget, or the obligation runtime's
     /// connected-demand cap — surfaced as the work budget).
     Budget(verter_type_expr::facts::InferenceUnavailableReason),
+    /// A name the frame's lexical authority resolved to a
+    /// FUNCTION-LOCAL binding the flow content does not model: a
+    /// destructuring-pattern element, a local `class` / `enum` /
+    /// `namespace` / `import =`, a `catch` parameter, or a nested
+    /// function declaration read as a value. The name is RESOLVED, not
+    /// free — publishing anything here (an `any`, or the file-scope
+    /// resolution of the same name) would be a warm-admissible wrong
+    /// answer, so the evaluation fails closed.
+    UnmodeledBinding,
 }
 
 /// The control surface a `FlowReturn` evaluation does not model.

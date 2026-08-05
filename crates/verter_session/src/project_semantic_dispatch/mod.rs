@@ -104,6 +104,8 @@ pub(crate) mod output_materialization;
 pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
 #[cfg(test)]
+pub(crate) mod flow_return_lexical_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_tests;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;

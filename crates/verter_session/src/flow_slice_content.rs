@@ -47,11 +47,14 @@ use oxc_ast::ast::{
     PropertyKind, Statement, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
+use verter_semantic::analysis::flow::{
+    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonBindingKind,
+};
 use verter_semantic::analysis::function_program::{
-    inventory_statement_list, resolve_function_node, FunctionBindingKind, FunctionControlRegion,
-    FunctionNode, FunctionProgramEntry,
+    inventory_statement_list, resolve_function_node, FunctionControlRegion, FunctionNode,
+    FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::infer_declaration_expression_type;
 use verter_type_expr::{PrimitiveName, TypeExpr};
@@ -157,6 +160,13 @@ pub enum SliceStatement {
     Return {
         /// The lowered return argument, when present.
         argument: Option<SliceExpr>,
+        /// Whether the argument is a FRESH literal source (a bare
+        /// literal expression with no const assertion). tsc widens a
+        /// fresh literal return only when it is the function's SOLE
+        /// return contributor; a multi-contributor join keeps every
+        /// literal, so the widening decision belongs to the join, not
+        /// to this position.
+        widening_literal: bool,
     },
     /// An `if` statement. No guard narrowing: each arm is its own region;
     /// the test's value is never consumed by the evaluator, so no test
@@ -278,6 +288,21 @@ pub enum SliceExpr {
         param: Option<u32>,
         /// The binding name.
         name: Arc<str>,
+        /// Whether the callee is a CAPTURED enclosing binding (see
+        /// [`SliceExpr::CapturedRead`]): an unbound capture fails closed
+        /// instead of taking the implicit-`any` call.
+        captured: bool,
+    },
+    /// A read of a binding an ENCLOSING frame declares, from inside a
+    /// nested function value. The evaluator answers it from the snapshot
+    /// of the enclosing layers it seeded the nested frame with; a capture
+    /// the snapshot does not carry (the demand slice selected no
+    /// definition for it) fails CLOSED — never the implicit-`any` a
+    /// same-frame unbound read takes, and never a file-scope resolution
+    /// of the same name.
+    CapturedRead {
+        /// The captured binding's name.
+        name: Arc<str>,
     },
     /// A bare-identifier call to a name a hoisted nested function
     /// declaration binds in this function. The nested declaration shadows
@@ -298,6 +323,16 @@ pub enum SliceExpr {
     /// An expression the leaf lowering cannot represent (its `any`
     /// fallback), including a call with an unrepresentable callee.
     Any,
+    /// A read (or call) of a name the frame's lexical authority resolves
+    /// to a FUNCTION-LOCAL binding this content half does not model: a
+    /// destructuring-pattern element, a local `class` / `enum` /
+    /// `namespace` / `import =`, or a `catch` parameter.
+    ///
+    /// The name is RESOLVED, not free — falling back to the shared leaf
+    /// lowering would resolve it in FILE OWNER SCOPE and silently bind an
+    /// unrelated module-scope (or cross-file imported) value of the same
+    /// name, cleanly and warm. Fails closed at the evaluator instead.
+    UnmodeledBinding,
     /// Content the demand slice did NOT select: never lowered, never
     /// evaluable. Observing an elided value is a planner/content mismatch
     /// and fails closed at the evaluator — it is never a fabricated
@@ -386,35 +421,20 @@ pub(crate) fn build_flow_slice_content(
     source: &str,
     entry: &FunctionProgramEntry,
     selection: &FlowSliceSelection,
+    skeleton: &FunctionBodySkeleton,
 ) -> Option<SliceContent> {
     let (node, self_name) = resolve_function_node(program, &entry.locator)?;
     let params = lower_params(node.params(), source);
     let type_parameters = lower_slice_type_params(&node, source);
     let body = node.body()?;
-    // ONE lexical binding authority, from the index's whole-function
-    // binding inventory: hoisted nested function declarations shadow every
-    // outer same-name callee; hoisted `var` names are in scope from the
-    // function's first statement (an unbound one evaluates to `any`).
-    let fn_shadows: Vec<Arc<str>> = entry
-        .bindings
-        .iter()
-        .filter(|binding| binding.kind == FunctionBindingKind::NestedFunction)
-        .map(|binding| Arc::clone(&binding.name))
-        .collect();
-    let hoisted_vars: Vec<Arc<str>> = entry
-        .bindings
-        .iter()
-        .filter(|binding| binding.kind == FunctionBindingKind::Var)
-        .map(|binding| Arc::clone(&binding.name))
-        .collect();
+    let captures = CaptureScope::default();
     let mut lowerer = Lowerer {
         source,
         selection: Some(selection),
         params: &params,
         self_name: self_name.as_deref(),
-        scopes: vec![hoisted_vars.clone()],
-        hoisted_vars: &hoisted_vars,
-        fn_shadows: &fn_shadows,
+        skeleton,
+        captures: &captures,
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         budget_failure: None,
@@ -427,14 +447,16 @@ pub(crate) fn build_flow_slice_content(
         let Statement::ExpressionStatement(expression) = statement else {
             return None;
         };
+        let widening_literal = expr_is_bare_literal(&expression.expression);
         let argument = if lowerer.value_span_selected(expression.expression.span()) {
-            lowerer.lower_expr(&expression.expression, ExprMode::ArrowBody)
+            lowerer.lower_expr(&expression.expression, ExprMode::Return)
         } else {
             SliceExpr::Elided
         };
         SliceRegion {
             statements: Arc::from([SliceStatement::Return {
                 argument: Some(argument),
+                widening_literal,
             }]),
             can_fall_through: false,
         }
@@ -449,6 +471,15 @@ pub(crate) fn build_flow_slice_content(
         body: region,
         budget_failure,
     })
+}
+
+/// The authored span of one nested function value — the position its
+/// capture scope resolves at.
+fn node_span(node: &FunctionNode<'_>) -> oxc_span::Span {
+    match node {
+        FunctionNode::Function(func) => func.span,
+        FunctionNode::Arrow(arrow) => arrow.span,
+    }
 }
 
 /// Unwrap a parenthesized expression (the IIFE callee shape).
@@ -540,18 +571,23 @@ fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<SliceParam> 
 }
 
 /// The expression-lowering position, selecting the shared shallow-pass
-/// entry's literal policy (and its widening behavior).
+/// entry's literal policy.
 #[derive(Clone, Copy)]
 enum ExprMode {
-    /// Return-argument position: a fresh top-level literal widens to its
-    /// primitive.
+    /// Return-argument position (including an expression-bodied arrow's
+    /// synthesized return): the literal is PRESERVED here — tsc widens a
+    /// fresh literal return only when it is the sole contributor, so the
+    /// return join owns that decision.
     Return,
-    /// Arrow expression-body position: a standalone literal keeps its
-    /// literal type.
-    ArrowBody,
-    /// Binding-initializer position: `const` preserves the literal,
-    /// `let` / `var` widen.
-    BindingInit(SliceBindingKind),
+    /// Binding-initializer position. `preserve_literal` is the
+    /// declarator's policy: a `const` keeps its initializer's literal,
+    /// `let` / `var` widen it, and an ANNOTATED declarator keeps it
+    /// because the declared type governs the outcome (the initializer
+    /// only selects a constituent).
+    BindingInit {
+        /// Whether the initializer's fresh literal survives lowering.
+        preserve_literal: bool,
+    },
 }
 
 /// The region lowering result: the region plus whether any nested lowering
@@ -562,18 +598,69 @@ struct LoweredRegion {
     hit_unsupported: bool,
 }
 
+/// How the frame's lexical authority classifies one identifier.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameBinding {
+    /// No binding in this frame or any enclosing one: a module- /
+    /// outer-scope reference the shared leaf lowering resolves.
+    Free,
+    /// A simple formal parameter of THIS frame.
+    Param(u32),
+    /// A modelable local declarator (`const` / `let` / `var` / `using`),
+    /// carrying the ordinal of a parameter it REDECLARES (a hoisted
+    /// `var` sharing a parameter's slot).
+    Local(Option<u32>),
+    /// A modelable binding an ENCLOSING frame declares (a closure
+    /// capture), read by name from the evaluator's seeded snapshot.
+    Captured,
+    /// A hoisted nested function declaration of this frame binds the
+    /// name; it shadows every outer same-name declaration.
+    NestedFunction,
+    /// A resolved function-local binding this content half cannot model.
+    Unmodeled,
+}
+
+/// A name an enclosing frame binds, as the ENCLOSING frame's lexical
+/// authority classified it at the nested function value's own position.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapturedBinding {
+    /// A modelable enclosing parameter / local: the evaluator seeds the
+    /// nested frame with the captured reaching definition BY NAME.
+    Local,
+    /// An enclosing binding the content half cannot model.
+    Unmodeled,
+}
+
+/// The names a nested function value captures from its ENCLOSING frames,
+/// resolved once at the position the function value itself occupies.
+/// Empty for the root frame.
+#[derive(Default)]
+struct CaptureScope {
+    names: FxHashMap<Arc<str>, CapturedBinding>,
+}
+
+impl CaptureScope {
+    fn lookup(&self, name: &str) -> NameBinding {
+        match self.names.get(name) {
+            // A captured binding is read BY NAME from the evaluator's
+            // seeded snapshot: no parameter ordinal applies (ordinals
+            // index the NESTED frame's own signature).
+            Some(CapturedBinding::Local) => NameBinding::Captured,
+            Some(CapturedBinding::Unmodeled) => NameBinding::Unmodeled,
+            None => NameBinding::Free,
+        }
+    }
+}
+
 /// The statement/expression lowering state: the demand selection (root
 /// frame only — nested function values lower ungated, their bodies are
 /// beyond slice granularity), the shared leaf-lowering entry, the
 /// function's parameters (for [`SliceExpr::Param`] ordinals), its
-/// bare-identifier self name (for [`SliceExpr::DirectSelfCall`]), the
-/// hoisted nested function declaration names (for
-/// [`SliceExpr::LocalFunctionShadow`]), and the local-binding scope stack
-/// (for [`SliceExpr::Local`]). One scope frame per region; a region
-/// PRE-DECLARES every lexical name its own statements bind (a forward
-/// reference is in scope but unbound at evaluation — the TDZ-honest `any`)
-/// and a binding's reaching definition still enters AFTER its initializer
-/// is lowered.
+/// bare-identifier self name (for [`SliceExpr::DirectSelfCall`]), and the
+/// frame's LEXICAL AUTHORITY — the same
+/// [`FunctionBodySkeleton`] the demand plan resolves against, so a
+/// planned edge and a lowered read can never disagree about which slot a
+/// name denotes.
 struct Lowerer<'a> {
     source: &'a str,
     /// The demand selection gating content lowering (`None` inside a
@@ -581,17 +668,17 @@ struct Lowerer<'a> {
     selection: Option<&'a FlowSliceSelection>,
     params: &'a [SliceParam],
     self_name: Option<&'a str>,
-    scopes: Vec<Vec<Arc<str>>>,
-    /// The function's hoisted `var` names (from the index's whole-function
-    /// binding inventory). A `var` REDECLARING a parameter name rebinds
-    /// that name for the whole function, so these resolve as locals ahead
-    /// of the parameter list — with the parameter kept as the evaluator's
-    /// not-yet-bound fallback.
-    hoisted_vars: &'a [Arc<str>],
-    /// The function's hoisted nested function declaration names (from the
-    /// index's whole-function binding inventory at the root; from the SAME
-    /// single inventory walk over a nested function value's own body).
-    fn_shadows: &'a [Arc<str>],
+    /// THE lexical binding authority of this frame: the arena-free
+    /// skeleton of the function body being lowered (the served
+    /// function's own skeleton at the root; the nested value's own
+    /// skeleton inside a function expression). Every identifier
+    /// classification routes through
+    /// [`FunctionBodySkeleton::bindings_of_name_in_scope`] — there is no
+    /// second inventory.
+    skeleton: &'a FunctionBodySkeleton,
+    /// The ENCLOSING frames' bindings visible at this function value's
+    /// position (empty at the root).
+    captures: &'a CaptureScope,
     /// The function's control-region skeleton (the index's for a served
     /// function; computed by the same single inventory walk for a nested
     /// function value's body) — the authoritative `has_return` source for
@@ -626,20 +713,124 @@ impl Lowerer<'_> {
             .map(|ordinal| ordinal as u32)
     }
 
-    fn is_local_in_scope(&self, name: &str) -> bool {
-        self.scopes
-            .iter()
-            .rev()
-            .any(|frame| frame.iter().any(|candidate| candidate.as_ref() == name))
+    /// Classify one identifier occurrence through the frame's LEXICAL
+    /// AUTHORITY: the skeleton resolves `name`, evaluated at `span`, to
+    /// the binding(s) of the nearest enclosing region (unioned with the
+    /// hoisting kinds at function scope). A name the skeleton does not
+    /// bind falls through to the enclosing frames' capture scope and,
+    /// failing that, is genuinely FREE.
+    fn resolve_name(&self, name: &str, span: oxc_span::Span) -> NameBinding {
+        let Some(name_id) = self.skeleton.name_id(name) else {
+            return self.captures.lookup(name);
+        };
+        let region = self.skeleton.innermost_region_containing(span.into());
+        let bindings = self.skeleton.bindings_of_name_in_scope(name_id, region);
+        if bindings.is_empty() {
+            return self.captures.lookup(name);
+        }
+        self.classify_bindings(name, &bindings)
     }
 
-    /// Whether a hoisted `var` of this function binds `name`. Such a
-    /// declarator REDECLARES a same-named parameter for the whole
-    /// function, so the local layer resolves first.
-    fn is_hoisted_var(&self, name: &str) -> bool {
-        self.hoisted_vars
-            .iter()
-            .any(|candidate| candidate.as_ref() == name)
+    /// Classify one RESOLVED binding set. A set carrying any binding this
+    /// content half cannot model classifies as [`NameBinding::Unmodeled`]
+    /// — never as the modelable sibling and never as a free name.
+    fn classify_bindings(
+        &self,
+        name: &str,
+        bindings: &[verter_semantic::analysis::flow::SkeletonBindingId],
+    ) -> NameBinding {
+        let mut unmodeled = false;
+        let mut nested_function = false;
+        let mut modelable_local = false;
+        let mut param: Option<u32> = None;
+        for id in bindings {
+            match self.skeleton.binding(*id).kind {
+                SkeletonBindingKind::Param => {
+                    // A destructured parameter has no whole-slot value
+                    // carrier (`lower_params` records no name for it).
+                    match (
+                        self.skeleton.binding(*id).destructured,
+                        self.param_ordinal(name),
+                    ) {
+                        (false, Some(ordinal)) => param = Some(ordinal),
+                        _ => unmodeled = true,
+                    }
+                }
+                SkeletonBindingKind::Const
+                | SkeletonBindingKind::Let
+                | SkeletonBindingKind::Var => {
+                    // A destructuring-pattern element has no whole-slot
+                    // `Binding` statement (the content lowering emits one
+                    // only for a plain binding identifier).
+                    if self.skeleton.binding(*id).destructured {
+                        unmodeled = true;
+                    } else {
+                        modelable_local = true;
+                    }
+                }
+                SkeletonBindingKind::NestedFunction => nested_function = true,
+                SkeletonBindingKind::Class
+                | SkeletonBindingKind::CatchParam
+                | SkeletonBindingKind::Enum
+                | SkeletonBindingKind::Namespace
+                | SkeletonBindingKind::ImportEquals => unmodeled = true,
+            }
+        }
+        if unmodeled {
+            return NameBinding::Unmodeled;
+        }
+        if nested_function {
+            return NameBinding::NestedFunction;
+        }
+        if modelable_local {
+            // A hoisted `var` REDECLARING a parameter shares that
+            // parameter's slot: the declarator's reaching definition wins
+            // from the declaration onward and the parameter rides along
+            // as the evaluator's not-yet-bound fallback.
+            return NameBinding::Local(param);
+        }
+        match param {
+            Some(ordinal) => NameBinding::Param(ordinal),
+            // Defensive: an empty set never reaches here (the caller
+            // returns early) and every kind above is covered.
+            None => NameBinding::Unmodeled,
+        }
+    }
+
+    /// The capture scope one nested function value lowers under: every
+    /// name the ENCLOSING frames bind at the function value's own
+    /// position, classified by the enclosing frame's authority. Inner
+    /// frames shadow outer ones.
+    fn capture_scope_for(&self, function_span: oxc_span::Span) -> CaptureScope {
+        let region = self
+            .skeleton
+            .innermost_region_containing(function_span.into());
+        let mut names = FxHashMap::default();
+        for (name, binding) in self.captures.names.iter() {
+            names.insert(Arc::clone(name), *binding);
+        }
+        let mut seen: FxHashSet<verter_semantic::analysis::flow::FlowNameId> = FxHashSet::default();
+        for binding in self.skeleton.bindings.iter() {
+            if !seen.insert(binding.name) {
+                continue;
+            }
+            let text = self.skeleton.name(binding.name);
+            let resolved = self
+                .skeleton
+                .bindings_of_name_in_scope(binding.name, region);
+            if resolved.is_empty() {
+                continue;
+            }
+            let captured = match self.classify_bindings(text, &resolved) {
+                NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured => {
+                    CapturedBinding::Local
+                }
+                NameBinding::Free => continue,
+                NameBinding::NestedFunction | NameBinding::Unmodeled => CapturedBinding::Unmodeled,
+            };
+            names.insert(Arc::from(text), captured);
+        }
+        CaptureScope { names }
     }
 
     /// Whether the statement's control region contains a `return` of the
@@ -659,24 +850,6 @@ impl Lowerer<'_> {
     /// terminal path are unreachable and dropped; an unsupported construct
     /// ends the region with its marker and propagates.
     fn lower_region(&mut self, statements: &[Statement<'_>]) -> LoweredRegion {
-        // Pre-declare every lexical name THIS region's own statements bind
-        // (one level deep — a nested block's bindings stay block-local): a
-        // forward `const` / `let` / `var` reference resolves to the local
-        // binding (unbound at evaluation — `any`), never to an outer
-        // same-name callee. Pre-declaration is selection-INDEPENDENT:
-        // classification never varies with the demand.
-        let mut frame: Vec<Arc<str>> = Vec::new();
-        for statement in statements {
-            let Statement::VariableDeclaration(decl) = statement else {
-                continue;
-            };
-            for declarator in &decl.declarations {
-                if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                    frame.push(Arc::from(id.name.as_str()));
-                }
-            }
-        }
-        self.scopes.push(frame);
         let mut out: Vec<SliceStatement> = Vec::new();
         let mut can_fall_through = true;
         let mut hit_unsupported = false;
@@ -686,6 +859,7 @@ impl Lowerer<'_> {
             }
             match statement {
                 Statement::ReturnStatement(ret) => {
+                    let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
                     let argument = ret.argument.as_ref().map(|arg| {
                         if self.value_span_selected(arg.span()) {
                             self.lower_expr(arg, ExprMode::Return)
@@ -693,7 +867,10 @@ impl Lowerer<'_> {
                             SliceExpr::Elided
                         }
                     });
-                    out.push(SliceStatement::Return { argument });
+                    out.push(SliceStatement::Return {
+                        argument,
+                        widening_literal,
+                    });
                     can_fall_through = false;
                 }
                 Statement::BlockStatement(block) => {
@@ -742,19 +919,27 @@ impl Lowerer<'_> {
                         // A binding OUTSIDE the slice's value-selected
                         // slot set never lowers: the elided declaration's
                         // initializer stays cold (no lowering, no
-                        // resolution, no budget charge). Its name is
-                        // already pre-declared, so classification of later
-                        // reads/calls is unchanged. The gate is the
-                        // binding-identifier SPAN (declaration-precise),
-                        // never the name — a shadowed same-named sibling
-                        // the plan kept out must not lower.
+                        // resolution, no budget charge). Classification of
+                        // later reads/calls is unchanged — the skeleton
+                        // indexes the declaration regardless of the
+                        // demand. The gate is the binding-identifier SPAN
+                        // (declaration-precise), never the name — a
+                        // shadowed same-named sibling the plan kept out
+                        // must not lower.
                         if !self.slot_selected(id.span) {
                             continue;
                         }
-                        let init = declarator
-                            .init
-                            .as_ref()
-                            .map(|expr| self.lower_expr(expr, ExprMode::BindingInit(kind)));
+                        // An ANNOTATED declarator preserves its
+                        // initializer's fresh literal: the declared type
+                        // governs the binding, and for a union declared
+                        // type the initializer only SELECTS which
+                        // declared constituents survive — a widened
+                        // initializer would select none.
+                        let preserve_literal =
+                            kind == SliceBindingKind::Const || declarator.type_annotation.is_some();
+                        let init = declarator.init.as_ref().map(|expr| {
+                            self.lower_expr(expr, ExprMode::BindingInit { preserve_literal })
+                        });
                         // The authored annotation is the binding's
                         // DECLARED type — it SUPPLIES a value, it does
                         // not merely suppress the initializer's
@@ -770,17 +955,13 @@ impl Lowerer<'_> {
                         let widening_literal = kind == SliceBindingKind::Const
                             && declared.is_none()
                             && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
-                        let name: Arc<str> = Arc::from(id.name.as_str());
                         out.push(SliceStatement::Binding {
-                            name: Arc::clone(&name),
+                            name: Arc::from(id.name.as_str()),
                             kind,
                             init,
                             declared,
                             widening_literal,
                         });
-                        if let Some(frame) = self.scopes.last_mut() {
-                            frame.push(name);
-                        }
                     }
                 }
                 // An expression statement's value is never consumed by the
@@ -812,13 +993,24 @@ impl Lowerer<'_> {
                         out.push(SliceStatement::TransparentLoop);
                     }
                 }
-                Statement::LabeledStatement(_) => {
+                Statement::LabeledStatement(labeled) => {
                     if self.control_has_return(statement) {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Labeled));
                         hit_unsupported = true;
                         can_fall_through = false;
                     } else {
-                        out.push(SliceStatement::TransparentLoop);
+                        // A return-free label is fall-through transparent,
+                        // but its BODY still lowers: the label wraps an
+                        // ordinary statement whose own rail decides (a
+                        // block's hoisted `var`s, a loop's escaping `var`
+                        // fail-close, an `if` arm's conditional binding,
+                        // `switch` / `try` / `with` unsupported). Emitting
+                        // a bare transparent marker instead would bypass
+                        // EVERY inner rail at once.
+                        let child = self.lower_arm(&labeled.body);
+                        can_fall_through = child.region.can_fall_through;
+                        hit_unsupported = child.hit_unsupported;
+                        out.push(SliceStatement::Block(child.region));
                     }
                 }
                 Statement::SwitchStatement(_) => {
@@ -870,7 +1062,6 @@ impl Lowerer<'_> {
                 can_fall_through = false;
             }
         }
-        self.scopes.pop();
         LoweredRegion {
             region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
@@ -899,28 +1090,25 @@ impl Lowerer<'_> {
         match expr {
             Expression::Identifier(identifier) => {
                 let name = identifier.name.as_str();
-                // A hoisted `var` REDECLARING a parameter name rebinds
-                // that name for the whole function: its declarator's
-                // reaching definition wins from the declaration onward,
-                // and the parameter rides along as the evaluator's
-                // not-yet-bound fallback. A plain parameter with no
-                // same-name `var` is unaffected.
-                if self.is_hoisted_var(name) {
-                    return SliceExpr::Local {
+                match self.resolve_name(name, identifier.span) {
+                    NameBinding::Param(ordinal) => SliceExpr::Param { ordinal },
+                    NameBinding::Local(param) => SliceExpr::Local {
                         name: Arc::from(name),
-                        param: self.param_ordinal(name),
-                    };
-                }
-                if let Some(ordinal) = self.param_ordinal(name) {
-                    return SliceExpr::Param { ordinal };
-                }
-                if self.is_local_in_scope(name) {
-                    return SliceExpr::Local {
+                        param,
+                    },
+                    NameBinding::Captured => SliceExpr::CapturedRead {
                         name: Arc::from(name),
-                        param: None,
-                    };
+                    },
+                    // A hoisted nested function declaration's own value
+                    // (its callable type) is not recoverable here, and a
+                    // binding the content half does not model has no
+                    // whole-slot carrier: both are RESOLVED names, so
+                    // the file-scope leaf would bind the wrong symbol.
+                    NameBinding::NestedFunction | NameBinding::Unmodeled => {
+                        SliceExpr::UnmodeledBinding
+                    }
+                    NameBinding::Free => self.lower_leaf(expr, mode),
                 }
-                self.lower_leaf(expr, mode)
             }
             Expression::ParenthesizedExpression(paren) => {
                 // A parenthesized wrapper is structurally transparent.
@@ -1010,17 +1198,16 @@ impl Lowerer<'_> {
                         });
                         continue;
                     }
-                    // Member-value literal widening follows the enclosing
-                    // position's policy (an arrow body / binding initializer
-                    // widens a fresh member literal; a block return
-                    // preserves it); an `as const` member always keeps its
-                    // literal.
+                    // An object-literal member's fresh literal ALWAYS
+                    // widens to its primitive (the member slot is
+                    // mutable), in every enclosing position — tsc's
+                    // object-literal property widening rule. An `as
+                    // const` member keeps its literal.
                     let widen_member =
-                        matches!(mode, ExprMode::ArrowBody | ExprMode::BindingInit(_))
-                            && !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                                &p.value,
-                                self.source,
-                            );
+                        !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                            &p.value,
+                            self.source,
+                        );
                     let value = self.lower_expr(&p.value, mode);
                     let value = match (widen_member, value) {
                         (true, SliceExpr::Type(ty)) => SliceExpr::Type(
@@ -1069,55 +1256,50 @@ impl Lowerer<'_> {
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
                     let name = callee.name.as_str();
-                    // ONE lexical binding authority, in precedence order.
-                    // 1. A hoisted nested function declaration of this name
-                    //    shadows every outer callee — its own return is
-                    //    beyond the direct-call inventory (fail closed).
-                    if self
-                        .fn_shadows
-                        .iter()
-                        .any(|candidate| candidate.as_ref() == name)
-                    {
-                        return SliceExpr::LocalFunctionShadow;
+                    // ONE lexical binding authority (the frame's
+                    // skeleton), then the file-level callee rails.
+                    match self.resolve_name(name, callee.span) {
+                        // A hoisted nested function declaration shadows
+                        // every outer same-name callee; exact recovery of
+                        // its own return is not implemented (fail closed).
+                        NameBinding::NestedFunction => return SliceExpr::LocalFunctionShadow,
+                        NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
+                        // A parameter or local SHADOWS the file-level
+                        // declaration: the call goes through the binding's
+                        // signature, never a flow obligation edge.
+                        NameBinding::Param(ordinal) => {
+                            return SliceExpr::CallOnBinding {
+                                param: Some(ordinal),
+                                name: Arc::from(name),
+                                captured: false,
+                            }
+                        }
+                        NameBinding::Local(param) => {
+                            return SliceExpr::CallOnBinding {
+                                param,
+                                name: Arc::from(name),
+                                captured: false,
+                            }
+                        }
+                        NameBinding::Captured => {
+                            return SliceExpr::CallOnBinding {
+                                param: None,
+                                name: Arc::from(name),
+                                captured: true,
+                            }
+                        }
+                        NameBinding::Free => {}
                     }
-                    // 2. A hoisted `var` REDECLARING a parameter name
-                    //    rebinds that name for the whole function: the
-                    //    declarator's reaching definition wins, with the
-                    //    parameter as the not-yet-bound fallback.
-                    if self.is_hoisted_var(name) {
-                        return SliceExpr::CallOnBinding {
-                            param: self.param_ordinal(name),
-                            name: Arc::from(name),
-                        };
-                    }
-                    // 3. A parameter SHADOWS the declaration: the call goes
-                    //    through the binding's signature, never a flow
-                    //    obligation edge.
-                    if let Some(ordinal) = self.param_ordinal(name) {
-                        return SliceExpr::CallOnBinding {
-                            param: Some(ordinal),
-                            name: Arc::from(name),
-                        };
-                    }
-                    // 4. An in-scope local (pre-declared or already bound)
-                    //    shadows the declaration the same way.
-                    if self.is_local_in_scope(name) {
-                        return SliceExpr::CallOnBinding {
-                            param: None,
-                            name: Arc::from(name),
-                        };
-                    }
-                    // 5. A bare-identifier call to the function itself — a
-                    //    direct same-slot recursion hold.
+                    // A bare-identifier call to the function itself — a
+                    // direct same-slot recursion hold.
                     if Some(name) == self.self_name {
                         return SliceExpr::DirectSelfCall;
                     }
-                    // 6. A bare-identifier callee the function index
-                    //    resolves EXACTLY (same-file served function
-                    //    position, the trailing implementation of its
-                    //    overload group) is a Flow obligation edge — the
-                    //    fixed point's mutual recursion discharges through
-                    //    it.
+                    // A bare-identifier callee the function index resolves
+                    // EXACTLY (same-file served function position, the
+                    // trailing implementation of its overload group) is a
+                    // Flow obligation edge — the fixed point's mutual
+                    // recursion discharges through it.
                     if let Some(direct) = self
                         .direct_calls
                         .iter()
@@ -1139,41 +1321,49 @@ impl Lowerer<'_> {
 
     /// Lower a NESTED function node (a function / arrow expression or an
     /// object-literal method) into an owned nested function value: the
-    /// nested body's statements lower under the nested function's OWN
-    /// parameter scope — outer parameters and locals are NOT in scope
-    /// (closure capture stays the leaf fallback). Nested bodies are one
-    /// selected value: content inside them is never selection-gated.
+    /// nested body lowers under its OWN [`FunctionBodySkeleton`] — the
+    /// same lexical authority the root frame uses, built over the nested
+    /// body alone — plus the CAPTURE SCOPE of every enclosing frame,
+    /// resolved at this function value's own position. A name the nested
+    /// frame does not bind but an enclosing frame does is a CAPTURE (read
+    /// by name from the evaluator's seeded snapshot), never a file-scope
+    /// leaf. Nested bodies are one selected value: content inside them is
+    /// never selection-gated.
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         let params = lower_params(node.params(), self.source);
         let type_parameters = lower_slice_type_params(node, self.source);
-        let nested_scopes: Vec<Arc<str>> = params
-            .iter()
-            .filter_map(|param| param.name.clone())
-            .collect();
         let self_name = match node {
             FunctionNode::Function(func) => func.id.as_ref().map(|id| Arc::from(id.name.as_str())),
             FunctionNode::Arrow(_) => None,
         };
         // A nested function value has no index entry of its own — its
-        // control skeleton, its hoisted nested-declaration shadow set,
-        // and its hoisted `var` names come from the SAME single inventory
-        // walk over its own body, so the one lexical binding authority
-        // applies inside nested values exactly as at the root.
+        // control regions come from the SAME single inventory walk over
+        // its own body, and its lexical authority is its own skeleton
+        // over the same positions.
         let inventory = node
             .body()
             .map(|body| inventory_statement_list(&body.statements))
             .unwrap_or_default();
         let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
-        let nested_fn_shadows = inventory.nested_function_names;
-        let nested_hoisted_vars = inventory.var_names;
+        let nested_skeleton = match node {
+            FunctionNode::Function(func) => FunctionBodySource::from_function(func)
+                .map(|source| build_function_body_skeleton(&source)),
+            FunctionNode::Arrow(arrow) => Some(build_function_body_skeleton(
+                &FunctionBodySource::from_arrow(arrow),
+            )),
+        };
+        let Some(nested_skeleton) = nested_skeleton else {
+            // A bodiless nested position has no lexical frame to lower.
+            return SliceExpr::UnmodeledBinding;
+        };
+        let captures = self.capture_scope_for(node_span(node));
         let mut nested = Lowerer {
             source: self.source,
             selection: None,
             params: &params,
             self_name: self_name.as_deref(),
-            scopes: vec![nested_scopes],
-            hoisted_vars: &nested_hoisted_vars,
-            fn_shadows: &nested_fn_shadows,
+            skeleton: &nested_skeleton,
+            captures: &captures,
             control,
             direct_calls: self.direct_calls,
             budget_failure: None,
@@ -1186,16 +1376,18 @@ impl Lowerer<'_> {
             let argument = body
                 .and_then(|body| body.statements.first())
                 .map(|statement| match statement {
-                    Statement::ExpressionStatement(expression) => {
-                        nested.lower_expr(&expression.expression, ExprMode::ArrowBody)
-                    }
-                    _ => SliceExpr::Any,
+                    Statement::ExpressionStatement(expression) => (
+                        nested.lower_expr(&expression.expression, ExprMode::Return),
+                        expr_is_bare_literal(&expression.expression),
+                    ),
+                    _ => (SliceExpr::Any, false),
                 });
             SliceRegion {
                 statements: Arc::from(
                     argument
-                        .map(|argument| SliceStatement::Return {
+                        .map(|(argument, widening_literal)| SliceStatement::Return {
                             argument: Some(argument),
+                            widening_literal,
                         })
                         .into_iter()
                         .collect::<Vec<_>>()
@@ -1236,15 +1428,16 @@ impl Lowerer<'_> {
     }
 
     /// The shared shallow-pass per-expression lowering for the position
-    /// (`infer_declaration_expression_type`: literal-preserving for arrow
-    /// bodies and `const` initializers, widening for return / `let` /
-    /// `var` positions). Budget exhaustion degrades the one expression to
-    /// `any` and records the typed budget edge.
+    /// (`infer_declaration_expression_type`): return arguments, `const`
+    /// initializers, and annotated declarators preserve the fresh
+    /// literal; unannotated `let` / `var` initializers widen it.
+    /// Budget exhaustion degrades the one expression to `any` and records
+    /// the typed budget edge.
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> TypeExpr {
-        let preserve_literal = matches!(
-            mode,
-            ExprMode::ArrowBody | ExprMode::BindingInit(SliceBindingKind::Const)
-        );
+        let preserve_literal = match mode {
+            ExprMode::Return => true,
+            ExprMode::BindingInit { preserve_literal } => preserve_literal,
+        };
         infer_declaration_expression_type(expr, self.source, preserve_literal).unwrap_or_else(
             |reason| {
                 if self.budget_failure.is_none() {

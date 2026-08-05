@@ -187,11 +187,11 @@ pub struct SkeletonRegion {
 pub enum SkeletonBindingKind {
     /// A formal parameter (destructured identifiers included).
     Param,
-    /// A `const` declarator.
+    /// A `const` / `using` / `await using` declarator (block-scoped).
     Const,
     /// A `let` declarator.
     Let,
-    /// A `var` / `using` declarator.
+    /// A `var` declarator — the only function-scoped declarator kind.
     Var,
     /// A nested function declaration's name.
     NestedFunction,
@@ -199,6 +199,25 @@ pub enum SkeletonBindingKind {
     Class,
     /// A `catch` clause parameter.
     CatchParam,
+    /// A local `enum` declaration's name.
+    Enum,
+    /// A local `namespace` / `module` declaration's name.
+    Namespace,
+    /// A local `import x = …` declaration's name.
+    ImportEquals,
+}
+
+/// The binding kind of one variable declaration. `using` / `await using`
+/// are BLOCK-scoped resource declarations (the `const` scoping rule plus
+/// disposal), never function-scoped `var`s.
+fn skeleton_binding_kind(kind: oxc_ast::ast::VariableDeclarationKind) -> SkeletonBindingKind {
+    match kind {
+        oxc_ast::ast::VariableDeclarationKind::Const
+        | oxc_ast::ast::VariableDeclarationKind::Using
+        | oxc_ast::ast::VariableDeclarationKind::AwaitUsing => SkeletonBindingKind::Const,
+        oxc_ast::ast::VariableDeclarationKind::Let => SkeletonBindingKind::Let,
+        oxc_ast::ast::VariableDeclarationKind::Var => SkeletonBindingKind::Var,
+    }
 }
 
 /// One entry of the lexical binding index.
@@ -214,6 +233,13 @@ pub struct SkeletonBinding {
     pub span: verter_span::Span,
     /// The declarator initializer / parameter default site, when present.
     pub initializer: Option<SkeletonExprSiteId>,
+    /// Whether the identifier is bound by a DESTRUCTURING pattern (an
+    /// object / array pattern element) rather than a plain binding
+    /// identifier. Consumers that model only whole-slot declarators read
+    /// this to tell "a binding I can model" from "a binding I resolved
+    /// but cannot model" — the latter must fail closed, never fall
+    /// through to an outer same-named declaration.
+    pub destructured: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +503,97 @@ impl FunctionBodySkeleton {
     #[must_use]
     pub fn return_site(&self, id: SkeletonReturnSiteId) -> &SkeletonReturnSite {
         &self.return_sites[id.index()]
+    }
+
+    /// The innermost control region whose span CONTAINS `span` — the
+    /// region an authored position evaluates in. Regions are
+    /// statement-scoped and properly nested, so the smallest containing
+    /// region is unique; a position outside every nested region (the
+    /// body's own top level) resolves to the function-body root.
+    #[must_use]
+    pub fn innermost_region_containing(&self, span: verter_span::Span) -> SkeletonRegionId {
+        let mut best = SkeletonRegionId(0);
+        let mut best_width = u32::MAX;
+        for (index, region) in self.regions.iter().enumerate() {
+            if region.span.start > span.start || region.span.end < span.end {
+                continue;
+            }
+            let width = region.span.end.saturating_sub(region.span.start);
+            if width <= best_width {
+                best_width = width;
+                best = SkeletonRegionId(u32::try_from(index).unwrap_or(u32::MAX));
+            }
+        }
+        best
+    }
+
+    /// THE lexical binding authority: every binding `name` resolves to
+    /// when read/written/called from `region`.
+    ///
+    /// A reference binds to the declaration(s) of the NEAREST enclosing
+    /// region carrying that name — an innermost-first walk of the region
+    /// parent chain. A shadowed same-named OUTER binding is therefore
+    /// never returned, so a consumer can never conflate two distinct
+    /// slots that share a name. Only when the enclosing chain carries NO
+    /// declaration does resolution fall back to same-name bindings of
+    /// the HOISTING kinds — `var` and nested function declarations hoist
+    /// to function scope wherever they are written; block-scoped kinds
+    /// (`let` / `const` / `using` / class / catch-param / `enum` /
+    /// `namespace` / `import =`) never do.
+    ///
+    /// An EMPTY result means the name is FREE in this frame (a module- or
+    /// outer-scope reference), never "unknown".
+    #[must_use]
+    pub fn bindings_of_name_in_scope(
+        &self,
+        name: FlowNameId,
+        region: SkeletonRegionId,
+    ) -> Vec<SkeletonBindingId> {
+        let mut current = Some(region);
+        while let Some(enclosing) = current {
+            let mut hits: Vec<SkeletonBindingId> = Vec::new();
+            for (index, binding) in self.bindings.iter().enumerate() {
+                if binding.name == name && binding.region == enclosing {
+                    hits.push(SkeletonBindingId::from_index(index as u32));
+                }
+            }
+            if !hits.is_empty() {
+                // The FUNCTION-scope frame is the parameters PLUS every
+                // hoisting-kind binding of the name, wherever it is
+                // written: a `var` redeclaring a parameter shares the
+                // parameter's slot, so a root-region resolution unions
+                // both (`function f(x) { { var x = "s"; } return x }`
+                // must reach the block declarator). Inner block-scoped
+                // frames stay exact — shadowing is preserved.
+                if self.regions[enclosing.index()].parent.is_none() {
+                    for hoisted in self.hoisting_bindings_of_name(name) {
+                        if !hits.contains(&hoisted) {
+                            hits.push(hoisted);
+                        }
+                    }
+                }
+                return hits;
+            }
+            current = self.regions[enclosing.index()].parent;
+        }
+        self.hoisting_bindings_of_name(name)
+    }
+
+    /// Every same-name binding of a HOISTING kind (`var` / nested
+    /// function declaration), wherever in the frame it is written.
+    fn hoisting_bindings_of_name(&self, name: FlowNameId) -> Vec<SkeletonBindingId> {
+        self.bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, binding)| {
+                binding.name == name
+                    && matches!(
+                        binding.kind,
+                        SkeletonBindingKind::Var | SkeletonBindingKind::NestedFunction
+                    )
+            })
+            .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
+            .collect()
     }
 }
 
@@ -791,6 +908,7 @@ impl SkeletonBuilder {
         kind: SkeletonBindingKind,
         span: verter_span::Span,
         initializer: Option<SkeletonExprSiteId>,
+        destructured: bool,
     ) {
         let name = self.intern(name);
         let region = self.current_region();
@@ -800,6 +918,7 @@ impl SkeletonBuilder {
             region,
             span,
             initializer,
+            destructured,
         });
     }
 
@@ -835,14 +954,20 @@ impl SkeletonBuilder {
         };
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
-        collect_binding_pattern(inner, &mut identifiers, &mut defaults);
+        collect_binding_pattern(inner, false, &mut identifiers, &mut defaults);
         // Nested pattern defaults still evaluate at bind time: track each
         // as a root site so its footprint is never dropped.
         for default in defaults {
             self.open_root_site(default);
         }
-        for (name, span) in identifiers {
-            self.push_binding(&name, SkeletonBindingKind::Param, span, initializer);
+        for (name, span, destructured) in identifiers {
+            self.push_binding(
+                &name,
+                SkeletonBindingKind::Param,
+                span,
+                initializer,
+                destructured,
+            );
         }
     }
 
@@ -854,12 +979,12 @@ impl SkeletonBuilder {
     ) {
         let mut identifiers = Vec::new();
         let mut defaults = Vec::new();
-        collect_binding_pattern(pattern, &mut identifiers, &mut defaults);
+        collect_binding_pattern(pattern, false, &mut identifiers, &mut defaults);
         for default in defaults {
             self.open_root_site(default);
         }
-        for (name, span) in identifiers {
-            self.push_binding(&name, kind, span, initializer);
+        for (name, span, destructured) in identifiers {
+            self.push_binding(&name, kind, span, initializer, destructured);
         }
     }
 
@@ -1184,6 +1309,7 @@ impl<'a> Visit<'a> for SkeletonBuilder {
                         SkeletonBindingKind::NestedFunction,
                         id.span.into(),
                         None,
+                        false,
                     );
                 }
             }
@@ -1194,8 +1320,46 @@ impl<'a> Visit<'a> for SkeletonBuilder {
                         SkeletonBindingKind::Class,
                         id.span.into(),
                         None,
+                        false,
                     );
                 }
+            }
+            // A local `enum` / `namespace` / `import =` declares a VALUE
+            // binding in this frame. It must be indexed even though no
+            // consumer models its value: an unindexed name reads as FREE
+            // and silently resolves to an unrelated module-scope (or
+            // imported) declaration of the same name.
+            Statement::TSEnumDeclaration(enum_declaration) => {
+                self.push_binding(
+                    enum_declaration.id.name.as_str(),
+                    SkeletonBindingKind::Enum,
+                    enum_declaration.id.span.into(),
+                    None,
+                    false,
+                );
+                walk::walk_statement(self, it);
+            }
+            Statement::TSModuleDeclaration(module) => {
+                if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &module.id {
+                    self.push_binding(
+                        id.name.as_str(),
+                        SkeletonBindingKind::Namespace,
+                        id.span.into(),
+                        None,
+                        false,
+                    );
+                }
+                walk::walk_statement(self, it);
+            }
+            Statement::TSImportEqualsDeclaration(import_equals) => {
+                self.push_binding(
+                    import_equals.id.name.as_str(),
+                    SkeletonBindingKind::ImportEquals,
+                    import_equals.id.span.into(),
+                    None,
+                    false,
+                );
+                walk::walk_statement(self, it);
             }
             _ => walk::walk_statement(self, it),
         }
@@ -1358,13 +1522,7 @@ impl<'a> Visit<'a> for SkeletonBuilder {
     }
 
     fn visit_variable_declaration(&mut self, it: &oxc_ast::ast::VariableDeclaration<'a>) {
-        let kind = match it.kind {
-            oxc_ast::ast::VariableDeclarationKind::Const => SkeletonBindingKind::Const,
-            oxc_ast::ast::VariableDeclarationKind::Let => SkeletonBindingKind::Let,
-            oxc_ast::ast::VariableDeclarationKind::Var
-            | oxc_ast::ast::VariableDeclarationKind::Using
-            | oxc_ast::ast::VariableDeclarationKind::AwaitUsing => SkeletonBindingKind::Var,
-        };
+        let kind = skeleton_binding_kind(it.kind);
         for declarator in &it.declarations {
             let initializer = declarator
                 .init
@@ -1504,23 +1662,17 @@ impl SkeletonBuilder {
     ) {
         match left {
             oxc_ast::ast::ForStatementLeft::VariableDeclaration(declaration) => {
-                let kind = match declaration.kind {
-                    oxc_ast::ast::VariableDeclarationKind::Const => SkeletonBindingKind::Const,
-                    oxc_ast::ast::VariableDeclarationKind::Let => SkeletonBindingKind::Let,
-                    oxc_ast::ast::VariableDeclarationKind::Var
-                    | oxc_ast::ast::VariableDeclarationKind::Using
-                    | oxc_ast::ast::VariableDeclarationKind::AwaitUsing => SkeletonBindingKind::Var,
-                };
+                let kind = skeleton_binding_kind(declaration.kind);
                 for declarator in &declaration.declarations {
                     let mut identifiers = Vec::new();
                     let mut defaults = Vec::new();
-                    collect_binding_pattern(&declarator.id, &mut identifiers, &mut defaults);
+                    collect_binding_pattern(&declarator.id, false, &mut identifiers, &mut defaults);
                     for default in defaults {
                         self.open_root_site(default);
                     }
-                    for (name, span) in identifiers {
+                    for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
-                        self.push_binding(&name, kind, span, None);
+                        self.push_binding(&name, kind, span, None, destructured);
                         self.writes.push(SkeletonWrite {
                             target: SkeletonWriteTarget::Named(interned),
                             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -1615,32 +1767,40 @@ fn collect_static_callee_path(
 /// expression of one binding pattern.
 fn collect_binding_pattern<'a, 'ast>(
     pattern: &'a BindingPattern<'ast>,
-    identifiers: &mut Vec<(String, verter_span::Span)>,
+    destructured: bool,
+    identifiers: &mut Vec<(String, verter_span::Span, bool)>,
     defaults: &mut Vec<&'a Expression<'ast>>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(identifier) => {
-            identifiers.push((identifier.name.to_string(), identifier.span.into()));
+            identifiers.push((
+                identifier.name.to_string(),
+                identifier.span.into(),
+                destructured,
+            ));
         }
         BindingPattern::ObjectPattern(object) => {
             for property in &object.properties {
-                collect_binding_pattern(&property.value, identifiers, defaults);
+                collect_binding_pattern(&property.value, true, identifiers, defaults);
             }
             if let Some(rest) = object.rest.as_ref() {
-                collect_binding_pattern(&rest.argument, identifiers, defaults);
+                collect_binding_pattern(&rest.argument, true, identifiers, defaults);
             }
         }
         BindingPattern::ArrayPattern(array) => {
             for element in array.elements.iter().flatten() {
-                collect_binding_pattern(element, identifiers, defaults);
+                collect_binding_pattern(element, true, identifiers, defaults);
             }
             if let Some(rest) = array.rest.as_ref() {
-                collect_binding_pattern(&rest.argument, identifiers, defaults);
+                collect_binding_pattern(&rest.argument, true, identifiers, defaults);
             }
         }
         BindingPattern::AssignmentPattern(assignment) => {
+            // A default does not itself destructure: `f(a = 1)` binds `a`
+            // as a plain identifier, `f({ a } = {})` inherits the
+            // pattern's flag from the recursion above.
             defaults.push(&assignment.right);
-            collect_binding_pattern(&assignment.left, identifiers, defaults);
+            collect_binding_pattern(&assignment.left, destructured, identifiers, defaults);
         }
     }
 }

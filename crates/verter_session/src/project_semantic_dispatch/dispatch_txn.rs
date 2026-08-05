@@ -496,6 +496,11 @@ pub(crate) struct FlowReturnPendingState {
     /// (§3.4 — recorded by the compute, never re-derived from the nominal
     /// key at publish).
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
+    /// Whether every one of the member's OWN return contributors was a
+    /// FRESH literal (and no bare-return / fallthrough arm joined). The
+    /// component-wide literal-widening decision is made after the
+    /// equation fixed point converges, so the bit must survive the pop.
+    pub(crate) fresh_seed: bool,
 }
 
 /// The domain deferral payload of a popped member.
@@ -1346,6 +1351,9 @@ pub(super) struct FlowDischargeEntry {
     pub(super) outcome: FlowReturnPendingOutcome,
     /// The member's coinductive hold targets.
     pub(super) holds: Vec<crate::semantic_query::FlowReturnKey>,
+    /// Whether the member's own contributors were all FRESH literals —
+    /// the post-convergence literal-widening input.
+    pub(super) fresh_seed: bool,
 }
 
 impl CheckerDispatchTransaction {

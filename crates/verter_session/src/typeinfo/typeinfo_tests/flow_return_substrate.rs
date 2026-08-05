@@ -16,6 +16,7 @@
 use super::support::*;
 use crate::VerterHost;
 use verter_audit::RequestKindPayload;
+use verter_type_expr::LiteralValue;
 
 const SUBSTRATE: &str = "/fixtures/flow_return_substrate.ts";
 
@@ -658,28 +659,30 @@ export type FieldFnReturn = ReturnType<FieldHost["f"]>;
     assert_primitive(&expr, PrimitiveName::Number);
 }
 
-fn assert_union_is_string_and_number(expr: &TypeExpr) {
+/// The multi-seed component's fixed point: the two members' literal
+/// seeds, unwidened. Literal widening at a return join is tsc's
+/// SINGLE-contributor rule, and each member here joins its own seed with
+/// the other member's discharged return — two contributors, so both
+/// literals stay pinned (`"a" | 1`).
+fn assert_union_is_the_two_literal_seeds(expr: &TypeExpr) {
     let TypeExpr::Union(members) = expr else {
-        panic!("expected the string | number union, got {expr:?}");
+        panic!("expected the `\"a\" | 1` union, got {expr:?}");
     };
     let mut has_string = false;
     let mut has_number = false;
     for member in members.iter() {
         match member {
-            TypeExpr::Primitive(PrimitiveName::String) => has_string = true,
-            TypeExpr::Primitive(PrimitiveName::Number) => has_number = true,
+            TypeExpr::Literal(LiteralValue::String(value)) if value == "a" => has_string = true,
+            TypeExpr::Literal(LiteralValue::Number(value)) if *value == 1.0 => has_number = true,
             other => panic!("unexpected union arm: {other:?}"),
         }
     }
-    assert!(
-        has_string && has_number,
-        "expected string | number: {expr:?}"
-    );
+    assert!(has_string && has_number, "expected `\"a\" | 1`: {expr:?}");
 }
 
 /// A multi-seed recursive component publishes the EQUATION FIXED POINT for
 /// every member: `msa = "a" | msb`, `msb = 1 | msa` — both members admit
-/// `string | number`, in both demand orders. Mutation recipe: revisiting
+/// `"a" | 1`, in both demand orders. Mutation recipe: revisiting
 /// only EmptyCycle members (never Complete-with-holds) publishes `number`
 /// for the non-root member.
 #[test]
@@ -702,14 +705,14 @@ export type MsBFirst = ReturnType<typeof msb>;
 "#,
     );
     let (expr_a, _) = resolve_substrate_alias(&host, "MsAFirst");
-    assert_union_is_string_and_number(&expr_a);
+    assert_union_is_the_two_literal_seeds(&expr_a);
     let (expr_b, _) = resolve_substrate_alias(&host, "MsBFirst");
-    assert_union_is_string_and_number(&expr_b);
+    assert_union_is_the_two_literal_seeds(&expr_b);
 }
 
 /// The same fixed point holds when the recursive flow component drains
 /// under a RELATION root: `PairHost.next` calls `msb`, whose fixed-point
-/// return is `string | number` — NOT assignable to `number`. Mutation
+/// return is `"a" | 1` — NOT assignable to `number`. Mutation
 /// recipe: the under-approximation (`msb = number` at pop) admits "yes".
 #[test]
 fn flow_return_substrate_multi_seed_cycle_under_a_relation_root() {

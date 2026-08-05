@@ -1296,12 +1296,16 @@ impl<'a> Visit<'a> for InventoryVisitor {
     }
 
     fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
+        // `using` / `await using` are BLOCK-scoped resource declarations
+        // (the `const` scoping rule plus disposal), never function-scoped
+        // `var`s: classifying them as `var` makes them escape their block
+        // through every hoisting rail.
         let kind = match it.kind {
-            oxc_ast::ast::VariableDeclarationKind::Const => FunctionBindingKind::Const,
-            oxc_ast::ast::VariableDeclarationKind::Let => FunctionBindingKind::Let,
-            oxc_ast::ast::VariableDeclarationKind::Var
+            oxc_ast::ast::VariableDeclarationKind::Const
             | oxc_ast::ast::VariableDeclarationKind::Using
-            | oxc_ast::ast::VariableDeclarationKind::AwaitUsing => FunctionBindingKind::Var,
+            | oxc_ast::ast::VariableDeclarationKind::AwaitUsing => FunctionBindingKind::Const,
+            oxc_ast::ast::VariableDeclarationKind::Let => FunctionBindingKind::Let,
+            oxc_ast::ast::VariableDeclarationKind::Var => FunctionBindingKind::Var,
         };
         for declarator in &it.declarations {
             if let BindingPattern::BindingIdentifier(id) = &declarator.id {
