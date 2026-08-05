@@ -270,6 +270,67 @@ export function r5ObjectLiteralMember() {
 export function r5ObjectConstAssertMember() {
   return { b: 1 as const };
 }
+
+// ── Structural widening at the PRODUCER, aggregate widening at the JOIN ─
+export function r5ArrayLiteralJoin(c: boolean) {
+  if (c) return [1];
+  return [0];
+}
+
+export function r5ArrayLiteralSingle() {
+  return [1];
+}
+
+export function r5ArrayConstElement() {
+  return [1 as const];
+}
+
+export function r5ArrayAsConst() {
+  return [1] as const;
+}
+
+export function r5ConditionalReturn(c: boolean) {
+  return c ? 1 : 2;
+}
+
+export function r5ParenLiteralReturn() {
+  return (1);
+}
+
+export function r5SatisfiesReturn() {
+  return 1 satisfies number;
+}
+
+export function r5AsLiteralReturn() {
+  return 1 as 1;
+}
+
+export function r5DedupFreshThenPinned(c: boolean) {
+  if (c) return 1;
+  return 1 as const;
+}
+
+export function r5DedupPinnedThenFresh(c: boolean) {
+  if (c) return 1 as const;
+  return 1;
+}
+
+export function r5CapturedWideningConst() {
+  const x = 1;
+  return { a: x, b: () => x };
+}
+
+// ── A mutual flow component with a DEGRADED member ────────────────────
+export function r5MutualA(c: boolean) {
+  if (c) return 1;
+  return r5MutualB(c);
+}
+
+export function r5MutualB(c: boolean) {
+  let z = 1;
+  z = 2;
+  return r5MutualA(!!z);
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -720,4 +781,183 @@ fn flow_return_object_member_literals_widen_independently_of_the_join() {
         super::flow_return_tests::object_prop(&outcome.ty, "b"),
         &number_lit(1.0)
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// #11 — the two widening axes: STRUCTURAL at the producer, AGGREGATE at
+//       the join
+// ──────────────────────────────────────────────────────────────────────
+
+/// STRUCTURAL widening belongs to the PRODUCER, not the join. An array
+/// literal's element type widens at lowering time, unconditionally —
+/// the decision is not aggregate-dependent and the interned node carries
+/// no freshness bit, so a join-side recursive widener could not tell
+/// `[1]` from `[1 as const]`. tsc 7.0.2:
+/// `r5ArrayLiteralJoin(c): number[]` (TWO arms, still widened),
+/// `r5ArrayLiteralSingle(): number[]`,
+/// `r5ArrayConstElement(): 1[]`,
+/// `r5ArrayAsConst(): readonly [1]`.
+///
+/// Mutation recipe: routing the return position through the
+/// literal-preserving short-circuit (a single `preserve_literal` axis)
+/// disables the element widen and publishes `1[]` / `0 | 1[]`.
+#[test]
+fn flow_return_array_element_widening_is_a_producer_rule_not_a_join_rule() {
+    let host = make_r5_host();
+    let number_array = TypeExpr::Array {
+        element: Arc::new(number()),
+        readonly: false,
+    };
+    assert_clean_warm(&host, "r5ArrayLiteralJoin", number_array.clone());
+    assert_clean_warm(&host, "r5ArrayLiteralSingle", number_array);
+    assert_clean_warm(
+        &host,
+        "r5ArrayConstElement",
+        TypeExpr::Array {
+            element: Arc::new(number_lit(1.0)),
+            readonly: false,
+        },
+    );
+    // `[1] as const` is a const assertion: a READONLY TUPLE of the pinned
+    // literal, never an array and never widened.
+    let outcome = r5_eval(&host, "r5ArrayAsConst").expect("evaluates");
+    assert_eq!(outcome.degradation, None);
+    let TypeExpr::Tuple { elements, readonly } = &outcome.ty else {
+        panic!("expected a readonly tuple, got {:?}", outcome.ty);
+    };
+    assert!(readonly, "`as const` produces a READONLY tuple");
+    assert_eq!(elements.len(), 1, "{:?}", outcome.ty);
+    assert_eq!(elements[0].ty, number_lit(1.0), "{:?}", outcome.ty);
+}
+
+/// The transparent producer arms propagate the caller's top-level policy
+/// instead of hardcoding a widen. A return-position conditional is a
+/// union of TWO fresh literals — an aggregate of two, which tsc never
+/// widens. tsc 7.0.2: `r5ConditionalReturn(c): 1 | 2`,
+/// `r5ParenLiteralReturn(): number` (one contributor, widened at the
+/// join).
+///
+/// Mutation recipe: hardcoding `Widen` in the conditional arm collapses
+/// this to `number`.
+#[test]
+fn flow_return_conditional_arms_propagate_the_top_level_literal_policy() {
+    let host = make_r5_host();
+    let outcome = r5_eval(&host, "r5ConditionalReturn").expect("evaluates");
+    assert_eq!(outcome.degradation, None);
+    let TypeExpr::Union(members) = &outcome.ty else {
+        panic!("expected `1 | 2`, got {:?}", outcome.ty);
+    };
+    assert_eq!(members.len(), 2, "{:?}", outcome.ty);
+    assert!(
+        members.contains(&number_lit(1.0)) && members.contains(&number_lit(2.0)),
+        "a union of two fresh literals is an aggregate of TWO: {:?}",
+        outcome.ty
+    );
+    assert_eq!(outcome.candidates, 1);
+    assert_clean_warm(&host, "r5ParenLiteralReturn", number());
+}
+
+/// FRESHNESS is a syntactic classification of the return ARGUMENT, and
+/// `satisfies` is transparent to it: `1 satisfies number` is still the
+/// bare literal `1`, so the lone-contributor join widens it. An `as`
+/// assertion — even to the literal type itself — PINS. tsc 7.0.2:
+/// `r5SatisfiesReturn(): number`, `r5AsLiteralReturn(): 1`.
+///
+/// Mutation recipe: unwrapping `TSAsExpression` alongside
+/// `TSSatisfiesExpression` republishes `r5AsLiteralReturn` as `number`.
+#[test]
+fn flow_return_satisfies_is_freshness_transparent_and_as_is_not() {
+    let host = make_r5_host();
+    assert_clean_warm(&host, "r5SatisfiesReturn", number());
+    assert_clean_warm(&host, "r5AsLiteralReturn", number_lit(1.0));
+}
+
+/// The aggregate freshness fold runs over EVERY contributor, including
+/// the ones deduplication drops. `1` and `1 as const` intern to the SAME
+/// node — that is why the second dedupes — but only the first is FRESH,
+/// so the aggregate is not all-fresh and must not widen. Folding after
+/// the dedup `continue` makes the answer depend on which contributor came
+/// first. tsc 7.0.2: `1` for BOTH orders.
+///
+/// Mutation recipe: folding `all_fresh` after the `continue` publishes
+/// `number` for `r5DedupFreshThenPinned` and `1` for its reverse — the
+/// same aggregate, two answers.
+#[test]
+fn flow_return_freshness_folds_over_deduplicated_contributors_in_both_orders() {
+    let host = make_r5_host();
+    assert_clean_warm(&host, "r5DedupFreshThenPinned", number_lit(1.0));
+    assert_clean_warm(&host, "r5DedupPinnedThenFresh", number_lit(1.0));
+}
+
+/// A widening-literal `const` read is widened at EVERY read site the
+/// frame models — the direct read and the CAPTURED read inside a nested
+/// function value alike. The nested frame is seeded with the enclosing
+/// frame's widening-local set, so a capture that skipped the widen would
+/// publish a pinned literal from a set that has no other consumer.
+/// tsc 7.0.2: `r5CapturedWideningConst(): { a: number; b: () => number }`.
+///
+/// Mutation recipe: matching only the direct-read carrier republishes
+/// `b` as `() => 1`.
+#[test]
+fn flow_return_captured_widening_literal_const_read_widens_like_a_direct_read() {
+    let host = make_r5_host();
+    let outcome = r5_eval(&host, "r5CapturedWideningConst").expect("evaluates");
+    assert_eq!(outcome.degradation, None);
+    assert_eq!(
+        super::flow_return_tests::object_prop(&outcome.ty, "a"),
+        &number(),
+        "the DIRECT read widens"
+    );
+    assert_eq!(
+        function_return(super::flow_return_tests::object_prop(&outcome.ty, "b")),
+        &number(),
+        "the CAPTURED read widens identically"
+    );
+    assert_eq!(outcome.candidates, 1);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// #12 — the degradation rail survives the component discharge
+// ──────────────────────────────────────────────────────────────────────
+
+/// The FIRST-demanded member of a mutual flow component whose other
+/// member is DEGRADED must carry that degradation and admit NOTHING —
+/// whichever member is demanded first.
+///
+/// `r5MutualB` observes an `UnappliedWriteEffect`; `r5MutualA` joins
+/// `r5MutualB`'s discharged return, so A's result is built from a
+/// degraded contributor and is itself degraded. Before the fix, A's
+/// evaluation reached the discharge as a hold-only `EmptyCycle`, whose
+/// construction DROPPED the observed degradation; the discharge then
+/// resurrected it from its hold targets and stamped it `Complete` with
+/// `degradation: None`, so the publish gate — which refuses only a
+/// degradation it can SEE — admitted it WARM. Demanding B first took the
+/// other path and reported the degradation honestly: the same key, two
+/// values and two warmths, chosen by demand order.
+///
+/// Each order needs its OWN host: `SemanticGraphStore` is host-owned and
+/// outlives any one `ProjectSemanticDispatch`, so reversing the demands
+/// on a single host re-reads the first order's state instead of
+/// executing the second.
+///
+/// Mutation recipe: seeding the discharge's degradation from `current[i]`
+/// (which is `None` for a failed member) instead of from the entry's own
+/// outcome restores the warm publication in the A-first order only.
+#[test]
+fn flow_return_degraded_component_member_is_order_independent_and_never_warms() {
+    for first in ["r5MutualA", "r5MutualB"] {
+        let host = make_r5_host();
+        let outcome = r5_eval(&host, first)
+            .unwrap_or_else(|| panic!("{first} must produce a value when demanded first"));
+        assert_eq!(
+            outcome.degradation,
+            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            "{first}: the component's observed degradation must survive the discharge"
+        );
+        assert_eq!(outcome.ty, number(), "{first} return type");
+        assert_eq!(
+            outcome.candidates, 0,
+            "{first}: a degraded component is ReturnOnly — it must never warm"
+        );
+    }
 }

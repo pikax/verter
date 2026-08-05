@@ -2153,7 +2153,11 @@ fn collect_named_class(
                                 infer_declaration_or_unknown(
                                     value,
                                     source,
-                                    prop.readonly,
+                                    if prop.readonly {
+                                        TopLevelLiteralPolicy::Preserve
+                                    } else {
+                                        TopLevelLiteralPolicy::Widen
+                                    },
                                     &mut inference_unavailable,
                                 )
                             })
@@ -2251,7 +2255,7 @@ fn collect_named_class(
                                     infer_declaration_or_unknown(
                                         initializer,
                                         source,
-                                        false,
+                                        TopLevelLiteralPolicy::Widen,
                                         &mut inference_unavailable,
                                     )
                                 })
@@ -2455,10 +2459,10 @@ fn collect_named_class(
 fn infer_declaration_or_unknown(
     expression: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
+    policy: TopLevelLiteralPolicy,
     unavailable: &mut Option<InferenceUnavailableReason>,
 ) -> TypeExpr {
-    match infer_declaration_expression_type(expression, source, preserve_literal) {
+    match infer_declaration_expression_type(expression, source, policy) {
         Ok(inferred) => inferred,
         Err(reason) => {
             unavailable.get_or_insert(reason);
@@ -3197,13 +3201,14 @@ fn lower_variable_parts(
 
         if type_annotation.is_none() {
             let inferred =
-                infer_declaration_expression_type(init, source, true).and_then(|inferred| {
-                    if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                        widen_literal_type(inferred)
-                    } else {
-                        Ok(inferred)
-                    }
-                });
+                infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
+                    .and_then(|inferred| {
+                        if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
+                            widen_literal_type(inferred)
+                        } else {
+                            Ok(inferred)
+                        }
+                    });
             let mut inferred = match inferred {
                 Ok(inferred) => inferred,
                 Err(reason) => {
@@ -3702,31 +3707,58 @@ impl InferenceBudget {
     }
 }
 
+/// How the TOP-LEVEL fresh literal of a declaration-position expression is
+/// treated. This axis governs ONLY the standalone literal at the
+/// expression's own top level.
+///
+/// STRUCTURAL widening — an array literal's element type, an object
+/// literal's member types — is a PRODUCER rule and is deliberately NOT on
+/// this axis: it applies unconditionally, in every position. It has to.
+/// The decision is not aggregate-dependent (`if (c) return [1]; return
+/// [0]` is `number[]` with TWO arms, exactly as `return [1]` is with one),
+/// and the interned structural node carries no freshness bit, so no later
+/// consumer could reconstruct whether an element came from `[1]`
+/// (widening) or `[1 as const]` (pinned).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TopLevelLiteralPolicy {
+    /// Keep a standalone top-level literal PINNED. Used by `const`
+    /// initializers, arrow expression bodies, and RETURN arguments — the
+    /// return JOIN owns the aggregate widening decision, because it is a
+    /// property of the deduplicated contributor set (`if (c) return 1;
+    /// return 0` is `0 | 1`; `if (c) return 1; return 1` is `number`)
+    /// that no per-expression producer can compute.
+    Preserve,
+    /// Widen a fresh standalone top-level literal to its primitive. Used
+    /// by unannotated `let` / `var` initializers.
+    Widen,
+}
+
 /// Infer the type of a declaration-position expression with a FRESH
 /// inference budget — the ONE shared shallow-pass per-expression lowering
-/// entry. `preserve_literal = false` widens a fresh top-level literal to
-/// its primitive (return arguments, `let` / `var` initializers);
-/// `preserve_literal = true` keeps standalone literals (arrow expression
-/// bodies, `const` initializers). Also the expression lowering the
-/// demand-sliced flow content reuses for its selected leaf positions.
+/// entry. Also the expression lowering the demand-sliced flow content
+/// reuses for its selected leaf positions. See
+/// [`TopLevelLiteralPolicy`] for the one axis this entry takes, and for
+/// why structural widening is not on it.
 pub fn infer_declaration_expression_type(
     expr: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
+    policy: TopLevelLiteralPolicy,
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceBudget::default();
-    infer_declaration_expression_type_with_budget(expr, source, preserve_literal, &mut budget, 0)
+    infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget, 0)
 }
 
 fn infer_declaration_expression_type_with_budget(
     expr: &Expression<'_>,
     source: &str,
-    preserve_literal: bool,
+    policy: TopLevelLiteralPolicy,
     budget: &mut InferenceBudget,
     depth: usize,
 ) -> InferenceResult<TypeExpr> {
     budget.visit(depth)?;
-    if preserve_literal || expr_is_const_asserted(expr, source) {
+    // A const assertion pins its whole operand and carries its own
+    // readonly/tuple semantics — it is never re-decided by either axis.
+    if expr_is_const_asserted(expr, source) {
         return infer_expression_type_ctx(
             expr,
             source,
@@ -3736,31 +3768,41 @@ fn infer_declaration_expression_type_with_budget(
         );
     }
     match expr {
+        // Structurally transparent: the wrapper is not a top level of its
+        // own, so the caller's policy passes straight through.
         Expression::ParenthesizedExpression(parenthesized) => {
             infer_declaration_expression_type_with_budget(
                 &parenthesized.expression,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )
         }
+        // A conditional's branches are each a top level under the SAME
+        // policy: `const v = c ? 1 : 2` is `1 | 2`, `let v = c ? 1 : 2` is
+        // `number`.
         Expression::ConditionalExpression(conditional) => Ok(TypeExpr::union(vec![
             infer_declaration_expression_type_with_budget(
                 &conditional.consequent,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )?,
             infer_declaration_expression_type_with_budget(
                 &conditional.alternate,
                 source,
-                false,
+                policy,
                 budget,
                 depth + 1,
             )?,
         ])),
+        // An array literal's elements ALWAYS widen — structural widening
+        // is a producer rule, independent of the caller's top-level
+        // policy. `const d = [1]` and `return [1]` are both `number[]`;
+        // only an element's OWN const assertion pins it (`[1 as const]` is
+        // `1[]`), and that is decided by the recursion's const-assert gate.
         Expression::ArrayExpression(array) => {
             let mut element_types = Vec::new();
             for element in &array.elements {
@@ -3769,7 +3811,7 @@ fn infer_declaration_expression_type_with_budget(
                         let spread_type = infer_declaration_expression_type_with_budget(
                             &spread.argument,
                             source,
-                            false,
+                            TopLevelLiteralPolicy::Widen,
                             budget,
                             depth + 1,
                         )?;
@@ -3788,7 +3830,7 @@ fn infer_declaration_expression_type_with_budget(
                                 infer_declaration_expression_type_with_budget(
                                     expression,
                                     source,
-                                    false,
+                                    TopLevelLiteralPolicy::Widen,
                                     budget,
                                     depth + 1,
                                 )?,
@@ -3806,8 +3848,19 @@ fn infer_declaration_expression_type_with_budget(
                 readonly: false,
             })
         }
-        _ => infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth + 1)
-            .map(widen_shallow_literal),
+        _ => {
+            let inferred = infer_expression_type_ctx(
+                expr,
+                source,
+                MemberLiteralPolicy::Widen,
+                budget,
+                depth + 1,
+            )?;
+            Ok(match policy {
+                TopLevelLiteralPolicy::Widen => widen_shallow_literal(inferred),
+                TopLevelLiteralPolicy::Preserve => inferred,
+            })
+        }
     }
 }
 
@@ -3886,7 +3939,13 @@ fn object_member_value(
     // Widen a fresh TOP-LEVEL literal only under a plain `Widen` context (no
     // per-property `as const`); `Preserve` (satisfies) and `ConstAssert` keep it.
     let ty = if value_policy == MemberLiteralPolicy::Widen {
-        infer_declaration_expression_type_with_budget(value, source, false, budget, depth)?
+        infer_declaration_expression_type_with_budget(
+            value,
+            source,
+            TopLevelLiteralPolicy::Widen,
+            budget,
+            depth,
+        )?
     } else {
         infer_expression_type_ctx(value, source, value_policy, budget, depth)?
     };
@@ -4576,7 +4635,7 @@ fn lower_function_params_with_budget(
             infer_declaration_expression_type_with_budget(
                 initializer,
                 source,
-                false,
+                TopLevelLiteralPolicy::Widen,
                 budget,
                 depth + 2,
             )?
@@ -5287,5 +5346,5 @@ pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
 }
 
 fn lower_value_expression(expr: &Expression<'_>, source: &str) -> InferenceResult<TypeExpr> {
-    infer_declaration_expression_type(expr, source, true)
+    infer_declaration_expression_type(expr, source, TopLevelLiteralPolicy::Preserve)
 }

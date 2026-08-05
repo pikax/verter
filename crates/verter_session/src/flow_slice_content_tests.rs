@@ -370,6 +370,7 @@ fn local_reaching_definition_is_binding_and_local() {
             argument: Some(SliceExpr::Local {
                 name: Arc::from("x"),
                 param: None,
+                captured: false,
             }),
             widening_literal: false,
         },

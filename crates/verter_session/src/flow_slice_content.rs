@@ -56,7 +56,9 @@ use verter_semantic::analysis::function_program::{
     inventory_statement_list, resolve_function_node, FunctionControlRegion, FunctionNode,
     FunctionProgramEntry,
 };
-use verter_semantic::analysis::type_eval_build::infer_declaration_expression_type;
+use verter_semantic::analysis::type_eval_build::{
+    infer_declaration_expression_type, TopLevelLiteralPolicy,
+};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
 
@@ -240,15 +242,29 @@ pub enum SliceExpr {
         ordinal: u32,
     },
     /// A local binding reference; its reaching definition is resolved by
-    /// the evaluator.
+    /// the evaluator. Covers BOTH a same-frame local and a binding an
+    /// ENCLOSING frame declares (read from inside a nested function
+    /// value) — the two differ only in `captured`, so every consumer that
+    /// reasons about "a read of a local binding" (the widening-literal
+    /// widen, the freshness classification) covers both by construction
+    /// rather than by remembering to name a second carrier.
     Local {
         /// The binding name.
         name: Arc<str>,
         /// The ordinal of a parameter this binding REDECLARES (a hoisted
         /// `var` of the same name). The evaluator falls back to it when
         /// the declarator's reaching definition is not bound yet — a
-        /// redeclaring `var` never erases the parameter's value.
+        /// redeclaring `var` never erases the parameter's value. Always
+        /// `None` for a captured read: a capture never redeclares one of
+        /// THIS frame's parameters.
         param: Option<u32>,
+        /// Whether the binding belongs to an ENCLOSING frame. The
+        /// evaluator answers a capture from the snapshot of the enclosing
+        /// layers the nested frame was seeded with; a capture the snapshot
+        /// does not carry (the demand slice selected no definition for it)
+        /// fails CLOSED — never the implicit-`any` a same-frame unbound
+        /// read takes, and never a file-scope resolution of the same name.
+        captured: bool,
     },
     /// An object-literal return evaluated STRUCTURALLY: every member value
     /// is a flow expression (parameter / local references substitute). Only
@@ -288,21 +304,10 @@ pub enum SliceExpr {
         param: Option<u32>,
         /// The binding name.
         name: Arc<str>,
-        /// Whether the callee is a CAPTURED enclosing binding (see
-        /// [`SliceExpr::CapturedRead`]): an unbound capture fails closed
-        /// instead of taking the implicit-`any` call.
+        /// Whether the callee is a CAPTURED enclosing binding (the same
+        /// axis [`SliceExpr::Local`] carries): an unbound capture fails
+        /// closed instead of taking the implicit-`any` call.
         captured: bool,
-    },
-    /// A read of a binding an ENCLOSING frame declares, from inside a
-    /// nested function value. The evaluator answers it from the snapshot
-    /// of the enclosing layers it seeded the nested frame with; a capture
-    /// the snapshot does not carry (the demand slice selected no
-    /// definition for it) fails CLOSED — never the implicit-`any` a
-    /// same-frame unbound read takes, and never a file-scope resolution
-    /// of the same name.
-    CapturedRead {
-        /// The captured binding's name.
-        name: Arc<str>,
     },
     /// A bare-identifier call to a name a hoisted nested function
     /// declaration binds in this function. The nested declaration shadows
@@ -490,13 +495,34 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
     }
 }
 
+/// Unwrap the wrappers that are TRANSPARENT to literal freshness: a
+/// parenthesis, and `satisfies`. `x satisfies T` checks `x` against `T`
+/// and evaluates to `x`'s own type unchanged — including its freshness —
+/// so `return 1 satisfies number` is `number`, exactly like `return 1`.
+///
+/// A type ASSERTION is not on this list and must never be added: `1 as 1`
+/// PINS to `1` even though the asserted type is the literal's own
+/// (tsc 7.0.2: `(): 1`).
+fn unwrap_freshness_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            unwrap_freshness_transparent(&paren.expression)
+        }
+        Expression::TSSatisfiesExpression(satisfies) => {
+            unwrap_freshness_transparent(&satisfies.expression)
+        }
+        inner => inner,
+    }
+}
+
 /// Whether an initializer is a BARE literal expression — a fresh
 /// (widening) literal source: a string / numeric / boolean literal or a
-/// substitution-free template, possibly parenthesized. A const assertion
-/// (`1 as const`) or any other assertion / expression shape is NOT bare —
-/// its literal is pinned or derived, never widening.
+/// substitution-free template, seen through the freshness-transparent
+/// wrappers. A const assertion (`1 as const`), a type assertion
+/// (`1 as 1`), or any other expression shape is NOT bare — its literal is
+/// pinned or derived, never widening.
 fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
-    match unwrap_parenthesized(expression) {
+    match unwrap_freshness_transparent(expression) {
         Expression::StringLiteral(_)
         | Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_) => true,
@@ -531,8 +557,12 @@ fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<SliceParam> 
             .map(|annotation| lower_ts_type(&annotation.type_annotation, source))
             .or_else(|| {
                 param.initializer.as_ref().map(|initializer| {
-                    infer_declaration_expression_type(initializer, source, false)
-                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any))
+                    infer_declaration_expression_type(
+                        initializer,
+                        source,
+                        TopLevelLiteralPolicy::Widen,
+                    )
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any))
                 })
             })
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
@@ -1095,9 +1125,12 @@ impl Lowerer<'_> {
                     NameBinding::Local(param) => SliceExpr::Local {
                         name: Arc::from(name),
                         param,
+                        captured: false,
                     },
-                    NameBinding::Captured => SliceExpr::CapturedRead {
+                    NameBinding::Captured => SliceExpr::Local {
                         name: Arc::from(name),
+                        param: None,
+                        captured: true,
                     },
                     // A hoisted nested function declaration's own value
                     // (its callable type) is not recoverable here, and a
@@ -1430,22 +1463,30 @@ impl Lowerer<'_> {
     /// The shared shallow-pass per-expression lowering for the position
     /// (`infer_declaration_expression_type`): return arguments, `const`
     /// initializers, and annotated declarators preserve the fresh
-    /// literal; unannotated `let` / `var` initializers widen it.
+    /// TOP-LEVEL literal; unannotated `let` / `var` initializers widen it.
+    /// Structural widening (array elements, object members) is a producer
+    /// rule the callee applies in every position — it is not on this axis.
     /// Budget exhaustion degrades the one expression to `any` and records
     /// the typed budget edge.
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> TypeExpr {
-        let preserve_literal = match mode {
-            ExprMode::Return => true,
-            ExprMode::BindingInit { preserve_literal } => preserve_literal,
+        // A return argument PRESERVES its top-level literal: the aggregate
+        // widening decision belongs to the return join, which is the only
+        // place the deduplicated contributor cardinality is known.
+        let policy = match mode {
+            ExprMode::Return => TopLevelLiteralPolicy::Preserve,
+            ExprMode::BindingInit {
+                preserve_literal: true,
+            } => TopLevelLiteralPolicy::Preserve,
+            ExprMode::BindingInit {
+                preserve_literal: false,
+            } => TopLevelLiteralPolicy::Widen,
         };
-        infer_declaration_expression_type(expr, self.source, preserve_literal).unwrap_or_else(
-            |reason| {
-                if self.budget_failure.is_none() {
-                    self.budget_failure = Some(reason);
-                }
-                TypeExpr::Primitive(PrimitiveName::Any)
-            },
-        )
+        infer_declaration_expression_type(expr, self.source, policy).unwrap_or_else(|reason| {
+            if self.budget_failure.is_none() {
+                self.budget_failure = Some(reason);
+            }
+            TypeExpr::Primitive(PrimitiveName::Any)
+        })
     }
 }
 

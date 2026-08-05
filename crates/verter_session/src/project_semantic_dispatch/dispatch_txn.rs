@@ -474,7 +474,35 @@ pub(crate) enum FlowReturnPendingOutcome {
     /// Complete evaluation (the admitted shape).
     Complete(FlowReturnResult),
     /// Typed failure — `ReturnOnly`, never admitted.
-    Degraded(FlowReturnFailure),
+    Degraded {
+        /// The typed no-value failure.
+        failure: FlowReturnFailure,
+        /// The degradation the FAILED evaluation had already observed
+        /// before it failed.
+        ///
+        /// This field is not optional decoration: a hold-only
+        /// [`FlowReturnFailure::EmptyCycle`] member is RESURRECTED by the
+        /// component discharge (its value is the join of its hold
+        /// targets'), so a degradation observed on the way to the empty
+        /// cycle must ride the failure into the fixed point. Dropping it
+        /// launders a degraded evaluation into a clean, WARM-admissible
+        /// result — and, because only the non-root member takes the
+        /// resurrection path, it does so in exactly one of the two demand
+        /// orders. Naming the field at every construction site is what
+        /// makes "a Degraded outcome without its degradation"
+        /// unrepresentable.
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    },
+}
+
+impl FlowReturnPendingOutcome {
+    /// The outcome's OWN degradation, whichever arm carries it.
+    pub(crate) fn degradation(&self) -> Option<crate::semantic_query::FlowReturnDegradation> {
+        match self {
+            Self::Complete(result) => result.degradation,
+            Self::Degraded { degradation, .. } => *degradation,
+        }
+    }
 }
 
 /// The flow-return-domain deferral payload of a popped member.

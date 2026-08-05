@@ -656,11 +656,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             unreachable!("a flow code path pops a flow frame");
         };
         let inline_flight = flow_state.inline_flight;
-        // A budget edge on the frame poisons the whole component.
+        // A budget edge on the frame poisons the whole component. The
+        // outcome it replaces may already have observed a degradation —
+        // carry it, so the budget failure does not launder it away.
         let outcome = if budget_cap.is_some() {
-            FlowReturnPendingOutcome::Degraded(FlowReturnFailure::Budget(
-                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
-            ))
+            FlowReturnPendingOutcome::Degraded {
+                failure: FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ),
+                degradation: outcome.degradation(),
+            }
         } else {
             outcome
         };
@@ -676,7 +681,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 FlowReturnPendingOutcome::Complete(result) => {
                     FlowReturnStep::Complete(result.clone())
                 }
-                FlowReturnPendingOutcome::Degraded(failure) => FlowReturnStep::Degraded(*failure),
+                FlowReturnPendingOutcome::Degraded { failure, .. } => {
+                    FlowReturnStep::Degraded(*failure)
+                }
             };
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.obligations.propagate_lowlink(popped.min_open_target);
@@ -770,10 +777,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Atomic admission: a degraded flow outcome anywhere in the
         // component (the root included) poisons the WHOLE tagged
         // component — nothing publishes, every flight aborts.
-        let component_degraded = matches!(outcome, FlowReturnPendingOutcome::Degraded(_))
+        let component_degraded = matches!(outcome, FlowReturnPendingOutcome::Degraded { .. })
             || flow_members
                 .iter()
-                .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::Degraded(_)))
+                .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::Degraded { .. }))
             || relation_members.iter().any(|member| {
                 matches!(
                     member.verdict,
@@ -788,7 +795,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             self.flow_return_abort_drained_flights(&flow_members);
             return FlowFramePop::RootClose(FlowRootClose::Degraded(match outcome {
-                FlowReturnPendingOutcome::Degraded(failure) => failure,
+                FlowReturnPendingOutcome::Degraded { failure, .. } => failure,
                 _ => {
                     if budget_cap.is_some() {
                         FlowReturnFailure::Budget(
@@ -866,7 +873,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
                 }
             }
-            FlowReturnPendingOutcome::Degraded(_) => {
+            FlowReturnPendingOutcome::Degraded { .. } => {
                 unreachable!("a degraded root poisons the component above")
             }
         }
@@ -895,7 +902,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|entry| match &entry.outcome {
                 FlowReturnPendingOutcome::Complete(result) => Some(result.clone()),
-                FlowReturnPendingOutcome::Degraded(_) => None,
+                // A failed member has no SEED of its own. Its observed
+                // degradation is NOT lost with the seed — it is read back
+                // from the entry's own outcome below, so a member the
+                // discharge resurrects carries it into the fixed point.
+                FlowReturnPendingOutcome::Degraded { .. } => None,
             })
             .collect();
         loop {
@@ -906,7 +917,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // from a degraded contributor is itself degraded
                 // (first-observed reason wins, deterministic in entry /
                 // hold order).
-                let mut degradation = current[i].as_ref().and_then(|result| result.degradation);
+                // Seeded from the ENTRY's own outcome, not from
+                // `current[i]`: a failed member has no `current[i]` seed,
+                // yet its evaluation may well have observed a degradation
+                // before it failed. Reading `current[i]` here would drop
+                // exactly the degradation the resurrection path needs.
+                let mut degradation = entries[i].outcome.degradation();
                 if let Some(result) = &current[i] {
                     arms.push(result.return_type);
                 }
@@ -974,6 +990,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some(mut result) = discharged else {
                 continue;
             };
+            // ONLY a hold-only empty cycle is resurrectable. Its "failure"
+            // is an artefact of evaluation order — it genuinely has no
+            // seed of its own and its value IS the join of its hold
+            // targets. Every OTHER failure kind is a real no-value
+            // outcome, and stamping it `Complete` from its targets'
+            // results would publish a value the member's own evaluation
+            // never produced.
+            if !matches!(
+                entry.outcome,
+                FlowReturnPendingOutcome::Complete(_)
+                    | FlowReturnPendingOutcome::Degraded {
+                        failure: FlowReturnFailure::EmptyCycle,
+                        ..
+                    }
+            ) {
+                continue;
+            }
             if component_is_fresh {
                 result.return_type = widen_literal_node(self, result.return_type);
             }
@@ -1087,11 +1120,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
+        // Every call site of this closure fails BEFORE the evaluator
+        // runs, so no degradation has been observed yet: `None` is the
+        // honest value, not a dropped one.
         let degraded =
             |failure: FlowReturnFailure,
              self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>| {
                 FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded(failure),
+                    outcome: FlowReturnPendingOutcome::Degraded {
+                        failure,
+                        degradation: None,
+                    },
                     self_roots,
                     holds: Vec::new(),
                     materialized: MaterializedSet::empty(),
@@ -1364,15 +1403,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bare_return_seen = evaluator.bare_return_seen;
             outcome
         };
+        // Both failure exits carry the degradation the evaluation had
+        // ALREADY observed, and both classify freshness identically: an
+        // EMPTY cycle contributes NO seed of its own — it is
+        // fresh-neutral, and vetoing the component's literal widening
+        // from a seedless member would make the outcome depend on which
+        // member was demanded first. Any other failure poisons the
+        // component outright, so its bit never reaches a discharge.
         let contributors = match contributors {
             Ok(contributors) => contributors,
             Err(failure) => {
                 return FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded(failure),
+                    outcome: FlowReturnPendingOutcome::Degraded {
+                        failure,
+                        degradation,
+                    },
                     self_roots,
                     holds,
                     materialized: MaterializedSet::empty(),
-                    fresh_seed: false,
+                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
                 };
             }
         };
@@ -1386,16 +1435,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Ok(joined) => joined,
             Err(failure) => {
                 return FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded(failure),
+                    outcome: FlowReturnPendingOutcome::Degraded {
+                        failure,
+                        degradation,
+                    },
                     self_roots,
                     holds,
                     materialized: MaterializedSet::empty(),
-                    // An EMPTY cycle contributes NO seed of its own — it
-                    // is fresh-neutral, and vetoing the component's
-                    // literal widening from a seedless member would make
-                    // the outcome depend on which member was demanded
-                    // first. Any other failure poisons the component
-                    // outright, so its bit never reaches a discharge.
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
                 };
             }
@@ -1451,10 +1497,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(contributors.len());
         let mut all_fresh = true;
         for contribution in contributors {
+            // Fold freshness over EVERY contributor, including the ones
+            // deduplication drops. `1` and `1 as const` intern to the SAME
+            // node — that is precisely why the second dedupes — but only
+            // the first is FRESH. Folding after the `continue` would make
+            // the aggregate's freshness depend on which contributor
+            // happened to come first and publish `number` for
+            // `if (c) return 1; return 1 as const` while publishing `1`
+            // for its reverse (tsc 7.0.2: `1` for both).
+            //
+            // Freshness deliberately does NOT enter the dedup identity:
+            // these two arms ARE the same type, and separating them would
+            // emit `1 | 1`.
+            all_fresh &= contribution.fresh_literal;
             if arms.contains(&contribution.node) {
                 continue;
             }
-            all_fresh &= contribution.fresh_literal;
             arms.push(contribution.node);
         }
         // A recursive HOLD counts as a contributor: the SCC close joins
@@ -2300,7 +2358,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .copied()
                 .map(Some)
                 .ok_or(FlowReturnFailure::Unresolved),
-            crate::flow_slice_content::SliceExpr::Local { name, param } => {
+            crate::flow_slice_content::SliceExpr::Local {
+                name,
+                param,
+                captured,
+            } => {
                 // The READ folds the binding's membership flags into this
                 // evaluation's degradation channel. A plain unbound local
                 // (a not-yet-assigned hoisted `var` / TDZ forward
@@ -2309,6 +2371,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // parameter is still the reaching value.
                 match self.read_local(name.as_ref()) {
                     Some(node) => Ok(Some(node)),
+                    // A CAPTURED binding the seeded snapshot does not
+                    // carry has no honest value: it is neither the
+                    // same-frame implicit-`any` nor a file-scope name, so
+                    // it fails closed.
+                    None if *captured => Err(FlowReturnFailure::UnmodeledBinding),
                     None => Ok(Some(
                         param
                             .and_then(|ordinal| self.params.get(ordinal as usize).copied())
@@ -2655,18 +2722,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::Any => Ok(Some(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             )),
-            crate::flow_slice_content::SliceExpr::CapturedRead { name } => {
-                // A read of an ENCLOSING frame's binding: answered from
-                // the snapshot the nested frame was seeded with. A
-                // capture the snapshot does not carry (the demand slice
-                // selected no definition for it — nested bodies are not
-                // walked by the planner) FAILS CLOSED: it is neither the
-                // same-frame implicit-`any` nor a file-scope name.
-                match self.read_local(name.as_ref()) {
-                    Some(node) => Ok(Some(node)),
-                    None => Err(FlowReturnFailure::UnmodeledBinding),
-                }
-            }
             // A name the frame's lexical authority resolved to a
             // function-local binding the content half does not model
             // (a destructuring element, a local `class` / `enum` /

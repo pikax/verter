@@ -680,18 +680,7 @@ fn assert_union_is_the_two_literal_seeds(expr: &TypeExpr) {
     assert!(has_string && has_number, "expected `\"a\" | 1`: {expr:?}");
 }
 
-/// A multi-seed recursive component publishes the EQUATION FIXED POINT for
-/// every member: `msa = "a" | msb`, `msb = 1 | msa` — both members admit
-/// `"a" | 1`, in both demand orders. Mutation recipe: revisiting
-/// only EmptyCycle members (never Complete-with-holds) publishes `number`
-/// for the non-root member.
-#[test]
-fn flow_return_substrate_multi_seed_cycle_publishes_the_union_everywhere() {
-    let host = make_host_with_footprint();
-    upsert_ts(
-        &host,
-        SUBSTRATE,
-        r#"
+const MULTI_SEED_CYCLE: &str = r#"
 export function msa(c: boolean) {
   if (c) return "a";
   return msb(c);
@@ -702,25 +691,46 @@ export function msb(c: boolean) {
 }
 export type MsAFirst = ReturnType<typeof msa>;
 export type MsBFirst = ReturnType<typeof msb>;
-"#,
-    );
+"#;
+
+/// A multi-seed recursive component publishes the EQUATION FIXED POINT for
+/// every member: `msa = "a" | msb`, `msb = 1 | msa` — both members admit
+/// `"a" | 1`. This row drains the component A-FIRST; its
+/// `…_msb_first` sibling drains the SAME source B-FIRST on its OWN host.
+///
+/// The two orders REQUIRE two hosts. `SemanticGraphStore` is host-owned and
+/// outlives any one `ProjectSemanticDispatch`, so demanding both aliases
+/// against a single host never executes the second drain — the first
+/// demand closes the SCC and publishes every member, and the "reversed"
+/// demand is served from the first order's state. A single-host pair
+/// asserts one order twice and cannot fail in the direction it names.
+///
+/// Mutation recipe: revisiting only EmptyCycle members (never
+/// Complete-with-holds) publishes `number` for the non-root member.
+#[test]
+fn flow_return_substrate_multi_seed_cycle_publishes_the_union_msa_first() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE);
     let (expr_a, _) = resolve_substrate_alias(&host, "MsAFirst");
     assert_union_is_the_two_literal_seeds(&expr_a);
     let (expr_b, _) = resolve_substrate_alias(&host, "MsBFirst");
     assert_union_is_the_two_literal_seeds(&expr_b);
 }
 
-/// The same fixed point holds when the recursive flow component drains
-/// under a RELATION root: `PairHost.next` calls `msb`, whose fixed-point
-/// return is `"a" | 1` — NOT assignable to `number`. Mutation
-/// recipe: the under-approximation (`msb = number` at pop) admits "yes".
+/// The B-FIRST drain of [`MULTI_SEED_CYCLE`] on a FRESH host — the order
+/// the single-host pair never executed. Both members still admit `"a" | 1`:
+/// the fixed point is the component's, not the entry point's.
 #[test]
-fn flow_return_substrate_multi_seed_cycle_under_a_relation_root() {
+fn flow_return_substrate_multi_seed_cycle_publishes_the_union_msb_first() {
     let host = make_host_with_footprint();
-    upsert_ts(
-        &host,
-        SUBSTRATE,
-        r#"
+    upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE);
+    let (expr_b, _) = resolve_substrate_alias(&host, "MsBFirst");
+    assert_union_is_the_two_literal_seeds(&expr_b);
+    let (expr_a, _) = resolve_substrate_alias(&host, "MsAFirst");
+    assert_union_is_the_two_literal_seeds(&expr_a);
+}
+
+const MULTI_SEED_CYCLE_UNDER_RELATION: &str = r#"
 export interface NumberBox {
   next(): number;
 }
@@ -739,8 +749,33 @@ export class PairHost {
   }
 }
 export type PairAssign = PairHost extends NumberBox ? "yes" : "no";
-"#,
-    );
+export type MsAFirst = ReturnType<typeof msa>;
+"#;
+
+/// The same fixed point holds when the recursive flow component drains
+/// under a RELATION root: `PairHost.next` calls `msb`, whose fixed-point
+/// return is `"a" | 1` — NOT assignable to `number`. This row drains the
+/// component COLD, from the relation root itself. Mutation recipe: the
+/// under-approximation (`msb = number` at pop) admits "yes".
+#[test]
+fn flow_return_substrate_multi_seed_cycle_under_a_relation_root() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE_UNDER_RELATION);
+    let (expr, _) = resolve_substrate_alias(&host, "PairAssign");
+    assert_string_literal(&expr, "no");
+}
+
+/// The relation root's answer is the same when the flow component was
+/// already closed by an `msa`-rooted drain on this host — the other order
+/// of the same two-demand sequence, on its OWN host. A relation that reads
+/// a PUBLISHED component member must see the identical fixed point it
+/// would have computed cold.
+#[test]
+fn flow_return_substrate_multi_seed_cycle_under_a_relation_root_after_a_flow_drain() {
+    let host = make_host_with_footprint();
+    upsert_ts(&host, SUBSTRATE, MULTI_SEED_CYCLE_UNDER_RELATION);
+    let (pre, _) = resolve_substrate_alias(&host, "MsAFirst");
+    assert_union_is_the_two_literal_seeds(&pre);
     let (expr, _) = resolve_substrate_alias(&host, "PairAssign");
     assert_string_literal(&expr, "no");
 }
