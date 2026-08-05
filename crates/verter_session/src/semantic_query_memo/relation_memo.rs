@@ -2,6 +2,10 @@
 //! `Relate` family, plus the payload-side relation-proof interners
 //! (design `docs/arch/u2-relation-infer-design.md` Decision 4).
 //!
+//! Writes land through the batched SCC member publish in
+//! [`super::scc_publish`] — the one store-owned admission path both
+//! domains ride.
+//!
 //! Storage is the family memo's [`FamilyKey::Relate`] family in the
 //! [`ModeSlot::Single`] slot. The stored value is the PUBLIC
 //! [`SemanticQueryValue::Relation`] payload — decided binary
@@ -34,8 +38,8 @@ pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
 /// inline compute instead of starting duplicate cold work.
 #[derive(Clone)]
 pub(crate) struct InlineRelationFlight {
-    prepared: PreparedKeyHandle,
-    inflight: Arc<InflightEntry>,
+    pub(super) prepared: PreparedKeyHandle,
+    pub(super) inflight: Arc<InflightEntry>,
     /// Present only when an inline flight starts outside an existing
     /// semantic execution stack. Production nested relations reuse the
     /// active owner; direct callers hold this detached RAII lease.
@@ -50,7 +54,7 @@ impl std::fmt::Debug for InlineRelationFlight {
     }
 }
 
-fn relation_satisfied_projection() -> MaterializedSet {
+pub(super) fn relation_satisfied_projection() -> MaterializedSet {
     MaterializedSet::single(MaterializedPoint::new(family::point_for_slot(
         ModeSlot::Single,
         &ProjectionPath::empty(),
@@ -254,150 +258,6 @@ impl SemanticGraphStore {
         })
     }
 
-    /// Publish a decided inline relation member through the same store-owned
-    /// admission fence as an ordinary family cold winner. On success any
-    /// concurrent top-level joiner receives this exact payload and carrier;
-    /// on invalidation/cancellation the publish is refused and joiners retry.
-    pub(crate) fn publish_relation_member_fenced(
-        &self,
-        ctx: Option<&dyn crate::resolver_core::ResolverContext>,
-        key: crate::semantic_query::RelateMemoKey,
-        payload: crate::semantic_query::RelationPayload,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        validated_at_generation: u64,
-        required_root: Option<(crate::semantic_query::RelateMemoKey, u64)>,
-        flight: Option<InlineRelationFlight>,
-    ) -> bool {
-        debug_assert!(
-            matches!(
-                payload.outcome,
-                crate::semantic_query::RelationOutcome::Assignable
-                    | crate::semantic_query::RelationOutcome::NotAssignable
-            ),
-            "only decided binary relation payloads publish; {payload:?} must route ReturnOnly"
-        );
-        debug_assert!(
-            flight
-                .as_ref()
-                .is_none_or(|flight| flight.prepared.key() == &key.to_query_key()),
-            "an inline relation flight must publish its own exact full key"
-        );
-        let completed = QueryResult::Value(SemanticQueryValue::Relation(payload.clone()));
-        let family = FamilyKey::Relate { key: Box::new(key) };
-        let slot = ModeSlot::Single;
-        let admission_seq = self.alloc_candidate_admission_seq();
-        let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
-        let entry = MemoEntry {
-            result: QueryResult::Value(SemanticQueryValue::Relation(payload)),
-            read_set_signature: carrier.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
-            self_root_canonicals: Arc::clone(&self_root_canonicals),
-            walker_diagnostics: Arc::from([]),
-            satisfied_projection: relation_satisfied_projection(),
-            validated_at_generation,
-            admission_seq,
-        };
-        let cap = family.candidate_cap();
-        let eviction = match ctx {
-            Some(ctx) => {
-                family::plan_family_slot_eviction(&self.entries, &family, slot, &entry, cap, ctx)
-            }
-            None => family::EvictionVictim::LruFront,
-        };
-        #[cfg(any(test, feature = "test-support"))]
-        if flight.is_some() {
-            let gate = self.relation_member_pre_entries_gate.lock().clone();
-            if let Some(gate) = gate {
-                gate.wait();
-                gate.wait();
-            }
-        }
-        let mut entries = self.entries_lock_diagnosed();
-        if let Some((root_key, root_admission_seq)) = required_root {
-            let root_family = FamilyKey::Relate {
-                key: Box::new(root_key),
-            };
-            let root_is_published = entries.get(&root_family).is_some_and(|slots| {
-                slots
-                    .snapshot_slot(ModeSlot::Single)
-                    .iter()
-                    .any(|entry| entry.admission_seq == root_admission_seq)
-            });
-            if !root_is_published {
-                drop(entries);
-                if let Some(flight) = flight.as_ref() {
-                    record_cold_abort_swept(&self.stats);
-                    self.abort_inline_relation_flight(flight);
-                }
-                return false;
-            }
-        }
-        if let Some(flight) = flight.as_ref() {
-            if self.force_cold_abort_sweep.load(Ordering::Relaxed) {
-                flight.inflight.state.lock().aborted = true;
-            }
-            if ctx.is_some_and(|ctx| ctx.is_cancelled()) {
-                flight.inflight.state.lock().aborted = true;
-            }
-            if flight.inflight.state.lock().aborted {
-                drop(entries);
-                record_cold_abort_swept(&self.stats);
-                self.abort_inline_relation_flight(flight);
-                return false;
-            }
-        }
-        let family_was_new = !entries.contains_key(&family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            &ProjectionPath::empty(),
-            cap,
-            eviction,
-        );
-        let populated_slots = outcome.populated;
-        for (displaced_slot, displaced_entry) in &outcome.displaced {
-            reverse_index::drain_candidate_reverse_index_registrations(
-                &self.canonical_to_entries,
-                &family,
-                *displaced_slot,
-                displaced_entry,
-            );
-        }
-        if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family);
-        }
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            &family,
-            &populated_slots,
-            &carrier,
-            &dispatch_dep_signature,
-            admission_seq,
-        );
-        drop(entries);
-        if let Some(flight) = flight.as_ref() {
-            {
-                let mut state = flight.inflight.state.lock();
-                if state.aborted {
-                    drop(state);
-                    self.abort_inline_relation_flight(flight);
-                    return false;
-                }
-                state.completed = Some(completed);
-                state.dep_signature = Some(empty_signature());
-                state.graph_carrier = Some(Box::new(carrier));
-                state.self_root_canonicals = self_root_canonicals;
-                state.walker_diagnostics = Some(Arc::from([]));
-                state.cache_suppress = false;
-                state.result_is_partial = false;
-            }
-            flight.inflight.ready.notify_all();
-            self.retire_inflight(&flight.prepared, &flight.inflight, false);
-        }
-        true
-    }
-
     /// Test-support enumeration of every published `Relate` family entry as
     /// `(key, outcome)` (freshest candidate per slot). Lets relation tests
     /// assert over the ACTUAL published set instead of probing guessed keys.
@@ -479,9 +339,9 @@ impl SemanticGraphStore {
 
     /// Test-support seed seam for relation fixtures (mirrors the retired
     /// `insert_relation` shape): publishes a DECIDED payload with the
-    /// legacy no-view eviction policy (LRU front). Production writes route
-    /// through the relation authority's fenced batched publish or the family
-    /// singleflight.
+    /// legacy no-view eviction policy (LRU front). This seeds a ROOT, so
+    /// it takes no root witness and no flight — production member writes
+    /// route through the store-owned batched SCC publish.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_relation_payload_for_tests(
         &self,
@@ -491,17 +351,15 @@ impl SemanticGraphStore {
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,
     ) {
-        let published = self.publish_relation_member_fenced(
+        self.publish_unfenced_candidate_for_tests(
             None,
-            key,
-            payload,
+            FamilyKey::Relate { key: Box::new(key) },
+            SemanticQueryValue::Relation(payload),
+            relation_satisfied_projection(),
             carrier,
             self_root_canonicals,
             validated_at_generation,
-            None,
-            None,
         );
-        debug_assert!(published, "an unfenced fixture publish cannot be aborted");
     }
 
     /// Host-view-aware variant of [`Self::insert_relation_payload_for_tests`]:
@@ -519,17 +377,15 @@ impl SemanticGraphStore {
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,
     ) {
-        let published = self.publish_relation_member_fenced(
+        self.publish_unfenced_candidate_for_tests(
             Some(host),
-            key,
-            payload,
+            FamilyKey::Relate { key: Box::new(key) },
+            SemanticQueryValue::Relation(payload),
+            relation_satisfied_projection(),
             carrier,
             self_root_canonicals,
             validated_at_generation,
-            None,
-            None,
         );
-        debug_assert!(published, "an unfenced fixture publish cannot be aborted");
     }
 
     /// Test-support payload constructor: a decided outcome with a default

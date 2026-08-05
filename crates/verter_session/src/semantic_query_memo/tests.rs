@@ -5,27 +5,56 @@
 use super::*;
 use crate::semantic_query::SemanticGraphRead;
 
+/// Seed a decided SCC root candidate for `(source, target)` and return
+/// its publication witness — the shape the batched member publish is
+/// fenced on.
+#[cfg(test)]
+fn seed_relation_scc_root(
+    store: &SemanticGraphStore,
+    source: crate::semantic_query::SemanticNodeId,
+    target: crate::semantic_query::SemanticNodeId,
+    validated_at_generation: u64,
+) -> crate::semantic_query_memo::SccRootWitness {
+    let root_key = crate::semantic_query::RelateMemoKey::assignable(
+        source,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    store.insert_relation_payload_for_tests(
+        root_key.clone(),
+        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        Arc::from(Vec::<Arc<str>>::new()),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        validated_at_generation,
+    );
+    let admission_seq = store
+        .relation_published_carrier(&root_key)
+        .expect("the seeded root publishes a carrier")
+        .admission_seq;
+    crate::semantic_query_memo::SccRootWitness::relate(root_key, admission_seq)
+}
+
 #[test]
 fn production_relation_admission_is_semantic_store_owned() {
-    let store_source = include_str!("relation_memo.rs");
+    let store_source = include_str!("scc_publish.rs");
     let producer_source = include_str!("../project_semantic_dispatch/relation.rs");
 
-    // Post-activation ownership: the family singleflight publishes the
-    // relation ROOT's entry (its cold-build output IS the payload), and
-    // `SemanticGraphStore::publish_relation_member_fenced` is the SCC
-    // batched-member admission path the authority's drain rides. The store
-    // owns the write and its in-flight fence; the engine supplies only the
-    // computed payload + the SCC-union carrier.
+    // Ownership: the family singleflight publishes the SCC ROOT's entry
+    // (its cold-build output IS the payload), and
+    // `SemanticGraphStore::publish_scc_members_fenced` is the ONE batched
+    // member-admission path both authorities' drains ride. The store owns
+    // the write, its root-witness fence, and its in-flight fence; the
+    // engine supplies only the computed payloads + the SCC-union carrier.
     let owner_start = store_source
-        .find("\n    pub(crate) fn publish_relation_member_fenced")
-        .expect("SemanticGraphStore must own the relation member publish");
+        .find("\n    pub(crate) fn publish_scc_members_fenced")
+        .expect("SemanticGraphStore must own the batched SCC member publish");
     let owner_body = &store_source[owner_start..];
     assert!(
         owner_body.contains("reverse_index::register_reverse_index("),
         "the member publish must land the (entries, memo_budget, reverse-index) consistency cluster"
     );
     assert!(
-        owner_body.contains("SemanticQueryValue::Relation(payload)"),
+        owner_body.contains("SemanticQueryValue::Relation(member.payload)"),
         "the member publish must store the PUBLIC Relation payload — never a compute-side verdict"
     );
     assert!(
@@ -33,16 +62,17 @@ fn production_relation_admission_is_semantic_store_owned() {
         "the relation engine must supply computation and roots, never reach a raw seed write"
     );
     assert!(
-        producer_source.contains("graph.publish_relation_member_fenced("),
-        "the authority's SCC drain must ride the store-owned fenced member publish"
+        producer_source.contains(".publish_scc_members_fenced("),
+        "the authority's SCC drain must ride the store-owned batched member publish"
     );
     assert!(
         store_source.lines().any(|line| line
             .trim_start()
-            .starts_with("pub(crate) fn publish_relation_member_fenced(")),
+            .starts_with("pub(crate) fn publish_scc_members_fenced(")),
         "the production relation write must be crate-private"
     );
 }
+
 use crate::semantic_query::{
     DeclIdentity, DepVersion, PrimitiveKind, ResolveDeclKey, ResolvedDeclSlotIdentity, ScopeId,
 };
@@ -2550,17 +2580,23 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
     );
 
     let host = ctx_host();
+    let generation = host.project_type_store().current_project_generation();
+    let root_witness = seed_relation_scc_root(&store, target, source, generation);
     assert!(
-        store.publish_relation_member_fenced(
+        store.publish_scc_members_fenced(
             Some(&host),
-            key,
-            store
-                .relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable,),
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
-            Arc::from(Vec::<Arc<str>>::new()),
-            host.project_type_store().current_project_generation(),
-            None,
-            Some(flight),
+            &root_witness,
+            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
+            generation,
+            vec![crate::semantic_query_memo::PendingRelationMember {
+                key,
+                payload: store.relation_payload_for_tests(
+                    crate::semantic_query::RelationOutcome::NotAssignable,
+                ),
+                flight,
+            }],
+            Vec::new(),
         ),
         "the inline member publish must retain its admission right"
     );
@@ -2614,17 +2650,13 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
         .into_boxed_slice(),
     ));
     let roots = Arc::from(vec![Arc::clone(&canonical)].into_boxed_slice());
-    let published = store.publish_relation_member_fenced(
-        None,
+    store.insert_relation_payload_for_tests(
         root_key.clone(),
-        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         carrier.clone(),
         Arc::clone(&roots),
+        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         0,
-        None,
-        None,
     );
-    assert!(published, "unfenced relation fixture publish");
     let flight = store
         .begin_inline_relation_flight(&member_key)
         .expect("member flight");
@@ -2636,16 +2668,19 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
     let _gate = store.test_relation_member_pre_entries_gate(Arc::clone(&barrier));
     let publisher_store = Arc::clone(&store);
     let publisher = thread::spawn(move || {
-        publisher_store.publish_relation_member_fenced(
+        publisher_store.publish_scc_members_fenced(
             None,
-            member_key,
-            publisher_store
-                .relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
-            carrier,
-            roots,
+            &crate::semantic_query_memo::SccRootWitness::relate(root_key, root_admission_seq),
+            &carrier,
+            &roots,
             0,
-            Some((root_key, root_admission_seq)),
-            Some(flight),
+            vec![crate::semantic_query_memo::PendingRelationMember {
+                key: member_key,
+                payload: publisher_store
+                    .relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+                flight,
+            }],
+            Vec::new(),
         )
     });
 
@@ -2826,16 +2861,31 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::BudgetExceeded(
             crate::semantic_query::BudgetExceededKind::RelationBudget,
         ));
+    // The already-admitted key doubles as the batch's live SCC root, so
+    // the refusal is decided by the payload gate and nothing else.
+    let root_witness = crate::semantic_query_memo::SccRootWitness::relate(
+        admit_key.clone(),
+        store
+            .relation_published_carrier(&admit_key)
+            .expect("the admitted candidate publishes a carrier")
+            .admission_seq,
+    );
+    let refuse_flight = store
+        .begin_inline_relation_flight(&refuse_key)
+        .expect("the refused member claims its family flight");
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        store.publish_relation_member_fenced(
+        store.publish_scc_members_fenced(
             None,
-            refuse_key.clone(),
-            budget_payload,
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
-            Arc::from(Vec::<Arc<str>>::new()),
+            &root_witness,
+            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
             gen0,
-            None,
-            None,
+            vec![crate::semantic_query_memo::PendingRelationMember {
+                key: refuse_key.clone(),
+                payload: budget_payload,
+                flight: refuse_flight,
+            }],
+            Vec::new(),
         );
     }));
     assert!(

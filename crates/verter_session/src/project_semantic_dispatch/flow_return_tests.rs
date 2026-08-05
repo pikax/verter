@@ -2951,6 +2951,28 @@ export function scDegradedB(c: boolean) {
   z = 2;
   return scDegradedA(!!z);
 }
+
+export function scResA(c: boolean) {
+  if (c) return scResB(c);
+  return 0;
+}
+
+export function scResB(c: boolean) {
+  return scResA(c);
+}
+
+export function scRingX(c: boolean) {
+  if (c) return scRingY(c);
+  return 0;
+}
+
+export function scRingY(c: boolean) {
+  return scRingZ(c);
+}
+
+export function scRingZ(c: boolean) {
+  return scRingX(c);
+}
 "#;
 
 fn make_scc_host() -> Arc<VerterHost> {
@@ -3164,5 +3186,248 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
             second_retained.is_empty(),
             "{second} must retire every member flight: {second_retained:?}"
         );
+    }
+}
+
+/// A drained SCC member's flight must be RETIRED FROM THE TABLE IT WAS
+/// CLAIMED IN — the ordinary `inflight` table.
+///
+/// `begin_inline_flow_return_flight` inserts into `inflight`, so the
+/// publish must retire from `inflight`. Retiring from the
+/// `independent_inflight` table instead leaves the completed entry
+/// resident forever. The damage is not a stale value (a joiner does fork
+/// on a generation bump) — it is that the key can NEVER re-warm:
+/// admission finds the resident entry and takes the joiner branch on
+/// every later demand, so once the warm family is dropped (the global
+/// `memo_budget` FIFO drain) the flight table becomes an ungated shadow
+/// cache with no generation gate, no bounded retention, and no
+/// reverse-index participation, holding the member's `Arc` payload and
+/// full carrier forever.
+///
+/// `retained_claimed_flight_keys_for_tests` cannot see this: it filters
+/// on `completed.is_none()`, and the leaked entry is COMPLETED. The
+/// probe here deliberately ignores completion state.
+#[test]
+fn flow_return_drained_member_retires_from_the_table_it_claimed() {
+    for (first, second) in [("scCleanA", "scCleanB"), ("scCleanB", "scCleanA")] {
+        let host = make_scc_host();
+        let (_, first_candidates, _) = scc_expect_value(&host, first);
+        assert_eq!(first_candidates, 1, "{first} admits warm as machinery root");
+
+        let resident = with_dispatch(&host, |dispatch| {
+            dispatch.graph().resident_flight_keys_for_tests()
+        });
+        assert!(
+            resident.is_empty(),
+            "the closed component must leave NO resident flight entry \
+             (demand order {first} → {second}), found {resident:?}"
+        );
+
+        // The re-warm direction: drop the member's warm family exactly as
+        // the global `memo_budget` FIFO drain does, leaving the in-flight
+        // table alone. A correctly retired flight lets the next demand
+        // re-admit cold and warm again; a leaked one makes the key join a
+        // corpse forever.
+        with_dispatch(&host, |dispatch| {
+            let key = SemanticQueryKey::FlowReturn(Box::new(scc_key(dispatch, second)));
+            dispatch.graph().evict_family_for_tests(&key);
+        });
+        let (_, second_candidates, _) = scc_expect_value(&host, second);
+        assert_eq!(
+            second_candidates, 1,
+            "{second} must RE-WARM after its family is dropped; a leaked flight \
+             makes admission join the retained completed entry forever"
+        );
+    }
+}
+
+/// Every member of a resurrected flow SCC must publish a READABLE entry.
+///
+/// A member whose own evaluation failed `EmptyCycle` has no seed of its
+/// own, so its evaluation records `MaterializedSet::empty()`. The
+/// component discharge then RESURRECTS it to `Complete` from its hold
+/// targets — but the resurrection copies only the outcome, so the
+/// published entry keeps the empty materialised set. `cached_satisfies`
+/// is an `.any(...)` over that set, so `∅` satisfies NOTHING: the
+/// candidate occupies a slot, a reverse-index registration and a FIFO
+/// budget admission while being permanently unreadable.
+///
+/// Candidate count alone does NOT discriminate — a zombie satisfies it.
+/// The discriminating assertions are the recorded materialised set and
+/// the actual warm read.
+#[test]
+fn flow_return_resurrected_member_publishes_a_readable_entry() {
+    // The two-cycle: whichever member is demanded first, the other one
+    // is the seedless `EmptyCycle` member the discharge resurrects.
+    for (first, rest) in [
+        ("scResA", ["scResB"].as_slice()),
+        ("scResB", ["scResA"].as_slice()),
+        // The three-cycle demanded at its only seeded member leaves BOTH
+        // other members resurrected in the SAME drain.
+        ("scRingX", ["scRingY", "scRingZ"].as_slice()),
+    ] {
+        let host = make_scc_host();
+        let (first_result, _, _) = scc_expect_value(&host, first);
+        assert_eq!(
+            first_result.degradation, None,
+            "{first} closes its component cleanly"
+        );
+
+        for name in rest {
+            let (materialized, warm) = with_dispatch(&host, |dispatch| {
+                let key = scc_key(dispatch, name);
+                let materialized = dispatch.graph().entry_satisfied_projection_for_tests(
+                    &SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+                );
+                let warm = dispatch.graph().get_flow_return_result(dispatch.ctx, &key);
+                (materialized, warm)
+            });
+            let materialized =
+                materialized.unwrap_or_else(|| panic!("{name} must publish a candidate"));
+            assert!(
+                !materialized.is_empty(),
+                "{name} (resurrected in {first}'s drain) must record the point its \
+                 published result actually serves — an empty set satisfies nothing"
+            );
+            assert!(
+                warm.is_some(),
+                "{name} (resurrected in {first}'s drain) must be WARM-READABLE; \
+                 an entry that occupies a slot but can never be read is a zombie"
+            );
+        }
+    }
+}
+
+/// An SCC's deferred members must publish ONLY onto a root candidate
+/// that is still live, and they must publish ATOMICALLY.
+///
+/// The relation publisher takes the root's admission token and, under
+/// the SAME `entries` lock it will publish with, refuses when the root
+/// family no longer holds that exact candidate. Three of the four
+/// member-publish sites had no such fence: a member drained onto a root
+/// an invalidation had already swept would publish anyway and serve a
+/// live warm read from a component whose root no longer exists.
+///
+/// The invalidation abort sweep cannot cover this — `affected_pairs`
+/// comes from the reverse-index drain, and a deferred, never-published
+/// member's flight holds no registration.
+///
+/// Atomicity is the second half: publishing each member under its own
+/// `entries` hold lets an invalidation land BETWEEN members and leave a
+/// partially-published component. The contract is that a superseded root
+/// releases the ENTIRE component with ZERO member publication, so this
+/// drives a THREE-member component and requires both members to refuse
+/// together.
+///
+/// Mutation recipe: dropping the root-witness check from the batched
+/// publish restores `publish -> true` with both members warm-readable
+/// under a swept root.
+#[test]
+fn flow_scc_members_never_publish_onto_a_superseded_root() {
+    for invalidate_root in [false, true] {
+        let host = make_scc_host();
+        // Warm the component so the root's published carrier exists and
+        // both members carry real results.
+        let (_, root_candidates, _) = scc_expect_value(&host, "scRingX");
+        assert_eq!(root_candidates, 1, "the root must warm before the drain");
+
+        with_dispatch(&host, |dispatch| {
+            let graph = dispatch.graph();
+            let root_key = scc_key(dispatch, "scRingX");
+            let root_query = SemanticQueryKey::FlowReturn(Box::new(root_key.clone()));
+            let carrier = graph
+                .published_carrier_for_tests(&root_query)
+                .expect("the root publishes a carrier");
+
+            // Re-stage both members exactly as the SCC drain does: drop
+            // the warm entry, then claim the ordinary family flight.
+            let mut staged = Vec::new();
+            for name in ["scRingY", "scRingZ"] {
+                let key = scc_key(dispatch, name);
+                let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
+                let result = graph
+                    .get_flow_return_result(dispatch.ctx, &key)
+                    .unwrap_or_else(|| panic!("{name} must be warm before re-staging"));
+                let materialized = graph
+                    .entry_satisfied_projection_for_tests(&query)
+                    .unwrap_or_else(|| panic!("{name} must record its materialised point"));
+                graph.evict_family_for_tests(&query);
+                let flight = graph
+                    .begin_inline_flow_return_flight(&key)
+                    .unwrap_or_else(|| panic!("{name} must claim its family flight"));
+                staged.push((name, key, query, result, materialized, flight));
+            }
+
+            // The invalidation lands with both flights already claimed —
+            // the exact production ordering, and the one the abort sweep
+            // cannot see.
+            if invalidate_root {
+                graph.invalidate_canonical(SCC_CANONICAL);
+                assert_eq!(
+                    graph.slot_candidate_count_for_tests(&root_query),
+                    0,
+                    "the root candidate must be swept before the drain resumes"
+                );
+            }
+
+            let pending: Vec<_> = staged
+                .iter()
+                .cloned()
+                .map(|(_, key, _, result, materialized, flight)| {
+                    crate::semantic_query_memo::PendingFlowReturnMember {
+                        key,
+                        result,
+                        materialized,
+                        flight,
+                    }
+                })
+                .collect();
+            let published_any = graph.publish_scc_members_fenced(
+                Some(dispatch.ctx),
+                &crate::semantic_query_memo::SccRootWitness::flow_return(
+                    root_key.clone(),
+                    carrier.admission_seq,
+                ),
+                &carrier.read_set_signature,
+                &carrier.self_root_canonicals,
+                carrier.validated_at_generation,
+                Vec::new(),
+                pending,
+            );
+
+            for (name, key, query, ..) in &staged {
+                let candidates = graph.slot_candidate_count_for_tests(query);
+                let warm = graph.get_flow_return_result(dispatch.ctx, key).is_some();
+                if invalidate_root {
+                    assert!(
+                        !published_any,
+                        "no member may publish onto a swept root ({name})"
+                    );
+                    assert_eq!(
+                        candidates, 0,
+                        "{name} must leave no candidate behind a swept root"
+                    );
+                    assert!(
+                        !warm,
+                        "{name} must not serve a warm read from a component whose root is gone"
+                    );
+                } else {
+                    assert!(published_any, "the positive control must publish ({name})");
+                    assert_eq!(candidates, 1, "{name} publishes onto the live root");
+                    assert!(warm, "{name} serves its published result warm");
+                }
+            }
+
+            let retained = graph.retained_claimed_flight_keys_for_tests();
+            assert!(
+                retained.is_empty(),
+                "every member flight must be released either way: {retained:?}"
+            );
+            let resident = graph.resident_flight_keys_for_tests();
+            assert!(
+                resident.is_empty(),
+                "every member flight must be retired either way: {resident:?}"
+            );
+        });
     }
 }

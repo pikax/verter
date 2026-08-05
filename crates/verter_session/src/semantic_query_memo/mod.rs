@@ -54,9 +54,11 @@ mod member_index;
 mod prepared;
 mod relation_memo;
 mod reverse_index;
+mod scc_publish;
 
 pub(crate) use flow_return_memo::InlineFlowReturnFlight;
 pub(crate) use relation_memo::InlineRelationFlight;
+pub(crate) use scc_publish::{PendingFlowReturnMember, PendingRelationMember, SccRootWitness};
 
 mod stats;
 mod wait_cycle;
@@ -3764,24 +3766,17 @@ impl SemanticGraphStore {
             // seq — surviving sibling candidates in the same slot
             // keep their own seq registrations.
             if let Some(slots) = entries.remove(&victim) {
-                // Walk every candidate in every slot — a multi-view
-                // slot must drain reverse-index registrations for
-                // each candidate, not just the first.
-                for (slot, entry) in slots.iter_populated_slots_all() {
-                    let carrier_canonicals = entry.read_set_signature.canonical_ids();
-                    let dispatch_canonicals = entry.dispatch_dep_signature.iter().map(|(c, _)| c);
-                    for canonical in carrier_canonicals.iter().chain(dispatch_canonicals) {
-                        reverse_index::prune_reverse_index_registration(
-                            &self.canonical_to_entries,
-                            canonical,
-                            &(victim.clone(), slot, entry.admission_seq),
-                        );
-                        #[cfg(any(test, feature = "test-support"))]
-                        {
-                            pruned_any = true;
-                        }
-                    }
+                let drained = reverse_index::drain_family_slots_registrations(
+                    &self.canonical_to_entries,
+                    &victim,
+                    &slots,
+                );
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    pruned_any |= drained;
                 }
+                #[cfg(not(any(test, feature = "test-support")))]
+                let _ = drained;
             }
         }
         // Test-only injection point — parked after the FIFO victims'

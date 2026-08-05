@@ -11,6 +11,10 @@
 //! `validated_at_generation` mismatch (the family carries the
 //! live-generation gate). Retention rides the family rails (cap 8,
 //! invalid-first / LRU eviction, reverse-index drains).
+//!
+//! Writes land through the batched SCC member publish in
+//! [`super::scc_publish`] — the one store-owned admission path both
+//! domains ride.
 
 use super::*;
 
@@ -21,8 +25,8 @@ use super::*;
 /// work.
 #[derive(Clone)]
 pub(crate) struct InlineFlowReturnFlight {
-    prepared: PreparedKeyHandle,
-    inflight: Arc<InflightEntry>,
+    pub(super) prepared: PreparedKeyHandle,
+    pub(super) inflight: Arc<InflightEntry>,
     /// Present only when an inline flight starts outside an existing
     /// semantic execution stack. Production nested evaluations reuse the
     /// active owner; direct callers hold this detached RAII lease.
@@ -34,13 +38,6 @@ impl std::fmt::Debug for InlineFlowReturnFlight {
         f.debug_struct("InlineFlowReturnFlight")
             .field("key", self.prepared.key())
             .finish_non_exhaustive()
-    }
-}
-
-impl InlineFlowReturnFlight {
-    /// The exact key this flight admitted for (debug assertions only).
-    pub(crate) fn prepared_key(&self) -> &SemanticQueryKey {
-        self.prepared.key()
     }
 }
 
@@ -162,132 +159,5 @@ impl SemanticGraphStore {
                 )
             }
         }
-    }
-
-    /// Publish ONE decided flow-return member at its SCC's batched close,
-    /// riding the root's union carrier (read-set signature, self roots,
-    /// generation stamp). Fenced exactly like the relation member
-    /// publish: only `Complete`, NON-DEGRADED results publish, and only
-    /// through the store-owned flight — a degraded success is `ReturnOnly`
-    /// by contract, so THIS single member-publish entry refuses it
-    /// (aborting the flight) rather than trusting call-site discipline.
-    /// `materialized` is the point set the member's compute ACTUALLY
-    /// produced — recorded by the compute, never re-derived from the
-    /// nominal key here.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn publish_flow_return_member_fenced(
-        &self,
-        ctx: Option<&dyn crate::resolver_core::ResolverContext>,
-        key: crate::semantic_query::FlowReturnKey,
-        result: crate::semantic_query::FlowReturnResult,
-        materialized: MaterializedSet,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
-        self_root_canonicals: Arc<[Arc<str>]>,
-        validated_at_generation: u64,
-        flight: Option<InlineFlowReturnFlight>,
-    ) -> bool {
-        debug_assert!(
-            flight.as_ref().is_none_or(|flight| {
-                matches!(flight.prepared_key(), SemanticQueryKey::FlowReturn(k) if **k == key)
-            }),
-            "an inline flow-return flight must publish its own exact full key"
-        );
-        if result.degradation.is_some() {
-            // Degraded success: a usable value, but ReturnOnly — no memo
-            // entry, no fact signature, no reverse-index metadata. The
-            // caller already holds the value; waiting joiners wake on the
-            // abort sentinel and retry admission.
-            if let Some(flight) = flight {
-                self.abort_inline_flow_return_flight(&flight);
-            }
-            return false;
-        }
-        let completed =
-            QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result.clone())));
-        let family = FamilyKey::FlowReturn { key: Box::new(key) };
-        let slot = ModeSlot::Single;
-        let admission_seq = self.alloc_candidate_admission_seq();
-        let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
-        let entry = MemoEntry {
-            result: QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result))),
-            read_set_signature: carrier.clone(),
-            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
-            self_root_canonicals: Arc::clone(&self_root_canonicals),
-            walker_diagnostics: Arc::from([]),
-            satisfied_projection: materialized,
-            validated_at_generation,
-            admission_seq,
-        };
-        let cap = family.candidate_cap();
-        let eviction = match ctx {
-            Some(ctx) => {
-                family::plan_family_slot_eviction(&self.entries, &family, slot, &entry, cap, ctx)
-            }
-            None => family::EvictionVictim::LruFront,
-        };
-        let mut entries = self.entries_lock_diagnosed();
-        if let Some(flight) = flight.as_ref() {
-            if self.force_cold_abort_sweep.load(Ordering::Relaxed) {
-                flight.inflight.state.lock().aborted = true;
-            }
-            if ctx.is_some_and(|ctx| ctx.is_cancelled()) {
-                flight.inflight.state.lock().aborted = true;
-            }
-            if flight.inflight.state.lock().aborted {
-                drop(entries);
-                record_cold_abort_swept(&self.stats);
-                self.abort_inline_flow_return_flight(flight);
-                return false;
-            }
-        }
-        let family_was_new = !entries.contains_key(&family);
-        let outcome = entries.entry(family.clone()).or_default().publish(
-            slot,
-            entry,
-            &ProjectionPath::empty(),
-            cap,
-            eviction,
-        );
-        let populated_slots = outcome.populated;
-        for (displaced_slot, displaced_entry) in &outcome.displaced {
-            reverse_index::drain_candidate_reverse_index_registrations(
-                &self.canonical_to_entries,
-                &family,
-                *displaced_slot,
-                displaced_entry,
-            );
-        }
-        if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(&mut entries, &family);
-        }
-        reverse_index::register_reverse_index(
-            &self.canonical_to_entries,
-            &family,
-            &populated_slots,
-            &carrier,
-            &dispatch_dep_signature,
-            admission_seq,
-        );
-        drop(entries);
-        if let Some(flight) = flight {
-            {
-                let mut state = flight.inflight.state.lock();
-                if state.aborted {
-                    drop(state);
-                    self.abort_inline_flow_return_flight(&flight);
-                    return false;
-                }
-                state.completed = Some(completed);
-                state.dep_signature = Some(empty_signature());
-                state.graph_carrier = Some(Box::new(carrier));
-                state.self_root_canonicals = self_root_canonicals;
-                state.walker_diagnostics = Some(Arc::from([]));
-                state.cache_suppress = false;
-                state.result_is_partial = false;
-            }
-            flight.inflight.ready.notify_all();
-            self.retire_inflight(&flight.prepared, &flight.inflight, true);
-        }
-        true
     }
 }

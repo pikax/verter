@@ -354,6 +354,74 @@ impl SemanticGraphStore {
             .collect()
     }
 
+    /// Test-only probe: the keys of EVERY entry still resident in the
+    /// ORDINARY in-flight table, whatever its completion state.
+    ///
+    /// [`Self::retained_claimed_flight_keys_for_tests`] filters on
+    /// `completed.is_none()`, so it is structurally blind to the worse
+    /// failure: a flight that COMPLETED and was then retired into the
+    /// wrong table. That entry stays resident forever — admission finds
+    /// it and takes the joiner branch on every later demand, so the key
+    /// can never re-warm, and the flight table becomes an ungated shadow
+    /// cache holding the completed value with no generation gate, no
+    /// bounded retention, and no reverse-index participation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn resident_flight_keys_for_tests(&self) -> Vec<SemanticQueryKey> {
+        let table = self.inflight.lock();
+        table.keys().map(|handle| handle.key().clone()).collect()
+    }
+
+    /// Test-only probe: the freshest published candidate's carrier
+    /// (read-set signature, self roots, generation stamp, admission
+    /// token) for `key` — the family-agnostic twin of
+    /// [`Self::relation_published_carrier`]. Lets a test drive the
+    /// store's batched SCC member publish with the SAME carrier the
+    /// production drain rides.
+    #[cfg(test)]
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn published_carrier_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<PublishedMemoCandidate> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        let entry = entries
+            .get(&family)?
+            .snapshot_slot(slot)
+            .into_iter()
+            .next_back()?;
+        Some(PublishedMemoCandidate {
+            read_set_signature: entry.read_set_signature.clone(),
+            self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
+            validated_at_generation: entry.validated_at_generation,
+            admission_seq: entry.admission_seq,
+        })
+    }
+
+    /// Test-only probe: drop `key`'s whole family from the warm memo the
+    /// way the global `memo_budget` FIFO drain does — the `entries`
+    /// removal plus each candidate's reverse-index prune, and NOTHING
+    /// else. The in-flight table is deliberately untouched, which is
+    /// exactly the production condition a leaked flight has to survive:
+    /// the warm entry is gone, so the next demand MUST re-admit cold.
+    /// Returns whether a family was present.
+    #[doc(hidden)]
+    pub fn evict_family_for_tests(&self, key: &SemanticQueryKey) -> bool {
+        let (family, _) = family_and_slot(key);
+        let mut entries = self.entries_lock_diagnosed();
+        let Some(slots) = entries.remove(&family) else {
+            return false;
+        };
+        reverse_index::drain_family_slots_registrations(
+            &self.canonical_to_entries,
+            &family,
+            &slots,
+        );
+        true
+    }
+
     pub fn slot_candidate_count_for_tests(&self, key: &SemanticQueryKey) -> usize {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();

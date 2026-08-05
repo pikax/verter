@@ -86,6 +86,33 @@ struct FlowEvaluationOutcome {
     fresh_seed: bool,
 }
 
+/// The §3.4 materialised point set a FAILED frame evaluation records.
+///
+/// A hold-only [`FlowReturnFailure::EmptyCycle`] is the one failure the
+/// component discharge RESURRECTS to `Complete`
+/// (`discharge_flow_component_to_fixed_point` admits exactly `Complete`
+/// and `EmptyCycle`): its value IS the join of its hold targets, and the
+/// point that join serves is the frame's own demand point. The
+/// resurrection copies only the outcome, so an empty set here would
+/// publish an entry `cached_satisfies` (an `.any(...)` over the recorded
+/// set) can never satisfy — a candidate holding a slot, a reverse-index
+/// registration and a FIFO budget admission while being permanently
+/// unreadable.
+///
+/// Every OTHER failure is a real no-value outcome that never publishes,
+/// so it records nothing.
+fn failure_materialized_set(
+    failure: FlowReturnFailure,
+    key: &FlowReturnKey,
+) -> crate::semantic_query::demand::MaterializedSet {
+    use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
+    if matches!(failure, FlowReturnFailure::EmptyCycle) {
+        MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()))
+    } else {
+        MaterializedSet::empty()
+    }
+}
+
 /// The frame-pop result.
 enum FlowFramePop {
     /// Caller-return for a non-root pop (the provisional member).
@@ -479,21 +506,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             matches!(key, SemanticQueryKey::FlowReturn(_)),
             "the flow-return executor admits FlowReturn keys only"
         );
+        let SemanticQueryKey::FlowReturn(root_key) = key.clone() else {
+            unreachable!("the flow-return executor admits FlowReturn keys only")
+        };
         let mut publication = None;
         let read = self.execute_via_cold_build_helper_capturing_publication(key, &mut publication);
         match publication {
-            Some(publication) => self.flow_return_drain_completed_members(&publication),
+            Some(publication) => self.flow_return_drain_completed_members(&root_key, &publication),
             None => self.relation_abort_completed_members(),
         }
         read
     }
 
     /// Drain the SCC-closed member batch onto the root's published
-    /// carrier. Relation members publish WITHOUT a relation-root fence
-    /// (this root is a flow evaluation); flow members publish through
-    /// their own family flights.
+    /// carrier, fenced on the FLOW root's own published candidate.
     fn flow_return_drain_completed_members(
         &self,
+        root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
     ) {
         let (relation_members, flow_members) = {
@@ -503,37 +532,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 std::mem::take(&mut txn.flow.completed_members),
             )
         };
-        let graph = self.graph();
-        for member in relation_members {
-            let Some(flight) = member.inline_flight else {
-                continue;
-            };
-            graph.publish_relation_member_fenced(
-                Some(self.ctx),
-                member.key,
-                member.payload,
-                carrier.read_set_signature.clone(),
-                Arc::clone(&carrier.self_root_canonicals),
-                carrier.validated_at_generation,
-                None,
-                Some(flight),
-            );
-        }
-        for member in flow_members {
-            let Some(flight) = member.inline_flight else {
-                continue;
-            };
-            graph.publish_flow_return_member_fenced(
-                Some(self.ctx),
-                member.key,
-                member.result,
-                member.materialized,
-                carrier.read_set_signature.clone(),
-                Arc::clone(&carrier.self_root_canonicals),
-                carrier.validated_at_generation,
-                Some(flight),
-            );
-        }
+        self.publish_scc_member_batch(
+            crate::semantic_query_memo::SccRootWitness::flow_return(
+                root_key.clone(),
+                carrier.admission_seq,
+            ),
+            carrier,
+            relation_members,
+            flow_members,
+        );
     }
 
     /// A nested flow evaluation's INLINE cold compute: charge the
@@ -882,6 +889,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match outcome {
             FlowReturnPendingOutcome::Complete(result) => {
                 if machinery_root {
+                    // The machinery root publishes through the family
+                    // singleflight, which owns the root's own admission —
+                    // so it never claims an inline flight, and this arm
+                    // has none to drop.
+                    debug_assert!(
+                        inline_flight.is_none(),
+                        "a machinery root publishes through the family singleflight \
+                         and must never hold an inline flight to drop"
+                    );
                     FlowFramePop::RootClose(FlowRootClose::Complete(
                         result,
                         scc_self_roots,
@@ -1447,7 +1463,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     self_roots,
                     holds,
-                    materialized: MaterializedSet::empty(),
+                    materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
                 };
             }
@@ -1468,7 +1484,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                     self_roots,
                     holds,
-                    materialized: MaterializedSet::empty(),
+                    materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
                 };
             }

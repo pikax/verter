@@ -1735,6 +1735,57 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Hand one closed component's deferred members to the store's
+    /// batched SCC publish, fenced on the root's published candidate.
+    ///
+    /// THE single drain shape both roots use: a member without a claimed
+    /// flight was never deferred and has nothing to publish; every other
+    /// member rides the root's SCC-union carrier and the root witness, so
+    /// a superseded root releases the whole component with zero member
+    /// publication.
+    pub(super) fn publish_scc_member_batch(
+        &self,
+        required_root: crate::semantic_query_memo::SccRootWitness,
+        carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
+        relation_members: Vec<CompletedSccMember>,
+        flow_members: Vec<super::dispatch_txn::CompletedFlowReturnMember>,
+    ) {
+        let relation_members: Vec<_> = relation_members
+            .into_iter()
+            .filter_map(|member| {
+                member.inline_flight.map(|flight| {
+                    crate::semantic_query_memo::PendingRelationMember {
+                        key: member.key,
+                        payload: member.payload,
+                        flight,
+                    }
+                })
+            })
+            .collect();
+        let flow_members: Vec<_> = flow_members
+            .into_iter()
+            .filter_map(|member| {
+                member.inline_flight.map(|flight| {
+                    crate::semantic_query_memo::PendingFlowReturnMember {
+                        key: member.key,
+                        result: member.result,
+                        materialized: member.materialized,
+                        flight,
+                    }
+                })
+            })
+            .collect();
+        self.graph().publish_scc_members_fenced(
+            Some(self.ctx),
+            &required_root,
+            &carrier.read_set_signature,
+            &carrier.self_root_canonicals,
+            carrier.validated_at_generation,
+            relation_members,
+            flow_members,
+        );
+    }
+
     pub(super) fn relation_abort_completed_members(&self) {
         let (members, flow_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
@@ -1851,37 +1902,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 std::mem::take(&mut txn.flow.completed_members),
             )
         };
-        let graph = self.graph();
-        for member in members {
-            let Some(flight) = member.inline_flight else {
-                continue;
-            };
-            graph.publish_relation_member_fenced(
-                Some(self.ctx),
-                member.key,
-                member.payload,
-                carrier.read_set_signature.clone(),
-                Arc::clone(&carrier.self_root_canonicals),
-                carrier.validated_at_generation,
-                Some((root_key.clone(), carrier.admission_seq)),
-                Some(flight),
-            );
-        }
-        for member in flow_members {
-            let Some(flight) = member.inline_flight else {
-                continue;
-            };
-            graph.publish_flow_return_member_fenced(
-                Some(self.ctx),
-                member.key,
-                member.result,
-                member.materialized,
-                carrier.read_set_signature.clone(),
-                Arc::clone(&carrier.self_root_canonicals),
-                carrier.validated_at_generation,
-                Some(flight),
-            );
-        }
+        self.publish_scc_member_batch(
+            crate::semantic_query_memo::SccRootWitness::relate(
+                root_key.clone(),
+                carrier.admission_seq,
+            ),
+            carrier,
+            members,
+            flow_members,
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────

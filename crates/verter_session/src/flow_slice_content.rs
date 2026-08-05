@@ -739,6 +739,34 @@ enum NameBinding {
     Unmodeled,
 }
 
+/// Whether a binding of this kind declares a name in TYPE space.
+///
+/// `class` and `enum` declare a type alongside their value; `namespace`
+/// declares a namespace-qualified type space; `import X = …` re-declares
+/// whatever spaces its target occupies, so it is treated as
+/// type-declaring. Everything else — `const` / `let` / `var`, a
+/// parameter, a `catch` parameter, a hoisted nested function declaration
+/// — declares a VALUE only, and leaves an outer same-name type
+/// completely visible.
+///
+/// (`namespace` and `import =` are illegal inside a function body —
+/// TS1235 / TS1232 — but the skeleton still records the recovered
+/// binding, and it genuinely occupies type space when it does.)
+fn kind_declares_type_space(kind: SkeletonBindingKind) -> bool {
+    match kind {
+        SkeletonBindingKind::Class
+        | SkeletonBindingKind::Enum
+        | SkeletonBindingKind::Namespace
+        | SkeletonBindingKind::ImportEquals => true,
+        SkeletonBindingKind::Param
+        | SkeletonBindingKind::Const
+        | SkeletonBindingKind::Let
+        | SkeletonBindingKind::Var
+        | SkeletonBindingKind::NestedFunction
+        | SkeletonBindingKind::CatchParam => false,
+    }
+}
+
 /// A name an enclosing frame binds, as the ENCLOSING frame's lexical
 /// authority classified it at the nested function value's own position.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -756,6 +784,15 @@ enum CapturedBinding {
 #[derive(Default)]
 struct CaptureScope {
     names: FxHashMap<Arc<str>, CapturedBinding>,
+    /// The captured names an enclosing frame binds in TYPE space — a
+    /// captured `class` / `enum` / `namespace` / `import =`.
+    ///
+    /// A SEPARATE inventory, not a projection of `names`:
+    /// [`CapturedBinding`] collapses every kind into one modelability
+    /// bit, so a captured `class` and a captured `const` are
+    /// indistinguishable there. They are opposites in type space — the
+    /// class shadows an outer type alias, the `const` is invisible to it.
+    type_space_names: FxHashSet<Arc<str>>,
 }
 
 impl CaptureScope {
@@ -850,6 +887,30 @@ impl Lowerer<'_> {
         self.classify_bindings(name, &bindings)
     }
 
+    /// Whether this frame binds `name` in TYPE space at `span`.
+    ///
+    /// The TYPE-space twin of [`Self::resolve_name`], over the SAME
+    /// [`FunctionBodySkeleton`] authority but filtered to the kinds that
+    /// actually declare a type ([`kind_declares_type_space`]). A local
+    /// binding that declares a VALUE only is TRANSPARENT here: `const
+    /// Info = 1` leaves `x as Info` naming the outer type alias, so the
+    /// lookup falls through to the enclosing frames' captured type-space
+    /// names exactly as a completely unbound name does.
+    fn type_space_name_is_frame_bound(&self, name: &str, span: oxc_span::Span) -> bool {
+        if let Some(name_id) = self.skeleton.name_id(name) {
+            let region = self.skeleton.innermost_region_containing(span.into());
+            if self
+                .skeleton
+                .bindings_of_name_in_scope(name_id, region)
+                .iter()
+                .any(|id| kind_declares_type_space(self.skeleton.binding(*id).kind))
+            {
+                return true;
+            }
+        }
+        self.captures.type_space_names.contains(name)
+    }
+
     /// Classify one RESOLVED binding set. A set carrying any binding this
     /// content half cannot model classifies as [`NameBinding::Unmodeled`]
     /// — never as the modelable sibling and never as a free name.
@@ -928,6 +989,7 @@ impl Lowerer<'_> {
         for (name, binding) in self.captures.names.iter() {
             names.insert(Arc::clone(name), *binding);
         }
+        let mut type_space_names = self.captures.type_space_names.clone();
         let mut seen: FxHashSet<verter_semantic::analysis::flow::FlowNameId> = FxHashSet::default();
         for binding in self.skeleton.bindings.iter() {
             if !seen.insert(binding.name) {
@@ -940,6 +1002,16 @@ impl Lowerer<'_> {
             if resolved.is_empty() {
                 continue;
             }
+            // The TYPE-space bit is carried separately from the value
+            // classification below: the two spaces disagree on the same
+            // binding set (a `const` is a value capture that shadows no
+            // type; a `class` is both).
+            if resolved
+                .iter()
+                .any(|id| kind_declares_type_space(self.skeleton.binding(*id).kind))
+            {
+                type_space_names.insert(Arc::from(text));
+            }
             let captured = match self.classify_bindings(text, &resolved) {
                 NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured => {
                     CapturedBinding::Local
@@ -949,7 +1021,10 @@ impl Lowerer<'_> {
             };
             names.insert(Arc::from(text), captured);
         }
-        CaptureScope { names }
+        CaptureScope {
+            names,
+            type_space_names,
+        }
     }
 
     /// Whether the statement's control region contains a `return` of the
@@ -1598,7 +1673,12 @@ impl Lowerer<'_> {
             }
         }
         for name in &names.type_names {
-            if !matches!(self.resolve_name(name, span), NameBinding::Free) {
+            // TYPE space, not value space: the answer's type names name
+            // TYPES, and only a type-DECLARING local shadows the owner
+            // scope's. `resolve_name` here would fail closed on a plain
+            // `const` / `let` / `var` / parameter / nested function that
+            // never shadowed the type at all.
+            if self.type_space_name_is_frame_bound(name, span) {
                 let entry = FrameShadowedName::Type(Arc::from(name.as_str()));
                 if !shadowed.contains(&entry) {
                     shadowed.push(entry);

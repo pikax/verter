@@ -331,6 +331,77 @@ export function r5MutualB(c: boolean) {
   z = 2;
   return r5MutualA(!!z);
 }
+
+// ── Value space vs TYPE space ─────────────────────────────────────────
+// The leaf answer's TYPE names resolve in TYPE space. A function-local
+// binding shadows the module type alias only when its kind DECLARES a
+// type: `class` / `enum` (and the two forms illegal in a function body,
+// `namespace` / `import =`). `const` / `let` / `var` / a parameter / a
+// nested function declaration declare a VALUE only, so the module type
+// alias still governs — reading them off the value inventory fails
+// closed on a name that never shadowed anything.
+export type Info = { tag: "info" };
+export type Res = { tag: "res" };
+
+export function bCtrlNoLocal(x: unknown) {
+  return x as Info;
+}
+
+export function bCtrlOtherLocal(x: unknown) {
+  const other = 1;
+  return x as Res;
+}
+
+export function bConst(x: unknown) {
+  const Info = 1;
+  return x as Info;
+}
+
+export function bLet(x: unknown) {
+  let Info = 1;
+  Info = 2;
+  return x as Info;
+}
+
+export function bVar(x: unknown) {
+  var Info = 1;
+  return x as Info;
+}
+
+export function bParam(Info: number, x: unknown) {
+  return x as Info;
+}
+
+export function bFn(x: unknown) {
+  function Info() {}
+  return x as Info;
+}
+
+export function bClass(x: unknown) {
+  class Info {}
+  return x as Info;
+}
+
+export function bEnum(x: unknown) {
+  enum Info {
+    A,
+  }
+  return x as Info;
+}
+
+export function capConst() {
+  const Info = 1;
+  return (x: unknown) => x as Info;
+}
+
+export function capParam(Info: number) {
+  return (x: unknown) => x as Info;
+}
+
+export function capClass() {
+  class Info {}
+  return (x: unknown) => x as Info;
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -960,4 +1031,91 @@ fn flow_return_degraded_component_member_is_order_independent_and_never_warms() 
             "{first}: a degraded component is ReturnOnly — it must never warm"
         );
     }
+}
+
+/// The frame's TYPE-space names are classified against TYPE-declaring
+/// bindings only — never against the value inventory.
+///
+/// `answer_names_frame_bound` walks the leaf answer's referenced names in
+/// two spaces. The value roots (`typeof x…`) are a value question and
+/// resolve through the `FunctionBodySkeleton`, which is a VALUE
+/// inventory. Routing the TYPE names through the same authority conflates
+/// the two namespaces: a local `const Info = 1` makes `x as Info` fail
+/// closed even though `Info` in type position still names the module
+/// alias, while the genuinely type-declaring `class Info {}` /
+/// `enum Info {}` must keep failing closed.
+///
+/// Oracle (`tsgo --strict --declaration --emitDeclarationOnly`):
+///
+/// ```text
+/// bCtrlNoLocal(x: unknown): Info      bClass(x: unknown): {}
+/// bCtrlOtherLocal(x: unknown): Res    bEnum(x: unknown): Info   // TS4060: private name
+/// bConst / bLet / bVar: Info          capConst(): (x: unknown) => Info
+/// bParam(Info: number, …): Info       capParam(Info: number): (x: unknown) => Info
+/// bFn(x: unknown): Info               capClass(): (x: unknown) => {}
+/// ```
+///
+/// `bClass` / `bEnum` / `capClass` print the LOCAL declaration's type
+/// (`{}` structurally; `Info` under TS4060 "private name" for the enum),
+/// which no owner-scope resolution can supply — those fail closed here.
+/// Every other row is the module alias, which the owner-scope leaf
+/// lowering resolves correctly and must be allowed to publish.
+///
+/// Mutation recipe: routing `names.type_names` back through
+/// `resolve_name` (the value inventory) flips every value-space row to
+/// `Error(Miss)`; dropping the type-space filter entirely (treating no
+/// local as type-declaring) flips `bClass` / `bEnum` / `capClass` to a
+/// warm wrong answer.
+#[test]
+fn flow_return_type_space_names_are_not_classified_against_the_value_inventory() {
+    let host = make_r5_host();
+    let info = || TypeExpr::Ref {
+        name: Arc::from("Info"),
+        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+    };
+
+    // Controls: no local at all, and a local under a DIFFERENT name.
+    assert_clean_warm(&host, "bCtrlNoLocal", info());
+    assert_clean_warm(
+        &host,
+        "bCtrlOtherLocal",
+        TypeExpr::Ref {
+            name: Arc::from("Res"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    );
+
+    // VALUE-space local kinds: no type-space shadow, so the owner-scope
+    // answer stands.
+    for name in ["bConst", "bLet", "bVar", "bParam", "bFn"] {
+        assert_clean_warm(&host, name, info());
+    }
+
+    // TYPE-declaring local kinds: the frame owns the name in type space,
+    // so the owner-scope answer is the wrong one and must fail closed.
+    for name in ["bClass", "bEnum"] {
+        assert_fails_closed(&host, name);
+    }
+
+    // The CAPTURE half: a nested function value resolves the same two
+    // spaces through the enclosing frames' capture scope, which collapses
+    // every captured kind into one bit. A captured `const` / parameter is
+    // value-only; a captured `class` declares a type.
+    for name in ["capConst", "capParam"] {
+        let outcome = r5_eval(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
+        assert_eq!(outcome.degradation, None, "{name} must evaluate clean");
+        let TypeExpr::Function(function) = &outcome.ty else {
+            panic!("{name} returns a function type, got {:?}", outcome.ty);
+        };
+        let return_type = function
+            .return_type
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}'s function type carries a return"));
+        assert_eq!(
+            **return_type,
+            info(),
+            "{name}: the captured value-space binding must not shadow the module type alias"
+        );
+    }
+    assert_fails_closed(&host, "capClass");
 }
