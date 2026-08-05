@@ -106,6 +106,8 @@ pub(crate) mod flow_return;
 #[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
+pub(crate) mod flow_return_root_gate_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_tests;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
@@ -1907,6 +1909,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        // `FlowReturn` is the one family whose cold build defers a
+        // member batch for its machinery root to release, so it never
+        // takes the bare helper: every entry — the typed producer's and
+        // the generic `SemanticQueryApi`'s alike — routes through the
+        // single publication-capturing executor that drains or retires
+        // that batch.
+        if matches!(key, SemanticQueryKey::FlowReturn(_)) {
+            return self.execute_flow_return_cold_build(key);
+        }
         self.execute_via_cold_build_helper_with_publication_capture(key, None)
     }
 

@@ -795,3 +795,200 @@ fn hash_function_step<'a, H: Hasher>(
         stack.push(HashStep::Param(p));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Referenced-name collection — depth-safe, exhaustive
+// ---------------------------------------------------------------------------
+
+/// Every NAME a type expression references, split by NAME SPACE.
+///
+/// A consumer that must decide whether a lowered type binds symbols from
+/// the scope it was lowered in reads this instead of re-walking the tree
+/// itself: the walk below is EXHAUSTIVE over `TypeExpr` (no wildcard arm),
+/// so a new variant carrying a name is a compile error here rather than a
+/// silent hole at every consumer.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReferencedNames {
+    /// The ROOT of every `typeof x.y.z` value path (`x`), in encounter
+    /// order. These name VALUE bindings.
+    pub value_roots: Vec<String>,
+    /// The head of every named type reference (`Ref` / `RecursiveRef` /
+    /// `TypeParameter`), in encounter order. These name TYPE bindings.
+    pub type_names: Vec<String>,
+}
+
+/// Collect every referenced name of `ty` (see [`ReferencedNames`]).
+///
+/// Depth-safe: the traversal runs on an explicit heap work-stack, never
+/// the call stack, exactly like the iterative `Drop` / `Hash` above.
+#[must_use]
+pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
+    let mut out = ReferencedNames::default();
+    let mut stack: Vec<&TypeExpr> = vec![ty];
+    while let Some(node) = stack.pop() {
+        match node {
+            TypeExpr::TypeOf(value_ref) => {
+                if let Some(root) = value_ref.path.first() {
+                    out.value_roots.push(root.clone());
+                }
+                for arg in &value_ref.type_args {
+                    stack.push(arg);
+                }
+            }
+            TypeExpr::Ref {
+                name,
+                type_arguments,
+            } => {
+                out.type_names.push(name.as_ref().to_string());
+                for arg in type_arguments.iter() {
+                    stack.push(arg);
+                }
+            }
+            TypeExpr::RecursiveRef {
+                name,
+                type_arguments,
+                conditional_context,
+            } => {
+                out.type_names.push(name.as_ref().to_string());
+                for arg in type_arguments.iter() {
+                    stack.push(arg);
+                }
+                for frame in conditional_context.iter() {
+                    stack.push(&frame.check);
+                    stack.push(&frame.extends);
+                }
+            }
+            TypeExpr::TypeParameter(tp) => {
+                out.type_names.push(tp.name.clone());
+                push_type_param_children(tp, &mut stack);
+            }
+            TypeExpr::ImportType {
+                type_arguments,
+                specifier: _,
+                qualifier: _,
+                typeof_query: _,
+            } => {
+                // An import type names a MODULE, never a binding in the
+                // lowering scope, so neither the specifier nor the
+                // qualifier is a scope-resolved name.
+                for arg in type_arguments.iter() {
+                    stack.push(arg);
+                }
+            }
+            TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
+                for member in members.iter() {
+                    stack.push(member);
+                }
+            }
+            TypeExpr::Array { element, .. } => stack.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements.iter() {
+                    stack.push(&element.ty);
+                }
+            }
+            TypeExpr::Object(object) => {
+                for member in &object.properties {
+                    push_object_member_children(member, &mut stack);
+                }
+            }
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+                push_function_children(func, &mut stack);
+            }
+            TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
+                stack.push(inner);
+            }
+            TypeExpr::IndexedAccess { object, index } => {
+                stack.push(object);
+                stack.push(index);
+            }
+            TypeExpr::Conditional {
+                check,
+                extends,
+                true_type,
+                false_type,
+            } => {
+                stack.push(check);
+                stack.push(extends);
+                stack.push(true_type);
+                stack.push(false_type);
+            }
+            TypeExpr::Mapped {
+                source,
+                value,
+                name_type,
+                parameter: _,
+                optional: _,
+                readonly: _,
+            } => {
+                stack.push(source);
+                stack.push(value);
+                if let Some(name_type) = name_type {
+                    stack.push(name_type);
+                }
+            }
+            TypeExpr::TemplateLiteral { expressions, .. } => {
+                for expression in expressions.iter() {
+                    stack.push(expression);
+                }
+            }
+            // Leaves: no name, no recursive child.
+            TypeExpr::Primitive(_)
+            | TypeExpr::Literal(_)
+            | TypeExpr::Infer { .. }
+            | TypeExpr::SyntheticSlotBinding(_)
+            | TypeExpr::Unknown(_) => {}
+        }
+    }
+    out
+}
+
+fn push_type_param_children<'a>(tp: &'a TypeParam, stack: &mut Vec<&'a TypeExpr>) {
+    if let Some(constraint) = tp.constraint.as_deref() {
+        stack.push(constraint);
+    }
+    if let Some(default) = tp.default.as_deref() {
+        stack.push(default);
+    }
+}
+
+fn push_function_children<'a>(func: &'a FunctionExpr, stack: &mut Vec<&'a TypeExpr>) {
+    for param in &func.parameters {
+        stack.push(&param.ty);
+    }
+    if let Some(return_type) = func.return_type.as_deref() {
+        stack.push(return_type);
+    }
+    for tp in &func.type_parameters {
+        push_type_param_children(tp, stack);
+    }
+}
+
+fn push_object_member_children<'a>(member: &'a ObjectMember, stack: &mut Vec<&'a TypeExpr>) {
+    match member {
+        ObjectMember::Property(property) => {
+            push_property_key_children(&property.key, stack);
+            stack.push(&property.ty);
+        }
+        ObjectMember::IndexSignature(signature) => {
+            stack.push(&signature.key_type);
+            stack.push(&signature.value_type);
+        }
+        ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
+            push_function_children(func, stack);
+        }
+        ObjectMember::Method(method) => {
+            push_property_key_children(&method.key, stack);
+            push_function_children(&method.function, stack);
+        }
+        ObjectMember::Spread(spread) => stack.push(&spread.ty),
+    }
+}
+
+fn push_property_key_children<'a>(key: &'a TypeAuthoredPropertyKey, stack: &mut Vec<&'a TypeExpr>) {
+    match key {
+        AuthoredPropertyKey::Computed(child) => stack.push(child),
+        AuthoredPropertyKey::String(_)
+        | AuthoredPropertyKey::Number(_)
+        | AuthoredPropertyKey::UniqueSymbol(_) => {}
+    }
+}

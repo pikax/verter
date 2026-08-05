@@ -236,6 +236,27 @@ pub enum SliceExpr {
     /// parenthesized results — the shared shallow-pass per-expression
     /// lowering.
     Type(TypeExpr),
+    /// A leaf answer that names one or more bindings THIS FRAME owns —
+    /// the root-identifier gate's carrier.
+    ///
+    /// The shared shallow-pass leaf lowering has no frame: it resolves
+    /// every name in FILE OWNER SCOPE. So the leaf's `typeof CBait.s` /
+    /// `ReturnType<typeof obj.m>` / `{ ...base }` answers are only
+    /// correct while no owner-scope declaration ANSWERS those names — the
+    /// moment one does, the published value is a different symbol's,
+    /// cleanly and warm. The gate cannot decide that in the lowerer (the
+    /// content half is arena-only and never sees the owner scope), so it
+    /// wraps the answer it produced together with the frame-owned names
+    /// it found; the evaluator — which resolves through the one shared
+    /// resolver — fails closed exactly when the owner scope would answer
+    /// one of them, and otherwise evaluates the wrapped leaf unchanged.
+    FrameShadowed {
+        /// The leaf carrier the gate wrapped ([`SliceExpr::Type`] or
+        /// [`SliceExpr::SymbolicCall`]).
+        inner: Box<SliceExpr>,
+        /// Frame-owned names the answer references, by name space.
+        shadowed: Arc<[FrameShadowedName]>,
+    },
     /// A parameter reference, substituted by the evaluator.
     Param {
         /// The parameter's ordinal in source order (rest last).
@@ -343,6 +364,18 @@ pub enum SliceExpr {
     /// and fails closed at the evaluator — it is never a fabricated
     /// `any` and never a silently widened sibling.
     Elided,
+}
+
+/// One name a leaf answer references that the frame's LEXICAL AUTHORITY
+/// owns, with the name space it was referenced in. The evaluator probes
+/// the owner scope for exactly that space: a value name through
+/// `typeof name`, a type name through a bare `name` reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FrameShadowedName {
+    /// The root of a `typeof name…` path — a VALUE binding.
+    Value(Arc<str>),
+    /// The head of a named type reference — a TYPE binding.
+    Type(Arc<str>),
 }
 
 /// One type parameter of a function value.
@@ -512,6 +545,62 @@ fn unwrap_freshness_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expre
             unwrap_freshness_transparent(&satisfies.expression)
         }
         inner => inner,
+    }
+}
+
+/// The ROOT IDENTIFIER of an expression's REFERENCE CHAIN — the binding
+/// whose value the whole chain reads from: `a` for `a`, `a.b`, `a["b"]`,
+/// `a.#b`, `a?.b`, `a.b()`, `new a()`, `` a`…` ``, and each of those
+/// through a parenthesis or a TS wrapper (`as` / `satisfies` / `!` /
+/// explicit instantiation).
+///
+/// `None` for every expression that is not a reference chain (a literal,
+/// an assignment, an operator expression, an object / array literal, a
+/// function value, `this`): those read no single binding, so there is no
+/// root for the frame's lexical authority to classify.
+fn chain_root_identifier<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    match expr {
+        Expression::Identifier(identifier) => Some(identifier),
+        Expression::ParenthesizedExpression(paren) => chain_root_identifier(&paren.expression),
+        Expression::TSAsExpression(ts_as) => chain_root_identifier(&ts_as.expression),
+        Expression::TSSatisfiesExpression(satisfies) => {
+            chain_root_identifier(&satisfies.expression)
+        }
+        Expression::TSNonNullExpression(non_null) => chain_root_identifier(&non_null.expression),
+        Expression::TSInstantiationExpression(instantiation) => {
+            chain_root_identifier(&instantiation.expression)
+        }
+        Expression::StaticMemberExpression(member) => chain_root_identifier(&member.object),
+        Expression::ComputedMemberExpression(member) => chain_root_identifier(&member.object),
+        Expression::PrivateFieldExpression(member) => chain_root_identifier(&member.object),
+        Expression::CallExpression(call) => chain_root_identifier(&call.callee),
+        Expression::NewExpression(new) => chain_root_identifier(&new.callee),
+        Expression::TaggedTemplateExpression(tagged) => chain_root_identifier(&tagged.tag),
+        Expression::ChainExpression(chain) => chain_element_root_identifier(&chain.expression),
+        _ => None,
+    }
+}
+
+/// [`chain_root_identifier`] for the optional-chain element carrier.
+fn chain_element_root_identifier<'a>(
+    element: &'a oxc_ast::ast::ChainElement<'a>,
+) -> Option<&'a oxc_ast::ast::IdentifierReference<'a>> {
+    match element {
+        oxc_ast::ast::ChainElement::CallExpression(call) => chain_root_identifier(&call.callee),
+        oxc_ast::ast::ChainElement::TSNonNullExpression(non_null) => {
+            chain_root_identifier(&non_null.expression)
+        }
+        oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+            chain_root_identifier(&member.object)
+        }
+        oxc_ast::ast::ChainElement::ComputedMemberExpression(member) => {
+            chain_root_identifier(&member.object)
+        }
+        oxc_ast::ast::ChainElement::PrivateFieldExpression(member) => {
+            chain_root_identifier(&member.object)
+        }
     }
 }
 
@@ -1341,11 +1430,18 @@ impl Lowerer<'_> {
                         return SliceExpr::DirectCall(direct.target.clone());
                     }
                 }
-                let ty = self.leaf_type(expr, mode);
-                if is_any(&ty) {
-                    SliceExpr::Any
-                } else {
-                    SliceExpr::SymbolicCall(ty)
+                // The SAME root-identifier gate the leaf path takes: a
+                // non-identifier callee rooted at a frame binding
+                // (`localObj.m()`) resolves in owner scope exactly like a
+                // bare read would, so it is gated here too.
+                match self.leaf_type(expr, mode) {
+                    LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
+                    LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
+                    LeafLowering::Free(ty) => SliceExpr::SymbolicCall(ty),
+                    LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
+                        inner: Box::new(SliceExpr::SymbolicCall(ty)),
+                        shadowed,
+                    },
                 }
             }
             _ => self.lower_leaf(expr, mode),
@@ -1365,10 +1461,6 @@ impl Lowerer<'_> {
     fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         let params = lower_params(node.params(), self.source);
         let type_parameters = lower_slice_type_params(node, self.source);
-        let self_name = match node {
-            FunctionNode::Function(func) => func.id.as_ref().map(|id| Arc::from(id.name.as_str())),
-            FunctionNode::Arrow(_) => None,
-        };
         // A nested function value has no index entry of its own — its
         // control regions come from the SAME single inventory walk over
         // its own body, and its lexical authority is its own skeleton
@@ -1378,8 +1470,12 @@ impl Lowerer<'_> {
             .map(|body| inventory_statement_list(&body.statements))
             .unwrap_or_default();
         let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
+        // A named function EXPRESSION binds its own name inside its own
+        // body: the nested skeleton carries it, so `function h() { … h … }`
+        // resolves `h` to THIS frame rather than looking free and
+        // falling through to an enclosing (or module-scope) `h`.
         let nested_skeleton = match node {
-            FunctionNode::Function(func) => FunctionBodySource::from_function(func)
+            FunctionNode::Function(func) => FunctionBodySource::from_function_expression(func)
                 .map(|source| build_function_body_skeleton(&source)),
             FunctionNode::Arrow(arrow) => Some(build_function_body_skeleton(
                 &FunctionBodySource::from_arrow(arrow),
@@ -1394,7 +1490,12 @@ impl Lowerer<'_> {
             source: self.source,
             selection: None,
             params: &params,
-            self_name: self_name.as_deref(),
+            // A nested function value is NOT the demanded flow slot, so
+            // it has no same-slot recursion to hold on: its own name is
+            // a binding of its skeleton (above), and the outer frame's
+            // self name must never mint a `DirectSelfCall` from in here
+            // — that hold would name the WRONG function.
+            self_name: None,
             skeleton: &nested_skeleton,
             captures: &captures,
             control,
@@ -1450,14 +1551,87 @@ impl Lowerer<'_> {
 
     /// Lower a leaf expression through the shared shallow-pass entry,
     /// wrapping the result. The `any` fallback surfaces as
-    /// [`SliceExpr::Any`].
+    /// [`SliceExpr::Any`]; an unmodellable form read THROUGH a frame
+    /// binding is the typed fail-closed [`SliceExpr::UnmodeledBinding`];
+    /// a modelled answer naming a frame binding rides the
+    /// [`SliceExpr::FrameShadowedType`] carrier.
     fn lower_leaf(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
-        let ty = self.leaf_type(expr, mode);
-        if is_any(&ty) {
-            SliceExpr::Any
-        } else {
-            SliceExpr::Type(ty)
+        match self.leaf_type(expr, mode) {
+            LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
+            LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
+            LeafLowering::Free(ty) => SliceExpr::Type(ty),
+            LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
+                inner: Box::new(SliceExpr::Type(ty)),
+                shadowed,
+            },
         }
+    }
+
+    /// THE root-identifier gate, half one: the names in the leaf
+    /// lowering's ANSWER that this frame owns.
+    ///
+    /// The shared shallow-pass leaf lowering has no frame — it resolves
+    /// every name it meets in FILE-OWNER SCOPE. So whenever its answer
+    /// carries a `typeof x…` value root or a named type reference the
+    /// frame BINDS, the published answer names whatever the OWNER scope
+    /// has under that name (`typeof CBait.s` / `ReturnType<typeof obj.m>`
+    /// bind the module-scope `CBait` / `obj`, not the local class / local
+    /// object). The name set is read off the produced typed IR through
+    /// the shared exhaustive walk, so it is exactly what the leaf
+    /// referenced — never a re-derivation of the leaf's own traversal.
+    ///
+    /// `span` is the leaf expression's own position: the region the
+    /// frame's authority resolves those names in.
+    fn answer_names_frame_bound(
+        &self,
+        ty: &TypeExpr,
+        span: oxc_span::Span,
+    ) -> Vec<FrameShadowedName> {
+        let names = verter_type_expr::referenced_names(ty);
+        let mut shadowed: Vec<FrameShadowedName> = Vec::new();
+        for name in &names.value_roots {
+            if !matches!(self.resolve_name(name, span), NameBinding::Free) {
+                let entry = FrameShadowedName::Value(Arc::from(name.as_str()));
+                if !shadowed.contains(&entry) {
+                    shadowed.push(entry);
+                }
+            }
+        }
+        for name in &names.type_names {
+            if !matches!(self.resolve_name(name, span), NameBinding::Free) {
+                let entry = FrameShadowedName::Type(Arc::from(name.as_str()));
+                if !shadowed.contains(&entry) {
+                    shadowed.push(entry);
+                }
+            }
+        }
+        shadowed
+    }
+
+    /// THE root-identifier gate, half two: whether an expression the leaf
+    /// could not model AT ALL (its answer is a bare `any`) nevertheless
+    /// reads THROUGH a binding this frame owns.
+    ///
+    /// This is the other face of the same defect. `obj[k]`, `obj.#p`,
+    /// `obj?.y`, `new C()`, and `` tag`…` `` name nothing in the answer
+    /// because the leaf produces no answer — it returns `any`, which then
+    /// publishes CLEAN and WARM for an expression whose value is a frame
+    /// binding's. There is no answer to gate here and nothing an owner
+    /// scope could ever supply, so this half fails closed outright.
+    ///
+    /// The subject is the REFERENCE CHAIN's root, not every identifier in
+    /// the subtree: the chain root is the binding the unmodelled form
+    /// actually reads through, while a name in a position the leaf never
+    /// consumes (an assignment's target in `{ a: (x = "s") }`, a
+    /// conditional test in `c ? 1 : 2`, a call argument) says nothing
+    /// about the answer.
+    fn unmodelled_leaf_root_is_frame_bound(&self, expr: &Expression<'_>) -> bool {
+        chain_root_identifier(expr).is_some_and(|root| {
+            !matches!(
+                self.resolve_name(root.name.as_str(), root.span),
+                NameBinding::Free
+            )
+        })
     }
 
     /// The shared shallow-pass per-expression lowering for the position
@@ -1468,7 +1642,11 @@ impl Lowerer<'_> {
     /// rule the callee applies in every position — it is not on this axis.
     /// Budget exhaustion degrades the one expression to `any` and records
     /// the typed budget edge.
-    fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> TypeExpr {
+    ///
+    /// Every leaf answer in the module is minted HERE, and every one of
+    /// them carries the root-identifier gate's verdict, so "take the leaf
+    /// value without the gate" is not expressible at any call site.
+    fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> LeafLowering {
         // A return argument PRESERVES its top-level literal: the aggregate
         // widening decision belongs to the return join, which is the only
         // place the deduplicated contributor cardinality is known.
@@ -1481,13 +1659,47 @@ impl Lowerer<'_> {
                 preserve_literal: false,
             } => TopLevelLiteralPolicy::Widen,
         };
-        infer_declaration_expression_type(expr, self.source, policy).unwrap_or_else(|reason| {
-            if self.budget_failure.is_none() {
-                self.budget_failure = Some(reason);
+        let ty =
+            infer_declaration_expression_type(expr, self.source, policy).unwrap_or_else(|reason| {
+                if self.budget_failure.is_none() {
+                    self.budget_failure = Some(reason);
+                }
+                TypeExpr::Primitive(PrimitiveName::Any)
+            });
+        if is_any(&ty) {
+            if self.unmodelled_leaf_root_is_frame_bound(expr) {
+                return LeafLowering::FrameShadowedRoot;
             }
-            TypeExpr::Primitive(PrimitiveName::Any)
-        })
+            return LeafLowering::Free(ty);
+        }
+        let shadowed = self.answer_names_frame_bound(&ty, expr.span());
+        if shadowed.is_empty() {
+            LeafLowering::Free(ty)
+        } else {
+            LeafLowering::FrameShadowed {
+                ty,
+                shadowed: Arc::from(shadowed.into_boxed_slice()),
+            }
+        }
     }
+}
+
+/// The root-identifier gate's verdict on one leaf lowering.
+enum LeafLowering {
+    /// Every name the answer depends on is genuinely FREE in this frame:
+    /// the owner-scope answer is the right one.
+    Free(TypeExpr),
+    /// The leaf modelled nothing (`any`) for a form read THROUGH a frame
+    /// binding — no answer to carry, and no owner-scope resolution could
+    /// ever be the right one. Fails closed.
+    FrameShadowedRoot,
+    /// The leaf modelled an answer that NAMES frame-owned bindings: the
+    /// evaluator decides, against the live owner scope, whether those
+    /// names would bind (fail closed) or genuinely answer nothing.
+    FrameShadowed {
+        ty: TypeExpr,
+        shadowed: Arc<[FrameShadowedName]>,
+    },
 }
 
 fn is_any(ty: &TypeExpr) -> bool {

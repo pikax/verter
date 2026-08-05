@@ -2919,3 +2919,250 @@ fn flow_return_return_free_loop_declaring_a_var_fails_closed() {
         );
     });
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Public-API SCC flight release
+// ────────────────────────────────────────────────────────────────────────
+
+const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
+
+/// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
+/// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
+/// write effect, so the whole component is a degraded success —
+/// `ReturnOnly`, never warm.
+const SCC_FIXTURE: &str = r#"
+export function scCleanA(c: boolean) {
+  if (c) return 1;
+  return scCleanB(c);
+}
+
+export function scCleanB(c: boolean) {
+  if (c) return 2;
+  return scCleanA(c);
+}
+
+export function scDegradedA(c: boolean) {
+  if (c) return 1;
+  return scDegradedB(c);
+}
+
+export function scDegradedB(c: boolean) {
+  let z = 1;
+  z = 2;
+  return scDegradedA(!!z);
+}
+"#;
+
+fn make_scc_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(SCC_CANONICAL.to_string()),
+        input_id: SCC_CANONICAL.to_string(),
+        source: Arc::from(SCC_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(SCC_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn scc_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(SCC_CANONICAL),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(SCC_CANONICAL),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+    }
+}
+
+/// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
+/// an external `SemanticQueryApi` consumer issues it.
+fn scc_public_demand(
+    host: &Arc<VerterHost>,
+    name: &str,
+) -> (
+    QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
+    usize,
+    Vec<SemanticQueryKey>,
+) {
+    with_dispatch(host, |dispatch| {
+        let key = scc_key(dispatch, name);
+        let result = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+        let candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+        let retained = dispatch.graph().retained_claimed_flight_keys_for_tests();
+        (result, candidates, retained)
+    })
+}
+
+#[track_caller]
+fn scc_expect_value(
+    host: &Arc<VerterHost>,
+    name: &str,
+) -> (
+    crate::semantic_query::FlowReturnResult,
+    usize,
+    Vec<SemanticQueryKey>,
+) {
+    let (result, candidates, retained) = scc_public_demand(host, name);
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(payload),
+        ..
+    }) = result
+    else {
+        panic!("{name} must answer through the public API, got {result:?}");
+    };
+    ((*payload).clone(), candidates, retained)
+}
+
+/// The public `execute(FlowReturn)` entry MUST release the component's
+/// drained member flights, in EITHER demand order.
+///
+/// The machinery root is the only place a flow SCC's deferred member
+/// batch is published or retired. Before the fix only
+/// `execute_flow_return_root` did that, and the public
+/// `SemanticQueryApi::execute` reached the family cold build through the
+/// generic dispatch instead — so after the first demand closed, every
+/// non-root member of the component was left with a CLAIMED, uncompleted
+/// in-flight entry whose owner registration had already dropped. The next
+/// demand of that member joined the stale entry, `register_wait`
+/// reported a cycle against an inactive owner, and the caller received a
+/// PERMANENT false `QueryResult::Recursive` — an incorrect public result
+/// AND persistent lifecycle poison.
+///
+/// Both orders run on SEPARATE FRESH HOSTS so neither leg can be carried
+/// by the other's warm state.
+#[test]
+fn flow_return_public_execute_releases_drained_members_both_orders() {
+    for (first, second) in [("scCleanA", "scCleanB"), ("scCleanB", "scCleanA")] {
+        let host = make_scc_host();
+
+        let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
+        assert_eq!(
+            first_result.degradation, None,
+            "{first} closes its component cleanly"
+        );
+        assert_eq!(
+            first_candidates, 1,
+            "{first} is the machinery root and admits warm"
+        );
+        assert!(
+            first_retained.is_empty(),
+            "{first} must leave no claimed/uncompleted flight: {first_retained:?}"
+        );
+
+        // The DRAINED member, demanded through the public API on the same
+        // host. A stale member flight surfaces here as a permanent false
+        // `Recursive`.
+        let (second_raw, second_candidates, second_retained) = scc_public_demand(&host, second);
+        assert!(
+            !matches!(second_raw, QueryResult::Recursive(_)),
+            "{second} must never surface a false Recursive after {first} drained it"
+        );
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(second_result),
+            ..
+        }) = second_raw
+        else {
+            panic!("{second} must answer through the public API");
+        };
+        assert_eq!(
+            second_result.degradation, None,
+            "{second} closes its component cleanly"
+        );
+        assert_eq!(
+            second_candidates, 1,
+            "{second} was drained onto the root's carrier and reads warm"
+        );
+        assert!(
+            second_retained.is_empty(),
+            "{second} must leave no claimed/uncompleted flight: {second_retained:?}"
+        );
+
+        // Each member publishes ITS OWN return sites in source order
+        // (own literal first, the component contribution second) — and
+        // the SAME value whichever member was demanded first, which is
+        // the order-independence half of the contract.
+        for name in ["scCleanA", "scCleanB"] {
+            let (result, _, _) = scc_expect_value(&host, name);
+            let projected = host
+                .project_node_to_type_expr_for_test(result.return_type)
+                .expect("a component member projects");
+            let verter_type_expr::TypeExpr::Union(arms) = &projected else {
+                panic!("{name} publishes the component union, got {projected:?}");
+            };
+            // Every member of a mutual component shares the component's
+            // fixed point, so both publish the SAME arm set in either
+            // demand order. Arm ORDER follows the root's accumulation
+            // order and is not part of this contract.
+            let mut arms: Vec<String> = arms.iter().map(|arm| format!("{arm:?}")).collect();
+            arms.sort();
+            assert_eq!(
+                arms,
+                vec![
+                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(1.0)),
+                    format!("{:?}", verter_type_expr::TypeExpr::number_literal(2.0)),
+                ],
+                "{name} publishes the component's exact fixed point (demand order {first} → {second})"
+            );
+        }
+    }
+
+    // The DEGRADED leg: the whole component is a degraded success, so the
+    // batch is ABORTED and RETIRED rather than published. Nothing warms,
+    // and no member flight is retained.
+    for (first, second) in [
+        ("scDegradedA", "scDegradedB"),
+        ("scDegradedB", "scDegradedA"),
+    ] {
+        let host = make_scc_host();
+
+        let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
+        assert!(
+            first_result.degradation.is_some(),
+            "{first} carries the component's typed degradation"
+        );
+        assert_eq!(
+            first_candidates, 0,
+            "{first} is a degraded success: ReturnOnly, zero memo entries"
+        );
+        assert!(
+            first_retained.is_empty(),
+            "{first} must retire every member flight: {first_retained:?}"
+        );
+
+        let (second_raw, second_candidates, second_retained) = scc_public_demand(&host, second);
+        assert!(
+            !matches!(second_raw, QueryResult::Recursive(_)),
+            "{second} must never surface a false Recursive after {first} aborted the batch"
+        );
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(second_result),
+            ..
+        }) = second_raw
+        else {
+            panic!("{second} must answer through the public API");
+        };
+        assert!(
+            second_result.degradation.is_some(),
+            "{second} carries the component's typed degradation"
+        );
+        assert_eq!(
+            second_candidates, 0,
+            "{second} never warms off an aborted batch: zero memo entries, zero backfill"
+        );
+        assert!(
+            second_retained.is_empty(),
+            "{second} must retire every member flight: {second_retained:?}"
+        );
+    }
+}

@@ -31,8 +31,9 @@ mod span_transform;
 
 /// Depth-safe iterative `Drop` + byte-identical-to-derive iterative
 /// `Hash` for [`TypeExpr`] (orphan-rule-permitted in this crate-local
-/// implementation module).
+/// implementation module), plus the exhaustive referenced-name walk.
 mod recursive_traversal;
+pub use recursive_traversal::{referenced_names, ReferencedNames};
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
 mod display;

@@ -438,10 +438,15 @@ fn symbolic_and_unrepresentable_calls() {
 }
 
 /// @ai-generated - object return keeps the spread member for later spread projection
+///
+/// The spread operand is a FREE name: the whole-literal leaf lowering
+/// resolves `typeof base` in the file's OWNER SCOPE, which is exactly
+/// where a free name belongs.
 #[test]
 fn object_return_rides_spread_member() {
     let node = content_for(
-        "function merge(base: { a: number }) {\n\
+        "declare const base: { a: number };\n\
+         function merge() {\n\
          \x20 return { ...base, x: 1 };\n\
          }\n",
         "merge",
@@ -464,6 +469,48 @@ fn object_return_rides_spread_member() {
     assert!(
         matches!(&object.properties[1], ObjectMember::Property(_)),
         "the direct member follows in source order"
+    );
+}
+
+/// @ai-generated - a spread of a FRAME binding rides the root-identifier gate's carrier
+///
+/// A spread operand naming a parameter (or any frame binding) is the
+/// SAME owner-scope leak a bare read would be: the whole-literal leaf
+/// lowering emits `...typeof base`, which resolves against the file's
+/// module scope, so `{ ...base }` would publish an unrelated
+/// module-scope `base`'s members — cleanly and warm. The content half
+/// cannot see the owner scope, so it wraps the answer with the
+/// frame-owned name and the EVALUATOR decides (see
+/// `flow_return_root_gate_tests`).
+#[test]
+fn object_return_spread_of_a_frame_binding_rides_the_gate_carrier() {
+    let node = content_for(
+        "declare const base: { a: string };\n\
+         function merge(base: { a: number }) {\n\
+         \x20 return { ...base, x: 1 };\n\
+         }\n",
+        "merge",
+    );
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::FrameShadowed { inner, shadowed }),
+        ..
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "a parameter-rooted spread must not lower as a bare owner-scope leaf: {:?}",
+            node.body.statements
+        );
+    };
+    assert_eq!(
+        shadowed.as_ref(),
+        &[crate::flow_slice_content::FrameShadowedName::Value(
+            std::sync::Arc::from("base")
+        )],
+        "the frame-owned spread operand is the gated name"
+    );
+    assert!(
+        matches!(inner.as_ref(), SliceExpr::Type(TypeExpr::Object(_))),
+        "the wrapped answer is the whole-literal leaf: {inner:?}"
     );
 }
 

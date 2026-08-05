@@ -109,7 +109,6 @@ fn contextual_typing_ct04_object_literal_in_function_call() {
 // is contextually applied to the arrow body. Calling `fn05()` returns `42`,
 // NOT `number`.
 #[test]
-#[ignore = "typeinfo currently does not contextually type an arrow BODY from the declarator's annotated function type, so `const fn05: () => 42 = () => 42` infers its return from the body (tsc 7.0.2: unannotated `() => 42` is `() => number`, and only the contextual type pins `42`); keep as the future Ct05 return-type-contextual-flow contract"]
 fn contextual_typing_ct05_return_type_contextual_flow() {
     let expr = resolve_alias("Ct05Result");
     assert_number_literal(&expr, 42.0);
@@ -119,7 +118,6 @@ fn contextual_typing_ct05_return_type_contextual_flow() {
 // TS7: wrapping the arrow in parens does NOT erase contextual typing.
 // `const fn06: () => 42 = (() => 42)` still returns `42`.
 #[test]
-#[ignore = "typeinfo currently does not contextually type an arrow BODY from the declarator's annotated function type (same missing mechanism as Ct05, through a parenthesized wrapper); keep as the future Ct06 parenthesized-context contract"]
 fn contextual_typing_ct06_parenthesized_expression_preserves_context() {
     let expr = resolve_alias("Ct06Result");
     assert_number_literal(&expr, 42.0);

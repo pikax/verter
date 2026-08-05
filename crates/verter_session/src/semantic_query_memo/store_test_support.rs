@@ -322,6 +322,38 @@ impl SemanticGraphStore {
 
     /// Test-only candidate-count probe for `(family, slot)`.
     #[doc(hidden)]
+    /// Test-only probe: the keys of every in-flight entry still CLAIMED
+    /// and UNCOMPLETED — a flight whose owner has finished but which was
+    /// never published, drained, or aborted.
+    ///
+    /// A retained entry in this state is lifecycle poison: a later
+    /// demand of the same key joins it, `register_wait` reports a cycle
+    /// against an owner that is no longer active, and the caller gets a
+    /// permanent false `QueryResult::Recursive`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_claimed_flight_keys_for_tests(&self) -> Vec<SemanticQueryKey> {
+        // Collect the handles under the table lock, then inspect each
+        // entry's `state` with the table lock RELEASED (the store's
+        // lock-order rule: `state` is never taken while `inflight` is
+        // held).
+        let handles: Vec<(PreparedKeyHandle, Arc<InflightEntry>)> = {
+            let table = self.inflight.lock();
+            table
+                .iter()
+                .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
+                .collect()
+        };
+        handles
+            .into_iter()
+            .filter(|(_, entry)| {
+                let state = entry.state.lock();
+                state.claimed && state.completed.is_none() && !state.aborted
+            })
+            .map(|(handle, _)| handle.key().clone())
+            .collect()
+    }
+
     pub fn slot_candidate_count_for_tests(&self, key: &SemanticQueryKey) -> usize {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();

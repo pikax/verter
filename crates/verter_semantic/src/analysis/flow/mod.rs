@@ -579,18 +579,32 @@ impl FunctionBodySkeleton {
         self.hoisting_bindings_of_name(name)
     }
 
-    /// Every same-name binding of a HOISTING kind (`var` / nested
-    /// function declaration), wherever in the frame it is written.
+    /// Every same-name binding that reaches FUNCTION scope, wherever in
+    /// the frame it is written.
+    ///
+    /// `var` hoists unconditionally — that is the whole of its scoping
+    /// rule. A function DECLARATION does not: in strict-mode code (every
+    /// ES module, which is every carrier surface this substrate serves) a
+    /// block-level function declaration is BLOCK-scoped, and only
+    /// Annex-B sloppy-mode semantics create the function-scoped alias. So
+    /// a nested function declaration reaches function scope exactly when
+    /// it is written at the frame's ROOT region; one inside a block, an
+    /// `if` arm, or a loop body stays where it was written, and a
+    /// function-scope read of that name resolves to whatever encloses the
+    /// frame — never to the block's function.
     fn hoisting_bindings_of_name(&self, name: FlowNameId) -> Vec<SkeletonBindingId> {
         self.bindings
             .iter()
             .enumerate()
             .filter(|(_, binding)| {
                 binding.name == name
-                    && matches!(
-                        binding.kind,
-                        SkeletonBindingKind::Var | SkeletonBindingKind::NestedFunction
-                    )
+                    && match binding.kind {
+                        SkeletonBindingKind::Var => true,
+                        SkeletonBindingKind::NestedFunction => {
+                            self.regions[binding.region.index()].parent.is_none()
+                        }
+                        _ => false,
+                    }
             })
             .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
             .collect()
@@ -614,11 +628,25 @@ pub struct FunctionBodySource<'a, 'ast> {
     pub expression_body: bool,
     /// The body span.
     pub body_span: verter_span::Span,
+    /// A NAMED FUNCTION EXPRESSION's own name, which binds INSIDE its own
+    /// body and nowhere else (`const g = function h() { … h … }`). It is
+    /// part of this frame's lexical inventory, not the enclosing one, so
+    /// the skeleton must carry it or a read of `h` looks free and falls
+    /// through to whatever the enclosing (or module) scope has under that
+    /// name.
+    ///
+    /// `None` for an arrow, for an anonymous function expression, and for
+    /// a function DECLARATION — a declaration's name binds in the
+    /// ENCLOSING scope, so it is that frame's inventory, never this one's.
+    pub self_binding: Option<&'a oxc_ast::ast::BindingIdentifier<'ast>>,
 }
 
 impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
-    /// The source positions of a bodied function declaration / expression
-    /// (`None` for a bodiless overload signature).
+    /// The source positions of a bodied function DECLARATION (`None` for
+    /// a bodiless overload signature). The declaration's own name binds
+    /// in the enclosing scope, so it is not part of this body's frame —
+    /// a named function EXPRESSION uses
+    /// [`Self::from_function_expression`] instead.
     #[must_use]
     pub fn from_function(function: &'a Function<'ast>) -> Option<Self> {
         let body = function.body.as_ref()?;
@@ -627,6 +655,18 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             statements: &body.statements,
             expression_body: false,
             body_span: body.span.into(),
+            self_binding: None,
+        })
+    }
+
+    /// The source positions of a bodied function EXPRESSION: as
+    /// [`Self::from_function`], plus the expression's own name as a
+    /// binding of THIS frame.
+    #[must_use]
+    pub fn from_function_expression(function: &'a Function<'ast>) -> Option<Self> {
+        Some(Self {
+            self_binding: function.id.as_ref(),
+            ..Self::from_function(function)?
         })
     }
 
@@ -638,6 +678,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             statements: &arrow.body.statements,
             expression_body: arrow.expression,
             body_span: arrow.body.span.into(),
+            self_binding: None,
         }
     }
 }
@@ -649,6 +690,21 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
 #[must_use]
 pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> FunctionBodySkeleton {
     let mut builder = SkeletonBuilder::new(source.body_span);
+    // A named function expression's own name is an immutable binding of
+    // its own frame, in scope over the parameters and the whole body. It
+    // is recorded as a nested-function-kind binding: a function-valued
+    // local this substrate does not evaluate, so a read or call of it
+    // resolves HERE and fails closed rather than escaping to an outer
+    // same-name declaration.
+    if let Some(self_binding) = source.self_binding {
+        builder.push_binding(
+            self_binding.name.as_str(),
+            SkeletonBindingKind::NestedFunction,
+            self_binding.span.into(),
+            None,
+            false,
+        );
+    }
     builder.collect_params(source.params);
     if source.expression_body {
         if let [Statement::ExpressionStatement(statement)] = source.statements {

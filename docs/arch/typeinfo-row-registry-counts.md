@@ -15,8 +15,8 @@ preserved by a named equivalent-or-stronger successor row).
 | Count | Value |
 | --- | --- |
 | baseline (registry cardinality) | 364 |
-| ignored | 303 |
-| running_unratified | 12 |
+| ignored | 301 |
+| running_unratified | 14 |
 | lifted | 49 |
 | superseded | 0 |
 
@@ -49,7 +49,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U6.NARROW_INVALIDATION | 5 | 5 | 0 | 0 | 0 |
 | U6.PREDICATE_ASSERTION | 3 | 3 | 0 | 0 | 0 |
 | U6.CALL_RESOLVE | 21 | 21 | 0 | 0 | 0 |
-| U6.CONTEXTUAL_CALLBACK | 17 | 17 | 0 | 0 | 0 |
+| U6.CONTEXTUAL_CALLBACK | 17 | 15 | 2 | 0 | 0 |
 | U6.VALUE_INFERENCE | 1 | 1 | 0 | 0 | 0 |
 | U6.ASYNC_GENERATOR | 1 | 1 | 0 | 0 | 0 |
 | U6.CROSS_FILE | 6 | 6 | 0 | 0 | 0 |

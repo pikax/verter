@@ -616,7 +616,7 @@ struct RowRegistryCounts {
 }
 
 #[rustfmt::skip]
-const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 364, ignored: 303, running_unratified: 12, lifted: 49, superseded: 0 };
+const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 364, ignored: 301, running_unratified: 14, lifted: 49, superseded: 0 };
 
 /// Per-block row-registry counts (same derivation; every block appears,
 /// zero-row blocks included).
@@ -658,7 +658,7 @@ const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowInvalidation, total: 5, ignored: 5, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6PredicateAssertion, total: 3, ignored: 3, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6CallResolve, total: 21, ignored: 21, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6ContextualCallback, total: 17, ignored: 17, running_unratified: 0, lifted: 0, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6ContextualCallback, total: 17, ignored: 15, running_unratified: 2, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6ValueInference, total: 1, ignored: 1, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6AsyncGenerator, total: 1, ignored: 1, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6CrossFile, total: 6, ignored: 6, running_unratified: 0, lifted: 0, superseded: 0 },

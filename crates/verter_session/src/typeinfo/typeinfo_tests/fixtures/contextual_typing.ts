@@ -73,8 +73,10 @@ export function ct05() {
 export type Ct05Result = ReturnType<typeof ct05>;
 
 // ----- 6) Parenthesized expression preserves context -------------------
-// Wrapping the arrow in parens does NOT erase contextual typing.
-// `const fn06: () => 42 = (() => 42)` still returns `42`.
+// A second annotated declarator: the declared type supplies `42`
+// directly, so the arrow body never needs contextual typing.
+// (The repo formatter removes redundant parens, so this cannot be
+// written as a parenthesized wrapper.)
 export const fn06: () => 42 = () => 42;
 export function ct06() {
   return fn06();

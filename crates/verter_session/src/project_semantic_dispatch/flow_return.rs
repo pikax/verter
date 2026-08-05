@@ -427,12 +427,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// published cold build, drain the SCC-closed member batch (relation
     /// and flow members) onto the root's carrier.
     fn execute_flow_return_root(&self, key: FlowReturnKey) -> FlowReturnStep {
-        let mut publication = None;
-        let read = self.execute_via_cold_build_helper_capturing_publication(
-            SemanticQueryKey::FlowReturn(Box::new(key.clone())),
-            &mut publication,
-        );
-        let step = match read.value {
+        let read = self.execute_flow_return_cold_build(SemanticQueryKey::FlowReturn(Box::new(key)));
+        match read.value {
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
                 FlowReturnStep::Complete((*result).clone())
             }
@@ -448,16 +444,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .take()
                     .unwrap_or(FlowReturnFailure::Unresolved),
             ),
-        };
-        if let Some(publication) = publication {
-            self.flow_return_drain_completed_members(&key, &publication);
-        } else {
-            // ReturnOnly exit (degraded / undecided): the deferred batch
-            // releases WITHOUT publish — no entry, no fact signature, no
-            // backfill, no reverse-index metadata.
-            self.relation_abort_completed_members();
         }
-        step
+    }
+
+    /// THE publication-capturing `FlowReturn` executor — the SOLE way a
+    /// [`SemanticQueryKey::FlowReturn`] reaches the family cold build.
+    ///
+    /// A flow SCC defers its non-root members: each one claims the
+    /// ordinary family flight, computes inline on the root's
+    /// transaction, and batches its publish for the machinery root to
+    /// drain. That makes the ROOT the only place the batch can be
+    /// released, so every entry into the family cold build must pass
+    /// here — the typed producer entry (`execute_flow_return_root`) AND
+    /// the generic `SemanticQueryApi` entries, which reach the family
+    /// through the shared cold-build helper. A path that skips this
+    /// executor leaves each member with a CLAIMED, uncompleted in-flight
+    /// entry whose owner has already dropped: the next demand joins it,
+    /// the wait graph reports a cycle against an inactive owner, and the
+    /// caller gets a PERMANENT false [`QueryResult::Recursive`].
+    ///
+    /// Release is decided by the PUBLICATION, never by the shape of the
+    /// returned value: a real
+    /// [`PublishedMemoCandidate`](crate::semantic_query_memo::PublishedMemoCandidate)
+    /// drains the batch onto that carrier (member fences preserved); its
+    /// ABSENCE — `ReturnOnly`, a typed failure, cancellation, or a
+    /// refused admission — aborts and retires the ENTIRE deferred batch
+    /// without publishing anything, so `ReturnOnly` stays non-publishing
+    /// and no torn or provisional member can warm.
+    pub(super) fn execute_flow_return_cold_build(
+        &self,
+        key: SemanticQueryKey,
+    ) -> crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>> {
+        debug_assert!(
+            matches!(key, SemanticQueryKey::FlowReturn(_)),
+            "the flow-return executor admits FlowReturn keys only"
+        );
+        let mut publication = None;
+        let read = self.execute_via_cold_build_helper_capturing_publication(key, &mut publication);
+        match publication {
+            Some(publication) => self.flow_return_drain_completed_members(&publication),
+            None => self.relation_abort_completed_members(),
+        }
+        read
     }
 
     /// Drain the SCC-closed member batch onto the root's published
@@ -466,7 +494,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// their own family flights.
     fn flow_return_drain_completed_members(
         &self,
-        _root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
     ) {
         let (relation_members, flow_members) = {
@@ -1373,7 +1400,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let mut evaluator = FlowEvaluator {
             dispatch: self,
-            key,
+            self_slot: Some(key),
             canonical,
             owner,
             params: &params,
@@ -1655,7 +1682,14 @@ struct FlowBinderEnv {
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b> {
     dispatch: &'d ProjectSemanticDispatch<'d>,
-    key: &'b FlowReturnKey,
+    /// The flow slot THIS frame evaluates — the identity a same-slot
+    /// recursive call holds on.
+    ///
+    /// `None` inside a NESTED function value: a nested body has no flow
+    /// slot of its own, so there is no identity for a self-call to hold,
+    /// and holding the enclosing frame's key would name the wrong
+    /// function. The `Option` is what makes that mistake unexpressible.
+    self_slot: Option<&'b FlowReturnKey>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     params: &'b [SemanticNodeId],
@@ -1969,6 +2003,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             &self.binder_env.shadowing,
             &mut substitutions,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+    }
+
+    /// Whether the file OWNER SCOPE answers `name` in the name space it
+    /// was referenced in — the root-identifier gate's owner-side probe.
+    ///
+    /// Asked through the ONE shared lowering the leaf itself would take
+    /// (`typeof name` for a value reference, a bare `name` reference for
+    /// a type one), so the gate's verdict is exactly "would the leaf bind
+    /// something here". A typed MISS means the owner scope answers
+    /// nothing, so nothing can be mis-bound.
+    fn owner_scope_answers_name(
+        &self,
+        name: &crate::flow_slice_content::FrameShadowedName,
+    ) -> bool {
+        let probe = match name {
+            crate::flow_slice_content::FrameShadowedName::Value(name) => {
+                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                    path: vec![name.as_ref().to_string()],
+                    type_args: Vec::new(),
+                })
+            }
+            crate::flow_slice_content::FrameShadowedName::Type(name) => {
+                verter_type_expr::TypeExpr::Ref {
+                    name: Arc::clone(name),
+                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+                }
+            }
+        };
+        let node = self.lower_body_type(&probe);
+        !matches!(
+            self.dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
         )
     }
 
@@ -2287,7 +2354,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let (contributors, _) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
-                key: self.key,
+                self_slot: None,
                 canonical: self.canonical,
                 owner: self.owner,
                 params: &params,
@@ -2342,6 +2409,59 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }))
     }
 
+    /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
+    /// that is `ReturnOnly` by contract.
+    fn degraded_unrepresentable_callee(
+        &mut self,
+    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
+        self.record_degradation(
+            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        );
+        Ok(Some(self.dispatch.graph().intern_node(
+            SemanticNodeData::Primitive(PrimitiveKind::Any),
+        )))
+    }
+
+    /// The call-bucket return of an already-lowered CALLEE TYPE — the one
+    /// place a call whose callee is a resolved value TYPE (rather than a
+    /// served flow position) takes its value from.
+    fn call_return_of_callee_node(
+        &mut self,
+        callee_node: SemanticNodeId,
+    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
+        let graph = self.dispatch.graph();
+        let resolved = self.dispatch.resolve_signature_source_carrier(
+            callee_node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        let Some(function_node) = self
+            .dispatch
+            .select_signature_function(resolved, super::build::SignatureBucket::Call)
+        else {
+            return self.degraded_unrepresentable_callee();
+        };
+        let data = graph.node_data(function_node);
+        let Some(SemanticNodeData::Signature { return_type, .. }) = data.as_deref() else {
+            return self.degraded_unrepresentable_callee();
+        };
+        let return_type = *return_type;
+        // A semantic-miss carrier at the signature's return position is a
+        // DEGRADED nested demand (an in-flight / failed callee) —
+        // propagate the typed failure, never count the miss as a
+        // contributor.
+        if matches!(
+            graph.node_data(return_type).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        ) {
+            return Err(FlowReturnFailure::Unresolved);
+        }
+        // Free signature generics instantiate at `unknown` (the sb15 rule).
+        Ok(Some(
+            self.dispatch
+                .instantiate_free_signature_params_at_unknown(function_node, return_type),
+        ))
+    }
+
     /// Evaluate one flow expression to a graph node. `Ok(None)` is a
     /// coinductive HOLD (a same-slot recursive backedge — neither a
     /// contributor nor a failure).
@@ -2352,6 +2472,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let graph = self.dispatch.graph();
         match expr {
             crate::flow_slice_content::SliceExpr::Type(ty) => Ok(Some(self.lower_body_type(ty))),
+            crate::flow_slice_content::SliceExpr::FrameShadowed { inner, shadowed } => {
+                // The root-identifier gate's decision point. The content
+                // half found that this leaf's answer names bindings the
+                // FRAME owns, and the shared shallow-pass lowering that
+                // produced it resolves names in FILE OWNER SCOPE. If the
+                // owner scope ANSWERS one of those names, evaluating the
+                // leaf would publish an unrelated module-scope (or
+                // cross-file imported) symbol's type for a
+                // function-local binding — cleanly and warm. Fail closed
+                // instead; the name is RESOLVED (never free), so there is
+                // no honest value to publish.
+                //
+                // When the owner scope answers NOTHING, the frame-owned
+                // name is genuinely unresolvable from here and the leaf
+                // evaluates unchanged: its own typed miss carrier is the
+                // honest answer, exactly as for any other unresolved
+                // reference.
+                if shadowed
+                    .iter()
+                    .any(|name| self.owner_scope_answers_name(name))
+                {
+                    return Err(FlowReturnFailure::UnmodeledBinding);
+                }
+                self.eval_expr(inner)
+            }
             crate::flow_slice_content::SliceExpr::Param { ordinal } => self
                 .params
                 .get(*ordinal as usize)
@@ -2474,26 +2619,64 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // an empty-cycle outcome is a hold the SCC close discharges
                 // on the component's admitted returns; every other outcome
                 // contributes the callee's return or its typed failure.
-                let source = self
-                    .dispatch
-                    .ctx
-                    .prepared_value_decl(
-                        self.canonical,
-                        target.declaration.owner,
-                        target.declaration.name.as_ref(),
+                let prepared = self.dispatch.ctx.prepared_value_decl(
+                    self.canonical,
+                    target.declaration.owner,
+                    target.declaration.name.as_ref(),
+                );
+                // A value declaration carrying an AUTHORED annotation is
+                // typed by that annotation, full stop: the initializer
+                // only has to be assignable to it. `const f: () => 42 =
+                // () => 42` IS `() => 42`, so `f()` is `42` — taking the
+                // initializer's own inferred signature here would publish
+                // `number`, confidently and warm, for a callee whose
+                // declared type says otherwise. The annotated callee is
+                // therefore resolved as a VALUE TYPE through the same
+                // shared path a parenthesised or ambient callee takes,
+                // never through the initializer's flow position.
+                if prepared.as_ref().is_some_and(|prepared| {
+                    matches!(
+                        prepared.type_annotation.classification,
+                        verter_type_expr::facts::ValueAnnotationClass::Direct
+                            | verter_type_expr::facts::ValueAnnotationClass::TypeOfAlias
+                    ) && matches!(
+                        prepared.type_annotation.annotation,
+                        Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
                     )
-                    .and_then(|prepared| {
-                        let ordinal = match &target.part {
-                            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
-                                target.overload_ordinal as usize
-                            }
-                            _ => 0,
-                        };
-                        prepared
-                            .signatures
-                            .get(ordinal)
-                            .map(|signature| signature.return_source.clone())
+                }) {
+                    let callee = verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                        path: target
+                            .declaration
+                            .name
+                            .split('.')
+                            .map(str::to_string)
+                            .collect(),
+                        type_args: Vec::new(),
                     });
+                    let Some(callee_node) =
+                        self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                            self.canonical,
+                            self.owner,
+                            &callee,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    else {
+                        return self.degraded_unrepresentable_callee();
+                    };
+                    return self.call_return_of_callee_node(callee_node);
+                }
+                let source = prepared.and_then(|prepared| {
+                    let ordinal = match &target.part {
+                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
+                            target.overload_ordinal as usize
+                        }
+                        _ => 0,
+                    };
+                    prepared
+                        .signatures
+                        .get(ordinal)
+                        .map(|signature| signature.return_source.clone())
+                });
                 // A target the value registry does not carry as a
                 // prepared declaration (a namespace-scoped function) is
                 // only reachable through the body-derived demand.
@@ -2635,9 +2818,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 Err(FlowReturnFailure::Unresolved)
             }
             crate::flow_slice_content::SliceExpr::DirectSelfCall => {
-                match self.dispatch.execute_flow_return(self.key.clone()) {
+                // Only the frame that OWNS a flow slot can hold on it.
+                let Some(self_slot) = self.self_slot else {
+                    return Err(FlowReturnFailure::Unresolved);
+                };
+                match self.dispatch.execute_flow_return(self_slot.clone()) {
                     FlowReturnStep::Hold(_) => {
-                        self.holds.push(self.key.clone());
+                        self.holds.push(self_slot.clone());
                         Ok(None)
                     }
                     FlowReturnStep::Complete(_) => {
@@ -2653,24 +2840,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // call-bucket return — an unrepresentable / unresolvable
                 // callee is the `UnrepresentableCallee` DEGRADATION: a
                 // usable modeled-`any`, `ReturnOnly` by contract.
-                let graph = self.dispatch.graph();
-                let degraded_any = |evaluator: &mut Self| {
-                    evaluator.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-                    );
-                    Ok(Some(graph.intern_node(SemanticNodeData::Primitive(
-                        PrimitiveKind::Any,
-                    ))))
-                };
                 let verter_type_expr::TypeExpr::Ref {
                     name,
                     type_arguments,
                 } = ty
                 else {
-                    return degraded_any(self);
+                    return self.degraded_unrepresentable_callee();
                 };
                 if name.as_ref() != "ReturnType" || type_arguments.len() != 1 {
-                    return degraded_any(self);
+                    return self.degraded_unrepresentable_callee();
                 }
                 let Some(callee_node) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
                     self.canonical,
@@ -2678,46 +2856,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     &type_arguments[0],
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 ) else {
-                    return degraded_any(self);
+                    return self.degraded_unrepresentable_callee();
                 };
-                let resolved = self.dispatch.resolve_signature_source_carrier(
-                    callee_node,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                );
-                match self
-                    .dispatch
-                    .select_signature_function(resolved, super::build::SignatureBucket::Call)
-                {
-                    Some(function_node) => {
-                        let data = graph.node_data(function_node);
-                        let return_type = match data.as_deref() {
-                            Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
-                            _ => {
-                                return degraded_any(self);
-                            }
-                        };
-
-                        // A semantic-miss carrier at the signature's return
-                        // position is a DEGRADED nested demand (an in-flight
-                        // / failed callee) — propagate the typed failure,
-                        // never count the miss as a contributor.
-                        if matches!(
-                            graph.node_data(return_type).as_deref(),
-                            Some(SemanticNodeData::Opaque(QueryError::Miss))
-                        ) {
-                            return Err(FlowReturnFailure::Unresolved);
-                        }
-                        // Free signature generics instantiate at `unknown`
-                        // (the sb15 rule).
-                        Ok(Some(
-                            self.dispatch.instantiate_free_signature_params_at_unknown(
-                                function_node,
-                                return_type,
-                            ),
-                        ))
-                    }
-                    None => degraded_any(self),
-                }
+                self.call_return_of_callee_node(callee_node)
             }
             crate::flow_slice_content::SliceExpr::Any => Ok(Some(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),

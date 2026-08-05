@@ -3011,6 +3011,21 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
       "be the frozen original the provenance rail anchors on; lift pending " +
       "an extractor extension",
   ],
+  ...[
+    ["contextual_typing.rs", "contextual_typing_ct05_return_type_contextual_flow"],
+    ["contextual_typing.rs", "contextual_typing_ct06_parenthesized_expression_preserves_context"],
+  ].map(([f, fn]) => [
+    tkey(f, fn),
+    "runs always in the default suite (its `#[ignore]` was removed when the " +
+      "demand-sliced flow-return substrate made the direct-call rail honour " +
+      "the DECLARATOR's authored annotation, so `const fn05: () => 42 = () => " +
+      "42` calls as `42` instead of the initializer arrow's inferred " +
+      "`number`); the retired ignore reason was FALSE — `ReturnType<typeof " +
+      "ct05>` needs only `typeof fn05`, which IS the authored `() => 42`, and " +
+      "tsc never contextually types that arrow body either; the row stays " +
+      "running_unratified because FINAL declarator-annotated CALL semantics " +
+      "are owned by U6.CALL_RESOLVE, which ratifies the lift",
+  ]),
 ]);
 
 function consumedMechsForBlock(blockVar) {
