@@ -40,16 +40,17 @@ pub fn apply_css_modules(
 ///
 /// Uses SHA-256 of `component_id + class_name`, truncated to 8 hex chars.
 /// Deterministic across builds (unlike counter-based), matching Vue's approach.
-fn content_hash(component_id: &str, class_name: &str) -> String {
+pub(crate) fn hashed_class_name(component_id: &str, class_name: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(component_id.as_bytes());
     hasher.update(class_name.as_bytes());
     let result = hasher.finalize();
     // Take first 4 bytes → 8 hex chars for compact, collision-resistant hash
-    format!(
+    let hash = format!(
         "{:02x}{:02x}{:02x}{:02x}",
         result[0], result[1], result[2], result[3]
-    )
+    );
+    format!("{class_name}_{hash}")
 }
 
 struct CssModulesTransformer {
@@ -114,10 +115,7 @@ impl CssModulesTransformer {
         let component_id = &self.component_id;
         self.class_mapping
             .entry(class_name.to_string())
-            .or_insert_with(|| {
-                let hash = content_hash(component_id, class_name);
-                format!("{}_{}", class_name, hash)
-            })
+            .or_insert_with(|| hashed_class_name(component_id, class_name))
     }
 }
 

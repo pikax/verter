@@ -2,7 +2,7 @@
 //!
 //! Drives the full SFC → JS compilation:
 //!   1. Tokenize → `Syntax` (parse SFC structure + template AST)
-//!   2. Style codegen (v-bind scan + `process_style`) — if `CompileTarget::STYLE`
+//!   2. Typed style rewrites (v-bind, CSS Modules, scoping) — if `CompileTarget::STYLE`
 //!   3. Script codegen (macros, bindings, imports) — if `CompileTarget::needs_script()`
 //!   4. Template codegen (VDOM or Vapor render function) — if `CompileTarget::TEMPLATE`
 //!   5. TSX codegen (valid JSX for LSP type checking) — if `CompileTarget::TSX`
@@ -51,8 +51,8 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
-    StyleRewriteOutcome,
+    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
+    PlainCssInput, StyleRewriteFailure, StyleRewriteOutcome,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -76,6 +76,22 @@ fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
         Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
         Some(StyleLang::Unknown) => None,
     }
+}
+
+fn push_style_rewrite_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    content_start: u32,
+    error: &StyleRewriteFailure,
+) {
+    diagnostics.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: CompilerErrorCode::XCssParseError,
+        plugin: "style-planner",
+        message: error.to_string(),
+        span: error.span.map(|span| {
+            crate::common::Span::new(content_start + span.start, content_start + span.end)
+        }),
+    });
 }
 
 // ── Orchestrator ───────────────────────────────────────────────────
@@ -505,72 +521,86 @@ fn compile_inner(
                 let source_name = options.filename.as_deref().unwrap_or("<style>");
                 let mut rewritten = style_source.to_string();
 
-                if let Some(dialect) = dialect {
-                    match transform_vue_v_bind(
-                        AuthoredStyleInput::new(
-                            style_source,
-                            dialect,
-                            source_name,
-                            "standalone:carrier",
-                            "standalone:carrier-bytes",
-                        ),
-                        scope_id_str,
-                    ) {
+                let authored_dialect = dialect.unwrap_or(CssDialect::Css);
+                match transform_vue_v_bind(
+                    AuthoredStyleInput::new(
+                        style_source,
+                        authored_dialect,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    ),
+                    scope_id_str,
+                ) {
+                    Ok(StyleRewriteOutcome::Unchanged { facts }) => {
+                        all_v_bind_vars.extend(facts.v_bind_vars);
+                    }
+                    Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                        rewritten = code;
+                        all_v_bind_vars.extend(facts.v_bind_vars);
+                    }
+                    Err(error) => {
+                        push_style_rewrite_diagnostic(&mut all_diagnostics, content.start, &error);
+                    }
+                }
+
+                if style.module && dialect == Some(CssDialect::Css) {
+                    let plain = PlainCssInput::new_css(
+                        &rewritten,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    );
+                    match transform_vue_css_modules(plain, scope_id_str) {
+                        Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
+                        Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
+                        Err(error) => {
+                            push_style_rewrite_diagnostic(
+                                &mut all_diagnostics,
+                                content.start,
+                                &error,
+                            );
+                            rewritten.clear();
+                        }
+                    }
+                }
+
+                if style.scoped && dialect == Some(CssDialect::Css) && !rewritten.is_empty() {
+                    let plain = PlainCssInput::new_css(
+                        &rewritten,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    );
+                    match transform_vue_scoped_css(plain, scope_id_str) {
                         Ok(StyleRewriteOutcome::Unchanged { facts }) => {
-                            all_v_bind_vars.extend(facts.v_bind_vars);
+                            for refusal in &facts.refusals {
+                                push_style_rewrite_diagnostic(
+                                    &mut all_diagnostics,
+                                    content.start,
+                                    refusal,
+                                );
+                            }
                         }
                         Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                            for refusal in &facts.refusals {
+                                push_style_rewrite_diagnostic(
+                                    &mut all_diagnostics,
+                                    content.start,
+                                    refusal,
+                                );
+                            }
                             rewritten = code;
-                            all_v_bind_vars.extend(facts.v_bind_vars);
                         }
-                        Err(error) => all_diagnostics.push(Diagnostic {
-                            severity: DiagnosticSeverity::Error,
-                            code: CompilerErrorCode::XCssParseError,
-                            plugin: "style-planner",
-                            message: error.to_string(),
-                            span: error.span.map(|span| {
-                                crate::common::Span::new(
-                                    content.start + span.start,
-                                    content.start + span.end,
-                                )
-                            }),
-                        }),
-                    }
-
-                    if style.scoped && dialect == CssDialect::Css {
-                        let plain = PlainCssInput::try_new(
-                            &rewritten,
-                            CssDialect::Css,
-                            source_name,
-                            "standalone:carrier",
-                            "standalone:carrier-bytes",
-                        )
-                        .expect("plain CSS stage is statically selected");
-                        match transform_vue_scoped_css(plain, scope_id_str) {
-                            Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
-                            Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
-                            Err(error) => all_diagnostics.push(Diagnostic {
-                                severity: DiagnosticSeverity::Error,
-                                code: CompilerErrorCode::XCssParseError,
-                                plugin: "style-planner",
-                                message: error.to_string(),
-                                span: error.span.map(|span| {
-                                    crate::common::Span::new(
-                                        content.start + span.start,
-                                        content.start + span.end,
-                                    )
-                                }),
-                            }),
+                        Err(error) => {
+                            push_style_rewrite_diagnostic(
+                                &mut all_diagnostics,
+                                content.start,
+                                &error,
+                            );
+                            rewritten.clear();
                         }
                     }
-                } else {
-                    all_diagnostics.push(Diagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        code: CompilerErrorCode::XCssParseError,
-                        plugin: "style-planner",
-                        message: "unsupported authored style dialect".to_string(),
-                        span: Some(*content),
-                    });
                 }
                 rewritten
             } else {

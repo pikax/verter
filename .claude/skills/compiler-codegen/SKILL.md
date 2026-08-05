@@ -66,7 +66,7 @@ ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type che
     +-- mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
     +-- directives.rs     # v-if -> ternary, v-for -> .map(), v-show -> style
     +-- props.rs          # :prop -> prop={}, @event -> onEvent={}, v-bind spread
-style_planner.rs          # Vue authored-v-bind and plain-CSS scoping stages
+style_planner.rs          # Vue authored-v-bind, CSS Modules, and plain-CSS scoping stages
 css/
 +-- mod.rs                # legacy processStyle/CSS-modules compatibility surface
 +-- prepass.rs            # retained until the NAPI/provider cutover
@@ -398,12 +398,23 @@ Guard: `crates/verter_compiler/tests/cases/ide_script_recovery_guard.rs` (scans 
 Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are deliberately split:
 
 1. `transform_vue_v_bind(AuthoredStyleInput)` runs on authored CSS, SCSS, indented Sass, Less, or Stylus and returns the same dialect. It never preprocesses or evaluates.
-2. `transform_vue_scoped_css(PlainCssInput)` runs only on plain CSS after preprocessing. `PlainCssInput::try_new` typed-refuses every non-CSS dialect before planning.
-3. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused.
+2. `transform_vue_css_modules(PlainCssInput)` hashes CSS class selectors and publishes the original-to-hashed mapping from typed selector spans.
+3. `transform_vue_scoped_css(PlainCssInput)` runs only on plain CSS after preprocessing. `PlainCssInput::try_new` typed-refuses every non-CSS dialect before planning.
+4. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused.
 
 Only complete trusted nodes publish edits. Rewrite uncertainty fails closed; style-liveness uncertainty fails open. Every emitted edit and its source map comes from the same `CodeTransform`. Supplied or external inputs retain their host-minted source-space/artifact identity in `RuntimeOutputDescriptor`; carrier-absolute positions are never fabricated.
 
 The sealed `applyBlockOverrides()` handoff remains the input channel for caller-preprocessed content. External/supplied semantic analysis continues to publish `css: None` until its source-space-aware analysis consumer lands; compiler rewrite code must not route around that gate.
+
+## Style Preprocessing in Bundler Mode
+
+Style blocks with `lang="scss"`, `lang="sass"`, `lang="less"`, or `lang="stylus"` require caller-owned preprocessing before the plain-CSS module/scoping stages.
+
+**Vite mode:** the unplugin caches raw authored style content and preserves its authored `lang` in the style request. Vite's CSS pipeline performs preprocessing; Vue-specific post-processing then consumes the resulting plain CSS.
+
+**Non-Vite mode:** `preprocessBlock()` / `preprocessStyle()` use Vite's `preprocessCSS()` when configured. The result returns through the sealed `applyBlockOverrides()` channel with validated artifact, revision, source-space, and content hashes before the compiler runs the plain-CSS stages.
+
+`vue/compiler-sfc` is resolved once per plugin instance from the project root and is shared by SFC parsing and bundler-side style post-processing. The relevant owners are `packages/unplugin/src/index.ts`, `packages/unplugin/src/core/preprocessor.ts`, `crates/verter_session/src/block_content.rs`, and `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs`.
 
 ## Vue Style Planner
 
@@ -412,6 +423,7 @@ authored dialect bytes
     | StyleSyntaxIr -> trusted v-bind plan -> CodeTransform
     | caller-owned preprocessing (when needed)
 plain CSS bytes
+    | StyleSyntaxIr -> trusted module plan -> CodeTransform
     | StyleSyntaxIr -> trusted scoped/pseudo/keyframe plan -> CodeTransform
 ```
 
@@ -421,7 +433,7 @@ plain CSS bytes
 
 | Flag            | Controls                                             | Used By           |
 | --------------- | ---------------------------------------------------- | ----------------- |
-| `STYLE`         | Typed framework style rewrite planning              | Bundler           |
+| `STYLE`         | Style codegen (CSS scoping, modules, v-bind)         | Bundler           |
 | `SCRIPT`        | Script codegen (macro expansion, binding extraction) | Bundler, Analysis |
 | `TEMPLATE`      | Template VDOM/Vapor render function codegen          | Bundler           |
 | `TSX`           | TSX template codegen for type checking               | LSP/IDE           |

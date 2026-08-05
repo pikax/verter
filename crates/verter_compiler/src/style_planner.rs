@@ -1,23 +1,26 @@
 //! Typed framework style rewrite stages over the shared style syntax IR.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use oxc_allocator::Allocator;
 use verter_css_syntax::{
-    css_identifier_eq_ignore_ascii_case, parse_selector_structure, parse_style_ir, ComplexSelector,
+    css_identifier_eq_ignore_ascii_case, parse_style_ir, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
-    SelectorComponent, SelectorComponentKind, StyleCompleteness, StyleDeclaration, StyleDirective,
-    StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement,
+    SelectorComponent, SelectorComponentKind, SelectorList, SelectorPseudo, StyleCompleteness,
+    StyleDeclaration, StyleDirective, StyleStatement, StyleSyntaxIr, TokenKind, UnknownStatement,
+    UnknownStatementKind,
 };
 use verter_span::Span;
 
 use crate::code_transform::{CodeTransform, SourceMapOptions};
+pub use crate::css::types::generate_var_name;
 use crate::css::types::VBindVar;
 use crate::framework_common::{RuntimeOutputDescriptor, SourceMapFidelity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StyleRewriteStage {
     AuthoredVBind,
+    PostPreprocessModules,
     PostPreprocessScoping,
 }
 
@@ -108,6 +111,23 @@ pub struct PlainCssInput<'a> {
 }
 
 impl<'a> PlainCssInput<'a> {
+    #[must_use]
+    pub const fn new_css(
+        code: &'a str,
+        source_name: &'a str,
+        source_space_token: &'a str,
+        content_artifact_token: &'a str,
+    ) -> Self {
+        Self {
+            code,
+            source: StyleSourceIdentity {
+                source_name,
+                source_space_token,
+                content_artifact_token,
+            },
+        }
+    }
+
     pub fn try_new(
         code: &'a str,
         dialect: CssDialect,
@@ -142,6 +162,7 @@ impl<'a> PlainCssInput<'a> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VueStyleRewriteMask {
     pub v_bind: bool,
+    pub css_modules: bool,
     pub scoped_selector: bool,
     pub keyframes: bool,
     pub deep: bool,
@@ -152,6 +173,8 @@ pub struct VueStyleRewriteMask {
 #[derive(Debug, Clone, Default)]
 pub struct VueStyleFacts {
     pub v_bind_vars: Vec<VBindVar>,
+    pub module_classes: Vec<(String, String)>,
+    pub refusals: Vec<StyleRewriteFailure>,
     pub rewrites: VueStyleRewriteMask,
 }
 
@@ -272,6 +295,7 @@ pub fn transform_vue_v_bind(
         ir.source(),
         input.dialect,
         scope_id,
+        true,
         &mut edits,
         &mut vars,
     )?;
@@ -281,6 +305,7 @@ pub fn transform_vue_v_bind(
             ..VueStyleRewriteMask::default()
         },
         v_bind_vars: vars,
+        ..VueStyleFacts::default()
     };
     emit(
         input.code,
@@ -297,13 +322,16 @@ fn collect_v_bind_statements(
     source: &CssSource,
     dialect: CssDialect,
     scope_id: &str,
+    trusted_ancestor: bool,
     edits: &mut Vec<StyleEdit>,
     vars: &mut Vec<VBindVar>,
 ) -> Result<(), StyleRewriteFailure> {
+    let mut trusted_context = trusted_ancestor;
     for statement in statements {
         match statement {
             StyleStatement::Declaration(declaration) => {
-                let trusted = declaration.completeness() == StyleCompleteness::Complete
+                let trusted = trusted_context
+                    && declaration.completeness() == StyleCompleteness::Complete
                     && declaration.value().completeness() == StyleCompleteness::Complete;
                 collect_v_bind_values(
                     declaration.value(),
@@ -320,19 +348,26 @@ fn collect_v_bind_statements(
                         source,
                         dialect,
                         scope_id,
+                        trusted && body.completeness() == StyleCompleteness::Complete,
                         edits,
                         vars,
                     )?;
                 }
             }
-            StyleStatement::Rule(rule) => collect_v_bind_statements(
-                rule.body().statements(),
-                source,
-                dialect,
-                scope_id,
-                edits,
-                vars,
-            )?,
+            StyleStatement::Rule(rule) => {
+                let trusted = trusted_context
+                    && rule.completeness() == StyleCompleteness::Complete
+                    && rule.body().completeness() == StyleCompleteness::Complete;
+                collect_v_bind_statements(
+                    rule.body().statements(),
+                    source,
+                    dialect,
+                    scope_id,
+                    trusted,
+                    edits,
+                    vars,
+                )?;
+            }
             StyleStatement::AtRule(rule) => {
                 if let Some(body) = rule.body() {
                     collect_v_bind_statements(
@@ -340,6 +375,9 @@ fn collect_v_bind_statements(
                         source,
                         dialect,
                         scope_id,
+                        trusted_context
+                            && rule.completeness() == StyleCompleteness::Complete
+                            && body.completeness() == StyleCompleteness::Complete,
                         edits,
                         vars,
                     )?;
@@ -352,6 +390,9 @@ fn collect_v_bind_statements(
                         source,
                         dialect,
                         scope_id,
+                        trusted_context
+                            && rule.completeness() == StyleCompleteness::Complete
+                            && body.completeness() == StyleCompleteness::Complete,
                         edits,
                         vars,
                     )?;
@@ -359,7 +400,11 @@ fn collect_v_bind_statements(
             }
             StyleStatement::Unknown(unknown) => {
                 if let Some(values) = unknown.opaque_values() {
-                    collect_v_bind_values(values, source, dialect, scope_id, false, edits, vars)?;
+                    let trusted = trusted_context
+                        && dialect == CssDialect::Stylus
+                        && unknown.kind() == UnknownStatementKind::Ambiguous
+                        && values.completeness() == StyleCompleteness::Complete;
+                    collect_v_bind_values(values, source, dialect, scope_id, trusted, edits, vars)?;
                 }
                 if let Some(body) = unknown.body() {
                     collect_v_bind_statements(
@@ -367,9 +412,13 @@ fn collect_v_bind_statements(
                         source,
                         dialect,
                         scope_id,
+                        false,
                         edits,
                         vars,
                     )?;
+                }
+                if unknown.kind() == UnknownStatementKind::Recovery {
+                    trusted_context = false;
                 }
             }
         }
@@ -404,6 +453,14 @@ fn collect_v_bind_values(
                     {
                         return Err(StyleRewriteFailure::new(
                             StyleRewriteFailureClass::IndentedLayoutMutation,
+                            StyleRewriteStage::AuthoredVBind,
+                            dialect,
+                            Some(function.full_span()),
+                        ));
+                    }
+                    if values_contain_interpolation(function.values()) {
+                        return Err(StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::UntrustedRewriteTarget,
                             StyleRewriteStage::AuthoredVBind,
                             dialect,
                             Some(function.full_span()),
@@ -479,6 +536,24 @@ fn collect_v_bind_value_slice(
                             Some(function.full_span()),
                         ));
                     }
+                    if matches!(dialect, CssDialect::Sass | CssDialect::Stylus)
+                        && source.slice(function.full_span()).contains(['\r', '\n'])
+                    {
+                        return Err(StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::IndentedLayoutMutation,
+                            StyleRewriteStage::AuthoredVBind,
+                            dialect,
+                            Some(function.full_span()),
+                        ));
+                    }
+                    if values_contain_interpolation(function.values()) {
+                        return Err(StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::UntrustedRewriteTarget,
+                            StyleRewriteStage::AuthoredVBind,
+                            dialect,
+                            Some(function.full_span()),
+                        ));
+                    }
                     let (expression, expression_span) = v_bind_expression(source, function)?;
                     let var_name = generate_var_name(scope_id, expression);
                     edits.push(StyleEdit::Overwrite {
@@ -519,6 +594,15 @@ fn collect_v_bind_value_slice(
     Ok(())
 }
 
+fn values_contain_interpolation(values: &[ComponentValue]) -> bool {
+    values.iter().any(|value| match value {
+        ComponentValue::Interpolation(_) => true,
+        ComponentValue::Function(function) => values_contain_interpolation(function.values()),
+        ComponentValue::Block(block) => values_contain_interpolation(block.values()),
+        ComponentValue::Token(_) | ComponentValue::String(_) | ComponentValue::Comment(_) => false,
+    })
+}
+
 fn v_bind_expression<'a>(
     source: &'a CssSource,
     function: &verter_css_syntax::ComponentFunction,
@@ -544,19 +628,183 @@ fn v_bind_expression<'a>(
     Ok((expression, span))
 }
 
-#[must_use]
-pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
-    let sanitized: String = expression
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
+pub fn transform_vue_css_modules(
+    input: PlainCssInput<'_>,
+    scope_id: &str,
+) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
+    let ir = parse_ir(
+        input.code,
+        CssDialect::Css,
+        StyleRewriteStage::PostPreprocessModules,
+    )?;
+    let mut edits = Vec::new();
+    let mut classes = BTreeMap::new();
+    collect_module_statements(
+        ir.statements(),
+        ir.source(),
+        scope_id,
+        false,
+        &mut edits,
+        &mut classes,
+    )?;
+    let facts = VueStyleFacts {
+        module_classes: classes.into_iter().collect(),
+        rewrites: VueStyleRewriteMask {
+            css_modules: !edits.is_empty(),
+            ..VueStyleRewriteMask::default()
+        },
+        ..VueStyleFacts::default()
+    };
+    emit(
+        input.code,
+        input.source,
+        CssDialect::Css,
+        StyleRewriteStage::PostPreprocessModules,
+        edits,
+        facts,
+    )
+}
+
+fn collect_module_statements(
+    statements: &[StyleStatement],
+    source: &CssSource,
+    scope_id: &str,
+    inside_keyframes: bool,
+    edits: &mut Vec<StyleEdit>,
+    classes: &mut BTreeMap<String, String>,
+) -> Result<(), StyleRewriteFailure> {
+    for statement in statements {
+        match statement {
+            StyleStatement::Rule(rule) => {
+                if !inside_keyframes {
+                    if rule.completeness() != StyleCompleteness::Complete
+                        || !rule.selector_list().facts().is_complete_static()
+                    {
+                        return Err(StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::UntrustedRewriteTarget,
+                            StyleRewriteStage::PostPreprocessModules,
+                            CssDialect::Css,
+                            Some(rule.span()),
+                        ));
+                    }
+                    collect_module_selector_list(
+                        rule.selector_list(),
+                        source,
+                        scope_id,
+                        edits,
+                        classes,
+                    )?;
+                }
+                collect_module_statements(
+                    rule.body().statements(),
+                    source,
+                    scope_id,
+                    inside_keyframes,
+                    edits,
+                    classes,
+                )?;
             }
-        })
-        .collect();
-    format!("--{scope_id}-{sanitized}")
+            StyleStatement::AtRule(rule) => {
+                if let Some(body) = rule.body() {
+                    let head = source.slice(rule.head_span());
+                    let keyframes = css_identifier_eq_ignore_ascii_case(head, "@keyframes")
+                        || css_identifier_eq_ignore_ascii_case(head, "@-webkit-keyframes");
+                    collect_module_statements(
+                        body.statements(),
+                        source,
+                        scope_id,
+                        inside_keyframes || keyframes,
+                        edits,
+                        classes,
+                    )?;
+                }
+            }
+            StyleStatement::Declaration(declaration) => {
+                if let Some(body) = declaration.body() {
+                    collect_module_statements(
+                        body.statements(),
+                        source,
+                        scope_id,
+                        inside_keyframes,
+                        edits,
+                        classes,
+                    )?;
+                }
+            }
+            StyleStatement::MixinOrFunction(rule) => {
+                if let Some(body) = rule.body() {
+                    collect_module_statements(
+                        body.statements(),
+                        source,
+                        scope_id,
+                        inside_keyframes,
+                        edits,
+                        classes,
+                    )?;
+                }
+            }
+            StyleStatement::Unknown(unknown) => {
+                if !inside_keyframes {
+                    return Err(StyleRewriteFailure::new(
+                        StyleRewriteFailureClass::UntrustedRewriteTarget,
+                        StyleRewriteStage::PostPreprocessModules,
+                        CssDialect::Css,
+                        Some(unknown.span()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_module_selector_list(
+    list: &SelectorList,
+    source: &CssSource,
+    scope_id: &str,
+    edits: &mut Vec<StyleEdit>,
+    classes: &mut BTreeMap<String, String>,
+) -> Result<(), StyleRewriteFailure> {
+    if !list.facts().is_complete_static() {
+        return Err(StyleRewriteFailure::new(
+            StyleRewriteFailureClass::UntrustedRewriteTarget,
+            StyleRewriteStage::PostPreprocessModules,
+            CssDialect::Css,
+            Some(list.span()),
+        ));
+    }
+    for selector in list.selectors() {
+        for compound in selector.compounds() {
+            for component in compound.components() {
+                if component.kind() == SelectorComponentKind::Class {
+                    let name_span = component.name_span().ok_or_else(|| {
+                        StyleRewriteFailure::new(
+                            StyleRewriteFailureClass::UntrustedRewriteTarget,
+                            StyleRewriteStage::PostPreprocessModules,
+                            CssDialect::Css,
+                            Some(component.span()),
+                        )
+                    })?;
+                    let name = source.slice(name_span);
+                    let hashed = classes
+                        .entry(name.to_string())
+                        .or_insert_with(|| crate::css::modules::hashed_class_name(scope_id, name))
+                        .clone();
+                    edits.push(StyleEdit::Overwrite {
+                        span: name_span,
+                        content: hashed,
+                    });
+                }
+                if let Some(nested) = component
+                    .pseudo()
+                    .and_then(verter_css_syntax::SelectorPseudo::selector_list)
+                {
+                    collect_module_selector_list(nested, source, scope_id, edits, classes)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn transform_vue_scoped_css(
@@ -667,30 +915,77 @@ impl VueScopePlanner<'_> {
         for statement in statements {
             match statement {
                 StyleStatement::Rule(rule) => {
-                    if !inside_keyframes {
-                        if rule.completeness() != StyleCompleteness::Complete
-                            || !rule.selector_list().facts().is_complete_static()
-                        {
-                            return Err(self.untrusted(rule.selector_list().span()));
+                    let edits_checkpoint = self.edits.len();
+                    let facts_checkpoint = self.facts.clone();
+                    let refusal_checkpoint = facts_checkpoint.refusals.len();
+                    let planned = (|| {
+                        if !inside_keyframes {
+                            if rule.completeness() != StyleCompleteness::Complete
+                                || !rule.selector_list().facts().is_complete_static()
+                            {
+                                return Err(self.untrusted(rule.selector_list().span()));
+                            }
+                            for selector in rule.selector_list().selectors() {
+                                self.plan_selector(selector)?;
+                            }
                         }
-                        for selector in rule.selector_list().selectors() {
-                            self.plan_selector(selector)?;
+                        self.plan_statements(rule.body().statements(), inside_keyframes)?;
+                        if self.facts.refusals.len() > refusal_checkpoint {
+                            return Err(self
+                                .facts
+                                .refusals
+                                .last()
+                                .cloned()
+                                .unwrap_or_else(|| self.untrusted(rule.span())));
                         }
+                        Ok(())
+                    })();
+                    if let Err(refusal) = planned {
+                        self.edits.truncate(edits_checkpoint);
+                        self.facts = facts_checkpoint;
+                        self.edits.push(StyleEdit::Overwrite {
+                            span: rule.span(),
+                            content: String::new(),
+                        });
+                        self.facts.refusals.push(refusal);
                     }
-                    self.plan_statements(rule.body().statements(), inside_keyframes)?;
                 }
                 StyleStatement::Declaration(declaration) => {
-                    self.plan_animation_declaration(declaration)?;
-                    if let Some(body) = declaration.body() {
-                        self.plan_statements(body.statements(), inside_keyframes)?;
+                    let edits_checkpoint = self.edits.len();
+                    let facts_checkpoint = self.facts.clone();
+                    let planned = (|| {
+                        self.plan_animation_declaration(declaration)?;
+                        if let Some(body) = declaration.body() {
+                            self.plan_statements(body.statements(), inside_keyframes)?;
+                        }
+                        Ok(())
+                    })();
+                    if let Err(refusal) = planned {
+                        self.edits.truncate(edits_checkpoint);
+                        self.facts = facts_checkpoint;
+                        self.edits.push(StyleEdit::Overwrite {
+                            span: declaration.span(),
+                            content: String::new(),
+                        });
+                        self.facts.refusals.push(refusal);
                     }
                 }
                 StyleStatement::AtRule(rule) => {
                     if let Some(body) = rule.body() {
-                        self.plan_statements(
+                        let edits_checkpoint = self.edits.len();
+                        let facts_checkpoint = self.facts.clone();
+                        if let Err(refusal) = self.plan_statements(
                             body.statements(),
                             inside_keyframes || self.is_keyframes(rule),
-                        )?;
+                        ) {
+                            self.edits.truncate(edits_checkpoint);
+                            self.facts = facts_checkpoint;
+                            self.edits.push(StyleEdit::Overwrite {
+                                span: rule.span(),
+                                content: String::new(),
+                            });
+                            self.facts.refusals.push(refusal);
+                        }
                     }
                 }
                 StyleStatement::MixinOrFunction(rule) => {
@@ -715,91 +1010,10 @@ impl VueScopePlanner<'_> {
         if !selector.facts().is_complete_static() {
             return Err(self.untrusted(selector.span()));
         }
-        let special = selector
-            .parts()
-            .iter()
-            .filter_map(|part| match part {
-                ComplexSelectorPart::Compound(compound) => Some(compound),
-                ComplexSelectorPart::Combinator(_) => None,
-            })
-            .enumerate()
-            .flat_map(|(compound_index, compound)| {
-                compound
-                    .components()
-                    .iter()
-                    .map(move |component| (compound_index, compound, component))
-            })
-            .find_map(|(compound_index, compound, component)| {
-                let name = self.pseudo_name(component)?;
-                matches!(
-                    name.as_str(),
-                    "deep" | "v-deep" | "slotted" | "v-slotted" | "global" | "v-global"
-                )
-                .then_some((compound_index, compound, component, name))
-            });
-
-        if let Some((compound_index, compound, component, name)) = special {
-            let pseudo = component
-                .pseudo()
-                .ok_or_else(|| self.untrusted(component.span()))?;
-            let argument = self
-                .trusted_single_selector_argument(pseudo.argument_span())?
-                .to_string();
-            match name.as_str() {
-                "global" | "v-global" => {
-                    self.edits.push(StyleEdit::Overwrite {
-                        span: selector.span(),
-                        content: argument,
-                    });
-                    self.facts.rewrites.global = true;
-                }
-                "slotted" | "v-slotted" => {
-                    self.edits.push(StyleEdit::Overwrite {
-                        span: component.span(),
-                        content: format!("{argument}{}", self.slotted_attr),
-                    });
-                    self.facts.rewrites.slotted = true;
-                }
-                "deep" | "v-deep" => {
-                    let components_before = compound
-                        .components()
-                        .iter()
-                        .any(|candidate| candidate.span().end <= component.span().start);
-                    let prior_compound = selector
-                        .parts()
-                        .iter()
-                        .filter_map(|part| match part {
-                            ComplexSelectorPart::Compound(value) => Some(value),
-                            ComplexSelectorPart::Combinator(_) => None,
-                        })
-                        .nth(compound_index.saturating_sub(1));
-                    if components_before {
-                        self.edits.push(StyleEdit::Overwrite {
-                            span: component.span(),
-                            content: format!("{} {argument}", self.scope_attr),
-                        });
-                    } else if compound_index > 0 {
-                        let anchor = prior_compound
-                            .map(|value| value.span().end)
-                            .ok_or_else(|| self.untrusted(selector.span()))?;
-                        self.edits.push(StyleEdit::Insert {
-                            at: anchor,
-                            content: self.scope_attr.clone(),
-                        });
-                        self.edits.push(StyleEdit::Overwrite {
-                            span: component.span(),
-                            content: argument,
-                        });
-                    } else {
-                        self.edits.push(StyleEdit::Overwrite {
-                            span: component.span(),
-                            content: format!("{} {argument}", self.scope_attr),
-                        });
-                    }
-                    self.facts.rewrites.deep = true;
-                }
-                _ => unreachable!("special pseudo filter is closed"),
-            }
+        let mut special_edits = Vec::new();
+        let has_special = self.collect_special_selector_edits(selector, &mut special_edits)?;
+        if has_special {
+            self.edits.extend(special_edits);
             self.facts.rewrites.scoped_selector = true;
             return Ok(());
         }
@@ -831,6 +1045,174 @@ impl VueScopePlanner<'_> {
         });
         self.facts.rewrites.scoped_selector = true;
         Ok(())
+    }
+
+    fn collect_special_selector_edits(
+        &mut self,
+        selector: &ComplexSelector,
+        edits: &mut Vec<StyleEdit>,
+    ) -> Result<bool, StyleRewriteFailure> {
+        let mut found = false;
+        let mut previous_compound = None;
+        let parts = selector.parts();
+        let mut index = 0;
+        while index < parts.len() {
+            let part = &parts[index];
+            match part {
+                ComplexSelectorPart::Compound(compound) => {
+                    for component in compound.components() {
+                        found |= self.collect_special_component_edits(component, edits)?;
+                    }
+                    previous_compound = Some(compound);
+                }
+                ComplexSelectorPart::Combinator(combinator) => {
+                    let mut deep_span = None;
+                    if combinator.kind() == CombinatorKind::Child && index + 2 < parts.len() {
+                        if let (
+                            ComplexSelectorPart::Combinator(second),
+                            ComplexSelectorPart::Combinator(third),
+                        ) = (&parts[index + 1], &parts[index + 2])
+                        {
+                            if second.kind() == CombinatorKind::Child
+                                && third.kind() == CombinatorKind::Child
+                            {
+                                deep_span =
+                                    Some((Span::new(combinator.span().start, third.span().end), 3));
+                            }
+                        }
+                    }
+                    if let Some((span, consumed)) = deep_span {
+                        if !found {
+                            let compound =
+                                previous_compound.ok_or_else(|| self.untrusted(selector.span()))?;
+                            edits.push(StyleEdit::Insert {
+                                at: self.scope_insertion(compound),
+                                content: self.scope_attr.clone(),
+                            });
+                        }
+                        edits.push(StyleEdit::Overwrite {
+                            span,
+                            content: " ".to_string(),
+                        });
+                        self.facts.rewrites.deep = true;
+                        found = true;
+                        index += consumed;
+                        continue;
+                    }
+                }
+            }
+            index += 1;
+        }
+        Ok(found)
+    }
+
+    fn collect_special_component_edits(
+        &mut self,
+        component: &SelectorComponent,
+        edits: &mut Vec<StyleEdit>,
+    ) -> Result<bool, StyleRewriteFailure> {
+        let Some(pseudo) = component.pseudo() else {
+            return Ok(false);
+        };
+        let Some(name) = self.pseudo_name(component) else {
+            return Ok(false);
+        };
+        let is_special = matches!(
+            name.as_str(),
+            "deep" | "v-deep" | "slotted" | "v-slotted" | "global" | "v-global"
+        );
+        if is_special {
+            let argument = self.render_special_argument(pseudo)?;
+            let content = match name.as_str() {
+                "global" | "v-global" => {
+                    self.facts.rewrites.global = true;
+                    argument
+                }
+                "slotted" | "v-slotted" => {
+                    self.facts.rewrites.slotted = true;
+                    format!("{argument}{}", self.slotted_attr)
+                }
+                "deep" | "v-deep" => {
+                    self.facts.rewrites.deep = true;
+                    format!("{} {argument}", self.scope_attr)
+                }
+                _ => unreachable!("special pseudo filter is closed"),
+            };
+            edits.push(StyleEdit::Overwrite {
+                span: component.span(),
+                content,
+            });
+            return Ok(true);
+        }
+
+        let Some(selector_list) = pseudo.selector_list() else {
+            return Ok(false);
+        };
+        if !selector_list.facts().is_complete_static() {
+            return Err(self.untrusted(selector_list.span()));
+        }
+        let mut found = false;
+        for selector in selector_list.selectors() {
+            found |= self.collect_special_selector_edits(selector, edits)?;
+        }
+        Ok(found)
+    }
+
+    fn render_special_argument(
+        &mut self,
+        pseudo: &SelectorPseudo,
+    ) -> Result<String, StyleRewriteFailure> {
+        let (span, selector_list) = self.trusted_single_selector_argument(pseudo)?;
+        let mut edits = Vec::new();
+        for selector in selector_list.selectors() {
+            self.collect_special_selector_edits(selector, &mut edits)?;
+        }
+        if edits.is_empty() {
+            return Ok(self.source.slice(span).to_string());
+        }
+        edits.sort_by_key(|edit| (edit.start(), edit.end()));
+        let allocator = Allocator::new();
+        let mut transform = CodeTransform::new(self.source.slice(span), &allocator);
+        let mut previous_end = span.start;
+        for edit in edits {
+            if edit.start() < previous_end || edit.end() > span.end {
+                return Err(self.untrusted(span));
+            }
+            previous_end = previous_end.max(edit.end());
+            match edit {
+                StyleEdit::Overwrite {
+                    span: edit_span,
+                    content,
+                } => {
+                    let content = allocator.alloc_str(&content);
+                    transform.overwrite(
+                        edit_span.start - span.start,
+                        edit_span.end - span.start,
+                        content,
+                    );
+                }
+                StyleEdit::Insert { at, content } => {
+                    let content = allocator.alloc_str(&content);
+                    transform.prepend_left(at - span.start, content);
+                }
+            }
+        }
+        Ok(transform.build_string())
+    }
+
+    fn scope_insertion(&self, compound: &verter_css_syntax::SelectorCompound) -> u32 {
+        compound
+            .components()
+            .iter()
+            .find(|component| {
+                matches!(
+                    component.kind(),
+                    SelectorComponentKind::PseudoClass
+                        | SelectorComponentKind::PseudoElement
+                        | SelectorComponentKind::FunctionalPseudo
+                )
+            })
+            .map_or(compound.span().end, |component| component.span().start)
     }
 
     fn plan_animation_declaration(
@@ -879,22 +1261,29 @@ impl VueScopePlanner<'_> {
         )
     }
 
-    fn trusted_single_selector_argument(&self, span: Span) -> Result<&str, StyleRewriteFailure> {
-        let argument = self.source.slice(span).trim();
+    fn trusted_single_selector_argument<'a>(
+        &self,
+        pseudo: &'a SelectorPseudo,
+    ) -> Result<(Span, &'a SelectorList), StyleRewriteFailure> {
+        let argument_span = pseudo.argument_span();
+        let raw = self.source.slice(argument_span);
+        let argument = raw.trim();
         if argument.is_empty() {
-            return Err(self.untrusted(span));
+            return Err(self.untrusted(argument_span));
         }
-        let offset =
-            u32::try_from(argument.as_ptr() as usize - self.source.text().as_ptr() as usize)
-                .unwrap_or(span.start);
-        let nested_source =
-            CssSource::new(Arc::from(argument), offset).map_err(|_| self.untrusted(span))?;
-        let nested = parse_selector_structure(&nested_source, CssDialect::Css)
-            .map_err(|_| self.untrusted(span))?;
-        if !nested.facts().is_complete_static() || nested.top_level_selector_count() != 1 {
-            return Err(self.untrusted(span));
+        let leading =
+            u32::try_from(argument.as_ptr() as usize - raw.as_ptr() as usize).unwrap_or(0);
+        let span = Span::new(
+            argument_span.start + leading,
+            argument_span.start + leading + u32::try_from(argument.len()).unwrap_or(u32::MAX),
+        );
+        let selector_list = pseudo
+            .selector_list()
+            .ok_or_else(|| self.untrusted(argument_span))?;
+        if !selector_list.facts().is_complete_static() || pseudo.selector_count() != 1 {
+            return Err(self.untrusted(argument_span));
         }
-        Ok(argument)
+        Ok((span, selector_list))
     }
 
     fn untrusted(&self, span: Span) -> StyleRewriteFailure {
@@ -924,6 +1313,29 @@ fn collect_animation_edits(
                     });
                 }
             }
+            ComponentValue::String(token) => {
+                let text = source.slice(token.span());
+                let Some(quote) = text
+                    .chars()
+                    .next()
+                    .filter(|value| matches!(value, '\'' | '"'))
+                else {
+                    continue;
+                };
+                let Some(name) = text
+                    .strip_prefix(quote)
+                    .and_then(|value| value.strip_suffix(quote))
+                else {
+                    continue;
+                };
+                if let Some((_, renamed)) = keyframes.iter().find(|(keyframe, _)| keyframe == name)
+                {
+                    edits.push(StyleEdit::Overwrite {
+                        span: token.span(),
+                        content: format!("{quote}{renamed}{quote}"),
+                    });
+                }
+            }
             ComponentValue::Function(function) => {
                 collect_animation_edits(function.values(), source, keyframes, edits)
             }
@@ -931,7 +1343,6 @@ fn collect_animation_edits(
                 collect_animation_edits(block.values(), source, keyframes, edits)
             }
             ComponentValue::Token(_)
-            | ComponentValue::String(_)
             | ComponentValue::Comment(_)
             | ComponentValue::Interpolation(_) => {}
         }

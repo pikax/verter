@@ -28,6 +28,20 @@ impl From<CssError> for String {
     }
 }
 
+/// Generate a Vue CSS variable name from a scope ID and authored expression.
+#[must_use]
+pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
+    let mut sanitized = String::with_capacity(expression.len());
+    for character in expression.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            sanitized.push(character);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    format!("--{scope_id}-{sanitized}")
+}
+
 /// Options for processing a style block with lightningcss.
 #[derive(Debug, Clone)]
 pub struct ProcessStyleOptions<'a> {

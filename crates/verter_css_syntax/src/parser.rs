@@ -1499,7 +1499,21 @@ fn classify_at_rule(name: &str) -> SyntaxKind {
 }
 
 fn is_selector_list_pseudo(name: &str) -> bool {
-    identifier_is_any(name, &["is", "where", "not", "has"])
+    identifier_is_any(
+        name,
+        &[
+            "is",
+            "where",
+            "not",
+            "has",
+            "deep",
+            "v-deep",
+            "slotted",
+            "v-slotted",
+            "global",
+            "v-global",
+        ],
+    )
 }
 
 fn is_nth_pseudo(name: &str) -> bool {

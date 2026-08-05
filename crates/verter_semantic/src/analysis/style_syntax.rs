@@ -243,11 +243,17 @@ impl Projection<'_> {
             end: component.span().end,
             inner,
         });
-        if let Some(span) = inner_span.filter(|span| span.start < span.end) {
-            if let Ok(source) = CssSource::new(Arc::from(self.source.slice(span)), span.start) {
-                if let Ok(structure) = parse_selector_structure(&source, CssDialect::Css) {
-                    for nested in structure.list().selectors() {
-                        self.collect_selector_facts(nested, selector_index);
+        let has_typed_selector_list = component
+            .pseudo()
+            .and_then(|pseudo| pseudo.selector_list())
+            .is_some();
+        if !has_typed_selector_list {
+            if let Some(span) = inner_span.filter(|span| span.start < span.end) {
+                if let Ok(source) = CssSource::new(Arc::from(self.source.slice(span)), span.start) {
+                    if let Ok(structure) = parse_selector_structure(&source, CssDialect::Css) {
+                        for nested in structure.list().selectors() {
+                            self.collect_selector_facts(nested, selector_index);
+                        }
                     }
                 }
             }
