@@ -1138,12 +1138,18 @@ impl CarrierCompiler for VueCarrierCompiler {
                 }
 
                 if node.module && selected_dialect == CssDialect::Css {
-                    let plain = PlainCssInput::new_css(
+                    let plain = PlainCssInput::try_new(
                         &current,
+                        selected_dialect,
                         &input.source_space_token,
                         &input.source_space_token,
                         &input.content_artifact_token,
-                    );
+                    )
+                    .map_err(|_| {
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        }
+                    })?;
                     match transform_vue_css_modules(plain, &style_scope).map_err(|_| {
                         CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -1164,7 +1170,7 @@ impl CarrierCompiler for VueCarrierCompiler {
                     }
                 }
 
-                if node.scoped && selected_dialect == CssDialect::Css {
+                if node.scoped {
                     let plain = PlainCssInput::try_new(
                         &current,
                         selected_dialect,

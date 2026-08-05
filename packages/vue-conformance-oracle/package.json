@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "generate": "node gen-vue-goldens.mjs",
+    "generate:style-pseudo": "node gen-vue-style-pseudo-oracle.mjs",
     "check": "node gen-vue-goldens.mjs --check",
-    "test": "pnpm run check"
+    "check:style-pseudo": "node gen-vue-style-pseudo-oracle.mjs --check",
+    "test": "pnpm run check && pnpm run check:style-pseudo"
   },
   "devDependencies": {
     "@vue/compiler-dom": "3.6.0-rc.1",

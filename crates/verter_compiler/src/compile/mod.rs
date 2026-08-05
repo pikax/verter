@@ -545,15 +545,25 @@ fn compile_inner(
                 }
 
                 if style.module && dialect == Some(CssDialect::Css) {
-                    let plain = PlainCssInput::new_css(
+                    match PlainCssInput::try_new(
                         &rewritten,
+                        authored_dialect,
                         source_name,
                         "standalone:carrier",
                         "standalone:carrier-bytes",
-                    );
-                    match transform_vue_css_modules(plain, scope_id_str) {
-                        Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
-                        Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
+                    ) {
+                        Ok(plain) => match transform_vue_css_modules(plain, scope_id_str) {
+                            Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
+                            Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
+                            Err(error) => {
+                                push_style_rewrite_diagnostic(
+                                    &mut all_diagnostics,
+                                    content.start,
+                                    &error,
+                                );
+                                rewritten.clear();
+                            }
+                        },
                         Err(error) => {
                             push_style_rewrite_diagnostic(
                                 &mut all_diagnostics,
@@ -565,33 +575,44 @@ fn compile_inner(
                     }
                 }
 
-                if style.scoped && dialect == Some(CssDialect::Css) && !rewritten.is_empty() {
-                    let plain = PlainCssInput::new_css(
+                if style.scoped && !rewritten.is_empty() {
+                    let plain = PlainCssInput::try_new(
                         &rewritten,
+                        authored_dialect,
                         source_name,
                         "standalone:carrier",
                         "standalone:carrier-bytes",
                     );
-                    match transform_vue_scoped_css(plain, scope_id_str) {
-                        Ok(StyleRewriteOutcome::Unchanged { facts }) => {
-                            for refusal in &facts.refusals {
+                    match plain {
+                        Ok(plain) => match transform_vue_scoped_css(plain, scope_id_str) {
+                            Ok(StyleRewriteOutcome::Unchanged { facts }) => {
+                                for refusal in &facts.refusals {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        content.start,
+                                        refusal,
+                                    );
+                                }
+                            }
+                            Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                                for refusal in &facts.refusals {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        content.start,
+                                        refusal,
+                                    );
+                                }
+                                rewritten = code;
+                            }
+                            Err(error) => {
                                 push_style_rewrite_diagnostic(
                                     &mut all_diagnostics,
                                     content.start,
-                                    refusal,
+                                    &error,
                                 );
+                                rewritten.clear();
                             }
-                        }
-                        Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
-                            for refusal in &facts.refusals {
-                                push_style_rewrite_diagnostic(
-                                    &mut all_diagnostics,
-                                    content.start,
-                                    refusal,
-                                );
-                            }
-                            rewritten = code;
-                        }
+                        },
                         Err(error) => {
                             push_style_rewrite_diagnostic(
                                 &mut all_diagnostics,

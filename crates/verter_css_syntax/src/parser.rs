@@ -1346,10 +1346,10 @@ impl<'a> Parser<'a> {
         };
         let name = name_token.map_or("", |token| token_name(self.source, token));
         let functional = name_token.map(SyntaxToken::kind) == Some(TokenKind::Function);
-        let kind = if pseudo_element {
-            SyntaxKind::PseudoElement
-        } else if functional && is_selector_list_pseudo(name) {
+        let kind = if functional && is_selector_list_pseudo(name) {
             SyntaxKind::PseudoSelectorList
+        } else if pseudo_element {
+            SyntaxKind::PseudoElement
         } else if functional && is_nth_pseudo(name) {
             SyntaxKind::NthSelector
         } else if functional {
