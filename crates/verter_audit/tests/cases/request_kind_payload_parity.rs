@@ -57,6 +57,7 @@ fn every_request_kind() -> Vec<RequestKind> {
             name: "test".to_string(),
         },
         RequestKind::TypeInfoGraph,
+        RequestKind::FlowReturnInference,
     ]
 }
 
@@ -66,8 +67,8 @@ fn every_request_kind_appears_exactly_once() {
     // Discriminating cardinality — drops surface here.
     assert_eq!(
         kinds.len(),
-        10,
-        "RequestKind covers exactly 10 variants (the typeinfo graph variant lands as #10)",
+        11,
+        "RequestKind covers exactly 11 variants (the flow-return inference variant lands as #11)",
     );
 
     // Each variant's filter name is distinct.
@@ -83,6 +84,7 @@ fn every_request_kind_appears_exactly_once() {
         "BundlerBatch",
         "Custom",
         "TypeInfoGraph",
+        "FlowReturnInference",
     ];
     for filter in filters {
         assert!(
@@ -155,6 +157,53 @@ fn typeinfo_graph_payload_accessor_returns_some() {
 }
 
 #[test]
+fn flow_return_inference_kind_pairs_with_flow_return_inference_payload() {
+    use verter_audit::payloads::FlowReturnInferencePayload;
+
+    let kind = RequestKind::FlowReturnInference;
+    assert!(kind.matches_filter("FlowReturnInference"));
+
+    let payload = RequestKindPayload::FlowReturnInference(FlowReturnInferencePayload::default());
+    // The payload variant must exist alongside the kind variant.
+    match payload {
+        RequestKindPayload::FlowReturnInference(_) => {}
+        other => panic!("RequestKindPayload::FlowReturnInference expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn flow_return_inference_payload_accessor_returns_some() {
+    use verter_audit::payloads::FlowReturnInferencePayload;
+    use verter_audit::record::RequestAuditRecord;
+
+    let mut record = RequestAuditRecord {
+        request_id: 1,
+        canonical_id: "/foo.ts".to_string(),
+        target_identity: Some(verter_audit::RequestTargetIdentity::RegisteredCanonical(
+            "/foo.ts".to_string(),
+        )),
+        kind: RequestKind::FlowReturnInference,
+        parent_request_id: None,
+        from_cache: false,
+        timings: Default::default(),
+        memory: Default::default(),
+        store: Default::default(),
+        footprint: None,
+        scheduler: None,
+        files: Vec::new(),
+        waits: None,
+        kind_payload: RequestKindPayload::FlowReturnInference(FlowReturnInferencePayload::default()),
+        trace_id: String::new(),
+        capture_state: verter_audit::AuditCaptureState::ActiveStored,
+    };
+    assert!(record.flow_return_inference_payload().is_some());
+
+    // Switching the payload to a non-flow variant returns None.
+    record.kind_payload = RequestKindPayload::None;
+    assert!(record.flow_return_inference_payload().is_none());
+}
+
+#[test]
 fn every_payload_variant_has_a_matching_kind_arm() {
     // The substrate sets up the pairing as (RequestKind, RequestKindPayload).
     // A payload arm that lacked a matching kind variant would be
@@ -172,6 +221,7 @@ fn every_payload_variant_has_a_matching_kind_arm() {
         RequestKindPayload::Mcp(Default::default()),
         RequestKindPayload::BundlerBatch(Default::default()),
         RequestKindPayload::TypeInfoGraph(Default::default()),
+        RequestKindPayload::FlowReturnInference(Default::default()),
         RequestKindPayload::None,
     ];
 
@@ -193,19 +243,20 @@ fn every_payload_variant_has_a_matching_kind_arm() {
             | RequestKindPayload::Lsp(_)
             | RequestKindPayload::Mcp(_)
             | RequestKindPayload::BundlerBatch(_)
-            | RequestKindPayload::TypeInfoGraph(_) => typed_arms += 1,
+            | RequestKindPayload::TypeInfoGraph(_)
+            | RequestKindPayload::FlowReturnInference(_) => typed_arms += 1,
             RequestKindPayload::None => none_arms += 1,
         }
     }
 
-    // 9 typed payload arms + `None` = 10 total in the enum.
+    // 10 typed payload arms + `None` = 11 total in the enum.
     assert_eq!(
-        typed_arms, 9,
-        "9 typed `RequestKindPayload` arms must each appear in the partition"
+        typed_arms, 10,
+        "10 typed `RequestKindPayload` arms must each appear in the partition"
     );
     assert_eq!(
         none_arms, 1,
         "exactly one `RequestKindPayload::None` placeholder appears"
     );
-    assert_eq!(payloads.len(), 10);
+    assert_eq!(payloads.len(), 11);
 }

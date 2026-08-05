@@ -56,6 +56,8 @@ mod env_hash_isolation;
 mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
+#[path = "g_misc0/flow_return_audit_tls_propagation.rs"]
+mod flow_return_audit_tls_propagation;
 #[path = "g_misc0/framework_adapter_guards.rs"]
 mod framework_adapter_guards;
 #[path = "g_misc0/framework_carrier_compiler_guards.rs"]

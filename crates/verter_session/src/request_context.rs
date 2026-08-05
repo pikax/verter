@@ -734,6 +734,18 @@ pub struct RequestContext {
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`] so a
     /// consumer can recover which query families a resolution actually touched.
     pub type_resolution_dispatched_query_tags: AtomicU32,
+    /// Number of cold whole-function flow-return evaluations this
+    /// request ran (root plus nested inline frames). Bumped at the
+    /// `FlowReturnStarted` emission site; a warm family hit bumps
+    /// nothing (the cold-vs-warm audit contract's counter witness).
+    pub flow_return_cold_computes: AtomicU32,
+    /// Number of flow-slice budget refusals observed. Bumped at the
+    /// `FlowSliceBudgetExceeded` emission site.
+    pub flow_return_budget_exceeded: AtomicU32,
+    /// Number of coinductive flow-cycle re-entry holds recorded on
+    /// the shared obligation runtime. Bumped at the
+    /// `FlowCycleSentinelHit` emission site.
+    pub flow_return_cycle_reentries: AtomicU32,
     /// Per-context accumulator for compile-phase wall-clock — parse
     /// phase. Stored as fixed-point microseconds (`f64` ms × 1_000`)
     /// so the atomic counter can `fetch_add` cheaply; finalisation
@@ -1240,6 +1252,9 @@ impl RequestContext {
             type_resolution_depth_high_water: AtomicU16::new(0),
             type_resolution_recursion_limit_reached: AtomicBool::new(false),
             type_resolution_dispatched_query_tags: AtomicU32::new(0),
+            flow_return_cold_computes: AtomicU32::new(0),
+            flow_return_budget_exceeded: AtomicU32::new(0),
+            flow_return_cycle_reentries: AtomicU32::new(0),
             compile_parse_us: AtomicU64::new(0),
             compile_transform_us: AtomicU64::new(0),
             compile_codegen_us: AtomicU64::new(0),

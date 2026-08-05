@@ -493,6 +493,113 @@ mod canary_signature_fingerprint_zero_alloc {
     }
 }
 
+mod canary_flow_return_audit_emission_zero_alloc {
+    //! Cold-vs-warm audit contract, allocation half
+    //! (`U6.FLOW_RETURN_SUBSTRATE` exit acceptance): without an
+    //! installed accumulator the flow-return audit emission helpers
+    //! allocate NOTHING — no event payload, no detail string, no
+    //! boxed variant. The warm family hit never reaches the helpers
+    //! at all (the behavioral half, pinned by
+    //! `warm_hit_emits_no_flow_return_started_event` in
+    //! `tests/cases/g_type/flow_return_audit_contract.rs`); this
+    //! canary pins that even the COLD-path helpers construct no
+    //! audit payload when no accumulator is installed, so a request
+    //! with audit off / footprint off pays zero audit allocation on
+    //! the flow path.
+    //!
+    //! Discrimination: a regression that builds a payload BEFORE the
+    //! accumulator gate — a `format!` detail, a `String::from`
+    //! canonical, a boxed event — reports ≥ 1 allocation per call
+    //! and pushes the 10 000-iteration delta to ≥ 10 000. The
+    //! companion test proves the counter responds to a real
+    //! per-iteration allocation through the same helpers' argument
+    //! shape, so the zero cannot be vacuous.
+    //!
+    //! Measurement isolation: no request context and no accumulator
+    //! are installed on this harness thread; the helpers' TLS probes
+    //! are warmed before the measured window so lazy TLS init is not
+    //! attributed to the loop.
+
+    use std::hint::black_box;
+    use std::sync::Arc;
+
+    use verter_semantic::analysis::flow::peeker::{FlowSliceBudgetAxis, FlowSliceBudgetExceeded};
+    use verter_session::flow_return_audit::{
+        record_flow_cycle_reentry, record_flow_return_started, record_flow_slice_budget_exceeded,
+    };
+
+    use super::alloc_count;
+
+    #[test]
+    fn emission_helpers_allocate_nothing_without_accumulator() {
+        // Setup phase — argument construction allocates and is NOT
+        // counted toward the measured delta.
+        let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
+        let symbol: Arc<str> = Arc::from("makeThing");
+        let exceeded = FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ReturnSites,
+            limit: 256,
+            observed: 300,
+        };
+
+        // Warm the TLS probes (request-context slot, accumulator
+        // slot) so one-time lazy initialisation is pre-paid.
+        for _ in 0..64 {
+            record_flow_return_started(&canonical, &symbol);
+            record_flow_slice_budget_exceeded(&exceeded);
+            record_flow_cycle_reentry(1, &symbol);
+        }
+
+        let baseline = alloc_count();
+        const ITERATIONS: usize = 10_000;
+        for i in 0..ITERATIONS {
+            record_flow_return_started(&canonical, &symbol);
+            record_flow_slice_budget_exceeded(&exceeded);
+            record_flow_cycle_reentry(i as u32, &symbol);
+        }
+        let after = alloc_count();
+        let delta = after - baseline;
+        assert_eq!(
+            delta, 0,
+            "flow-return audit emission helpers must allocate NOTHING without an \
+             installed accumulator (the cold-vs-warm audit contract's \
+             no-audit-payload half). A helper that builds a payload before the \
+             accumulator gate — a format!() detail, a String canonical, a boxed \
+             event — reports ≥ {ITERATIONS} here; observed {delta} over \
+             {ITERATIONS} iterations of all three helpers."
+        );
+    }
+
+    /// Discrimination companion: the same loop shape, with a real
+    /// per-iteration payload allocation of the kind the gate must
+    /// prevent. The counter must observe it — proving the zero above
+    /// is a measured zero, not a dead counter.
+    #[test]
+    fn discrimination_companion_ungated_payload_is_observed() {
+        let canonical: Arc<str> = Arc::from("/w/flow-canary.ts");
+        let symbol: Arc<str> = Arc::from("makeThing");
+        for i in 0..32 {
+            let _ = black_box(format!("warmup-{i}"));
+        }
+        let baseline = alloc_count();
+        const ITERATIONS: usize = 1_000;
+        for _ in 0..ITERATIONS {
+            // Exactly the payload an ungated helper would build.
+            let detail = format!("{canonical}::{symbol}");
+            black_box(detail);
+        }
+        let after = alloc_count();
+        let delta = after - baseline;
+        assert!(
+            delta >= ITERATIONS as u64,
+            "companion: a per-iteration format!() payload must be observed by the \
+             counting allocator (≥ {ITERATIONS} allocations); got {delta}. A zero \
+             here means the counter is not wired and the zero-allocation canary \
+             above proves nothing."
+        );
+    }
+}
+
 mod canary_fact_emission_allocation_volume_class {
     //! ALLOCATION-COMPLEXITY canary for `emit_parse_facts`.
     //!

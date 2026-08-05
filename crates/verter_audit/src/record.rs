@@ -10,9 +10,9 @@ use crate::footprint::RequestFootprintAudit;
 use crate::memory::RequestMemoryAudit;
 use crate::payloads::tags::{BundlerKindTag, CompileTargetTag, LspMethodTag};
 use crate::payloads::{
-    BundlerBatchPayload, CompilePayload, ComponentMetaPayload, LspRequestPayload, McpToolPayload,
-    SemanticAnalysisPayload, TypeInfoGraphPayload, TypeResolutionPayload, WorkspaceOp,
-    WorkspacePayload,
+    BundlerBatchPayload, CompilePayload, ComponentMetaPayload, FlowReturnInferencePayload,
+    LspRequestPayload, McpToolPayload, SemanticAnalysisPayload, TypeInfoGraphPayload,
+    TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };
 use crate::scheduler::SchedulerAudit;
 use crate::store::RequestStoreAudit;
@@ -350,6 +350,15 @@ impl RequestAuditRecord {
             _ => None,
         }
     }
+
+    /// Borrow the record's flow-return inference payload, if any.
+    #[must_use]
+    pub fn flow_return_inference_payload(&self) -> Option<&FlowReturnInferencePayload> {
+        match &self.kind_payload {
+            RequestKindPayload::FlowReturnInference(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// How much audit work the producing entry-point actually did for a
@@ -441,6 +450,12 @@ pub enum RequestKind {
     /// [`TypeInfoGraphPayload`] aggregating counters from the response
     /// snapshot.
     TypeInfoGraph,
+    /// Flow-return inference request — the host's audited
+    /// whole-function return-type entry-point
+    /// (`get_flow_return_type_with_audit`) opens a record with this
+    /// kind and populates [`RequestKindPayload::FlowReturnInference`]
+    /// with per-request cold-path counters.
+    FlowReturnInference,
 }
 
 impl RequestKind {
@@ -465,6 +480,7 @@ impl RequestKind {
                 | ("BundlerBatch", RequestKind::BundlerBatch { .. })
                 | ("Custom", RequestKind::Custom { .. })
                 | ("TypeInfoGraph", RequestKind::TypeInfoGraph)
+                | ("FlowReturnInference", RequestKind::FlowReturnInference)
         )
     }
 }
@@ -503,6 +519,11 @@ pub enum RequestKindPayload {
     /// [`RequestKind::TypeInfoGraph`]. Carries aggregated counters
     /// from the graph snapshot the request produced.
     TypeInfoGraph(TypeInfoGraphPayload),
+    /// Flow-return inference payload — paired with
+    /// [`RequestKind::FlowReturnInference`]. Carries the per-request
+    /// cold-path counters (cold computes, budget refusals, cycle
+    /// re-entry holds).
+    FlowReturnInference(FlowReturnInferencePayload),
 }
 
 /// Phase-specific audit data threaded through TLS by the request

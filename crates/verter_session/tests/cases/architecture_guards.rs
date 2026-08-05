@@ -12661,6 +12661,19 @@ fn wave_3_entry_points_propagate_tls() {
             "audit_mcp_tool_call",
             &["crates/verter_session/tests/cases/g_misc0/mcp_audit_tls_propagation.rs"],
         ),
+        // FlowReturnInference producer.
+        // `get_flow_return_type_with_audit` (verter_session) drives
+        // the `RequestKind::FlowReturnInference` audit producer. The
+        // TLS driver asserts the cold flow evaluation's
+        // `cold_computes` counter increments (proving the request
+        // context installed by the entry-point's guard was reachable
+        // at the `FlowReturnStarted` emission site) and that the
+        // harness's outer guard remains visible after the
+        // entry-point's nested guard drops.
+        (
+            "get_flow_return_type_with_audit",
+            &["crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs"],
+        ),
     ];
 
     // Wave-3 entry-points that ship WITHOUT a paired TLS test.

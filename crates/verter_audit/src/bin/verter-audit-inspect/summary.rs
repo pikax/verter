@@ -178,5 +178,6 @@ pub(crate) fn kind_label(kind: &RequestKind) -> String {
         RequestKind::BundlerBatch { kind } => format!("BundlerBatch({kind:?})"),
         RequestKind::Custom { name } => format!("Custom({name})"),
         RequestKind::TypeInfoGraph => "TypeInfoGraph".to_string(),
+        RequestKind::FlowReturnInference => "FlowReturnInference".to_string(),
     }
 }

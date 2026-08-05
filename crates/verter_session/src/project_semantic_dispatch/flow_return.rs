@@ -138,6 +138,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     ) -> FlowReturnKey {
+        // The canonical production point: whole return. The demand axis
+        // is KEY DATA — a narrower demand is a distinct cache and
+        // re-entry identity, never an implicit default.
+        self.flow_return_key_with_demand(
+            identity,
+            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        )
+    }
+
+    /// The demand-parameterised half of [`Self::flow_return_key_for`] —
+    /// still the ONE construction point (the whole-return wrapper
+    /// delegates here; the audited host seam passes the caller's
+    /// demand). The input axis stays the canonical EMPTY point: no
+    /// production contextual-input producer exists, and a non-empty
+    /// point is a distinct cache/re-entry identity a later block mints.
+    pub(crate) fn flow_return_key_with_demand(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        demand: crate::semantic_query::ReturnProjectionDemand,
+    ) -> FlowReturnKey {
         FlowReturnKey {
             function: self.flow_function_slot_for(
                 Arc::clone(&identity.anchor.canonical_id),
@@ -148,11 +168,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
-            // The canonical production point: whole return, empty input.
-            // The axes are KEY DATA — a narrower demand or a contextual
-            // input is a distinct cache and re-entry identity, never an
-            // implicit default.
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            demand,
             input: crate::semantic_query::FlowInputContext::empty(),
         }
     }
@@ -218,6 +234,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
                 txn.obligations.record_assumption(idx);
+                drop(txn);
+                // Cold-path flow-cycle sentinel: a re-entry only occurs
+                // while the component is being cold-evaluated (a warm
+                // hit never opens a frame to re-enter).
+                crate::flow_return_audit::record_flow_cycle_reentry(
+                    u32::try_from(idx).unwrap_or(u32::MAX),
+                    &key.function.declaration_slot.merged_symbol_name,
+                );
                 return FlowReturnStep::Hold(Box::new(key));
             }
         }
@@ -905,6 +929,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     MaterializedSet::empty(),
                 )
             };
+        // Cold-path start event: every cold whole-function evaluation
+        // (root and nested inline frames) passes through here; the warm
+        // family hit in `execute_flow_return` returns before any frame
+        // opens, so a warm hit can never reach this emission.
+        crate::flow_return_audit::record_flow_return_started(
+            &key.function.declaration_slot.defining_canonical,
+            &key.function.declaration_slot.merged_symbol_name,
+        );
         // The evaluation models exactly the whole-return / empty-input
         // point today. Any other demand/input point fails CLOSED with a
         // typed no-value outcome — never a silently widened whole-return
@@ -977,6 +1009,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     observed = exceeded.observed,
                     "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
                 );
+                crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
                 return degraded(
                     FlowReturnFailure::Budget(
                         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,

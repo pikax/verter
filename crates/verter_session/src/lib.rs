@@ -159,6 +159,7 @@ mod decl_body_dispatch_equivalence_tests;
 pub(crate) mod decl_body_memo;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
+pub mod flow_return_audit;
 pub mod framework;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
@@ -276,6 +277,7 @@ mod host_construction;
 pub(crate) mod host_executor;
 #[cfg(test)]
 mod host_executor_lowering_tests;
+pub mod host_flow_return_audit;
 mod host_lifecycle;
 pub mod host_lsp_audit;
 pub mod host_manage;

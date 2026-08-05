@@ -285,6 +285,8 @@ pub enum KindBit {
     Custom = 8,
     /// `RequestKind::TypeInfoGraph`.
     TypeInfoGraph = 9,
+    /// `RequestKind::FlowReturnInference`.
+    FlowReturnInference = 10,
 }
 
 impl KindBit {
@@ -302,6 +304,7 @@ impl KindBit {
             RequestKind::BundlerBatch { .. } => Self::BundlerBatch,
             RequestKind::Custom { .. } => Self::Custom,
             RequestKind::TypeInfoGraph => Self::TypeInfoGraph,
+            RequestKind::FlowReturnInference => Self::FlowReturnInference,
         }
     }
 }
@@ -340,5 +343,22 @@ mod tests {
         let filter = AuditConsumerFilter::default().deny(KindBit::ComponentMeta);
         assert!(!filter.allows(&RequestKind::ComponentMeta));
         assert!(filter.allows(&RequestKind::TypeResolution));
+    }
+
+    #[test]
+    fn flow_return_inference_bit_filters_independently() {
+        // The new bit toggles ONLY the flow-return kind: denying it
+        // keeps every other kind, and allow_only([FlowReturnInference])
+        // admits exactly it. A `from_kind` mapping that collapsed the
+        // variant onto another bit fails both directions.
+        let denied = AuditConsumerFilter::default().deny(KindBit::FlowReturnInference);
+        assert!(!denied.allows(&RequestKind::FlowReturnInference));
+        assert!(denied.allows(&RequestKind::TypeInfoGraph));
+        assert!(denied.allows(&RequestKind::TypeResolution));
+
+        let only = AuditConsumerFilter::allow_only([KindBit::FlowReturnInference]);
+        assert!(only.allows(&RequestKind::FlowReturnInference));
+        assert!(!only.allows(&RequestKind::TypeInfoGraph));
+        assert!(!only.allows(&RequestKind::ComponentMeta));
     }
 }

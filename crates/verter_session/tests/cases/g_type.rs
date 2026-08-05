@@ -1,5 +1,7 @@
 //! Consolidated integration-test group `type`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+#[path = "g_type/flow_return_audit_contract.rs"]
+mod flow_return_audit_contract;
 #[path = "g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs"]
 mod type_resolution_audit_cache_reuse_across_entrypoints;
 #[path = "g_type/type_resolution_audit_diamond_repeated_prop.rs"]

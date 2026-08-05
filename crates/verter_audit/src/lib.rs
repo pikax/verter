@@ -100,12 +100,14 @@ pub use published_surface::{
 pub use payloads::cache_outcomes::CacheOutcomeKind;
 pub use payloads::tags::{
     AdmissionRefusalReason, AugmentationTargetKindTag, BundlerKindTag, CompileTargetTag,
-    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, LspMethodTag, ProjectionModeTag,
+    FactKeyKindTag, FactLaneTag, FileArtifactCacheAction, FlowSliceBudgetAxisTag, LspMethodTag,
+    ProjectionModeTag,
 };
 pub use payloads::{
     AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
-    ComponentMetaPayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,
-    SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
+    ComponentMetaPayload, FlowReturnInferencePayload, LspRequestPayload, McpToolPayload,
+    SemanticAnalysisPayload, SlowRecordSummary, TypeResolutionPayload, WorkspaceOp,
+    WorkspacePayload,
 };
 pub use record::{
     AuditCaptureState, Hash16, IncidentalFields, RequestAuditRecord, RequestKind,

@@ -301,6 +301,12 @@ custom_count: number,
  */
 typeinfo_graph_count: number,
 /**
+ * Records with `kind == RequestKind::FlowReturnInference`.
+ * Serde-default for back-compat with payloads emitted before
+ * this additive counter landed.
+ */
+flow_return_inference_count: number,
+/**
  * Sum of `RequestTimingAudit::total_ms` across the batch.
  */
 total_duration_ms: number,
@@ -945,6 +951,50 @@ lower_ms?: number | null, };
  * the role is determined by which path the file came in through.
  */
 export type FileRole = "Entry" | "DirectImport" | "TransitiveImport" | "TypeDep" | "IndexedReadyBuild" | "NotLoaded" | "ResolverWalk";
+
+/**
+ * Per-request counters for one flow-return inference request.
+ *
+ * The three counters mirror the cold-path structured events one to
+ * one: each cold whole-function evaluation bumps `cold_computes`
+ * (paired with `FlowReturnStarted`), each flow-slice budget refusal
+ * bumps `budget_exceeded_events` (paired with
+ * `FlowSliceBudgetExceeded`), and each coinductive re-entry hold on
+ * the obligation runtime bumps `cycle_reentry_holds` (paired with
+ * `FlowCycleSentinelHit`). A warm family hit bumps nothing — the
+ * cold-vs-warm audit contract's counter-side witness is
+ * `cold_computes == 0`.
+ */
+export type FlowReturnInferencePayload = {
+/**
+ * Demanded function's symbol name (display attribution only —
+ * the record's `target_identity` carries the canonical file).
+ */
+function_symbol: string,
+/**
+ * Number of cold whole-function flow evaluations this request
+ * ran (root plus nested inline frames). `0` on a pure warm hit.
+ */
+cold_computes: number,
+/**
+ * Number of flow-slice budget refusals observed (each one is a
+ * typed `Budget` failure routed through `ReturnOnly`).
+ */
+budget_exceeded_events: number,
+/**
+ * Number of coinductive re-entry holds recorded on the shared
+ * obligation runtime (the flow-cycle sentinel).
+ */
+cycle_reentry_holds: number, };
+
+/**
+ * Which flow-slice budget axis tripped — the substrate mirror of the
+ * planner's `FlowSliceBudgetAxis` (the audit leaf crate cannot name
+ * the semantic type; producers convert at the emission site). Carried
+ * by
+ * [`super::super::structured_event::StructuredAuditEvent::FlowSliceBudgetExceeded`].
+ */
+export type FlowSliceBudgetAxisTag = "ReturnSites" | "SelectedNodes";
 
 /**
  * Closed mirror of the per-kind framework-surface support
@@ -1755,7 +1805,7 @@ kind: BundlerKindTag, } } | { "Custom": {
 /**
  * Free-form name describing the custom kind.
  */
-name: string, } } | "TypeInfoGraph";
+name: string, } } | "TypeInfoGraph" | "FlowReturnInference";
 
 /**
  * Strongly-typed payload paired with [`RequestKind`]. The variant
@@ -1764,7 +1814,7 @@ name: string, } } | "TypeInfoGraph";
  * `RequestAuditRecord` envelope still carries the generic timing /
  * memory / store / footprint data in that case).
  */
-export type RequestKindPayload = { "kind": "None" } | { "kind": "ComponentMeta" } & ComponentMetaPayload | { "kind": "TypeResolution" } & TypeResolutionPayload | { "kind": "SemanticAnalysis" } & SemanticAnalysisPayload | { "kind": "Compile" } & CompilePayload | { "kind": "Workspace" } & WorkspacePayload | { "kind": "Lsp" } & LspRequestPayload | { "kind": "Mcp" } & McpToolPayload | { "kind": "BundlerBatch" } & BundlerBatchPayload | { "kind": "TypeInfoGraph" } & TypeInfoGraphPayload;
+export type RequestKindPayload = { "kind": "None" } | { "kind": "ComponentMeta" } & ComponentMetaPayload | { "kind": "TypeResolution" } & TypeResolutionPayload | { "kind": "SemanticAnalysis" } & SemanticAnalysisPayload | { "kind": "Compile" } & CompilePayload | { "kind": "Workspace" } & WorkspacePayload | { "kind": "Lsp" } & LspRequestPayload | { "kind": "Mcp" } & McpToolPayload | { "kind": "BundlerBatch" } & BundlerBatchPayload | { "kind": "TypeInfoGraph" } & TypeInfoGraphPayload | { "kind": "FlowReturnInference" } & FlowReturnInferencePayload;
 
 /**
  * Memory snapshots — process RSS before/after, plus host and
@@ -2893,7 +2943,36 @@ layer: string,
 /**
  * Which graph operation the hit attributed to.
  */
-operation: GraphOperationTag, } } | { "Custom": {
+operation: GraphOperationTag, } } | { "FlowReturnStarted": {
+/**
+ * Canonical id of the file owning the demanded function.
+ */
+canonical_id: string,
+/**
+ * Demanded function's symbol name.
+ */
+function_symbol: string, } } | { "FlowSliceBudgetExceeded": {
+/**
+ * Which budget axis tripped.
+ */
+axis: FlowSliceBudgetAxisTag,
+/**
+ * The configured limit of the tripped axis.
+ */
+limit: number,
+/**
+ * The observed count when the limit tripped.
+ */
+observed: number, } } | { "FlowCycleSentinelHit": {
+/**
+ * Request-scoped identifier of the in-flight obligation
+ * frame the re-entry targeted.
+ */
+cycle_id: number,
+/**
+ * The re-entered function's symbol name.
+ */
+function_symbol: string, } } | { "Custom": {
 /**
  * Short identifier for the event kind.
  */
