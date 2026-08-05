@@ -4169,7 +4169,7 @@ fn lifted_row_audit_query_mode_matches_spec() {
         );
     }
 
-    // Independent expected fact: all forty-six seated rows are
+    // Independent expected fact: all forty-nine seated rows are
     // Expanded-mode oracle identities (every lift to date was verified in the
     // original `Expanded` projection mode).
     let expanded = ORACLE_QUERY_SPECS
@@ -4177,8 +4177,8 @@ fn lifted_row_audit_query_mode_matches_spec() {
         .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
         .count();
     assert_eq!(
-        expanded, 46,
-        "all forty-six seated lifted rows must be Expanded-mode oracle identities",
+        expanded, 49,
+        "all forty-nine seated lifted rows must be Expanded-mode oracle identities",
     );
 }
 
@@ -4388,7 +4388,7 @@ fn landed_typeinfo_blocks_have_required_guards() {
 /// FAILS the shared engine; the same block as `Pending` passes.
 #[test]
 fn landed_guard_engine_fails_on_landed_block_with_owed_guard() {
-    let owed_id = GuardId::FlowSliceIsGraphReachabilityNotProceduralWalk;
+    let owed_id = GuardId::FlowSolverNeverSlicesSourceText;
     let spec = guard_spec(owed_id).expect("registered");
     assert!(
         matches!(spec.disposition, GuardDisposition::Owed),
@@ -4396,7 +4396,7 @@ fn landed_guard_engine_fails_on_landed_block_with_owed_guard() {
     );
     let mut broken = TYPEINFO_PARITY_BLOCKS[0];
     broken.status = BlockLandingStatus::Landed;
-    broken.required_guards = &[GuardId::FlowSliceIsGraphReachabilityNotProceduralWalk];
+    broken.required_guards = &[GuardId::FlowSolverNeverSlicesSourceText];
     let failures = landed_blocks_with_unlive_required_guards(&[broken], GUARD_REGISTRY);
     assert!(
         failures.iter().any(|f| f.contains("Owed")),

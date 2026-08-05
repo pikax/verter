@@ -445,20 +445,20 @@ const GUARD_REGISTRY: &[GuardSpec] = &[
     GuardSpec { id: GuardId::JsxIntrinsicElementsProjectViaIndexedAccess, owner: TypeInfoParityBlockId::U2JsxFoundations, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::JsxNoDedicatedGraphTypeNode, owner: TypeInfoParityBlockId::U2JsxFoundations, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::NoDepthSentinelOnFlowReturnPath, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionIntegration } },
-    GuardSpec { id: GuardId::FunctionFlowGraphBuiltOncePerFunctionSkeleton, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowSliceIsGraphReachabilityNotProceduralWalk, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowGraphEffectEdgesStayLivePastValueWrites, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowGraphBuildIsShallowInternedNoLoweringLazyRegions, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowReturnRoutesThroughProjectSemanticDispatch, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowSliceLoweredBodyDoesNotComputeSliceHash, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowSliceKeysOnBodySensitiveHashNotParseStableHash, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowReturnKeyCoversEnvDimensions, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowReturnKeyCoversInputContextAndProjectionDemand, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
+    GuardSpec { id: GuardId::FunctionFlowGraphBuiltOncePerFunctionSkeleton, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowSliceIsGraphReachabilityNotProceduralWalk, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowGraphEffectEdgesStayLivePastValueWrites, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowGraphBuildIsShallowInternedNoLoweringLazyRegions, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowReturnRoutesThroughProjectSemanticDispatch, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowSliceLoweredBodyDoesNotComputeSliceHash, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowSliceKeysOnBodySensitiveHashNotParseStableHash, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowReturnKeyCoversEnvDimensions, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowReturnKeyCoversInputContextAndProjectionDemand, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
     GuardSpec { id: GuardId::FlowSolverNeverSlicesSourceText, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::NoFlowSlotInPublishedTypeSurface, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowSliceBudgetExceededAdmitsNothing, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
+    GuardSpec { id: GuardId::NoFlowSlotInPublishedTypeSurface, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
+    GuardSpec { id: GuardId::FlowSliceBudgetExceededAdmitsNothing, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
     GuardSpec { id: GuardId::ProgramAnalysisFactDomainValidatesFlowSlice, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
-    GuardSpec { id: GuardId::FlowSliceIrDetachesFromOxcArena, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
+    GuardSpec { id: GuardId::FlowSliceIrDetachesFromOxcArena, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Live { target: GuardTarget::SessionLib } },
     GuardSpec { id: GuardId::SubstitutionEnvCanonicalHashIsOrderIndependent, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::NarrowingFactsComposeInPredicateKeyedFrames, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
     GuardSpec { id: GuardId::NarrowingFactsAreProgramAnalysisNotGraphTypeNodes, owner: TypeInfoParityBlockId::U6FlowReturnSubstrate, disposition: GuardDisposition::Owed },
@@ -596,7 +596,7 @@ const BLOCK_STATUS_EVIDENCE: &[BlockStatusEvidence] = &[
     BlockStatusEvidence { block_id: TypeInfoParityBlockId::U2BinderIdentityFacts, refs: &["commit:0a6c3bd9b", "commit:29155de2c", "guards:crates/verter_session/tests/cases/g_binder/binder_identity_facts.rs"] },
     BlockStatusEvidence { block_id: TypeInfoParityBlockId::U2RelationInfer, refs: &["commit:2ee921b9c", "rows:relation_semantics.rs::relation_optional_property_not_assignable_to_required removed from the partition at 2ee921b9c"] },
     BlockStatusEvidence { block_id: TypeInfoParityBlockId::U2ModuleAugmentation, refs: &["doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (codex STEP-0 ruling SPINEMODAUG: what U2.MODULE_AUGMENTATION actually landed, branch mom/u2-module-aug)"] },
-    BlockStatusEvidence { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, refs: &["commit:a8eef6202", "rows:3 value_inference.rs partition identities removed at a8eef6202", "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)"] },
+    BlockStatusEvidence { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, refs: &["commit:a8eef6202", "rows:3 value_inference.rs partition identities removed at a8eef6202", "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)", "scc-10:share-vs-split record — the five storage-condition checks ran against the LANDED shared artifact (FunctionBodySkeleton + FunctionFlowGraph on one memoized FunctionFlowGraphStore bundle) and ALL FIVE PASS: checks 1-3 (structural detach: arena-free Send+Sync+'static NoTypeExpr skeleton/graph; build-time no-type-lowering; query-independent once-per-content-version identity) via flow_graph_is_arena_free_send_sync_static + flow_graph_build_is_deterministic_over_one_skeleton + skeleton_build_is_deterministic_per_content_version; check 4 against the production store via cache_runtime::flow_slice_node_tests::two_demands_one_function_flow_graph_build (build_count == 1 across two demands); check 5 end-to-end through the projector via component_meta_flow_return_admission_tests::return_type_member_demand_loads_only_the_walked_member (side.ts parse count 0, zero dispatch keys naming it). Recorded outcome per SCC-10: the shared implementation is SHARE-ELIGIBLE-AND-EVIDENCED — a shared artifact passing all five conditions is equally conforming; this records evidence, not a sharing preference."] },
     BlockStatusEvidence { block_id: TypeInfoParityBlockId::U6CallResolve, refs: &["ruling:F1 (hold as IMPLEMENTED_UNLANDED / REBASE_REQUIRED; never landed)", "worktree:branch block/u6-call-resolve"] },
     BlockStatusEvidence { block_id: TypeInfoParityBlockId::U3AdaptiveFamilyRetention, refs: &["doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (Landed bridge block — U3.ADAPTIVE_FAMILY_RETENTION (LANDED))", "guards:crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs"] },
 ];
@@ -616,7 +616,7 @@ struct RowRegistryCounts {
 }
 
 #[rustfmt::skip]
-const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 362, ignored: 302, running_unratified: 14, lifted: 46, superseded: 0 };
+const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 362, ignored: 301, running_unratified: 12, lifted: 49, superseded: 0 };
 
 /// Per-block row-registry counts (same derivation; every block appears,
 /// zero-row blocks included).
@@ -647,7 +647,7 @@ const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Enums, total: 7, ignored: 7, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ModuleAugmentation, total: 4, ignored: 4, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2JsxFoundations, total: 7, ignored: 7, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, total: 7, ignored: 4, running_unratified: 3, lifted: 0, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, total: 7, ignored: 3, running_unratified: 1, lifted: 3, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowTypeof, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowEquality, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowTruthiness, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },

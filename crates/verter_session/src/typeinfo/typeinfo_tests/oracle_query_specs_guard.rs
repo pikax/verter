@@ -21,7 +21,8 @@ use super::oracle::query_specs::{
     MODULE_FEATURES_LEAF_SOURCE, MODULE_FEATURES_PATCH_SOURCE, MODULE_FEATURES_SOURCE,
     ORACLE_QUERY_SPECS, SUBSTITUTION_TYPES_SOURCE, TEMPLATE_LITERAL_INFERENCE_SOURCE,
     TYPESCRIPT_RULES_SOURCE, UNION_KEY_ACCESS_SOURCE, UTILITY_COMPOSITION_SOURCE,
-    UTILITY_EDGE_SOURCE, UTILITY_TOP_BOTTOM_SOURCE, VARIADIC_TUPLES_SOURCE, WIDE_DEEP_SOURCE,
+    UTILITY_EDGE_SOURCE, UTILITY_TOP_BOTTOM_SOURCE, VALUE_INFERENCE_SOURCE, VARIADIC_TUPLES_SOURCE,
+    WIDE_DEEP_SOURCE,
 };
 
 /// The registry inlines each fixture's source bytes (`INDEX_SIGNATURES_SOURCE` /
@@ -240,6 +241,12 @@ fn inlined_registry_source_is_byte_identical_to_fixture_files() {
         "TEMPLATE_LITERAL_INFERENCE_SOURCE (inlined in the registry) drifted from \
          fixtures/template_literal_inference.ts (read by the sibling #[ignore]d tests)",
     );
+    assert_eq!(
+        VALUE_INFERENCE_SOURCE,
+        include_str!("fixtures/value_inference.ts"),
+        "VALUE_INFERENCE_SOURCE (inlined in the registry) drifted from \
+         fixtures/value_inference.ts (read by the sibling #[ignore]d tests)",
+    );
 }
 
 /// A synthetic well-formed spec with a tweakable `oracle_family` + `query_ordinal`.
@@ -274,7 +281,7 @@ fn spec(row_function: &'static str, query_ordinal: u16, oracle_family: &'static 
 
 #[test]
 fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
-    // The lifts seat 46 queries: the two index-signature publication
+    // The lifts seat 49 queries: the two index-signature publication
     // queries, the two built-in modifier-utility queries, the three U2
     // IndexedAccess-reduction carve-out queries, the U2.MAPPED_TEMPLATE
     // `-?` optional-remover query, the three keyof-expansion carve-out
@@ -291,11 +298,14 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
     // intrinsic-lookup lifts (`IntrinsicPropsFor<"div">` /
     // `IntrinsicPropsFor<"span">`), and the two U2.MAPPED_TEMPLATE-era lifts
     // (the `RecordTemplateRootSlot` string-literal index-chain query + the
-    // `CounterHandlers` key-remap mapped-type query); the table is well-formed
-    // (non-empty `oracle_family`, contiguous ordinals).
+    // `CounterHandlers` key-remap mapped-type query), and the three
+    // U6.FLOW_RETURN_SUBSTRATE value-inference queries (the `ReturnType<typeof
+    // bodyReturn>` per-return-site union row and the two `ReturnType<typeof
+    // directArrow>` arrow-body rows); the table is well-formed (non-empty
+    // `oracle_family`, contiguous ordinals).
     assert_eq!(registry_well_formed(ORACLE_QUERY_SPECS), Ok(()));
 
-    // The seated set is EXACTLY those 46 rows, one query each. A stray
+    // The seated set is EXACTLY those 49 rows, one query each. A stray
     // addition / removal FAILS here (discriminating).
     let seated: Vec<(&str, &str, u16)> = ORACLE_QUERY_SPECS
         .iter()
@@ -532,6 +542,21 @@ fn oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed() {
             (
                 "template_literal_inference.rs",
                 "template_literal_key_remap_capitalises_each_event_key",
+                0
+            ),
+            (
+                "value_inference.rs",
+                "value_inference_function_body_return_union_from_return_statements",
+                0
+            ),
+            (
+                "value_inference.rs",
+                "value_inference_arrow_expression_body_publishes_return_shape",
+                0
+            ),
+            (
+                "value_inference.rs",
+                "value_inference_arrow_expression_body_substitutes_parameter_references",
                 0
             ),
         ],

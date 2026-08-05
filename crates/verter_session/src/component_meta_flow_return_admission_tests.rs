@@ -222,3 +222,54 @@ fn return_type_member_demand_loads_only_the_walked_member() {
         expanded.join("\n")
     );
 }
+
+/// Registry-live guard (`GuardId::NoFlowSlotInPublishedTypeSurface`) — a
+/// `FlowReturn` whose intermediate solve transits flow slots publishes a
+/// PLAIN reduced `TypeExpr` with no flow-internal identity. Two rails:
+///
+/// - STRUCTURAL: `TypeExpr` is a closed public enum with NO `FlowSlot`
+///   variant — the published surface cannot carry a slot by type.
+/// - BEHAVIORAL: the published prop reduces to the widened primitive
+///   (`number`), and its rendered value carries no flow-internal
+///   identity (`FlowSlot` / `FlowExpr` / `FlowSlice` / `SlotId`) — a
+///   leaked opaque carrier would trip both assertions.
+#[test]
+pub(crate) fn no_flow_slot_in_published_type_surface() {
+    let host = build_host(&[
+        ("/workspace/src/side.ts", SIDE_TS),
+        ("/workspace/src/MyType.vue", MYTYPE_SFC),
+    ]);
+
+    let (meta, resolution) = host
+        .get_component_meta_with_resolution("/workspace/src/MyType.vue")
+        .expect("ReturnType-admission SFC must resolve");
+    assert!(!resolution.synthesis_should_suppress);
+
+    let b = meta
+        .props
+        .iter()
+        .find(|p| p.name == "b")
+        .expect("b prop present");
+    let b_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/MyType.vue",
+        b.type_source
+            .present()
+            .expect("b prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("b prop's published source must shell-materialize"));
+    assert!(
+        matches!(
+            &b_type,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "the flow transit must REDUCE in the published surface, got {b_type:?}"
+    );
+    let rendered = format!("{b_type:?}");
+    for leak in ["FlowSlot", "FlowExpr", "FlowSlice", "SlotId"] {
+        assert!(
+            !rendered.contains(leak),
+            "published surface leaked a flow-internal identity `{leak}`: {rendered}"
+        );
+    }
+}

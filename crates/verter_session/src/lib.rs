@@ -120,7 +120,7 @@ mod component_meta_component_config_fast_path_tests;
 #[cfg(test)]
 mod component_meta_concurrency_tests;
 #[cfg(test)]
-mod component_meta_flow_return_admission_tests;
+pub(crate) mod component_meta_flow_return_admission_tests;
 pub mod component_meta_host;
 #[cfg(test)]
 mod component_meta_indexed_access_early_out_tests;

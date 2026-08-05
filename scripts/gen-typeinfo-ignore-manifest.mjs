@@ -1094,24 +1094,33 @@ const GUARD_REGISTRY_DATA = [
   // per F1) + the owed demand-sliced substrate contract (Q1) + the shared
   // narrowing-frame guards its narrowing children consume.
   ["no_depth_sentinel_on_flow_return_path", "U6FlowReturnSubstrate", "integration"],
-  ["function_flow_graph_built_once_per_function_skeleton", "U6FlowReturnSubstrate", "owed"],
-  ["flow_slice_is_graph_reachability_not_procedural_walk", "U6FlowReturnSubstrate", "owed"],
-  ["flow_graph_effect_edges_stay_live_past_value_writes", "U6FlowReturnSubstrate", "owed"],
-  [
-    "flow_graph_build_is_shallow_interned_no_lowering_lazy_regions",
-    "U6FlowReturnSubstrate",
-    "owed",
-  ],
-  ["flow_return_routes_through_project_semantic_dispatch", "U6FlowReturnSubstrate", "owed"],
-  ["flow_slice_lowered_body_does_not_compute_slice_hash", "U6FlowReturnSubstrate", "owed"],
-  ["flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash", "U6FlowReturnSubstrate", "owed"],
-  ["flow_return_key_covers_env_dimensions", "U6FlowReturnSubstrate", "owed"],
-  ["flow_return_key_covers_input_context_and_projection_demand", "U6FlowReturnSubstrate", "owed"],
+  ["function_flow_graph_built_once_per_function_skeleton", "U6FlowReturnSubstrate", "lib"],
+  ["flow_slice_is_graph_reachability_not_procedural_walk", "U6FlowReturnSubstrate", "lib"],
+  ["flow_graph_effect_edges_stay_live_past_value_writes", "U6FlowReturnSubstrate", "lib"],
+  ["flow_graph_build_is_shallow_interned_no_lowering_lazy_regions", "U6FlowReturnSubstrate", "lib"],
+  ["flow_return_routes_through_project_semantic_dispatch", "U6FlowReturnSubstrate", "lib"],
+  ["flow_slice_lowered_body_does_not_compute_slice_hash", "U6FlowReturnSubstrate", "lib"],
+  ["flow_slice_keys_on_body_sensitive_hash_not_parse_stable_hash", "U6FlowReturnSubstrate", "lib"],
+  ["flow_return_key_covers_env_dimensions", "U6FlowReturnSubstrate", "lib"],
+  ["flow_return_key_covers_input_context_and_projection_demand", "U6FlowReturnSubstrate", "lib"],
+  // Owed on the landed-scanner bar: the subplan specs this guard as a
+  // name-keyed source grep over the flow module trees, which may not LAND
+  // as a guard (CLAUDE.md, Landed guards are structural). The invariant is
+  // held by the Typed-IR-Only rule's existing guard cluster plus review;
+  // a structural (type-state) replacement is the recorded follow-up.
   ["flow_solver_never_slices_source_text", "U6FlowReturnSubstrate", "owed"],
-  ["no_flow_slot_in_published_type_surface", "U6FlowReturnSubstrate", "owed"],
-  ["flow_slice_budget_exceeded_admits_nothing", "U6FlowReturnSubstrate", "owed"],
+  ["no_flow_slot_in_published_type_surface", "U6FlowReturnSubstrate", "lib"],
+  ["flow_slice_budget_exceeded_admits_nothing", "U6FlowReturnSubstrate", "lib"],
+  // Owed: the `FlowSlice` DISCRIMINANT fact this guard classifies does not
+  // exist on this tree (ratified C7 divergence — warm FlowReturn validity
+  // runs on the sole `ProgramAnalysisFactRef::FlowBody` rail, covered by
+  // `program_analysis_fact_tests` + `flow_return_warm_read_consults_no_slice_state`);
+  // binding those tests here would claim more than they prove.
   ["program_analysis_fact_domain_validates_flow_slice", "U6FlowReturnSubstrate", "owed"],
-  ["flow_slice_ir_detaches_from_oxc_arena", "U6FlowReturnSubstrate", "owed"],
+  ["flow_slice_ir_detaches_from_oxc_arena", "U6FlowReturnSubstrate", "lib"],
+  // Owed: no substitution-canonicalisation producer exists on this tree
+  // (`SubstitutionCanonicalHash` is shape-only; the producer lands with the
+  // inference-session fixation work), so there is no subject to test.
   ["substitution_env_canonical_hash_is_order_independent", "U6FlowReturnSubstrate", "owed"],
   ["narrowing_facts_compose_in_predicate_keyed_frames", "U6FlowReturnSubstrate", "owed"],
   ["narrowing_facts_are_program_analysis_not_graph_type_nodes", "U6FlowReturnSubstrate", "owed"],
@@ -2895,6 +2904,48 @@ const LIFTED_ROW_OVERRIDES = new Map([
         'lifted by U2.MAPPED_TEMPLATE: `CounterHandlers = EventHandlers<"inc" | "dec">` expands the key-remapped mapped type `{ [K in T as `on${Capitalize<K>}`]: (payload: K) => void }` to `{ onDec: (payload: "dec") => void; onInc: (payload: "inc") => void }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
     },
   ],
+  // U6.FLOW_RETURN_SUBSTRATE lifts (the pure value-inference rows whose
+  // mechanism is the bare demand-sliced FlowReturn slice + return-position
+  // widening — the three formerly running_unratified restored rows; the
+  // sibling const-object row transitions ignored -> running_unratified
+  // instead, because its ORIGINAL two-query body defers in the closed
+  // migration extractor).
+  [
+    tkey("value_inference.rs", "value_inference_function_body_return_union_from_return_statements"),
+    {
+      mech: "ReturnPathPeekerTwoFrontier",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
+      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      unblocker:
+        "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof bodyReturn>` solves the two-return-site body through the demand-sliced FlowReturn dispatch to the exact per-arm union (`as const` discriminants preserved, `value` widened to `number`), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("value_inference.rs", "value_inference_arrow_expression_body_publishes_return_shape"),
+    {
+      mech: "ReturnPathPeekerTwoFrontier",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
+      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      unblocker:
+        "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof directArrow>` solves the arrow expression body through the demand-sliced FlowReturn dispatch with return-position literal widening (`ok: true` widens to `boolean`; the pre-substrate tree returned a semantic miss), proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "value_inference.rs",
+      "value_inference_arrow_expression_body_substitutes_parameter_references",
+    ),
+    {
+      mech: "ReturnPathPeekerTwoFrontier",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::ValueInference)",
+      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "FlowReturn", "LowerLocator"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
+      unblocker:
+        "lifted by U6.FLOW_RETURN_SUBSTRATE: `ReturnType<typeof directArrow>` substitutes the parameter references in the returned object (`input: string`; optional `count` injects `number | undefined`) through the demand-sliced FlowReturn dispatch, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
 ]);
 
 // -- RUNNING-UNRATIFIED rows: the restored registry identities whose test
@@ -2948,18 +2999,18 @@ const RUNNING_UNRATIFIED_UNBLOCKERS = new Map([
       "is restored per Q4 (2026-08-04) as running_unratified until Q2 " +
       "ratification lifts it",
   ]),
-  ...[
-    "value_inference_arrow_expression_body_publishes_return_shape",
-    "value_inference_arrow_expression_body_substitutes_parameter_references",
-    "value_inference_function_body_return_union_from_return_statements",
-  ].map((fn) => [
-    tkey("value_inference.rs", fn),
-    "runs always in the default suite (its `#[ignore]` was removed at the " +
-      "whole-function FlowReturn landing, a8eef6202, which Q1 reclassifies " +
-      "as PARTIAL); the registry identity was removed instead of re-statused " +
-      "and is restored per Q4 (2026-08-04) as running_unratified until Q2 " +
-      "ratification lifts it",
-  ]),
+  [
+    tkey("value_inference.rs", "value_inference_const_object_literal_expands_nested_shape"),
+    "runs always in the default suite (its `#[ignore]` was removed when " +
+      "the demand-sliced flow-return substrate landed the `as const` " +
+      "readonly-literal-tuple projection, so the stale mutable-Array " +
+      "ignore reason no longer holds); NOT oracle-liftable " +
+      "today — the ORIGINAL two-query body carries control flow around its " +
+      "second query, which the closed migration extractor rejects " +
+      "(ControlFlowAroundQuery), and a rewritten-to-extract body would not " +
+      "be the frozen original the provenance rail anchors on; lift pending " +
+      "an extractor extension",
+  ],
 ]);
 
 function consumedMechsForBlock(blockVar) {
@@ -2995,6 +3046,7 @@ const KEY_OWNING_BLOCK = new Map([
   ["ResolveEnum", "U2Enums"],
   ["ResolveAmbientNamespace", "U2ModuleAugmentation"],
   ["FlowNarrowingAt", "U6FlowReturnSubstrate"],
+  ["FlowReturn", "U6FlowReturnSubstrate"],
   ["ContextualTypeAt", "U6ContextualCallback"],
   ["ResolveMacroPayload", "U14MacroAdapter"],
 ]);
@@ -4128,7 +4180,10 @@ function main(checkOnly = false) {
       unblocker = escapeRustStringLiteral(override.unblocker);
       rowKeys = [...override.semantic_queries];
       rowConsumed = [...override.consumed_mechanisms];
-      oracleQueryOrdinals = 1;
+      // One oracle query per row unless the lift declares more (a row whose
+      // ORIGINAL body issued N registry-backed queries carries N ordinals —
+      // cross-checked three ways by `registry_entry_count_matches_declared`).
+      oracleQueryOrdinals = override.oracle_query_ordinals ?? 1;
     } else if (entry.status === "running_unratified") {
       mech = mechanismForRow(cap, file_, fnName);
       proof = `ProofRequirement::RowTestGuard { file: "${file_}", ` + `function: "${fnName}" }`;

@@ -1182,7 +1182,7 @@
       "function": "value_inference_const_object_literal_expands_nested_shape",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference",
-      "status": "ignored"
+      "status": "running_unratified"
     },
     {
       "file": "value_inference.rs",
@@ -2519,21 +2519,21 @@
       "function": "value_inference_arrow_expression_body_publishes_return_shape",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference",
-      "status": "running_unratified"
+      "status": "lifted"
     },
     {
       "file": "value_inference.rs",
       "function": "value_inference_arrow_expression_body_substitutes_parameter_references",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference",
-      "status": "running_unratified"
+      "status": "lifted"
     },
     {
       "file": "value_inference.rs",
       "function": "value_inference_function_body_return_union_from_return_statements",
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference",
-      "status": "running_unratified"
+      "status": "lifted"
     }
   ]
 }

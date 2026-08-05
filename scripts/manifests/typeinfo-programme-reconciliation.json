@@ -93,7 +93,8 @@
       "evidence": [
         "commit:a8eef6202",
         "rows:3 value_inference.rs partition identities removed at a8eef6202",
-        "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)"
+        "ruling:Q1 reclassifies the landing as PARTIAL (whole-function shape violates the locked demand-sliced contract)",
+        "scc-10:share-vs-split record — the five storage-condition checks ran against the LANDED shared artifact (FunctionBodySkeleton + FunctionFlowGraph on one memoized FunctionFlowGraphStore bundle) and ALL FIVE PASS: checks 1-3 (structural detach: arena-free Send+Sync+'static NoTypeExpr skeleton/graph; build-time no-type-lowering; query-independent once-per-content-version identity) via flow_graph_is_arena_free_send_sync_static + flow_graph_build_is_deterministic_over_one_skeleton + skeleton_build_is_deterministic_per_content_version; check 4 against the production store via cache_runtime::flow_slice_node_tests::two_demands_one_function_flow_graph_build (build_count == 1 across two demands); check 5 end-to-end through the projector via component_meta_flow_return_admission_tests::return_type_member_demand_loads_only_the_walked_member (side.ts parse count 0, zero dispatch keys naming it). Recorded outcome per SCC-10: the shared implementation is SHARE-ELIGIBLE-AND-EVIDENCED — a shared artifact passing all five conditions is equally conforming; this records evidence, not a sharing preference."
       ]
     },
     {
@@ -373,18 +374,8 @@
     },
     {
       "file": "value_inference.rs",
-      "function": "value_inference_arrow_expression_body_publishes_return_shape",
-      "removed_at": "a8eef6202"
-    },
-    {
-      "file": "value_inference.rs",
-      "function": "value_inference_arrow_expression_body_substitutes_parameter_references",
-      "removed_at": "a8eef6202"
-    },
-    {
-      "file": "value_inference.rs",
-      "function": "value_inference_function_body_return_union_from_return_statements",
-      "removed_at": "a8eef6202"
+      "function": "value_inference_const_object_literal_expands_nested_shape",
+      "note": "not a removed-identity restoration: transitioned ignored -> running_unratified by the U6.FLOW_RETURN_SUBSTRATE landing (the demand-sliced substrate makes the test pass, so the stale mutable-Array ignore reason no longer holds), while the oracle lift stays blocked on the closed migration extractor (ControlFlowAroundQuery on the original two-query body)"
     }
   ]
 }

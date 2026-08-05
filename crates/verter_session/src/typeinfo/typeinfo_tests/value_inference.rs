@@ -1,30 +1,11 @@
 //! @ai-generated - Synthetic value-level typeinfo inference tests.
 
+use super::oracle;
 use super::support::*;
+use verter_session_oracle_macro::oracle_row;
 
 fn upsert_value_fixture(host: &crate::VerterHost) {
     upsert_ts(host, "/fixtures/value-inference.ts", VALUE_INFERENCE);
-}
-
-fn assert_union_arm_state_with_number_value(expr: &TypeExpr, state: &str) {
-    let TypeExpr::Union(types) = expr else {
-        panic!("expected union return type, got {expr:?}");
-    };
-    let found = types.iter().any(|ty| {
-        let TypeExpr::Object(_) = ty else {
-            return false;
-        };
-        let props = object_props(ty);
-        matches!(
-            props.get("state"),
-            Some(prop)
-                if matches!(&prop.ty, TypeExpr::Literal(verter_type_expr::LiteralValue::String(actual)) if actual == state)
-        ) && matches!(props.get("value"), Some(prop) if prop.ty == TypeExpr::Primitive(PrimitiveName::Number))
-    });
-    assert!(
-        found,
-        "expected union {expr:?} to include state {state:?} with widened number value"
-    );
 }
 
 #[test]
@@ -83,8 +64,15 @@ fn value_inference_regular_variables_resolve_typeof_aliases_and_scratch_expressi
     assert_query_mode(&scratch_record, ProjectionModeTag::Expanded);
 }
 
+// RUNNING-UNRATIFIED: the U6.FLOW_RETURN_SUBSTRATE `as const` value lowering
+// projects `typeof objectConst` with its readonly literal tuple `list` and
+// nested literal members — the pre-substrate tree lowered the list to a
+// mutable `Array<1 | 2 | 3>`, so the former `#[ignore]` reason no longer
+// holds. NOT oracle-liftable today: this ORIGINAL two-query body carries
+// control flow around its second query, which the closed migration extractor
+// rejects (`ControlFlowAroundQuery`), and a rewritten-to-extract body would
+// not be the frozen original the provenance rail anchors on.
 #[test]
-#[ignore = "typeinfo currently lowers const object array members to mutable Array<literal union> instead of TypeScript's readonly tuple shape; keep as the future const-object tuple contract"]
 fn value_inference_const_object_literal_expands_nested_shape() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);
@@ -147,79 +135,37 @@ fn value_inference_static_member_expression_typeof_path_resolves_terminal() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// LIFTED: `ReturnType<typeof bodyReturn>` solves the two-return-site body
+// through the demand-sliced FlowReturn dispatch to the exact per-arm union —
+// `as const` `state` discriminants preserved, `value` widened to `number` at
+// return position. Registry-keyed `oracle::run_row` body against the
+// checked-in tsgo snapshot.
+#[oracle_row]
 #[test]
-fn value_inference_function_body_return_union_from_return_statements() {
-    let host = make_host_with_footprint();
-    upsert_value_fixture(&host);
+fn value_inference_function_body_return_union_from_return_statements() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/value-inference.ts",
-        "BodyReturnType",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_union_arm_state_with_number_value(&expr, "on");
-    assert_union_arm_state_with_number_value(&expr, "off");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// LIFTED: TS7 contract — directArrow is inferred as
+// `(input: string, count?: number) => { input: string; count: number |
+// undefined; ok: boolean }`. The `ok: true` literal widens to `boolean` at
+// return position (no contextual type, no `as const`); the pre-substrate tree
+// returned a semantic miss for the arrow body. Registry-keyed
+// `oracle::run_row` body against the checked-in tsgo snapshot. The companion
+// row `value_inference_arrow_expression_body_substitutes_parameter_references`
+// pins the `input`/`count` parameter-substitution side of the same contract.
+#[oracle_row]
 #[test]
-fn value_inference_arrow_expression_body_publishes_return_shape() {
-    // TS7 contract: directArrow is inferred as
-    //   (input: string, count?: number) => { input: string; count: number | undefined; ok: boolean }
-    // The `ok: true` literal widens to `boolean` because the object literal is returned from
-    // an arrow function with no contextual type and no `as const`. Verter currently preserves
-    // the literal `true` (no return-position widening yet). The companion test
-    // `value_inference_arrow_expression_body_substitutes_parameter_references` characterises the
-    // `input`/`count` parameter substitution side of the same contract.
-    let host = make_host_with_footprint();
-    upsert_value_fixture(&host);
+fn value_inference_arrow_expression_body_publishes_return_shape() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/value-inference.ts",
-        "DirectArrowReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_eq!(prop_names(&props), vec!["count", "input", "ok"]);
-    // The shape is `{ input: string; count: number | undefined; ok: boolean }`.
-    assert!(!props["input"].optional);
-    assert_primitive(&props["input"].ty, PrimitiveName::String);
-    // `count?` propagates `undefined` into the union because the parameter is optional.
-    assert_union_contains_primitive(&props["count"].ty, PrimitiveName::Number);
-    assert_union_contains_primitive(&props["count"].ty, PrimitiveName::Undefined);
-    assert!(!props["ok"].optional);
-    assert_primitive(&props["ok"].ty, PrimitiveName::Boolean);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+// LIFTED: the parameter-substitution side of the arrow-body contract —
+// `input` substitutes its `string` annotation; optional `count` injects
+// `number | undefined`. Registry-keyed `oracle::run_row` body against the
+// checked-in tsgo snapshot.
+#[oracle_row]
+#[test]
+fn value_inference_arrow_expression_body_substitutes_parameter_references() {}
 
 #[test]
-fn value_inference_arrow_expression_body_substitutes_parameter_references() {
-    let host = make_host_with_footprint();
-    upsert_value_fixture(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/value-inference.ts",
-        "DirectArrowReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    let props = object_props(&expr);
-    assert_primitive(&props["input"].ty, PrimitiveName::String);
-    assert_expr_contains_primitive(&props["count"].ty, PrimitiveName::Number);
-    assert_expr_contains_primitive(&props["count"].ty, PrimitiveName::Undefined);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
-#[test]
-#[ignore = "typeinfo currently records local function-scope variables as unresolved typeof roots and does not perform TypeScript control-flow narrowing; keep as the future flow-sensitive value inference contract"]
+#[ignore = "the substrate's branch join composes the per-arm return objects, but the text arm's `value` stays `string | number` — narrowing `typeof current === \"string\"` is the U6.NARROW_TYPEOF mechanism, not yet landed; keep as the future flow-sensitive value inference contract"]
 fn value_inference_flow_variables_narrow_return_value_by_branch() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);

@@ -157,9 +157,15 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 /// lowered key is built FROM the minted hash (the opaque
 /// `FlowSliceHash` has no other producer, so the hash structurally
 /// precedes the lowered lookup); the lowered node serves the IR of
-/// exactly the selected slice.
+/// exactly the selected slice. Registry-live guard
+/// (`GuardId::FlowSliceLoweredBodyDoesNotComputeSliceHash`): the
+/// hash-then-lower split is pinned by the opaque `FlowSliceHash`
+/// type-state — the lowered node's key REQUIRES a minted hash and the
+/// type has no byte export and no constructor outside
+/// `compute_flow_slice_hash`, so the lowered compute structurally
+/// cannot re-derive it.
 #[test]
-fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
+pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     let function = function_key("/fixtures/my-type.ts", "myType", 1);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
@@ -208,9 +214,10 @@ fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
 /// Share-vs-split check 4 (`function_flow_graph_built_once_per_function_skeleton`),
 /// the discriminating fixture: two demands against the same function
 /// content version — through BOTH nodes — build the skeleton + graph
-/// exactly ONCE and only re-plan reachability.
+/// exactly ONCE and only re-plan reachability. Registry-live guard
+/// (`GuardId::FunctionFlowGraphBuiltOncePerFunctionSkeleton`).
 #[test]
-fn two_demands_one_function_flow_graph_build() {
+pub(crate) fn two_demands_one_function_flow_graph_build() {
     let function = function_key("/fixtures/my-type.ts", "myType", 1);
     let rig = rig(
         vec![(function.clone(), MYTYPE_FIXTURE)],
@@ -326,9 +333,13 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
 /// `flow_body_stable_hash` are distinct artifacts (separate graph
 /// builds, separate lowered entries) even when the SLICE hash
 /// coincides — a return-literal edit re-keys through the content pin
-/// while the slice identity stays selection-scoped.
+/// while the slice identity stays selection-scoped. Registry-live guard
+/// (`GuardId::FlowSliceKeysOnBodySensitiveHashNotParseStableHash`): the
+/// `return { b: 1 }` / `return { b: 2 }` pair is exactly the contract's
+/// body-sensitive fixture, and the key field IS `flow_body_stable_hash`
+/// (`FlowSliceFunctionKey` carries no `parse_stable_hash`).
 #[test]
-fn distinct_content_versions_key_distinct_artifacts() {
+pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
     let v1 = function_key("/fixtures/lit.ts", "lit", 1);
     let v2 = function_key("/fixtures/lit.ts", "lit", 2);
     let rig = rig(
@@ -534,4 +545,254 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .published_entry(&key)
         .expect("the hash artifact published");
     assert!(published.signature.facts.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Registry-live substrate guards (U6.FLOW_RETURN_SUBSTRATE required guards,
+// bound through `LIB_LIVE_GUARD_BINDINGS`)
+// ---------------------------------------------------------------------------
+
+/// Registry-live guard (`GuardId::FlowSliceIsGraphReachabilityNotProceduralWalk`).
+///
+/// The demand slice is graph REACHABILITY over the `FunctionFlowGraph`,
+/// never a procedural statement / mini-CFG walk. Two rails:
+///
+/// - STRUCTURAL: the skeleton is DROPPED before planning — the planner
+///   type holds only `&FunctionFlowGraph` (`ReturnPathPeeker::new(graph)`),
+///   so a statement-list re-walk is unrepresentable at compile time (the
+///   statements live on the dropped skeleton).
+/// - BEHAVIORAL: a statement PROCEDURALLY BETWEEN the demanded
+///   contributors (`dead`, declared between `b`'s definition and the
+///   return) is graph-disconnected from the `['b']` demand and stays
+///   unselected by EITHER frontier, while the same graph serves an
+///   EXPRESSION-SITE origin — the planner is origin-general reachability,
+///   not a return-statement walker.
+#[test]
+pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
+    use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+
+    let skeleton = skeleton_of(
+        "function f(u: number) { const b = 1; const dead = mystery(u); return { a: dead, b } }",
+    );
+    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+
+    // Resolve every asserted node id BEFORE the skeleton is dropped.
+    let object_site = skeleton.return_sites[0].argument.expect("return argument");
+    let object_node = graph.expr_site_node(object_site);
+    let b_key = skeleton.name_id("b").expect("b interned");
+    let a_key = skeleton.name_id("a").expect("a interned");
+    let entry_node = |key| {
+        graph
+            .out_edges(object_node)
+            .iter()
+            .find_map(|edge| match &edge.kind {
+                verter_semantic::analysis::flow::flow_graph::FlowEdgeKind::PathWrite {
+                    path,
+                    ..
+                } if path.as_ref()
+                    == [verter_semantic::analysis::flow::SkeletonPathSegment::Static(key)] =>
+                {
+                    Some(edge.to)
+                }
+                _ => None,
+            })
+            .expect("object literal provisions the key")
+    };
+    let a_entry = entry_node(a_key);
+    let b_entry = entry_node(b_key);
+    let binding_node = |name: &str| {
+        let id = skeleton.name_id(name).expect("name interned");
+        let binding = skeleton.bindings_named(id).next().expect("bound");
+        graph.binding_node(binding)
+    };
+    let dead_hub = binding_node("dead");
+    let b_hub = binding_node("b");
+    let dead_binding = skeleton
+        .bindings_named(skeleton.name_id("dead").expect("dead"))
+        .next()
+        .expect("dead bound");
+    let dead_init = skeleton.binding(dead_binding).initializer.expect("init");
+    let dead_init_node = graph.expr_site_node(dead_init);
+    let b_binding = skeleton.bindings_named(b_key).next().expect("b bound");
+    let b_init = skeleton.binding(b_binding).initializer.expect("b init");
+
+    let return_demand = SliceDemand::for_return_projection(&skeleton, &[Arc::<str>::from("b")]);
+    let expr_demand = SliceDemand::for_expression_site(&skeleton, b_init, &[]);
+
+    // The structural rail: NOTHING below can consult the statement list.
+    drop(skeleton);
+
+    let planner = ReturnPathPeeker::new(&graph);
+    let plan = planner
+        .plan(&return_demand, &FlowSliceBudget::default())
+        .expect("plan within default budget");
+    assert!(plan.is_value(b_entry), "b's entry value is selected");
+    assert!(plan.is_value(b_hub), "b's binding hub is selected");
+    assert!(
+        !plan.is_selected(dead_hub),
+        "the procedurally-interleaved `dead` binding is graph-disconnected \
+         from the ['b'] demand — a statement walker would have visited it"
+    );
+    assert!(!plan.is_selected(dead_init_node), "`dead`'s call stays out");
+    assert!(
+        !plan.is_selected(a_entry),
+        "the sibling entry (a plain binding read — no eval effect) is \
+         reached by NEITHER frontier"
+    );
+
+    // Expression-site origin over the SAME graph: reachability from b's
+    // initializer selects that site and still never reaches `dead`.
+    let expr_plan = planner
+        .plan(&expr_demand, &FlowSliceBudget::default())
+        .expect("expression-site plan");
+    assert!(expr_plan.is_value(graph.expr_site_node(b_init)));
+    assert!(!expr_plan.is_selected(dead_hub));
+}
+
+/// Registry-live guard (`GuardId::FlowGraphEffectEdgesStayLivePastValueWrites`)
+/// — the block contract's discriminating fixture: demanding `['b']` of
+/// `return { a: (x = "s"), b: x.toUpperCase() }` reaches `a`'s
+/// eval-effect edge (the assignment mutates `x`, which `b` reads) but
+/// never materializes `a`'s VALUE; value-provider edges stop at the
+/// definite write while the effect family stays live past it.
+#[test]
+pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
+    use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+
+    let skeleton =
+        skeleton_of(r#"function f(x: string) { return { a: (x = "s"), b: x.toUpperCase() } }"#);
+    let graph = verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+    let demand = SliceDemand::for_return_projection(&skeleton, &[Arc::<str>::from("b")]);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(&demand, &FlowSliceBudget::default())
+        .expect("plan within default budget");
+
+    let object_site = skeleton.return_sites[0].argument.expect("return argument");
+    let object_node = graph.expr_site_node(object_site);
+    let entry_node = |name: &str| {
+        let key = skeleton.name_id(name).expect("key interned");
+        graph
+            .out_edges(object_node)
+            .iter()
+            .find_map(|edge| match &edge.kind {
+                verter_semantic::analysis::flow::flow_graph::FlowEdgeKind::PathWrite {
+                    path,
+                    ..
+                } if path.as_ref()
+                    == [verter_semantic::analysis::flow::SkeletonPathSegment::Static(key)] =>
+                {
+                    Some(edge.to)
+                }
+                _ => None,
+            })
+            .expect("object literal provisions the key")
+    };
+    let a_entry = entry_node("a");
+    let b_entry = entry_node("b");
+    let x_id = skeleton.name_id("x").expect("x interned");
+    let x_hub = graph.binding_node(skeleton.bindings_named(x_id).next().expect("x bound"));
+
+    assert!(plan.is_value(b_entry), "b's value is demanded");
+    assert!(
+        plan.is_effect_only(a_entry),
+        "a's eval-effect edge stays LIVE past the definite value write — \
+         the two-frontier soundness as a typed-edge invariant"
+    );
+    assert!(!plan.is_value(a_entry), "a's VALUE is never materialized");
+    assert!(plan.is_value(x_hub), "x is read by the selected path");
+    // The sibling write's RHS is x's reaching definition — value-selected.
+    let rhs_site = skeleton.writes[0].value.expect("assignment value site");
+    assert!(plan.is_value(graph.expr_site_node(rhs_site)));
+}
+
+/// Registry-live guard
+/// (`GuardId::FlowGraphBuildIsShallowInternedNoLoweringLazyRegions`) — the
+/// PART 1 §6.2 perf-hardening build-path pin: skeleton + graph construction
+/// for a large body lowers NO type and produces NO resolution dispatch,
+/// route lookup, or imported-fact observation. Rails:
+///
+/// - STRUCTURAL: `build_function_body_skeleton(&FunctionBodySource)` and
+///   `build_function_flow_graph(&FunctionBodySkeleton)` take no resolver,
+///   no store view, and no dispatch handle — resolution is unreachable
+///   from the build path at compile time; and both artifacts are
+///   `NoTypeExpr` (asserted below), so no lowered type can be STORED.
+/// - BEHAVIORAL: a REAL host fact tracer brackets the whole build over a
+///   type-heavy body and observes ZERO facts.
+///
+/// Build timing / region-materialization strategy is deliberately NOT
+/// constrained here (eager and lazy are both conforming); the
+/// per-query-rebuild rejection is `two_demands_one_function_flow_graph_build`.
+#[test]
+pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
+    fn assert_arena_free_no_type_expr<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {
+    }
+    assert_arena_free_no_type_expr::<FunctionBodySkeleton>();
+    assert_arena_free_no_type_expr::<verter_semantic::analysis::flow::flow_graph::FunctionFlowGraph>(
+    );
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let source = r#"function big(input: Widget, flags: Map<string, Set<number>>) {
+        const a: Widget = makeWidget(input);
+        const b = { deep: { deeper: { deepest: [1, 2, 3] } } };
+        const c: Promise<Array<Record<string, Widget>>> = load(a, flags);
+        const d = c;
+        const e = { a, b, d };
+        return { big: e, tiny: 1 };
+    }"#;
+    let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
+        let skeleton = skeleton_of(source);
+        let graph =
+            verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+        assert!(graph.node_count() > 0, "the build produced a real graph");
+    });
+    match finalise {
+        crate::resolver_core::FactReadSetFinalise::Ok(facts)
+        | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+            assert!(
+                facts.is_empty(),
+                "skeleton + graph construction must observe ZERO facts \
+                 (no resolution dispatch, no route lookup, no imported-fact \
+                 production), got {facts:?}"
+            );
+        }
+        crate::resolver_core::FactReadSetFinalise::Overflow => {
+            panic!("the build path must not overflow the fact tracer")
+        }
+    }
+}
+
+/// Registry-live guard (`GuardId::FlowSliceIrDetachesFromOxcArena`) —
+/// `FlowSliceIR` (and every carrier on the hash-then-lower chain) is
+/// `Send + Sync + 'static` and `NoTypeExpr`: no transitive
+/// `&'arena T` / `oxc_allocator::Box<'arena, T>` field survives into the
+/// host-owned stores. The runtime half is inherent to the fixture rig:
+/// `skeleton_of`'s OXC allocator drops at the end of that helper, and the
+/// IR served below is read AFTER that arena is gone.
+#[test]
+pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
+    fn assert_detached<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}
+    assert_detached::<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>();
+    assert_detached::<verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>();
+    assert_detached::<verter_semantic::analysis::flow::hashing::FlowSliceHash>();
+
+    let function = function_key("/fixtures/my-type.ts", "myType", 1);
+    let rig = rig(
+        vec![(function.clone(), MYTYPE_FIXTURE)],
+        FlowSliceBudget::default(),
+    );
+    let ctx: &dyn ResolverContext = &rig.host;
+    let key = hash_key(function, &["b"]);
+    let slice_hash = planned(lookup(&rig.hash_node, key.clone(), ctx).expect("hash"));
+    let ir = lookup(
+        &rig.lowered_node,
+        FlowSliceLoweredKey {
+            hash_key: key,
+            slice_hash,
+        },
+        ctx,
+    )
+    .expect("lowered IR");
+    // The parse arena that produced this IR dropped inside `skeleton_of`;
+    // reading the IR here is the runtime detach witness.
+    assert!(!ir.exprs.is_empty(), "the detached IR carries owned data");
 }

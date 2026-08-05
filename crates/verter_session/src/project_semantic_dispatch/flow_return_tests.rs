@@ -551,7 +551,7 @@ fn flow_return_key_carries_no_value_environment() {
 /// the key fails the distinctness half; failing the fresh-view family
 /// lookup fails the isolation half.
 #[test]
-fn flow_return_keys_do_not_warm_hit_across_env_axes() {
+pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let base = flow_key(
@@ -1514,7 +1514,7 @@ fn key_hash(key: &FlowReturnKey) -> u64 {
 /// so distinct hashes ARE distinct candidate slots). The canonical
 /// whole-return / empty-input point is one stable identity.
 #[test]
-fn flow_return_key_covers_input_context_and_projection_demand() {
+pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let base = flow_key(
@@ -1767,7 +1767,7 @@ fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
 /// restored armed budget completes and admits (the discrimination that
 /// the budget, and nothing else, caused the refusal).
 #[test]
-fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
+pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
     use verter_semantic::analysis::flow::peeker::FlowSliceBudget;
     let host = make_host();
     host.project_type_store()
@@ -2281,5 +2281,52 @@ fn flow_return_member_and_whole_demands_coexist_as_candidates() {
             member_again,
             verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
+    });
+}
+
+/// Registry-live guard (`GuardId::FlowReturnRoutesThroughProjectSemanticDispatch`)
+/// — the `SemanticQueryKey::FlowReturn` arm dispatches through
+/// `ProjectSemanticDispatch::execute → SemanticGraphStore`, and the stored
+/// result IS the dispatched result: the same key read back from the graph
+/// store serves the identical published `FlowReturnResult`, and the
+/// consumer-facing function-return helper builds the IDENTICAL dispatch
+/// key (`function_return_helper_flow_arm_builds_the_identical_key`), so
+/// every consumer route funnels into this one dispatch. The
+/// no-second-constructor half is held by review pending a structural
+/// construction confinement on `FlowReturnResult` (its production
+/// constructors all live on the `build_flow_return` compute path today).
+#[test]
+pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
+    let host = make_host();
+    let (key, dispatched) = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLocalConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // Cold: the ONLY producing route is `execute` on the dispatch.
+        let dispatched = flow_result_value(dispatch, key.clone());
+        assert_eq!(dispatched.degradation, None);
+        (key, dispatched)
+    });
+
+    // Against a FRESH view (the cold build's artifact is now visible):
+    // the graph store — the dispatch's sole publication surface — serves
+    // the SAME result for the same key, and re-execution serves the
+    // published candidate (no second producer path constructs a
+    // divergent result).
+    with_dispatch(&host, |fresh| {
+        let stored = fresh
+            .graph()
+            .get_flow_return_result(fresh.ctx, &key)
+            .expect("the dispatched FlowReturn published to the graph store");
+        assert_eq!(
+            stored, dispatched,
+            "the stored candidate is the dispatched result — dispatch → \
+             SemanticGraphStore is the one serving path"
+        );
+        let warm = flow_result_value(fresh, key.clone());
+        assert_eq!(warm, dispatched);
     });
 }

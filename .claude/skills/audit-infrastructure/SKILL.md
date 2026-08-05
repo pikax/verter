@@ -54,6 +54,8 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 | `Mcp { tool: String }` | `McpToolPayload` | `VerterHost::audit_mcp_tool_call` |
 | `BundlerBatch { kind: BundlerKindTag }` | `BundlerBatchPayload` | `BatchAuditAggregator::summarize` |
 | `Custom { name: String }` | `RequestKindPayload::None` | Open-ended escape hatch |
+| `TypeInfoGraph` | `TypeInfoGraphPayload` | `VerterHost::resolve_framework_surface_with_audit` (the typeinfo graph wire envelope) |
+| `FlowReturnInference` | `FlowReturnInferencePayload` | `VerterHost::get_flow_return_type_with_audit` |
 
 ### Typed Payload Accessors
 
@@ -68,6 +70,33 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 - `mcp_payload() -> Option<&McpToolPayload>`
 - `bundler_batch_payload() -> Option<&BundlerBatchPayload>`
 - `typeinfo_graph_payload() -> Option<&TypeInfoGraphPayload>`
+- `flow_return_inference_payload() -> Option<&FlowReturnInferencePayload>`
+
+### `FlowReturnInference` (U6 flow-return substrate)
+
+`RequestKind::FlowReturnInference` audits the whole-function flow-return
+entry `VerterHost::get_flow_return_type_with_audit(function, demand)`
+(`crates/verter_session/src/host_flow_return_audit.rs`), which resolves ONE
+`SemanticQueryKey::FlowReturn` through the shared dispatch and returns
+`AuditedResult<Arc<FlowReturnResult>, FlowReturnError>` — the carrier's
+`audit` field is populated on BOTH arms. `FlowReturnInferencePayload`
+(`crates/verter_audit/src/payloads/flow_return.rs`) carries
+`function_symbol` plus three per-request counters mirroring the cold-path
+structured events one to one:
+
+| Counter | Paired structured event | Bumped when |
+| --- | --- | --- |
+| `cold_computes` | `FlowReturnStarted` | a cold whole-function flow evaluation runs (root + nested inline frames) |
+| `budget_exceeded_events` | `FlowSliceBudgetExceeded { axis: FlowSliceBudgetAxisTag }` | a flow-slice budget refusal routes through `ReturnOnly` |
+| `cycle_reentry_holds` | `FlowCycleSentinelHit` | a coinductive re-entry hold is recorded on the shared obligation runtime |
+
+Cold-vs-warm contract: a warm family hit emits NO `FlowReturnStarted` and
+bumps NO counter (`cold_computes == 0` is the counter-side witness), and
+allocates no audit payload without an active accumulator. Guards:
+`crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs`
+(cold/warm event + payload contract) and
+`crates/verter_session/tests/cases/g_misc0/flow_return_audit_tls_propagation.rs`
+(TLS observer propagation across the dispatch's worker hops).
 
 ## `AuditedResult<T, E>` Carrier
 
@@ -150,7 +179,7 @@ Session-side `RequestContext` provides full implementations; `NoOpObserver` leav
 
 ## Consumer Filter (Install-Time)
 
-`AuditConfig::consumer_filter` (`crates/verter_audit/src/config.rs`) is a `u32` bitset deciding which `RequestKind` variants emit records. Bits are positionally stable via `KindBit` enum (`ComponentMeta = 0`, `TypeResolution = 1`, `SemanticAnalysis = 2`, `Compile = 3`, `Workspace = 4`, `Lsp = 5`, `Mcp = 6`, `BundlerBatch = 7`, `Custom = 8`).
+`AuditConfig::consumer_filter` (`crates/verter_audit/src/config.rs`) is a `u32` bitset deciding which `RequestKind` variants emit records. Bits are positionally stable via `KindBit` enum (`ComponentMeta = 0`, `TypeResolution = 1`, `SemanticAnalysis = 2`, `Compile = 3`, `Workspace = 4`, `Lsp = 5`, `Mcp = 6`, `BundlerBatch = 7`, `Custom = 8`, `TypeInfoGraph = 9`, `FlowReturnInference = 10`).
 
 | Constructor | Behaviour |
 | --- | --- |

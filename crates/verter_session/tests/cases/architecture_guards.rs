@@ -5766,6 +5766,13 @@ pub(crate) mod foundations_guards {
         // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `ComponentMetaResultDb::evict_if_schema_mismatch`.
         "pub mod component_meta_result_db",
+        // `#[cfg(test)]`-only acceptance suite for the flow-return
+        // projector admission (`ReturnType<typeof callee>` published
+        // member demand). `pub(crate)` so the typed guard-registry
+        // lib binding table (`typeinfo_guard_bindings_tests.rs`) can
+        // bind `no_flow_slot_in_published_type_surface` by fn path;
+        // never compiled into the production lib (cfg(test)-gated).
+        "pub(crate) mod component_meta_flow_return_admission_tests",
         // R3/R26/R28 compile-tier fact-observation helper module.
         // Wraps the compile cold-compute pass in
         // `with_fact_tracer` and emits per-`Member`/`MemberPresence`,

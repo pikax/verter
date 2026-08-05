@@ -15,9 +15,9 @@ preserved by a named equivalent-or-stronger successor row).
 | Count | Value |
 | --- | --- |
 | baseline (registry cardinality) | 362 |
-| ignored | 302 |
-| running_unratified | 14 |
-| lifted | 46 |
+| ignored | 301 |
+| running_unratified | 12 |
+| lifted | 49 |
 | superseded | 0 |
 
 ## Per block
@@ -38,7 +38,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U2.ENUMS | 7 | 7 | 0 | 0 | 0 |
 | U2.MODULE_AUGMENTATION | 4 | 4 | 0 | 0 | 0 |
 | U2.JSX_FOUNDATIONS | 7 | 7 | 0 | 0 | 0 |
-| U6.FLOW_RETURN_SUBSTRATE | 7 | 4 | 3 | 0 | 0 |
+| U6.FLOW_RETURN_SUBSTRATE | 7 | 3 | 1 | 3 | 0 |
 | U6.NARROW_TYPEOF | 15 | 15 | 0 | 0 | 0 |
 | U6.NARROW_EQUALITY | 15 | 15 | 0 | 0 | 0 |
 | U6.NARROW_TRUTHINESS | 15 | 15 | 0 | 0 | 0 |

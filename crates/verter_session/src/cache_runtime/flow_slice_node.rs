@@ -59,7 +59,7 @@ use crate::types::Hash16;
 
 #[cfg(test)]
 #[path = "flow_slice_node_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 // ── Keys ──────────────────────────────────────────────────────────────
 

@@ -1007,7 +1007,152 @@ const TEMPLATE_LITERAL_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSp
     source: TEMPLATE_LITERAL_INFERENCE_SOURCE,
 }];
 
-/// The closed registry table. Holds the 46 lifted rows — the two
+/// Vendored source bytes of the value-inference fixture (the registry is the
+/// source-byte authority). Inlined verbatim (PURE owned `&'static str`); the
+/// guard `inlined_registry_source_is_byte_identical_to_fixture_files` asserts
+/// byte-identity with `fixtures/value_inference.ts`. The on-disk fixture name
+/// uses an underscore but the rows upsert it at the hyphenated canonical path
+/// `/fixtures/value-inference.ts`.
+#[allow(dead_code)]
+pub(crate) const VALUE_INFERENCE_SOURCE: &str = r#"// @ai-generated - Synthetic value-level type inference fixture.
+
+export const literalConst = "ready";
+export const numberConst = 42;
+export let mutableLabel = "draft";
+export var mutableCount = 1;
+
+export const objectConst = {
+  id: "item",
+  nested: {
+    value: 7,
+    flag: true,
+  },
+  list: [1, 2, 3],
+} as const;
+
+export const derivedValue = objectConst.nested.value;
+
+export const directArrow = (input: string, count?: number) => ({
+  input,
+  count,
+  ok: true,
+});
+
+export function bodyReturn(flag: boolean) {
+  if (flag) {
+    return {
+      state: "on" as const,
+      value: 1,
+    };
+  }
+  return {
+    state: "off" as const,
+    value: 0,
+  };
+}
+
+export function flowReturn(input: string | number) {
+  let current = input;
+  if (typeof current === "string") {
+    return {
+      kind: "text" as const,
+      value: current,
+    };
+  }
+  return {
+    kind: "number" as const,
+    value: current,
+  };
+}
+
+export type ComputedRef<T> = {
+  readonly value: T;
+};
+
+export function computed<T>(getter: () => T): ComputedRef<T> {
+  return {
+    value: getter(),
+  };
+}
+
+export const computedObject = computed(() => ({
+  id: "computed" as const,
+  count: 2,
+  nested: {
+    ready: true,
+  },
+}));
+
+export const computedBlock = computed(() => {
+  const local = {
+    ready: true as const,
+    count: 3,
+  };
+  return {
+    state: local.ready,
+    count: local.count,
+  };
+});
+
+export type LiteralConstType = typeof literalConst;
+export type NumberConstType = typeof numberConst;
+export type MutableLabelType = typeof mutableLabel;
+export type MutableCountType = typeof mutableCount;
+export type ObjectConstType = typeof objectConst;
+export type ObjectNestedType = typeof objectConst.nested;
+export type DerivedValueType = typeof derivedValue;
+export type DirectArrowReturn = ReturnType<typeof directArrow>;
+export type BodyReturnType = ReturnType<typeof bodyReturn>;
+export type FlowReturnType = ReturnType<typeof flowReturn>;
+export type ComputedObjectType = typeof computedObject;
+export type ComputedObjectValue = typeof computedObject.value;
+export type ComputedBlockValue = typeof computedBlock.value;
+"#;
+
+/// The single-file workspace the `value_inference.rs` lift rows upsert.
+#[allow(dead_code)]
+const VALUE_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSpec {
+    path: "/fixtures/value-inference.ts",
+    source: VALUE_INFERENCE_SOURCE,
+}];
+
+/// One `ResolveExpr`/`Expanded` query spec for a `value_inference.rs`
+/// U6.FLOW_RETURN_SUBSTRATE lift row. Every queried alias is a same-file
+/// source-walk carve-out shape: `ReturnType<typeof bodyReturn>` /
+/// `ReturnType<typeof directArrow>` are `BuiltinUtilityCarveOutArg` roots
+/// whose returns Verter solves through the demand-sliced `FlowReturn`
+/// substrate (return-position literal widening, `as const` preservation,
+/// per-return-site union) — tsgo expands the same alias.
+const fn value_inference_spec(row_function: &'static str, symbol: &'static str) -> QuerySpec {
+    QuerySpec {
+        row_file: "value_inference.rs",
+        row_function,
+        query_ordinal: 0,
+        oracle_family: "value_inference",
+        workspace_files: VALUE_INFERENCE_FILES,
+        primary_canonical: "/fixtures/value-inference.ts",
+        host_project: HostProjectSpec {
+            project_root: "/",
+            workspace_root: "/",
+            tsconfig_path: "/oracle.tsconfig.json",
+            host_setup_kind: HostSetupKindSpec::Standalone,
+        },
+        query_helper: QueryHelperSpec::ResolveExpr {
+            symbol,
+            type_args: &[],
+            projection_mode: ProjectionModeSpec::Expanded,
+            probe_rhs: ProbeRhsSpec::Bare,
+        },
+        source_locator: SourceLocatorSpec {
+            reference_canonical: "/fixtures/value-inference.ts",
+            reference_name: symbol,
+            symbol_space: SymbolSpace::Type,
+        },
+        oracle_value_kind: OracleValueKindSpec::StructuredTypeExpr,
+    }
+}
+
+/// The closed registry table. Holds the 49 lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
@@ -1030,7 +1175,11 @@ const TEMPLATE_LITERAL_INFERENCE_FILES: &[WorkspaceFileSpec] = &[WorkspaceFileSp
 /// two U2.MAPPED_TEMPLATE-era queries (the `RecordTemplateRootSlot` same-file
 /// string-literal index-chain row + the `CounterHandlers` `Capitalize` key-remap
 /// mapped-type row, both terminating at `MappedTemplateRemap` under
-/// `U2.MAPPED_TEMPLATE`)
+/// `U2.MAPPED_TEMPLATE`), and the three `U6.FLOW_RETURN_SUBSTRATE`-era
+/// value-inference queries (the `ReturnType<typeof bodyReturn>`
+/// per-return-site union row + the two `ReturnType<typeof directArrow>`
+/// arrow-body rows, all solved through the demand-sliced `FlowReturn`
+/// substrate)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1413,6 +1562,29 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         TEMPLATE_LITERAL_INFERENCE_FILES,
         "/fixtures/template_literal_inference.ts",
         "CounterHandlers",
+    ),
+    // U6.FLOW_RETURN_SUBSTRATE lifts: the pure value-inference rows whose
+    // mechanism is the bare `FlowReturn` slice + return-position widening.
+    // `ReturnType<typeof bodyReturn>` / `ReturnType<typeof directArrow>` are
+    // `BuiltinUtilityCarveOutArg` roots solved through the demand-sliced flow
+    // substrate (per-return-site union with `as const` discriminants;
+    // return-position literal widening + optional-parameter `undefined`
+    // injection). The sibling const-object row stays running-unratified: its
+    // ORIGINAL two-query body carries control flow around the second query,
+    // which the closed migration extractor rejects (`ControlFlowAroundQuery`),
+    // and a rewritten-to-extract body would not be the frozen original the
+    // provenance rail anchors on.
+    value_inference_spec(
+        "value_inference_function_body_return_union_from_return_statements",
+        "BodyReturnType",
+    ),
+    value_inference_spec(
+        "value_inference_arrow_expression_body_publishes_return_shape",
+        "DirectArrowReturn",
+    ),
+    value_inference_spec(
+        "value_inference_arrow_expression_body_substitutes_parameter_references",
+        "DirectArrowReturn",
     ),
 ];
 
@@ -1946,6 +2118,38 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:4376ec8e27b02314d0af94a7d6de18c2a6a468d1090dc236b2216096c43305bc",
         workspace_files: &[("/fixtures/template_literal_inference.ts", "sha256:383c4fdd04efadb1f7344d3b8518313172211f86e2e712e570e82d25d8b8fb44")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    // U6.FLOW_RETURN_SUBSTRATE lifts (tsgo-available oracle lift). Provenance
+    // emitted by the audited `emit_lifted_row_migrations` lift-capture (the
+    // closed `syn` extractor over the original body); the body-extracted
+    // fingerprint matched the registry-projected fingerprint, so the registry
+    // faithfully reproduces each original query.
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_function_body_return_union_from_return_statements",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:efacc4c25220407183ced69188ccb01a916326ca188f49b13df5a02eb8199f01",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"BodyReturnType\" , & [] , ProjectionMode :: Expanded ,) ; assert_union_arm_state_with_number_value (& expr , \"on\") ; assert_union_arm_state_with_number_value (& expr , \"off\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_arrow_expression_body_publishes_return_shape",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:29e62a7df980ec44e55894d9eb2279778aebb2be6ffa541e8b518d4cce65ebc0",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"DirectArrowReturn\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"count\" , \"input\" , \"ok\"]) ; assert ! (! props [\"input\"] . optional) ; assert_primitive (& props [\"input\"] . ty , PrimitiveName :: String) ; assert_union_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Number) ; assert_union_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Undefined) ; assert ! (! props [\"ok\"] . optional) ; assert_primitive (& props [\"ok\"] . ty , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "value_inference.rs",
+        row_function: "value_inference_arrow_expression_body_substitutes_parameter_references",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:8bea37884f3e108fda9b4061524254f6dbe2a5feeebdf8acd98224fa897d98e0",
+        workspace_files: &[("/fixtures/value-inference.ts", "sha256:b41fc60b646fc71e04fccef4253ca24e2fb3fd5b9d95a09fe4a7ced70e6e6790")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_value_fixture (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/value-inference.ts\" , \"DirectArrowReturn\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_primitive (& props [\"input\"] . ty , PrimitiveName :: String) ; assert_expr_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Number) ; assert_expr_contains_primitive (& props [\"count\"] . ty , PrimitiveName :: Undefined) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
 ];
 
