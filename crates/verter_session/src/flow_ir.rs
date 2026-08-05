@@ -126,6 +126,14 @@ pub enum FlowIrStatement {
         kind: FlowIrBindingKind,
         /// The lowered initializer, when present.
         init: Option<FlowIrExpr>,
+        /// Whether the binding carries a WIDENING literal type: an
+        /// unannotated `const` whose initializer is a bare literal
+        /// expression with no const assertion (`const b = 1`). Reads of
+        /// such a binding widen to the literal's primitive at
+        /// return-object member positions and at the return join —
+        /// `1 as const` / an annotated `const b: 1` stay non-widening
+        /// and preserve the literal.
+        widening_literal: bool,
     },
     /// An expression statement (evaluation effects; no return
     /// contribution).
@@ -379,6 +387,21 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
     }
 }
 
+/// Whether an initializer is a BARE literal expression — a fresh
+/// (widening) literal source: a string / numeric / boolean literal or a
+/// substitution-free template, possibly parenthesized. A const assertion
+/// (`1 as const`) or any other assertion / expression shape is NOT bare —
+/// its literal is pinned or derived, never widening.
+fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
+    match unwrap_parenthesized(expression) {
+        Expression::StringLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_) => true,
+        Expression::TemplateLiteral(template) => template.expressions.is_empty(),
+        _ => false,
+    }
+}
+
 /// Lower the formal parameters: binding name, optional/rest flags, and the
 /// parameter type — the authored TS annotation through `lower_ts_type`,
 /// else the default initializer's inferred type (the scanner's parameter
@@ -606,11 +629,20 @@ impl Lowerer<'_> {
                             .init
                             .as_ref()
                             .map(|expr| self.lower_expr(expr, ExprMode::BindingInit(kind)));
+                        // A WIDENING literal binding: an unannotated
+                        // `const` initialized from a bare literal with no
+                        // const assertion. `let` / `var` initializers
+                        // already widened at `BindingInit` lowering, and
+                        // an annotation or `as const` pins the literal.
+                        let widening_literal = kind == FlowIrBindingKind::Const
+                            && declarator.type_annotation.is_none()
+                            && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
                         let name: Arc<str> = Arc::from(id.name.as_str());
                         out.push(FlowIrStatement::Binding {
                             name: Arc::clone(&name),
                             kind,
                             init,
+                            widening_literal,
                         });
                         if let Some(frame) = self.scopes.last_mut() {
                             frame.push(name);

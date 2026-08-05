@@ -206,6 +206,131 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// The `ReturnType<typeof callee>` MEMBER-HOP admission: the
+    /// path-precise projector demand rail. Given the argument node of a
+    /// builtin `ReturnType` instantiation carrier and the pending walk
+    /// segment, resolve the callee to its served function slot and — when
+    /// the callee is a FUNCTION VALUE whose return is body-derived
+    /// (`FunctionReturnSource::Flow`) — dispatch
+    /// `SemanticQueryKey::FlowReturn` with the single-member
+    /// `ReturnProjectionDemand`, returning the demanded member's node.
+    ///
+    /// `None` is the structured fall-through: a declared-return callee, a
+    /// non-`typeof` argument, an overload group, a computed segment, or a
+    /// degraded/held member evaluation all fall back to the generic
+    /// `Instantiate` unwrap (the pre-existing whole-return route through
+    /// this same dispatch) — never a fabricated member and never a
+    /// second resolver.
+    /// The typed `ReturnType<typeof callee>` CALLEE detection: `arg` is
+    /// the bare `typeof callee` carrier (no member path) of a
+    /// single-signature FUNCTION VALUE whose return is body-derived
+    /// (`FunctionReturnSource::Flow`), resolved through the prepared
+    /// value registry — identity only, no body lowering, no execution.
+    /// `None` for a declared-return callee, an overload group, a dotted
+    /// `typeof` path, or a non-`typeof` argument.
+    pub(super) fn flow_return_callee_for_typeof_arg(
+        &self,
+        callee_arg: SemanticNodeId,
+    ) -> Option<verter_type_expr::facts::FlowFunctionReturnIdentity> {
+        let data = crate::project_semantic_dispatch::node_data_for(self.ctx, callee_arg)?;
+        let (value_root, typeof_path) = data.typeof_head()?;
+        if !typeof_path.is_empty() {
+            return None;
+        }
+        let scope_canonical = Arc::clone(&value_root.scope.canonical_id);
+        let scope_owner = value_root.scope.owner;
+        let value_name = Arc::clone(&value_root.name);
+        drop(data);
+        let prepared =
+            self.ctx
+                .prepared_value_decl(scope_canonical.as_ref(), scope_owner, &value_name)?;
+        let [signature] = prepared.signatures.as_slice() else {
+            return None;
+        };
+        let verter_type_expr::facts::FunctionReturnSource::Flow(identity) =
+            &signature.return_source
+        else {
+            return None;
+        };
+        // Anchor fill mirrors the signature-composition consumers: the
+        // extractor stamps the declaration name; canonical / owner come
+        // from the serving scope.
+        let mut identity = identity.clone();
+        identity.anchor.canonical_id = scope_canonical;
+        identity.anchor.owner = scope_owner;
+        Some(identity)
+    }
+
+    /// Whether `node` is the builtin `ReturnType<typeof callee>`
+    /// instantiation carrier over a body-derived (flow-return) callee —
+    /// the shape whose MEMBER projection routes through the
+    /// single-member `FlowReturn` demand instead of a whole-signature
+    /// composition.
+    pub(super) fn is_flow_return_type_member_base(&self, node: SemanticNodeId) -> bool {
+        match crate::project_semantic_dispatch::node_data_for(self.ctx, node) {
+            Some(data) => self.is_flow_return_type_member_base_data(&data),
+            None => false,
+        }
+    }
+
+    /// The node-data half of [`Self::is_flow_return_type_member_base`].
+    /// Matches BOTH carrier stages: the resolved builtin
+    /// `InstantiationRef` and the still-unresolved authored
+    /// `BareRef("ReturnType", [arg])` (whose head the dispatch's
+    /// carrier-subject normalization resolves shadowing-aware — a
+    /// userland `ReturnType` shadow settles to its own declaration
+    /// there and never enters the flow member rail).
+    pub(super) fn is_flow_return_type_member_base_data(&self, data: &SemanticNodeData) -> bool {
+        if let SemanticNodeData::InstantiationRef { base, args } = data {
+            return base.canonical_id.as_ref() == "__builtin__"
+                && base.decl_name.as_ref() == "ReturnType"
+                && args.len() == 1
+                && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
+        }
+        if let Some((name, _scope)) = data.bare_ref_head() {
+            let args = data.carrier_type_args();
+            return name.as_ref() == "ReturnType"
+                && args.len() == 1
+                && self.flow_return_callee_for_typeof_arg(args[0]).is_some();
+        }
+        false
+    }
+
+    pub(super) fn flow_return_member_projection(
+        &self,
+        callee_arg: SemanticNodeId,
+        segment: &crate::semantic_query::PathSegment,
+    ) -> Option<SemanticNodeId> {
+        // The demanded member must be a statically-named key.
+        let member_name: Arc<str> = match segment {
+            crate::semantic_query::PathSegment::Member(key) => Arc::from(key.as_string()?),
+            crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
+                value,
+            )) => Arc::clone(value),
+            crate::semantic_query::PathSegment::Index(_) => return None,
+        };
+        let identity = self.flow_return_callee_for_typeof_arg(callee_arg)?;
+        let demand = crate::semantic_query::ReturnProjectionDemand {
+            point: crate::semantic_query::demand::Demand::navigate(
+                crate::semantic_query::demand::ProjectionPath::from_segments([
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name)),
+                    ),
+                ]),
+            ),
+        };
+        let key = self.flow_return_key_with_demand(&identity, demand);
+        match self.execute_flow_return(key) {
+            FlowReturnStep::Complete(result) if result.degradation.is_none() => {
+                Some(result.return_type)
+            }
+            // Degraded success / typed failure / in-flight hold: the
+            // generic unwrap route decides (it already owns these
+            // shapes for every other consumer).
+            _ => None,
+        }
+    }
+
     /// The whole-function `FlowReturn` authority. Every whole-function
     /// return demand enters here with the full key:
     ///
@@ -937,14 +1062,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &key.function.declaration_slot.defining_canonical,
             &key.function.declaration_slot.merged_symbol_name,
         );
-        // The evaluation models exactly the whole-return / empty-input
-        // point today. Any other demand/input point fails CLOSED with a
-        // typed no-value outcome — never a silently widened whole-return
-        // result, never a sibling materialisation the narrower demand did
-        // not ask for.
-        if !key.demand.is_whole_return() || !key.input.is_empty() {
+        // The evaluation models the whole-return point and the
+        // single-named-member projection point (the `ReturnType<typeof
+        // f>['b']` demand rail), both at the empty input point. Any
+        // other demand/input point fails CLOSED with a typed no-value
+        // outcome — never a silently widened whole-return result, never
+        // a sibling materialisation the narrower demand did not ask for.
+        if !key.input.is_empty() {
             return degraded(FlowReturnFailure::UnmodeledDemandPoint, Vec::new());
         }
+        let demanded_member: Option<Arc<str>> = if key.demand.is_whole_return() {
+            None
+        } else {
+            match flow_demanded_member_name(&key.demand) {
+                Some(name) => Some(name),
+                None => {
+                    return degraded(FlowReturnFailure::UnmodeledDemandPoint, Vec::new());
+                }
+            }
+        };
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
@@ -989,10 +1125,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
             },
             demand: crate::cache_runtime::flow_slice_node::FlowSliceDemandIdentity {
-                projection_path: Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                projection_path: match demanded_member.as_ref() {
+                    Some(member) => Arc::from(vec![Arc::clone(member)].into_boxed_slice()),
+                    None => Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                },
             },
         };
         let flow_slice = self.ctx.project_type_store().flow_slice();
+        let mut member_filter: Option<MemberDemandFilter> = None;
         match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx) {
             None => {
                 // The skeleton source could not serve the pinned content
@@ -1029,10 +1169,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     hash_key: slice_key,
                     slice_hash,
                 };
-                if crate::cache_runtime::lookup(flow_slice.lowered_node(), lowered_key, self.ctx)
-                    .is_none()
+                match crate::cache_runtime::lookup(flow_slice.lowered_node(), lowered_key, self.ctx)
                 {
-                    return degraded(FlowReturnFailure::Unresolved, self_roots);
+                    None => {
+                        return degraded(FlowReturnFailure::Unresolved, self_roots);
+                    }
+                    Some(lowered) => {
+                        // The member-projection demand consumes the
+                        // lowered slice's SLOT SELECTION: only the
+                        // bindings the planner value-selected for the
+                        // demanded member evaluate; every unselected
+                        // sibling binding stays cold (no lowering, no
+                        // resolution, no fact).
+                        if let Some(member) = demanded_member.as_ref() {
+                            member_filter = Some(MemberDemandFilter {
+                                member: Arc::clone(member),
+                                selected_locals: lowered
+                                    .slots
+                                    .iter()
+                                    .filter(|slot| slot.value_selected)
+                                    .map(|slot| Arc::clone(&slot.name))
+                                    .collect(),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1049,6 +1209,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(reason) = ir.budget_failure {
             return degraded(FlowReturnFailure::Budget(reason), self_roots);
         }
+        // A member projection over a fall-through body would need the
+        // `undefined` arm folded into the member access (a tsc error
+        // shape) — beyond the modeled member point: fail closed.
+        if member_filter.is_some() && ir.can_fall_through {
+            return degraded(FlowReturnFailure::UnmodeledDemandPoint, self_roots);
+        }
+        debug_assert!(
+            demanded_member.is_none() || member_filter.is_some(),
+            "a member demand always derives its filter from the lowered slice"
+        );
         // The ONE binder environment: the function's OWN type parameters
         // are binders in scope for the parameter and body-leaf lowering (a
         // root `<T extends string>(x: T)` keeps the binder `T`, never the
@@ -1078,16 +1248,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: &params,
             binder_env: &binder_env,
             locals: rustc_hash::FxHashMap::default(),
+            widening_locals: rustc_hash::FxHashSet::default(),
+            bare_return_seen: false,
+            member_filter,
             holds: Vec::new(),
             degradation: None,
             degraded_locals: rustc_hash::FxHashSet::default(),
         };
         let holds;
         let degradation;
+        let bare_return_seen;
         let (contributors, _) = {
             let outcome = evaluator.eval_region(&ir.body);
             holds = std::mem::take(&mut evaluator.holds);
             degradation = evaluator.degradation;
+            bare_return_seen = evaluator.bare_return_seen;
             outcome
         };
         let contributors = match contributors {
@@ -1104,6 +1279,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let result = match self.join_flow_return_contributors(
             contributors,
             ir.can_fall_through,
+            bare_return_seen,
             &holds,
             degradation,
         ) {
@@ -1141,11 +1317,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         contributors: Vec<SemanticNodeId>,
         can_fall_through: bool,
+        bare_return_seen: bool,
         holds: &[FlowReturnKey],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     ) -> Result<FlowReturnResult, FlowReturnFailure> {
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = contributors;
+        // Bare-return-as-void (BL12): a body whose only return
+        // contributions are bare `return;` statements models as `void`
+        // regardless of fallthrough — tsc's rule for expressionless
+        // returns (a bare-only body is also the concrete `void` seed of
+        // a recursive component). Alongside VALUE returns, a bare
+        // return contributes `undefined` (`if (c) return 1; return;`
+        // is `1 | undefined`).
+        if bare_return_seen {
+            if arms.is_empty() {
+                let return_type =
+                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+                return Ok(FlowReturnResult {
+                    return_type,
+                    can_fall_through,
+                    degradation,
+                });
+            }
+            arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)));
+        }
         if can_fall_through {
             if arms.is_empty() {
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)));
@@ -1165,6 +1361,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
             can_fall_through,
             degradation,
         })
+    }
+}
+
+/// The single-named-member projection filter of one flow evaluation —
+/// the demand-sliced `ReturnType<typeof f>['b']` point. Carries the
+/// demanded member name and the lowered slice's value-selected slot
+/// names (the ONLY bindings the filtered evaluation may evaluate).
+struct MemberDemandFilter {
+    /// The demanded member name.
+    member: Arc<str>,
+    /// Names of the slice-selected bindings (planner value selection).
+    selected_locals: rustc_hash::FxHashSet<Arc<str>>,
+}
+
+/// The single supported narrow projection point: a one-segment path of a
+/// statically-named member (`['b']`). Returns the member name, or `None`
+/// for any other non-whole-return point (fail closed at the caller).
+fn flow_demanded_member_name(
+    demand: &crate::semantic_query::ReturnProjectionDemand,
+) -> Option<Arc<str>> {
+    let path = demand.point.projection.path.as_slice();
+    let [segment] = path else {
+        return None;
+    };
+    match segment {
+        crate::semantic_query::PathSegment::Member(key) => key.as_string().map(Arc::<str>::from),
+        crate::semantic_query::PathSegment::Index(crate::semantic_query::IndexKey::String(
+            value,
+        )) => Some(Arc::clone(value)),
+        crate::semantic_query::PathSegment::Index(_) => None,
     }
 }
 
@@ -1201,6 +1427,23 @@ struct FlowEvaluator<'d, 'b> {
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    /// Locals bound to a WIDENING literal (`const b = 1` — unannotated,
+    /// no const assertion). Reads of these widen to the literal's
+    /// primitive at return-object member positions and at the return
+    /// join (tsc's widening-literal-type rule); `as const` / annotated
+    /// literals never enter this set and stay pinned.
+    widening_locals: rustc_hash::FxHashSet<String>,
+    /// Whether a bare `return;` was evaluated. A body whose ONLY return
+    /// contributions are bare returns models as `void` (BL12);
+    /// alongside value returns a bare return contributes `undefined`.
+    bare_return_seen: bool,
+    /// The member-projection demand filter, when this evaluation serves
+    /// a single-named-member `ReturnProjectionDemand` (`ReturnType<typeof
+    /// f>['b']`). Return sites evaluate ONLY the demanded member of a
+    /// structural object return (siblings never evaluate), and bindings
+    /// outside the lowered slice's value-selected slot set never
+    /// evaluate. `None` = the whole-return point.
+    member_filter: Option<MemberDemandFilter>,
     /// The coinductive hold targets this evaluation met (in-flight direct
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle outcome on its targets' admitted returns.
@@ -1223,6 +1466,72 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.degradation.get_or_insert(degradation);
     }
 
+    /// Evaluate ONE return site under the member-projection demand: the
+    /// argument must be a structural object literal carrying the
+    /// demanded member statically — ONLY that member's value evaluates
+    /// (with the same member-position widening the whole-return object
+    /// path applies); sibling entries never evaluate. Any other return
+    /// shape — a bare return, a non-object value, a missing member — is
+    /// beyond the modeled member point: fail closed with the typed
+    /// `UnmodeledDemandPoint`, never a silently widened whole-return
+    /// evaluation and never a fabricated `undefined` member.
+    fn eval_member_projected_return(
+        &mut self,
+        argument: Option<&crate::flow_ir::FlowIrExpr>,
+    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
+        let member_name = match self.member_filter.as_ref() {
+            Some(filter) => Arc::clone(&filter.member),
+            None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
+        };
+        let Some(crate::flow_ir::FlowIrExpr::Object { members }) = argument else {
+            return Err(FlowReturnFailure::UnmodeledDemandPoint);
+        };
+        // Last write wins for duplicate keys (JS object-literal
+        // semantics): take the LAST member with the demanded key.
+        let Some(member) = members
+            .iter()
+            .rev()
+            .find(|member| member.key.as_ref() == member_name.as_ref())
+        else {
+            return Err(FlowReturnFailure::UnmodeledDemandPoint);
+        };
+        match self.eval_expr(&member.value)? {
+            Some(node) => Ok(Some(self.widen_if_widening_local_read(&member.value, node))),
+            // A hold inside the demanded member is the same coinductive
+            // hold the whole-return object path reports.
+            None => Ok(None),
+        }
+    }
+
+    /// Widen `node` to its literal's primitive when `expr` is a read of
+    /// a WIDENING-literal local (`const b = 1` — unannotated, no const
+    /// assertion) and the evaluated node is that literal. Every other
+    /// shape passes through unchanged — `as const`, annotated literals,
+    /// parameters, and non-literal values are never rewritten.
+    fn widen_if_widening_local_read(
+        &self,
+        expr: &crate::flow_ir::FlowIrExpr,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let crate::flow_ir::FlowIrExpr::Local { name } = expr else {
+            return node;
+        };
+        if !self.widening_locals.contains(name.as_ref()) {
+            return node;
+        }
+        let graph = self.dispatch.graph();
+        let widened = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
+                crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,
+                crate::semantic_query::LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
+                crate::semantic_query::LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
+            },
+            _ => return node,
+        };
+        graph.intern_node(SemanticNodeData::Primitive(widened))
+    }
+
     /// Evaluate one region, returning its contributor nodes and whether
     /// the region falls through (mirrors the IR's reachability — this
     /// recomputes nothing, it only evaluates contributors).
@@ -1234,19 +1543,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         for statement in region.statements.iter() {
             match statement {
                 crate::flow_ir::FlowIrStatement::Return { argument } => {
-                    let node =
-                        match argument {
-                            Some(expr) => match self.eval_expr(expr) {
-                                Ok(node) => node,
-                                Err(failure) => return (Err(failure), region.can_fall_through),
-                            },
-                            None => Some(self.dispatch.graph().intern_node(
-                                SemanticNodeData::Primitive(PrimitiveKind::Undefined),
-                            )),
-                        };
-                    // A hold is neither a contributor nor a failure.
-                    if let Some(node) = node {
-                        contributors.push(node);
+                    if self.member_filter.is_some() {
+                        // Member-projection demand: evaluate ONLY the
+                        // demanded member of a structural object return.
+                        match self.eval_member_projected_return(argument.as_ref()) {
+                            Ok(Some(node)) => contributors.push(node),
+                            Ok(None) => {}
+                            Err(failure) => return (Err(failure), region.can_fall_through),
+                        }
+                        continue;
+                    }
+                    match argument {
+                        Some(expr) => match self.eval_expr(expr) {
+                            // A widening-literal local read widens to its
+                            // primitive at the return join (tsc's
+                            // widening-literal-type rule: `const b = 1;
+                            // return b;` infers `number`; `as const` /
+                            // annotated literals never enter the set).
+                            Ok(Some(node)) => {
+                                contributors.push(self.widen_if_widening_local_read(expr, node));
+                            }
+                            // A hold is neither a contributor nor a failure.
+                            Ok(None) => {}
+                            Err(failure) => return (Err(failure), region.can_fall_through),
+                        },
+                        None => {
+                            // Bare `return;` — recorded, never a direct
+                            // `undefined` contributor: a bare-only body
+                            // joins to `void` (BL12).
+                            self.bare_return_seen = true;
+                        }
                     }
                 }
                 crate::flow_ir::FlowIrStatement::If {
@@ -1259,6 +1585,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // of a `const` inside an arm never escape it).
                     let saved = self.locals.clone();
                     let saved_degraded = self.degraded_locals.clone();
+                    let saved_widening = self.widening_locals.clone();
                     let (consequent_result, _) = self.eval_region(consequent);
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
@@ -1267,6 +1594,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     contributors.extend(consequent_contributors);
                     self.locals = saved.clone();
                     self.degraded_locals = saved_degraded.clone();
+                    self.widening_locals = saved_widening.clone();
                     if let Some(alternate) = alternate {
                         let (alternate_result, _) = self.eval_region(alternate);
                         let alternate_contributors = match alternate_result {
@@ -1277,12 +1605,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     self.locals = saved;
                     self.degraded_locals = saved_degraded;
+                    self.widening_locals = saved_widening;
                 }
                 crate::flow_ir::FlowIrStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
                     // never escapes it.
                     let saved = self.locals.clone();
                     let saved_degraded = self.degraded_locals.clone();
+                    let saved_widening = self.widening_locals.clone();
                     let (result, _) = self.eval_region(block);
                     let block_contributors = match result {
                         Ok(contributors) => contributors,
@@ -1291,12 +1621,34 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     contributors.extend(block_contributors);
                     self.locals = saved;
                     self.degraded_locals = saved_degraded;
+                    self.widening_locals = saved_widening;
                 }
-                crate::flow_ir::FlowIrStatement::Binding { name, init, .. } => {
+                crate::flow_ir::FlowIrStatement::Binding {
+                    name,
+                    init,
+                    widening_literal,
+                    ..
+                } => {
+                    // Member-projection demand: a binding OUTSIDE the
+                    // lowered slice's value-selected slot set never
+                    // evaluates — the elided sibling's initializer stays
+                    // cold (no lowering, no resolution, no fact).
+                    if self
+                        .member_filter
+                        .as_ref()
+                        .is_some_and(|filter| !filter.selected_locals.contains(name))
+                    {
+                        continue;
+                    }
                     if let Some(init) = init {
                         match self.eval_expr(init) {
                             Ok(Some(node)) => {
                                 self.degraded_locals.remove(name.as_ref());
+                                if *widening_literal {
+                                    self.widening_locals.insert(name.to_string());
+                                } else {
+                                    self.widening_locals.remove(name.as_ref());
+                                }
                                 self.locals.insert(name.to_string(), node);
                             }
                             Ok(None) => {}
@@ -1310,6 +1662,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // binding degrades nothing).
                             Err(_) => {
                                 self.degraded_locals.insert(name.to_string());
+                                self.widening_locals.remove(name.as_ref());
                                 self.locals.insert(
                                     name.to_string(),
                                     self.dispatch
@@ -1395,6 +1748,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         let nested_holds;
         let nested_degradation;
+        let nested_bare_return_seen;
         let (contributors, _) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -1404,6 +1758,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 params: &params,
                 binder_env: &binder_env,
                 locals: rustc_hash::FxHashMap::default(),
+                widening_locals: rustc_hash::FxHashSet::default(),
+                bare_return_seen: false,
+                // A nested function value always evaluates its WHOLE
+                // return (its signature's return type) — the member
+                // filter is a top-level demand axis.
+                member_filter: None,
                 holds: Vec::new(),
                 degradation: None,
                 degraded_locals: rustc_hash::FxHashSet::default(),
@@ -1411,6 +1771,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let outcome = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
             nested_degradation = nested_evaluator.degradation;
+            nested_bare_return_seen = nested_evaluator.bare_return_seen;
             self.holds.append(&mut nested_evaluator.holds);
             outcome
         };
@@ -1423,6 +1784,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let result = self.dispatch.join_flow_return_contributors(
             contributors,
             can_fall_through,
+            nested_bare_return_seen,
             &nested_holds,
             nested_degradation,
         )?;
@@ -1497,6 +1859,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let Some(value) = self.eval_expr(&member.value)? else {
                         return Err(FlowReturnFailure::Unresolved);
                     };
+                    // Selective object widening (BL02-class): a member
+                    // read of a WIDENING-literal local widens to its
+                    // primitive at the mutable member position (`const
+                    // b = 1; return { b }` publishes `b: number`), while
+                    // `as const` / annotated literal locals stay pinned.
+                    // Direct literal members already widened (or stayed
+                    // pinned under a const assertion) at IR lowering.
+                    let value = self.widen_if_widening_local_read(&member.value, value);
                     surface_members.push(crate::semantic_query::SurfaceMember {
                         key: crate::semantic_query::AuthoredPropertyKey::string(
                             member.key.as_ref(),

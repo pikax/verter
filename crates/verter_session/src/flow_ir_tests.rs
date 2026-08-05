@@ -295,7 +295,13 @@ fn local_reaching_definition_is_binding_and_local() {
         "make",
     );
     assert_eq!(node.body.statements.len(), 2);
-    let FlowIrStatement::Binding { name, kind, init } = &node.body.statements[0] else {
+    let FlowIrStatement::Binding {
+        name,
+        kind,
+        init,
+        widening_literal,
+    } = &node.body.statements[0]
+    else {
         panic!("the first statement must be the const binding");
     };
     assert_eq!(name.as_ref(), "x");
@@ -306,6 +312,10 @@ fn local_reaching_definition_is_binding_and_local() {
             Some(FlowIrExpr::Type(TypeExpr::Literal(LiteralValue::Number(_))))
         ),
         "a const initializer keeps its literal: {init:?}"
+    );
+    assert!(
+        *widening_literal,
+        "an unannotated bare-literal const is a WIDENING literal binding"
     );
     assert_eq!(
         node.body.statements[1],

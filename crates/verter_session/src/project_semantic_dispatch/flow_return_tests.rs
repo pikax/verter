@@ -118,6 +118,29 @@ export function subInner() {
 export function subOuterCallsInner() {
   return subInner();
 }
+
+export declare const sideMarker: { tag: string };
+
+export function subMemberWiden() {
+  const other = sideMarker;
+  const b = 1;
+  return { a: other, b };
+}
+
+export function subMemberConstAssert() {
+  const b = 1 as const;
+  return { a: "s", b };
+}
+
+export function subMixedBareValue(flag: boolean) {
+  if (flag) return 1;
+  return;
+}
+
+export function subMemberBareMix(flag: boolean) {
+  if (flag) return { b: 1 };
+  return;
+}
 "#;
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
@@ -440,11 +463,14 @@ fn flow_return_local_const_reaching_definition() {
                 0,
             ),
         );
-        // A `const` binding preserves its literal initializer through the
-        // reaching definition (TS's `const x = 1; return x` → `1`).
+        // A WIDENING-literal `const` binding widens at the return join —
+        // TS7 oracle (`tsc 7.0.2 --declaration`):
+        // `function f(){ const x = 1; return x; }` declares `(): number`.
+        // (`1 as const` / an annotated `const x: 1` stay pinned — see
+        // `flow_return_member_demand_preserves_const_asserted_local`.)
         assert_eq!(
             expr,
-            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
     });
 }
@@ -1921,6 +1947,238 @@ fn flow_return_publishes_compute_recorded_whole_return_point() {
             member_points[0].point(),
             &member.demand.point,
             "the member entry's recorded point is the point ITS compute served"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Member-projection demand (`ReturnType<typeof f>['b']` rail)
+// ---------------------------------------------------------------------------
+
+/// The single-named-member `ReturnProjectionDemand` point for one
+/// declaration-body function.
+fn member_flow_key(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    member: &str,
+) -> FlowReturnKey {
+    let mut key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    key.demand = crate::semantic_query::ReturnProjectionDemand {
+        point: crate::semantic_query::demand::Demand::navigate(
+            crate::semantic_query::demand::ProjectionPath::from_segments([
+                crate::semantic_query::PathSegment::Member(
+                    crate::semantic_query::PropertyKey::identifier(member),
+                ),
+            ]),
+        ),
+    };
+    key
+}
+
+/// Whether any dispatched key under the capture names `needle` (the
+/// sibling-materialisation detector for the member-demand tests).
+fn capture_touches(snapshot: &crate::capture_token::CaptureSnapshot, needle: &str) -> bool {
+    snapshot
+        .dispatch_log
+        .iter()
+        .any(|entry| format!("{:?}", entry.key).contains(needle))
+}
+
+/// The member demand evaluates ONLY the demanded member: `b` (a
+/// widening-literal local read) projects the widened `number`, and the
+/// sibling binding's value root (`sideMarker`) never enters a dispatch
+/// key. The whole-return demand on the SAME function is the positive
+/// control: it DOES materialise the sibling, so the detector is proven
+/// able to see a sibling materialisation.
+#[test]
+fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding() {
+    // Member demand: sibling stays cold.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let guard = crate::capture_token::CaptureToken::start_for_query("flow_member_demand");
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        let snapshot = guard.end();
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the demanded member widens its literal local read to number"
+        );
+        assert!(
+            !capture_touches(&snapshot, "sideMarker"),
+            "the elided sibling's value root must never enter a dispatch key"
+        );
+    });
+
+    // Positive control on a FRESH host: the whole-return demand
+    // materialises the sibling — the detector is discriminating.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let guard = crate::capture_token::CaptureToken::start_for_query("flow_member_control");
+        let (expr, _) = flow_result(
+            dispatch,
+            &control,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        let snapshot = guard.end();
+        assert_eq!(
+            object_prop(&expr, "b"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert!(
+            capture_touches(&snapshot, "sideMarker"),
+            "positive control: the WHOLE-return evaluation materialises the sibling, \
+             so a member-demand leak would have been visible to the detector"
+        );
+    });
+}
+
+/// `as const` preservation through the member demand: a const-asserted
+/// literal local read stays the pinned literal — TS7 oracle
+/// (`tsc 7.0.2 --declaration`): `const x = 1 as const; return { x }`
+/// declares `{ x: 1 }`.
+#[test]
+fn flow_return_member_demand_preserves_const_asserted_local() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberConstAssert", "b"),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+    });
+}
+
+/// A member demand over a NON-OBJECT return fails closed with a typed
+/// no-value outcome — never a silently widened whole-return result.
+#[test]
+fn flow_return_member_demand_on_non_object_return_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subLiteral", "b")
+        ));
+    });
+}
+
+/// A member demand for a key the returned object does not carry fails
+/// closed — never a fabricated `undefined` member.
+#[test]
+fn flow_return_member_demand_missing_member_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subMemberWiden", "missing")
+        ));
+    });
+}
+
+/// A member demand over a body with a bare return / fallthrough arm
+/// fails closed (the `undefined` arm cannot fold into a member access).
+#[test]
+fn flow_return_member_demand_with_bare_return_arm_is_typed_miss() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(flow_is_miss(
+            dispatch,
+            member_flow_key(dispatch, "subMemberBareMix", "b")
+        ));
+    });
+}
+
+/// Bare-return-as-void keeps its OTHER half: a bare return ALONGSIDE a
+/// value return contributes `undefined` (never `void`, never dropped).
+#[test]
+fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMixedBareValue",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("expected `number | undefined`, got {expr:?}");
+        };
+        assert!(arms.contains(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Undefined
+        )));
+        assert!(arms.contains(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        )));
+    });
+}
+
+/// The whole-return and single-member demand points COEXIST as distinct
+/// family candidates: neither satisfies the other (the §3.4 two-gate
+/// hit over the RECORDED materialised point), and a warm re-read of the
+/// whole point after the member publish still serves the whole object.
+#[test]
+fn flow_return_member_and_whole_demands_coexist_as_candidates() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let (whole, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert!(matches!(&whole, verter_type_expr::TypeExpr::Object(_)));
+        let (member, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        assert_eq!(
+            member,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        // Warm re-reads serve each point's own candidate.
+        let (whole_again, _) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subMemberWiden",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert!(matches!(
+            &whole_again,
+            verter_type_expr::TypeExpr::Object(_)
+        ));
+        let (member_again, _) = flow_result(
+            dispatch,
+            &host,
+            member_flow_key(dispatch, "subMemberWiden", "b"),
+        );
+        assert_eq!(
+            member_again,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
         );
     });
 }

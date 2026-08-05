@@ -3949,6 +3949,34 @@ fn infer_expression_type_ctx(
             infer_expression_type_ctx(&paren.expression, source, policy, budget, depth + 1)
         }
         Expression::ArrayExpression(arr) => {
+            // A const context (`... as const`, established by the enclosing
+            // assertion and propagated through the member policy) pins an
+            // array literal to its exact READONLY TUPLE shape: element
+            // positions keep their literal types in authored order. Spreads
+            // and elisions fall back to the mutable-array inference below —
+            // the const-tuple surface is the exact positional literal case.
+            if policy == MemberLiteralPolicy::ConstAssert {
+                let positional: Option<Vec<&Expression<'_>>> = arr
+                    .elements
+                    .iter()
+                    .map(|element| element.as_expression())
+                    .collect();
+                if let Some(positional) = positional {
+                    let mut elements = Vec::with_capacity(positional.len());
+                    for expr in positional {
+                        elements.push(verter_type_expr::TupleElement {
+                            label: None,
+                            ty: infer_expression_type_ctx(expr, source, policy, budget, depth + 1)?,
+                            optional: false,
+                            rest: false,
+                        });
+                    }
+                    return Ok(TypeExpr::Tuple {
+                        elements: Arc::from(elements.into_boxed_slice()),
+                        readonly: true,
+                    });
+                }
+            }
             let mut element_types = Vec::new();
             for element in &arr.elements {
                 match element {

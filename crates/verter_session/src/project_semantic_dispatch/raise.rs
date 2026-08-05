@@ -865,7 +865,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             SemanticNodeData::IndexedAccess { object, index } => {
                 let object_context = indexed_access_object_context(parent_context);
-                stack.push(ReduceFrame::descend(*object, object_context));
+                // The flow-return `ReturnType<typeof callee>['b']` member
+                // hop: the OBJECT is NOT pre-reduced — reducing the
+                // builtin carrier here would execute the callee's WHOLE
+                // signature composition for a single-member demand. The
+                // un-reduced carrier flows into the `IndexedAccess`
+                // dispatch verbatim (the reduce arm's mapping fall-through)
+                // and the walker's member-hop admission dispatches
+                // `FlowReturn` with the single-member demand.
+                let flow_member_hop = matches!(index, IndexKey::String(_))
+                    && self.is_flow_return_type_member_base(*object);
+                if !flow_member_hop {
+                    stack.push(ReduceFrame::descend(*object, object_context));
+                }
                 if let IndexKey::Computed(n) = index {
                     stack.push(ReduceFrame::descend(
                         *n,
@@ -912,13 +924,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 }
             }
-            SemanticNodeData::InstantiationRef { args, .. } => {
+            SemanticNodeData::InstantiationRef { base, args } => {
                 // Args travel with the carrier — substituted into the
                 // body if the carrier's dispatch reifies. Under
                 // Navigate the carrier stays terminal so args effectively
                 // stay un-reduced via the mapping fall-through.
-                for arg in args.iter() {
-                    stack.push(ReduceFrame::descend(*arg, parent_context));
+                //
+                // EXCEPT the flow-return `ReturnType<typeof callee>`
+                // carrier under a non-whole-surface demand: reducing its
+                // `typeof` argument here would compose the callee's full
+                // signature — an eager WHOLE-body flow evaluation at a
+                // position whose carrier stays terminal. The demand
+                // points own that materialisation (the walker's member
+                // hop dispatches the single-member `FlowReturn`; a
+                // whole-surface demand reifies through `Instantiate`).
+                let _ = base;
+                let flow_return_carrier_stop = !is_whole_surface_published(parent_context)
+                    && self.is_flow_return_type_member_base_data(data);
+                if !flow_return_carrier_stop {
+                    for arg in args.iter() {
+                        stack.push(ReduceFrame::descend(*arg, parent_context));
+                    }
                 }
             }
             SemanticNodeData::MergedDecl { contributors } => {

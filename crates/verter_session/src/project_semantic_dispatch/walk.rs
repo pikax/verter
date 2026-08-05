@@ -2625,6 +2625,22 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         results.push(current);
                         return;
                     }
+                    // `ReturnType<typeof callee>` member-hop admission
+                    // (the flow-return substrate's path-precise demand
+                    // rail): a pending named segment over the builtin
+                    // `ReturnType` carrier whose argument is a bare
+                    // `typeof` of a body-derived function value
+                    // dispatches `FlowReturn` with the single-member
+                    // `ReturnProjectionDemand` — the demanded member
+                    // materialises, sibling members and their bindings
+                    // stay cold. A `None` falls through to the generic
+                    // `Instantiate` unwrap below (the whole-return route
+                    // through this same dispatch).
+                    let flow_member_arg = (still_more_path
+                        && is_builtin
+                        && base.decl_name.as_ref() == "ReturnType"
+                        && args.len() == 1)
+                        .then(|| args[0]);
                     let identity = self
                         .dispatch
                         .type_slot_for(
@@ -2634,6 +2650,35 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         );
                     let args_clone = Arc::clone(args);
                     drop(data);
+                    if let Some(callee_arg) = flow_member_arg {
+                        if let Some(member_node) = self
+                            .dispatch
+                            .flow_return_member_projection(callee_arg, &path[index])
+                        {
+                            let meta = match &path[index] {
+                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                    key: key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                            };
+                            let edge_kind = match &path[index] {
+                                PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
+                                PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
+                            };
+                            self.graph().record_origin_edge(
+                                member_node,
+                                edge_kind,
+                                Arc::from([current]),
+                                meta,
+                                Arc::clone(self.fence),
+                            );
+                            current = member_node;
+                            index += 1;
+                            self.intermediate_nodes.push(Some(current));
+                            continue;
+                        }
+                    }
                     // Intermediate-hop demand
                     // demotion (the spec). An InstantiationRef
                     // unwrapped with a path segment still pending is

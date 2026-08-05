@@ -321,7 +321,28 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     ) && type_args.iter().any(|arg| {
                         crate::project_semantic_dispatch::raise::
                             builtin_lowering_argument_is_open(self, *arg)
-                    }));
+                    }))
+                    // `ReturnType<typeof callee>` over a BODY-DERIVED
+                    // (flow-return) function value stays a carrier under
+                    // the carrier-preserving modes: executing it here
+                    // would evaluate the callee's WHOLE body at a
+                    // head-normalization site that carries no projection
+                    // demand. Materialisation enters at the demand
+                    // points — the PathWalker's member hop dispatches
+                    // `FlowReturn` with the single-member demand
+                    // (path-precise; siblings stay cold), and a terminal
+                    // whole-surface demand executes through the direct
+                    // `Instantiate` unwrap. Declared-return callees keep
+                    // executing eagerly (annotation-only, no body
+                    // evaluation).
+                    || (matches!(
+                        context.mode,
+                        ProjectionMode::Navigate | ProjectionMode::Skeleton
+                    ) && name.as_ref() == "ReturnType"
+                        && type_args.len() == 1
+                        && self
+                            .flow_return_callee_for_typeof_arg(type_args[0])
+                            .is_some());
                 if build_carrier {
                     return self.intern_ref_head_carrier(
                         RefHeadResolution::Builtin(identity),

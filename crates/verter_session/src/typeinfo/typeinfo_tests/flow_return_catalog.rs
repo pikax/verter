@@ -532,17 +532,15 @@ fn flow_return_cf13_labeled_break_current_return_collection() {
     });
 }
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl01_widens_primitive_literal_return,
     "BL01",
-    "typeinfo currently preserves a numeric literal from an unannotated function body instead of applying TypeScript return-literal widening; keep as the future BL01 widening contract",
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl02_widens_object_return_properties_selectively,
     "BL02",
-    "typeinfo currently collects object return shape but does not apply TypeScript property-level return widening while preserving explicit const assertions; keep as the future BL02 object widening contract",
     |expr| {
         let props = assert_object_has_props(expr, &["count", "kind"]);
         assert_string_literal(&props["kind"].ty, "ok");
@@ -589,10 +587,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl09_preserves_readonly_tuple_const_return,
     "BL09",
-    "typeinfo currently does not infer readonly tuple shapes from array literals under function-body as const returns; keep as the future BL09 const-tuple contract",
     |expr| {
         let TypeExpr::Tuple { elements, readonly } = expr else {
             panic!("expected readonly tuple, got {expr:?}");
@@ -627,10 +624,9 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+catalog_contract!(
     flow_return_bl12_models_bare_return_as_void,
     "BL12",
-    "typeinfo currently ignores bare return statements with no expression instead of normalizing the function return to void; keep as the future BL12 bare-return contract",
     |expr| assert_primitive(expr, PrimitiveName::Void)
 );
 

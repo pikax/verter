@@ -5585,6 +5585,16 @@ pub(crate) mod foundations_guards {
         // for type-resolution requests. Producer side of the
         // `RequestKind::TypeResolution` audit kind.
         "pub mod host_resolve_type_audit",
+        // Flow-return audit substrate: the per-request TLS emission
+        // helpers (`FlowReturnStarted` / budget / cycle events and the
+        // per-request counters) the cold flow path records through.
+        "pub mod flow_return_audit",
+        // Public audited entry-point that wires
+        // `VerterHost::get_flow_return_type_with_audit` (the single
+        // public flow-return seam) and its typed `FlowReturnError`.
+        // Producer side of the `RequestKind::FlowReturnInference`
+        // audit kind.
+        "pub mod host_flow_return_audit",
         // verter_ffi::convert (host::cross_file::CrossFileResult)
         "pub mod cross_file",
         // Project-bound external-TypeScript-engine contract: the
