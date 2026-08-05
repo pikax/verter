@@ -4,10 +4,19 @@
 //! component-meta prop written as `ReturnType<typeof myType>['b']`
 //! resolves the demanded member THROUGH the shared `FlowReturn` dispatch
 //! path-precisely — the demanded member (`b`) materialises, the sibling
-//! (`a`) stays unloaded (its cross-file value type is never parsed,
-//! routed, or dispatched), and the publication pipeline records ZERO
+//! (`a`) stays unloaded (its cross-file value type is never ROUTED into a
+//! semantic dispatch), and the publication pipeline records ZERO
 //! `Published(Expanded)` projection contexts (Component-Meta
 //! Shallow-By-Default).
+//!
+//! Non-materialization is asserted at the SEMANTIC-DISPATCH boundary, not
+//! at the parse boundary. Shallow file processing indexes every reachable
+//! import up front by design (Shallow File Processing Core Invariant), so
+//! the sibling's FILE is legitimately read and indexed; what must never
+//! happen is its declaration being deepened. `ProjectSemanticDispatch`
+//! runs on the requesting thread, so the capture token observes its key
+//! log directly — the positive control below proves the log is live
+//! rather than trivially empty.
 //!
 //! Fixtures are vendored-in-memory only (Testing-Hermeticity).
 
@@ -110,8 +119,7 @@ fn key_published_expanded(key: &SemanticQueryKey) -> bool {
 }
 
 /// Debug-render of the offending dispatch keys touching the elided
-/// sibling's file (assertion diagnostics only — the pass/fail signal is
-/// the typed parse-count + key scan below).
+/// sibling's file — the pass/fail signal for cross-file non-deepening.
 fn sibling_touches(log: &[DispatchEntry]) -> Vec<String> {
     log.iter()
         .map(|entry| format!("{:?}", entry.key))
@@ -158,9 +166,8 @@ fn return_type_of_local_function_member_projects_widened_number() {
 
 /// Path-precision: the full `get_component_meta` for the
 /// `ReturnType<typeof myType>['b']` prop loads ONLY `b` — the sibling
-/// member's cross-file value is never parsed and never enters a
-/// dispatch key — and records ZERO `Published(Expanded)` projection
-/// contexts.
+/// member's cross-file value never enters a semantic dispatch key — and
+/// records ZERO `Published(Expanded)` projection contexts.
 #[test]
 fn return_type_member_demand_loads_only_the_walked_member() {
     let host = build_host(&[
@@ -174,15 +181,28 @@ fn return_type_member_demand_loads_only_the_walked_member() {
     let (_, resolution) = resolved.expect("ReturnType-admission SFC must resolve");
     assert!(!resolution.synthesis_should_suppress);
 
-    // The elided sibling's file is never parsed under this request.
-    assert_eq!(
-        snapshot.parse_count_for("/workspace/src/side.ts"),
-        0,
-        "the elided sibling's cross-file value must never be parsed \
-         (sibling `a` stays shallow under the `['b']` demand)"
+    // POSITIVE CONTROL. The negative scans below are only evidence if the
+    // dispatch log actually captured this request's semantic work. An
+    // observation surface that silently captured nothing would pass every
+    // "no key names the sibling" assertion while proving nothing, so the
+    // log must be non-empty AND must name the owner the demand walks.
+    assert!(
+        !snapshot.dispatch_log.is_empty(),
+        "the capture token observed ZERO dispatch keys — the negative scans below \
+         would pass vacuously"
+    );
+    let owner_touches = snapshot
+        .dispatch_log
+        .iter()
+        .filter(|entry| format!("{:?}", entry.key).contains("/workspace/src/MyType.vue"))
+        .count();
+    assert!(
+        owner_touches > 0,
+        "no dispatch key names the OWNER file — the log is live but not this request's"
     );
 
-    // No dispatch key names the sibling's file.
+    // No dispatch key names the sibling's file: `sideValue`'s declaration
+    // is never deepened, even though shallow indexing has seen its file.
     let touches = sibling_touches(&snapshot.dispatch_log);
     assert!(
         touches.is_empty(),

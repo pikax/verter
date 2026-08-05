@@ -46,6 +46,7 @@ use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 mod arena;
 mod derivation;
 mod family;
+mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
 mod inflight;
@@ -55,6 +56,8 @@ mod prepared;
 mod relation_memo;
 mod reverse_index;
 mod scc_publish;
+#[cfg(test)]
+mod scc_publish_tests;
 
 pub(crate) use flow_return_memo::InlineFlowReturnFlight;
 pub(crate) use relation_memo::InlineRelationFlight;
@@ -3669,133 +3672,6 @@ impl SemanticGraphStore {
         let admitted = !populated_slots.is_empty();
         drop(entries);
         admitted
-    }
-
-    /// Record a newly-admitted family against the memo retention
-    /// budget and FIFO-evict the oldest families once the family count
-    /// exceeds the budget cap. Evicting a still-valid family only forces
-    /// a recompute; it never yields an incorrect result.
-    ///
-    /// Called exactly once per family that newly enters the `entries`
-    /// memo (a re-publish into a different slot of an already-present
-    /// family does not re-record).
-    ///
-    /// **Family-memo consistency-cluster fence.** The caller passes the
-    /// `entries` guard it is already holding — the `memo_budget`
-    /// admission is recorded, the FIFO victims are removed from
-    /// `entries`, AND each evicted victim's `canonical_to_entries`
-    /// reverse-index registrations are pruned, ALL WITHIN that same lock
-    /// hold. The family memo is a three-member consistency cluster
-    /// (`entries`, `memo_budget`, `canonical_to_entries`); a concurrent
-    /// [`Self::invalidate_all`] clears all three under the SAME `entries`
-    /// lock, so the publish's `(entries slot, memo_budget record,
-    /// reverse-index register)` triple is atomic against the reset.
-    ///
-    /// Pruning the victim's reverse index here — rather than deferring it
-    /// past the `entries`-lock drop — closes the race where a fresh
-    /// same-`(family, slot)` re-publish registers into
-    /// `canonical_to_entries` between the victim's `entries` removal and
-    /// a deferred key-only reverse-index cleanup, which would delete the
-    /// fresh registration and leave the live re-published memo slot
-    /// invisible to `invalidate_canonical`. With the prune inside the
-    /// `entries` lock — and the publish-side `register_reverse_index`
-    /// also under that lock — no concurrent publish can register a fresh
-    /// `(family, slot)` in the gap, so there is no gap. The `entries →
-    /// canonical_to_entries shards` lock order PERMITS taking a shard
-    /// mutex while `entries` is held (`entries` is outermost), and no
-    /// path takes a `canonical_to_entries` shard mutex then `entries`, so
-    /// this nesting is sound.
-    ///
-    /// The injection point armed by
-    /// [`Self::test_publish_post_memo_budget_record_gate`] fires after
-    /// the admission lands; the one armed by
-    /// [`Self::test_publish_post_reverse_index_prune_gate`] fires after
-    /// the victims' reverse-index registrations are pruned — both with
-    /// the `entries` lock still held.
-    fn record_family_admission_locked(
-        &self,
-        entries: &mut FxHashMap<FamilyKey, FamilySlots>,
-        family: &FamilyKey,
-    ) {
-        let seq = crate::bounded_query_retention::next_retention_seq();
-        let victims = self.memo_budget.record_admission(seq, family.clone());
-        // Test-only injection point — parked after the `memo_budget`
-        // admission lands and with the `entries` lock still held, so a
-        // race test can assert the admission is recorded in the `entries`
-        // lock domain. `None` (the production default) is a no-op.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let gate = self.publish_post_memo_budget_record_gate.lock().clone();
-            if let Some(barrier) = gate {
-                barrier.wait();
-                barrier.wait();
-            }
-        }
-        // `record_admission` hands back `(seq, FamilyKey)` victims. The
-        // removal here is by `FamilyKey` alone, NOT by admission seq —
-        // sound because this whole method runs under the caller's
-        // exclusive `entries` lock (`&mut FxHashMap<FamilyKey,
-        // FamilySlots>`), the same lock domain every
-        // `record_family_admission_locked` records under and that
-        // `invalidate_all` clears `entries` + `memo_budget` under. With
-        // the exclusive lock held no concurrent writer can re-admit a
-        // FIFO victim's `FamilyKey` between `record_admission` and this
-        // drain, so a key-based removal cannot evict a fresh same-key
-        // re-admission. The `GlobalRetentionBudget` victim-identity
-        // contract permits a key-based removal for exactly this
-        // exclusive-lock-serialised case.
-        // Tracks whether at least one victim reverse-index registration
-        // was pruned, so the post-prune injection point fires only when a
-        // FIFO eviction actually happened. `cfg`-gated — absent from
-        // release builds, where the gate block is also compiled out.
-        #[cfg(any(test, feature = "test-support"))]
-        let mut pruned_any = false;
-        for (_victim_seq, victim) in victims {
-            // Remove the victim from `entries` (keeping map and budget
-            // in lockstep), then prune its reverse-index registrations
-            // under the same lock. The prune walks the SAME union
-            // `register_reverse_index` iterates — carrier
-            // `canonical_ids()` PLUS `dispatch_dep_signature` — so a
-            // dispatch-only registration (notably `<project>` from
-            // `project_generation_signature()`) cannot survive FIFO
-            // eviction. `prune_reverse_index_registration` is
-            // idempotent, so a canonical in both rails is pruned twice
-            // harmlessly. Each candidate's registrations are keyed
-            // PER-CANDIDATE on `(family, slot, admission_seq)` so a
-            // multi-view slot's cleanup strips only this candidate's
-            // seq — surviving sibling candidates in the same slot
-            // keep their own seq registrations.
-            if let Some(slots) = entries.remove(&victim) {
-                let drained = reverse_index::drain_family_slots_registrations(
-                    &self.canonical_to_entries,
-                    &victim,
-                    &slots,
-                );
-                #[cfg(any(test, feature = "test-support"))]
-                {
-                    pruned_any |= drained;
-                }
-                #[cfg(not(any(test, feature = "test-support")))]
-                let _ = drained;
-            }
-        }
-        // Test-only injection point — parked after the FIFO victims'
-        // `canonical_to_entries` reverse-index registrations have been
-        // pruned and with the `entries` lock still held, so a race test
-        // can assert the reverse-index prune runs in the `entries` lock
-        // domain. Fires only when at least one victim registration was
-        // pruned (so a publish that evicts nothing does not park).
-        // `None` (the production default) is a no-op.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            if pruned_any {
-                let gate = self.publish_post_reverse_index_prune_gate.lock().clone();
-                if let Some(barrier) = gate {
-                    barrier.wait();
-                    barrier.wait();
-                }
-            }
-        }
     }
 }
 

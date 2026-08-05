@@ -604,6 +604,19 @@ these is retired). Two cooperating pieces, tuned per cache:
   (`DERIVATION_SIGNATURE_POOL_CAP` = 4096) with two such budgets, evicted
   write-side from `record` / `intern_signature`. The cache's invalidation paths
   call `forget` so the ledger stays consistent with the map.
+  **Group admission with self-exemption** (`record_admissions_exempt`) is the
+  second entry: a publisher writing a set of entries that is only coherent
+  WHOLE — the batched SCC member publish, whose members are readable only while
+  their fenced root stays resident — records the entire set as ONE budget step
+  whose victim selection exempts every key the set needs. Per-entry admission
+  cannot see that constraint: under cap pressure entry *n*'s FIFO victim can be
+  the publisher's own root or an entry `0..n` it already wrote, leaving a
+  torn SUFFIX whose surviving members depend on iteration ORDER. The exemption
+  obliges the caller to REFUSE a group wider than the cap (an exemption set
+  larger than `cap` would pin the ledger above its bound); the store-side entry
+  is `SemanticGraphStore::record_family_admissions_locked`
+  (`semantic_query_memo/family_retention.rs`), and the SCC publish's whole-batch
+  refusal lives in `scc_publish.rs`.
 - `BoundedCandidateMap<K, D, V>` — a content-free-keyed slot map with a bounded
   per-slot candidate list (`DEFAULT_CANDIDATE_CAP` = 4) AND a global budget.
   `ComponentMetaResultDb` is built on it: the slot key drops `owner_whole_hash`,

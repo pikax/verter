@@ -2806,9 +2806,15 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
 /// through any path (the retired memoized-`Unknown` arm is deleted —
 /// admission rows 3–4 of `docs/arch/u2-relation-infer-design.md`).
 ///
+/// The refusal is RELEASE-ACTIVE: the publish gate returns `false` and
+/// releases the flight rather than relying on a `debug_assert!`, which is
+/// compiled out of exactly the builds that ship — so the test asserts the
+/// refusal itself, never a panic.
+///
 /// DISCRIMINATES against an admission-semantics regression: re-admitting
-/// `Unknown` fails the refuse assertions (a warm entry appears); a store
-/// that stopped admitting decided payloads fails the admit assertions.
+/// `Unknown` fails the refuse assertions (the publish reports `true` and
+/// a warm entry appears); a store that stopped admitting decided payloads
+/// fails the admit assertions.
 #[test]
 fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let host = ctx_host();
@@ -2873,24 +2879,23 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let refuse_flight = store
         .begin_inline_relation_flight(&refuse_key)
         .expect("the refused member claims its family flight");
-    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        store.publish_scc_members_fenced(
-            None,
-            &root_witness,
-            &crate::fact_signature_helpers::ReadSetSignature::empty(),
-            &Arc::from(Vec::<Arc<str>>::new()),
-            gen0,
-            vec![crate::semantic_query_memo::PendingRelationMember {
-                key: refuse_key.clone(),
-                payload: budget_payload,
-                flight: refuse_flight,
-            }],
-            Vec::new(),
-        );
-    }));
+    let published = store.publish_scc_members_fenced(
+        None,
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: refuse_key.clone(),
+            payload: budget_payload,
+            flight: refuse_flight,
+        }],
+        Vec::new(),
+    );
     assert!(
-        refused.is_err(),
-        "REFUSE: a BudgetExceeded payload must be rejected by the publish gate (row 4)",
+        !published,
+        "REFUSE: a BudgetExceeded payload must be rejected by the publish gate (row 4) \
+         — as a returned refusal, not a debug-only assertion",
     );
     assert_eq!(
         store.relation_memo_count(),
@@ -2900,6 +2905,11 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     assert!(
         store.get_relation_payload(ctx, &refuse_key).is_none(),
         "REFUSE: the refused key has no warm entry to serve",
+    );
+    assert!(
+        store.retained_claimed_flight_keys_for_tests().is_empty()
+            && store.resident_flight_keys_for_tests().is_empty(),
+        "REFUSE: the refused member's flight must be released and retired, not stranded",
     );
 }
 

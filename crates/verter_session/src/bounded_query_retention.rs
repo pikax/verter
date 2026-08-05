@@ -178,13 +178,90 @@ where
     pub fn record_admission(&self, seq: u64, key: K) -> Vec<(u64, K)> {
         let mut ledger = self.ledger.lock();
         ledger.push_back((seq, key));
-        let mut evict = Vec::new();
-        while ledger.len() > self.cap {
-            if let Some(victim) = ledger.pop_front() {
-                evict.push(victim);
+        Self::trim_locked(&mut ledger, self.cap, &|_| false)
+    }
+
+    /// Record a GROUP of freshly-admitted entries as ONE budget step, with
+    /// an eviction exemption over the group's own liveness set.
+    ///
+    /// **Why the exemption exists.** A publisher that admits several
+    /// entries which are only meaningful TOGETHER — a cache component
+    /// whose members are readable only while a specific other entry stays
+    /// resident — cannot use per-entry [`Self::record_admission`]. Under
+    /// cap pressure entry *n*'s admission selects a FIFO victim, and
+    /// nothing stops that victim being the publisher's own precondition
+    /// or one of entries `0..n` it already wrote. The publisher then
+    /// finishes having stored a proper SUFFIX of a set that is only
+    /// coherent whole, and *which* suffix survives depends on the order
+    /// the caller happened to iterate. Recording the group in one call —
+    /// with `exempt` naming every key the group needs resident — makes
+    /// that outcome unexpressible rather than merely unlikely: victim
+    /// selection never sees a key the group depends on.
+    ///
+    /// **Termination / cap fidelity (caller-enforced).** The trim skips
+    /// exempt entries and stops when only exempt entries remain, so the
+    /// ledger settles at `cap` exactly when the caller keeps its exempt
+    /// set within `cap`. A caller whose group cannot fit `cap` must
+    /// REFUSE the group rather than call this — otherwise the exemption
+    /// pins the ledger above cap until unrelated admissions trim it.
+    ///
+    /// Victims carry their admission `seq` under the same identity
+    /// contract as [`Self::record_admission`].
+    #[must_use]
+    pub fn record_admissions_exempt(
+        &self,
+        admissions: impl IntoIterator<Item = (u64, K)>,
+        exempt: &dyn Fn(&K) -> bool,
+    ) -> Vec<(u64, K)> {
+        let mut ledger = self.ledger.lock();
+        ledger.extend(admissions);
+        Self::trim_locked(&mut ledger, self.cap, exempt)
+    }
+
+    /// Bring a held ledger back within `cap` by removing the oldest
+    /// non-exempt admissions, and hand the removed records back as
+    /// victims. The single trim both admission entries share.
+    ///
+    /// Stops early when only exempt records remain, which is the bounded
+    /// overshoot the group form's caller contract rules out.
+    fn trim_locked(
+        ledger: &mut VecDeque<(u64, K)>,
+        cap: usize,
+        exempt: &dyn Fn(&K) -> bool,
+    ) -> Vec<(u64, K)> {
+        let over = ledger.len().saturating_sub(cap);
+        if over == 0 {
+            return Vec::new();
+        }
+        // Oldest-first victim selection, skipping every exempt key. The
+        // scan yields victims in LEDGER order, which is what makes the
+        // single-pass merge removal below correct.
+        let mut victims: Vec<(u64, K)> = Vec::with_capacity(over);
+        for (seq, key) in ledger.iter() {
+            if victims.len() == over {
+                break;
+            }
+            if !exempt(key) {
+                victims.push((*seq, key.clone()));
             }
         }
-        evict
+        if !victims.is_empty() {
+            // Admission seqs are unique per admission and the victim list
+            // was built by walking the ledger, so a single forward cursor
+            // removes exactly the selected records — no O(n·k) membership
+            // test and no risk of dropping a same-key record the scan did
+            // not select.
+            let mut cursor = 0usize;
+            ledger.retain(|(seq, _)| {
+                if cursor < victims.len() && victims[cursor].0 == *seq {
+                    cursor += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        victims
     }
 
     /// Drop EVERY ledger entry for `key`, regardless of admission seq.

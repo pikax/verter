@@ -28,6 +28,24 @@
 //!    root must release the ENTIRE component with ZERO member
 //!    publication.
 //!
+//! 3. **Retention self-exemption.** The batch's own admissions drive the
+//!    shared global family-retention FIFO, so under cap pressure a
+//!    member's admission can select a victim — and the two victims that
+//!    would tear the component are the batch's OWN witnessed root and the
+//!    batch's OWN already-written members. A per-member admission cannot
+//!    see that: it would publish a proper SUFFIX of the component onto a
+//!    root it had just evicted, and *which* suffix survived would depend
+//!    on the order the drain happened to iterate its members. So the
+//!    whole batch is ONE budget step whose victim selection exempts the
+//!    root plus every member family
+//!    ([`SemanticGraphStore::record_family_admissions_locked`]), and a
+//!    component whose resident footprint cannot fit the budget cap
+//!    REFUSES WHOLE — an exemption wider than the cap would pin the
+//!    ledger above its bound. The per-member write no longer touches the
+//!    budget at all: it hands back a `#[must_use]` [`NewlyKeyedFamily`]
+//!    the batch accumulates, so adding a member cannot reintroduce a
+//!    per-member admission without deleting that contract outright.
+//!
 //! Only decided, non-degraded results publish. A degraded flow success is
 //! `ReturnOnly` by contract and a non-binary relation outcome has no
 //! value-domain form — either one refuses the WHOLE batch here rather
@@ -92,6 +110,18 @@ pub(crate) struct PendingFlowReturnMember {
     pub(crate) flight: InlineFlowReturnFlight,
 }
 
+/// Whether a member's `entries` write made its family NEWLY resident,
+/// and therefore still owes the retention budget a ledger record.
+///
+/// `#[must_use]` on purpose: the per-member write deliberately does NOT
+/// record the admission itself (that is what let a member evict its own
+/// component's root), so dropping this answer would strand the family
+/// outside the budget and let the memo grow past its cap. The batch
+/// collects every newly-keyed family and settles them in ONE exempting
+/// budget step.
+#[must_use]
+struct NewlyKeyedFamily(bool);
+
 /// A member's claimed flight, in whichever domain it belongs to.
 enum StagedFlight {
     Relation(InlineRelationFlight),
@@ -117,9 +147,9 @@ impl SemanticGraphStore {
     /// Returns whether the batch published. `false` means NOTHING was
     /// written and every flight was released: the root witness no longer
     /// matches a live candidate, the caller was cancelled, an
-    /// invalidation aborted a flight, or a member's result is not
-    /// admissible. Waiting joiners wake on the abort sentinel and retry
-    /// admission.
+    /// invalidation aborted a flight, a member's result is not
+    /// admissible, or the component cannot fit the retention budget.
+    /// Waiting joiners wake on the abort sentinel and retry admission.
     pub(crate) fn publish_scc_members_fenced(
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
@@ -135,15 +165,53 @@ impl SemanticGraphStore {
         }
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
 
-        // A degraded flow success is a usable value but ReturnOnly by
-        // contract — no memo entry, no fact signature, no reverse-index
-        // metadata. Under a BATCHED publish that refusal is necessarily
-        // whole-component: a component cannot be half-admitted. The
-        // caller already holds every value.
-        if flow_members
-            .iter()
-            .any(|member| member.result.degradation.is_some())
-        {
+        // WHOLE-BATCH ADMISSIBILITY. Every gate here is release-active
+        // and every one is evaluated BEFORE any staging: a batched
+        // publish cannot be half-refused, so a single inadmissible member
+        // takes the entire component to `ReturnOnly`. The caller already
+        // holds every value; refusing only withholds warmth.
+        //
+        // 1. RETENTION FOOTPRINT. A component is coherent only while its
+        //    root AND every member stay resident, so publishing commits
+        //    the global family budget to `1 + members` co-resident
+        //    families. A component that cannot fit is not warmable at
+        //    all: exempting a set wider than the cap from FIFO victim
+        //    selection would pin the ledger permanently above its bound,
+        //    and publishing without the exemption would tear the
+        //    component. The count is a deliberate UPPER BOUND (`1 + len`,
+        //    not the distinct-family count) — a component's member list
+        //    is duplicate-free by construction, so the bound is exact in
+        //    practice and costs no set allocation on the publish path.
+        //
+        // 2. DEGRADED FLOW SUCCESS. A usable value, but `ReturnOnly` by
+        //    contract — no memo entry, no fact signature, no
+        //    reverse-index metadata. Under a MIXED component this is not
+        //    free: a relation machinery root's verdict is binary and
+        //    carries no degradation channel, so one degraded flow member
+        //    costs the clean relation siblings their warmth too. That is
+        //    a cold-recompute cost, never a wrong value — the alternative
+        //    (admitting the clean siblings) is the torn component.
+        //
+        // 3. NON-BINARY RELATION OUTCOME. `Unknown` / `BudgetExceeded`
+        //    have no value-domain form and must never enter the memo
+        //    (the decided-only admission contract). The authority maps
+        //    them to `ReturnOnly` before ever reaching here, so this is a
+        //    backstop — but a backstop spelled as a `debug_assert!` is
+        //    absent from the builds that ship, where the payload would
+        //    proceed to publication. It refuses instead.
+        let footprint = 1 + relation_members.len() + flow_members.len();
+        let inadmissible = footprint > self.memo_budget.cap()
+            || flow_members
+                .iter()
+                .any(|member| member.result.degradation.is_some())
+            || relation_members.iter().any(|member| {
+                !matches!(
+                    member.payload.outcome,
+                    crate::semantic_query::RelationOutcome::Assignable
+                        | crate::semantic_query::RelationOutcome::NotAssignable
+                )
+            });
+        if inadmissible {
             for member in relation_members {
                 self.abort_inline_relation_flight(&member.flight);
             }
@@ -156,15 +224,6 @@ impl SemanticGraphStore {
         let mut staged: Vec<StagedMember> =
             Vec::with_capacity(relation_members.len() + flow_members.len());
         for member in relation_members {
-            debug_assert!(
-                matches!(
-                    member.payload.outcome,
-                    crate::semantic_query::RelationOutcome::Assignable
-                        | crate::semantic_query::RelationOutcome::NotAssignable
-                ),
-                "only decided binary relation payloads publish; {:?} must route ReturnOnly",
-                member.payload
-            );
             debug_assert!(
                 member.flight.prepared.key() == &member.key.to_query_key(),
                 "an inline relation flight must publish its own exact full key"
@@ -245,8 +304,25 @@ impl SemanticGraphStore {
 
         let mut to_complete: Vec<(StagedFlight, QueryResult<SemanticQueryValue>)> =
             Vec::with_capacity(staged.len());
+        // Every member family the batch touches, whether or not its write
+        // newly keyed it — an ALREADY-resident member family still carries
+        // an older ledger record the batch's own admissions must not
+        // select. `newly_keyed` is the narrower subset that owes a fresh
+        // record.
+        //
+        // HASHED, not a linear scan: the exemption is consulted once per
+        // ledger record the trim walks, so a linear membership test would
+        // make the step quadratic in component size while the `entries`
+        // lock is held.
+        let mut component: rustc_hash::FxHashSet<FamilyKey> =
+            rustc_hash::FxHashSet::with_capacity_and_hasher(
+                staged.len() + 1,
+                rustc_hash::FxBuildHasher,
+            );
+        component.insert(required_root.family.clone());
+        let mut newly_keyed: Vec<FamilyKey> = Vec::with_capacity(staged.len());
         for member in staged {
-            self.publish_staged_locked(
+            let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
                 &mut entries,
                 &member.family,
                 member.entry,
@@ -255,8 +331,19 @@ impl SemanticGraphStore {
                 &dispatch_dep_signature,
                 member.admission_seq,
             );
+            if is_new {
+                newly_keyed.push(member.family.clone());
+            }
+            component.insert(member.family);
             to_complete.push((member.flight, member.completed));
         }
+        // ONE budget step for the whole component, with the root and every
+        // member family exempt from victim selection. The footprint gate
+        // above guarantees the exempt set fits the cap, so the trim still
+        // settles the ledger at exactly `cap`.
+        self.record_family_admissions_locked(&mut entries, &newly_keyed, &|family| {
+            component.contains(family)
+        });
         drop(entries);
 
         for (flight, completed) in to_complete {
@@ -344,8 +431,14 @@ impl SemanticGraphStore {
     }
 
     /// Write one prepared candidate into the family memo and land the
-    /// `(entries, memo_budget, reverse-index)` consistency cluster. The
+    /// `entries` + reverse-index halves of the consistency cluster. The
     /// caller holds the batch's single `entries` lock.
+    ///
+    /// The retention-budget half is deliberately NOT landed here — see
+    /// [`NewlyKeyedFamily`]. A per-member budget admission is exactly the
+    /// step that could select the batch's own root as its FIFO victim, so
+    /// the answer is returned and the caller settles every newly-keyed
+    /// family in one exempting step.
     fn publish_staged_locked(
         &self,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
@@ -355,7 +448,7 @@ impl SemanticGraphStore {
         carrier: &crate::fact_signature_helpers::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         admission_seq: u64,
-    ) {
+    ) -> NewlyKeyedFamily {
         let cap = family.candidate_cap();
         let family_was_new = !entries.contains_key(family);
         let outcome = entries.entry(family.clone()).or_default().publish(
@@ -374,9 +467,6 @@ impl SemanticGraphStore {
                 displaced_entry,
             );
         }
-        if family_was_new && !populated_slots.is_empty() {
-            self.record_family_admission_locked(entries, family);
-        }
         reverse_index::register_reverse_index(
             &self.canonical_to_entries,
             family,
@@ -385,6 +475,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature,
             admission_seq,
         );
+        NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }
 
     fn abort_staged_flight(&self, flight: &StagedFlight) {
@@ -433,7 +524,7 @@ impl SemanticGraphStore {
         let mut entry = entry;
         entry.admission_seq = admission_seq;
         let mut entries = self.entries_lock_diagnosed();
-        self.publish_staged_locked(
+        let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
             &mut entries,
             &family,
             entry,
@@ -442,6 +533,11 @@ impl SemanticGraphStore {
             &dispatch_dep_signature,
             admission_seq,
         );
+        // A seeded ROOT is a lone family, not a component: it takes the
+        // ordinary unexempted admission, exactly like `warm_publish_one`.
+        if is_new {
+            self.record_family_admission_locked(&mut entries, &family);
+        }
     }
 }
 
