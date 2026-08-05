@@ -422,6 +422,52 @@ export function capClassOuterRegion() {
     return (x: unknown) => x as Info;
   }
 }
+
+// ── QUALIFIED (dotted) type references ────────────────────────────────
+// `QE.M` / `QNS.Inner` / `QA.B.C` resolve their LEFTMOST segment as a
+// binding; the rest are member selections inside whatever that binding
+// denotes. A frame that declares the HEAD owns the whole reference, so
+// the owner-scope answer is the wrong one.
+export enum QE {
+  M = "outer",
+}
+
+export namespace QNS {
+  export type Inner = "outerNs";
+}
+
+export namespace QA {
+  export namespace B {
+    export type C = "outerABC";
+  }
+}
+
+export function qNoShadow(x: unknown) {
+  return x as QE.M;
+}
+
+export function qEnum(x: unknown) {
+  enum QE {
+    M = "inner",
+  }
+  return x as QE.M;
+}
+
+export function qNs(x: unknown) {
+  namespace QNS {
+    export type Inner = "innerNs";
+  }
+  return x as QNS.Inner;
+}
+
+export function qDeep(x: unknown) {
+  namespace QA {
+    export namespace B {
+      export type C = "innerABC";
+    }
+  }
+  return x as QA.B.C;
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -1154,4 +1200,52 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
     }
     assert_fails_closed(&host, "capClass");
     assert_fails_closed(&host, "capClassOuterRegion");
+}
+
+/// A QUALIFIED type reference is owned by its HEAD segment.
+///
+/// `x as QE.M` references exactly one binding — `QE`. The trailing
+/// segments are member selections INSIDE whatever `QE` denotes, never
+/// separate scope lookups. So when the frame declares `QE`, the whole
+/// reference belongs to the frame and the owner-scope answer is wrong.
+///
+/// tsgo 7.0.2 `--strict --declaration --emitDeclarationOnly`, on exactly
+/// these bodies:
+///
+/// ```text
+/// qNoShadow(x: unknown): QE.M     // the module enum
+/// qEnum(x: unknown): QE           // + TS4060 "private name 'QE'" — the LOCAL enum
+/// qNs(x: unknown): "innerNs"      // the LOCAL namespace
+/// qDeep(x: unknown): "innerABC"   // the LOCAL nested namespace
+/// ```
+///
+/// The `qEnum` row is proven local by assignability, not just by the
+/// printed name: `const w: import("./q").QE = qEnum(0)` is `TS2322 Type
+/// 'QE' is not assignable to type 'import("…").QE'`.
+///
+/// Mutation recipe: pushing the DOTTED name into `ReferencedNames`
+/// instead of its head (the pre-fix `recursive_traversal` `Ref` /
+/// `RecursiveRef` arms) makes `"QE.M"` compare against binding names,
+/// which only ever hold `"QE"` — so no frame binding matches, the gate
+/// never fires, and all three shadowed rows publish the owner scope's
+/// answer CLEAN and WARM. The `qNoShadow` row is the value control: it
+/// pins that taking the head leaves an UNSHADOWED qualified reference's
+/// resolved answer (the module enum member's literal) untouched, so the
+/// gate cannot be widened into a blanket fail-closed on every qualified
+/// reference.
+#[test]
+fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
+    let host = make_r5_host();
+
+    // Control: no local `QE` at all, so the module enum member governs
+    // and the answer stays clean + warm. This is the over-fire guard —
+    // a head split that fires on an unshadowed name breaks this row.
+    assert_clean_warm(&host, "qNoShadow", string_lit("outer"));
+
+    // The frame declares the HEAD in type space (`enum` / `namespace`,
+    // both unconditionally unmodelable), so every one of these must fail
+    // closed rather than publish the module-scope answer.
+    for name in ["qEnum", "qNs", "qDeep"] {
+        assert_fails_closed(&host, name);
+    }
 }

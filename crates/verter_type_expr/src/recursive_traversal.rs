@@ -814,7 +814,22 @@ pub struct ReferencedNames {
     pub value_roots: Vec<String>,
     /// The head of every named type reference (`Ref` / `RecursiveRef` /
     /// `TypeParameter`), in encounter order. These name TYPE bindings.
+    ///
+    /// A QUALIFIED reference contributes its LEFTMOST segment only:
+    /// `E.M` and `A.B.C` name `E` and `A`. The trailing segments select
+    /// members INSIDE whatever the head denotes, so they are not scope
+    /// lookups and never name a binding. This mirrors the value-space
+    /// rule, where `typeof x.y.z` contributes `x`.
     pub type_names: Vec<String>,
+}
+
+/// The one segment of a (possibly qualified) type reference that names a
+/// binding — see [`ReferencedNames::type_names`].
+fn type_reference_head(name: &str) -> &str {
+    match name.split_once('.') {
+        Some((head, _)) => head,
+        None => name,
+    }
 }
 
 /// Collect every referenced name of `ty` (see [`ReferencedNames`]).
@@ -839,7 +854,8 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 name,
                 type_arguments,
             } => {
-                out.type_names.push(name.as_ref().to_string());
+                out.type_names
+                    .push(type_reference_head(name.as_ref()).to_string());
                 for arg in type_arguments.iter() {
                     stack.push(arg);
                 }
@@ -849,7 +865,8 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 type_arguments,
                 conditional_context,
             } => {
-                out.type_names.push(name.as_ref().to_string());
+                out.type_names
+                    .push(type_reference_head(name.as_ref()).to_string());
                 for arg in type_arguments.iter() {
                     stack.push(arg);
                 }

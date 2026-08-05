@@ -98,6 +98,55 @@ fn referenced_names_takes_the_path_root_not_the_whole_path() {
 }
 
 #[test]
+fn referenced_names_takes_the_type_reference_head_not_the_dotted_name() {
+    // `E.M` / `A.B.C` resolve their LEFTMOST segment as a binding; the
+    // remaining segments are member selections inside whatever that
+    // binding denotes. A consumer asking "does this frame bind any name
+    // this answer references" compares against binding names, so pushing
+    // the dotted string makes every qualified reference miss — the answer
+    // silently keeps the scope it was lowered in.
+    let dotted = TypeExpr::union(vec![
+        TypeExpr::Ref {
+            name: Arc::from("E.M"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+        TypeExpr::Ref {
+            name: Arc::from("A.B.C"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+        TypeExpr::RecursiveRef {
+            name: Arc::from("R.Inner"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            conditional_context: Arc::from(Vec::new().into_boxed_slice()),
+        },
+    ]);
+
+    let mut type_names = referenced_names(&dotted).type_names;
+    type_names.sort();
+    assert_eq!(
+        type_names,
+        vec!["A".to_string(), "E".to_string(), "R".to_string()],
+        "a qualified type reference names its head binding, not the dotted path"
+    );
+    assert!(
+        !type_names.iter().any(|name| name.contains('.')),
+        "no dotted name survives into `type_names`: {type_names:?}"
+    );
+}
+
+#[test]
+fn referenced_names_leaves_an_undotted_reference_head_intact() {
+    // The head split must not perturb the common case.
+    let names = referenced_names(&TypeExpr::union(vec![
+        named("Info"),
+        TypeExpr::recursive_ref("Rec", Vec::new()),
+    ]));
+    let mut type_names = names.type_names;
+    type_names.sort();
+    assert_eq!(type_names, vec!["Info".to_string(), "Rec".to_string()]);
+}
+
+#[test]
 fn referenced_names_finds_nothing_in_a_name_free_type() {
     let names = referenced_names(&TypeExpr::union(vec![
         TypeExpr::number_literal(1.0),
