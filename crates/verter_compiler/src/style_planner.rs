@@ -1043,20 +1043,24 @@ impl VueScopePlanner<'_> {
                         let Some(pseudo) = component.pseudo() else {
                             continue;
                         };
-                        let Some(name) = self.pseudo_name(component) else {
-                            continue;
-                        };
-                        if matches!(name.as_str(), "global" | "v-global") {
+                        let special_name = self.vue_special_pseudo_name(component);
+                        if special_name
+                            .as_deref()
+                            .is_some_and(|name| matches!(name, "global" | "v-global"))
+                        {
                             let argument = self.render_special_argument(pseudo, false, false)?;
                             edits.truncate(edits_checkpoint);
                             edits.push(StyleEdit::Overwrite {
-                                span: selector.span(),
+                                span: selector_content_span(selector),
                                 content: argument,
                             });
                             self.facts.rewrites.global = true;
                             return Ok(true);
                         }
-                        if matches!(name.as_str(), "deep" | "v-deep") {
+                        if special_name
+                            .as_deref()
+                            .is_some_and(|name| matches!(name, "deep" | "v-deep"))
+                        {
                             let argument = self.render_special_argument(pseudo, false, true)?;
                             let same_compound_anchor = component_index > 0;
                             let anchor = same_compound_anchor
@@ -1082,7 +1086,10 @@ impl VueScopePlanner<'_> {
                             self.facts.rewrites.deep = true;
                             return Ok(true);
                         }
-                        if matches!(name.as_str(), "slotted" | "v-slotted") {
+                        if special_name
+                            .as_deref()
+                            .is_some_and(|name| matches!(name, "slotted" | "v-slotted"))
+                        {
                             let argument = self.render_special_argument(pseudo, true, false)?;
                             edits.push(StyleEdit::Overwrite {
                                 span: component.span(),
@@ -1297,10 +1304,19 @@ impl VueScopePlanner<'_> {
         Some(
             self.source
                 .slice(span)
-                .trim_start_matches(':')
                 .trim_end_matches('(')
                 .to_ascii_lowercase(),
         )
+    }
+
+    fn vue_special_pseudo_name(&self, component: &SelectorComponent) -> Option<String> {
+        component.pseudo()?.selector_list()?;
+        let name = self.pseudo_name(component)?;
+        matches!(
+            name.as_str(),
+            "deep" | "v-deep" | "slotted" | "v-slotted" | "global" | "v-global"
+        )
+        .then_some(name)
     }
 
     fn trusted_first_selector_argument<'a>(
@@ -1365,6 +1381,17 @@ fn collect_animation_edits(
 
 fn unknown_may_contain_selector(unknown: &UnknownStatement) -> bool {
     unknown.span().start < unknown.span().end
+}
+
+fn selector_content_span(selector: &ComplexSelector) -> Span {
+    let end = selector
+        .parts()
+        .last()
+        .map_or(selector.span().end, |part| match part {
+            ComplexSelectorPart::Compound(compound) => compound.span().end,
+            ComplexSelectorPart::Combinator(combinator) => combinator.span().end,
+        });
+    Span::new(selector.span().start, end)
 }
 
 fn selector_list_is_trusted_for_scoping(selector_list: &SelectorList) -> bool {

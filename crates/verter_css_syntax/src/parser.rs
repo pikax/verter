@@ -1346,7 +1346,7 @@ impl<'a> Parser<'a> {
         };
         let name = name_token.map_or("", |token| token_name(self.source, token));
         let functional = name_token.map(SyntaxToken::kind) == Some(TokenKind::Function);
-        let kind = if functional && is_selector_list_pseudo(name) {
+        let kind = if functional && is_selector_list_pseudo(name, pseudo_element) {
             SyntaxKind::PseudoSelectorList
         } else if pseudo_element {
             SyntaxKind::PseudoElement
@@ -1498,22 +1498,26 @@ fn classify_at_rule(name: &str) -> SyntaxKind {
     }
 }
 
-fn is_selector_list_pseudo(name: &str) -> bool {
-    identifier_is_any(
-        name,
-        &[
-            "is",
-            "where",
-            "not",
-            "has",
-            "deep",
-            "v-deep",
-            "slotted",
-            "v-slotted",
-            "global",
-            "v-global",
-        ],
-    )
+fn is_selector_list_pseudo(name: &str, pseudo_element: bool) -> bool {
+    if pseudo_element {
+        identifier_is_any(
+            name,
+            &[
+                "is",
+                "where",
+                "not",
+                "has",
+                "v-deep",
+                "v-slotted",
+                "v-global",
+            ],
+        )
+    } else {
+        identifier_is_any(
+            name,
+            &["is", "where", "not", "has", "deep", "slotted", "global"],
+        )
+    }
 }
 
 fn is_nth_pseudo(name: &str) -> bool {

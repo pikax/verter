@@ -538,6 +538,52 @@ fn unknown_functional_pseudos_keep_lossless_component_values() {
     assert_eq!(pseudo.selector_count(), 0);
 }
 
+// @ai-generated - R3-1 keeps Vue's pseudo aliases distinct from rejected cross-product spellings.
+#[test]
+fn vue_selector_list_pseudos_admit_only_the_exact_alias_spellings() {
+    for input in [
+        ":deep(.a)",
+        ":slotted(.a)",
+        ":global(.a)",
+        "::v-deep(.a)",
+        "::v-slotted(.a)",
+        "::v-global(.a)",
+    ] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+        let component = &structure.list().selectors()[0].compounds()[0].components()[0];
+        assert_eq!(
+            component.kind(),
+            SelectorComponentKind::FunctionalPseudo,
+            "{input}"
+        );
+        assert_eq!(component.pseudo().unwrap().selector_count(), 1, "{input}");
+    }
+
+    for input in ["::deep(.a)", "::slotted(.a)", "::global(.a)"] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+        let component = &structure.list().selectors()[0].compounds()[0].components()[0];
+        assert_eq!(
+            component.kind(),
+            SelectorComponentKind::PseudoElement,
+            "{input}"
+        );
+    }
+
+    for input in [":v-deep(.a)", ":v-slotted(.a)", ":v-global(.a)"] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+        let component = &structure.list().selectors()[0].compounds()[0].components()[0];
+        assert_eq!(
+            component.kind(),
+            SelectorComponentKind::FunctionalPseudo,
+            "{input}"
+        );
+        assert_eq!(component.pseudo().unwrap().selector_count(), 0, "{input}");
+    }
+}
+
 #[test]
 fn combinators_are_exact_and_whitespace_is_only_descendant_between_compounds() {
     let input = "  .a > .b+.c ~ .d||.e, > .relative .tail, .x |element  ";

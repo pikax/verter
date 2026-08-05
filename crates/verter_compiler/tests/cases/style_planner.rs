@@ -74,6 +74,15 @@ fn vue_global_rewrite_matches_official_selector_replacement() {
     }
 }
 
+// @ai-generated - R3-10 preserves the authored rule-boundary trivia after global replacement.
+#[test]
+fn vue_global_rewrite_preserves_rule_boundary_whitespace() {
+    assert_eq!(
+        scoped(":global(.a) { color: red }", "sc1"),
+        ".a { color: red }"
+    );
+}
+
 #[derive(serde::Deserialize)]
 struct VuePseudoOracleRow {
     selector: String,
