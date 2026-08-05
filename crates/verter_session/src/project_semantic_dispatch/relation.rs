@@ -321,6 +321,9 @@ pub(super) struct DrainedFlowReturnMember {
     /// The member's own file roots (unioned into the published component's
     /// self-roots).
     pub(super) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The materialised point set the member's compute ACTUALLY produced
+    /// (§3.4) — carried to the fenced member publish.
+    pub(super) materialized: crate::semantic_query::demand::MaterializedSet,
 }
 
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
@@ -1166,6 +1169,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
+                        materialized: state.materialized,
                     });
                 }
             }
@@ -1608,6 +1612,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         result,
                         inline_flight: member.inline_flight,
                         self_roots: member.self_roots,
+                        materialized: member.materialized,
                     });
             }
         }
@@ -1865,6 +1870,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(self.ctx),
                 member.key,
                 member.result,
+                member.materialized,
                 carrier.read_set_signature.clone(),
                 Arc::clone(&carrier.self_root_canonicals),
                 carrier.validated_at_generation,

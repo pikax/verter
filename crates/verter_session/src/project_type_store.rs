@@ -954,6 +954,16 @@ pub struct ProjectTypeStore {
     /// the per-profile [`compile_cache_db`](Self::compile_cache_db)
     /// instead, so the two cache families are disjoint by construction.
     compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent,
+    /// The demand-sliced flow substrate's home: the
+    /// once-per-content-version `FunctionFlowGraphStore` plus the
+    /// content-addressed `FlowSliceHashNode` / `FlowSliceLoweredBodyNode`
+    /// artifact nodes and the shared armed `FlowSliceBudget` cell.
+    /// Content-addressed (key identity IS validity — no fact rail, no
+    /// generation participation, like `compile_output_pure_content`);
+    /// per-canonical eviction rides the `evict_canonical` cascade.
+    /// Memory-side only; persistent registration of the two nodes is
+    /// separately owed and nothing here builds a persistence tier.
+    flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores,
     /// Source-content-domain DB for the per-canonical compile cache (D48).
     /// Holds [`crate::types::DerivedRawState`] entries (the
     /// caller-supplied route table plus source-derived analyses); the
@@ -1109,6 +1119,7 @@ impl ProjectTypeStore {
             app_config_no_override_proof,
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content: crate::cache_runtime::CompileOutputNodePureContent::new(),
+            flow_slice: crate::cache_runtime::flow_slice_node::FlowSliceStores::new(),
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
@@ -1223,6 +1234,12 @@ impl ProjectTypeStore {
         &self,
     ) -> &crate::cache_runtime::CompileOutputNodePureContent {
         &self.compile_output_pure_content
+    }
+
+    /// The demand-sliced flow substrate's project-global home (graph
+    /// store + slice nodes + shared budget cell).
+    pub(crate) fn flow_slice(&self) -> &crate::cache_runtime::flow_slice_node::FlowSliceStores {
+        &self.flow_slice
     }
 
     /// Source-content-domain DB for the per-canonical compile cache
@@ -1417,6 +1434,10 @@ impl ProjectTypeStore {
     ///   references the canonical.
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
+        // Flow-slice substrate: content-addressed (stale versions would
+        // only miss by key), evicted for memory hygiene exactly like the
+        // `FileArtifactStore` removal above.
+        self.flow_slice.remove_canonical(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
         self.owner_import_surfaces.remove(canonical_id);
         self.component_meta_results.invalidate_owner(canonical_id);

@@ -492,6 +492,10 @@ pub(crate) struct FlowReturnPendingState {
     /// are the UNION of every drained member's roots, so a cross-file edit
     /// invalidates the whole component.
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The materialised point set the member's compute ACTUALLY produced
+    /// (§3.4 — recorded by the compute, never re-derived from the nominal
+    /// key at publish).
+    pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
 }
 
 /// The domain deferral payload of a popped member.
@@ -1293,6 +1297,9 @@ pub(crate) struct CompletedFlowReturnMember {
     /// The member's own file roots (the SCC-union carrier's self-roots
     /// include them even when the ROOT is a relation obligation).
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    /// The materialised point set the member's compute ACTUALLY produced
+    /// (§3.4) — carried to the fenced member publish.
+    pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
 }
 
 /// The flow-return domain runtime: the completed flow members queued

@@ -45,18 +45,14 @@ const HASH_SEP: u8 = 0;
 /// The identity of one selected slice: minted ONLY by
 /// [`compute_flow_slice_hash`]. The private field makes the value
 /// unforgeable — a consumer holding a `FlowSliceHash` provably ran the
-/// planner + hasher first.
+/// planner + hasher first — and there is deliberately NO byte accessor:
+/// a slice hash cannot be converted to raw bytes, so it structurally
+/// cannot be embedded into any fact payload or warm-validity rail (the
+/// sole intra-function rail stays the whole-body
+/// `flow_body_stable_hash`; slice identity keys content-addressed
+/// artifacts only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct FlowSliceHash(Hash16);
-
-impl FlowSliceHash {
-    /// The hash bytes (read-only — there is no bytes-to-hash
-    /// constructor).
-    #[must_use]
-    pub fn bytes(&self) -> Hash16 {
-        self.0
-    }
-}
 
 /// Hash exactly the selected subgraph of `plan`: the demand identity,
 /// the selected node sets with their roles, and every graph edge whose

@@ -1871,7 +1871,27 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
         SemanticQueryKey::IndexedAccess { index, .. } => {
             ProjectionPath::from_segments([PathSegment::Index(index.clone())])
         }
+        // FlowReturn: the path is the key's OWN demand-axis projection
+        // path (whole-return = empty). Kept in lockstep with
+        // `requested_demand_override` so the requested point's path and
+        // the requested path are the same datum.
+        SemanticQueryKey::FlowReturn(key) => key.demand.point.projection.path.clone(),
         _ => ProjectionPath::empty(),
+    }
+}
+
+/// The requested-DEMAND override for key variants that embed their own
+/// demand point instead of denoting it through their `ModeSlot` preset.
+/// `FlowReturn` carries the flow-typed `(ProjectionDemand, EvalPolicy)`
+/// point as a KEY FIELD (`ReturnProjectionDemand`); a warm hit on such a
+/// key must be gated against THAT point — the shared demand-lattice
+/// dominance machinery over the key's own demand — never the modeless
+/// `Single` preset (which would collapse every demand point to a trivial
+/// pass). `None` keeps the `point_for_slot` formula.
+pub(super) fn requested_demand_override(key: &SemanticQueryKey) -> Option<Demand> {
+    match key {
+        SemanticQueryKey::FlowReturn(key) => Some(key.demand.point.clone()),
+        _ => None,
     }
 }
 
@@ -1884,6 +1904,9 @@ pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
 /// (`cached_satisfies(entry.satisfied_projection, requested_point_for_key(key))`).
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
+    if let Some(point) = requested_demand_override(key) {
+        return MaterializedPoint::new(point);
+    }
     let (_, slot) = family_and_slot(key);
     let path = requested_path_for_key(key);
     MaterializedPoint::new(point_for_slot(slot, &path))

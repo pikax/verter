@@ -116,20 +116,21 @@ fn slice_hash_ignores_cosmetic_position_shifts() {
     assert_eq!(slice_hash_of(plain, &["b"]), slice_hash_of(shifted, &["b"]));
 }
 
-/// `FlowSliceHash` is opaque and unforgeable: it exposes bytes but no
-/// bytes-to-hash constructor, so holding one proves the planner + hasher
-/// ran. (The lowered-body cache key embeds this type, which is what
-/// enforces hash-then-lower structurally.)
+/// `FlowSliceHash` is opaque and unforgeable: no bytes-to-hash
+/// constructor AND no byte accessor, so holding one proves the planner +
+/// hasher ran, and the value can never be re-encoded into a fact payload
+/// or any other byte-carrying rail. (The lowered-body cache key embeds
+/// this type, which is what enforces hash-then-lower structurally; the
+/// missing byte export is what keeps slice identity out of every
+/// warm-validity fact rail structurally.)
 #[test]
 fn flow_slice_hash_is_opaque_send_sync_static() {
     fn assert_arena_free<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}
     assert_arena_free::<FlowSliceHash>();
     let hash = slice_hash_of("function f() { return { b: 1 } }", &["b"]);
-    let bytes = hash.bytes();
-    assert_eq!(bytes.len(), 16);
-    // Read-only: the ONLY way to obtain a `FlowSliceHash` is
-    // `compute_flow_slice_hash` — there is no `from_bytes`, no `Default`,
-    // and the field is private. (Enforced by the type; this test pins the
-    // public surface by exercising all of it.)
+    // The ONLY public surface is identity: `Eq` / `Hash` / `Clone`. There
+    // is no `from_bytes`, no `Default`, no byte accessor, and the field
+    // is private. (Enforced by the type; this test pins the public
+    // surface by exercising all of it.)
     assert_eq!(hash, hash.clone());
 }

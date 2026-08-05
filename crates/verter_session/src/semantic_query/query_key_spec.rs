@@ -991,8 +991,13 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // the substitution axis is the TYPE-ONLY
         // `CanonicalTypeSubstitution` on the same context; overload
         // ordinal and function part ride on the function slot identity.
-        // No mode / demand axis (`allowed_demand` empty), so the family
-        // lives in the `Single` slot. Value domain is `FlowReturn` (NOT
+        // The demand axis (`ReturnProjectionDemand`) and the input axis
+        // (`FlowInputContext`) are KEY-EMBEDDED fields of `FlowReturnKey`
+        // (whole-return / empty-input is the canonical production point),
+        // not slot-mode demands — `allowed_demand` stays empty and the
+        // family lives in the `Single` slot; the warm gate runs over the
+        // key's OWN demand point (`requested_demand_override`). Value
+        // domain is `FlowReturn` (NOT
         // `TypeNode` — the canonical whole-return carrier + fallthrough
         // bit; consumers project afterward under their own mode). Every
         // degraded shape (Unsupported / Missing / Budget / EmptyCycle /

@@ -14,16 +14,6 @@
 
 use super::*;
 
-/// The `satisfied_projection` every flow-return entry carries: the
-/// modeless [`ModeSlot::Single`] identity point at the empty path (same
-/// modeless-family treatment as the relation family).
-fn flow_return_satisfied_projection() -> MaterializedSet {
-    MaterializedSet::single(MaterializedPoint::new(family::point_for_slot(
-        ModeSlot::Single,
-        &ProjectionPath::empty(),
-    )))
-}
-
 /// Store-owned admission token for a flow-return member computed inline
 /// by another obligation's transaction. Registering the token in the
 /// ordinary flow-return-family flight table lets a concurrent top-level
@@ -112,10 +102,17 @@ impl SemanticGraphStore {
     }
 
     /// The strict warm read of the `FlowReturn` family (design §3.4):
-    /// carrier validation AND the live-generation gate. An entry carries
-    /// the `FlowBody` fact rail plus its consumed subquery facts and self
-    /// roots; `validate(ctx)` revalidates that whole signature against
-    /// the caller's live view, so a body edit or a torn fact set hard-misses.
+    /// the TWO-GATE hit — `cached_satisfies` over the entry's RECORDED
+    /// materialised point against the key's OWN demand point (never the
+    /// nominal `Single` preset), AND carrier validation with the
+    /// live-generation gate. An entry carries the `FlowBody` fact rail
+    /// plus its consumed subquery facts and self roots; `validate(ctx)`
+    /// revalidates that whole signature against the caller's live view,
+    /// so a body edit or a torn fact set hard-misses. Warm validity
+    /// consults the `FlowBody` rooting + the unioned consumed facts
+    /// ONLY — no slice hash or selected-ID is re-derived or consulted
+    /// here (the sole-rail invariant; slice identity is structurally
+    /// unrepresentable in the fact rail).
     pub(crate) fn get_flow_return_result(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -124,6 +121,7 @@ impl SemanticGraphStore {
         let family = FamilyKey::FlowReturn {
             key: Box::new(key.clone()),
         };
+        let requested = MaterializedPoint::new(key.demand.point.clone());
         // Snapshot the candidate list under the `entries` lock, then
         // validate OUTSIDE the lock (the family warm-read discipline:
         // validation may re-enter the memo through the resolver view).
@@ -135,7 +133,9 @@ impl SemanticGraphStore {
         };
         let live_generation = ctx.project_type_store().current_project_generation();
         let hit = snapshot.into_iter().find(|entry| {
-            entry.validated_at_generation == live_generation && entry.validate(ctx)
+            cached_satisfies(&entry.satisfied_projection, &requested)
+                && entry.validated_at_generation == live_generation
+                && entry.validate(ctx)
         })?;
         // Brief LRU bookkeeping — promote the hit candidate in the slot's
         // recency order (a concurrent invalidation makes this a no-op).
@@ -147,7 +147,13 @@ impl SemanticGraphStore {
         }
         hit.read_set_signature.bubble(ctx);
         match hit.result {
-            QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => Some((*result).clone()),
+            QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
+                debug_assert!(
+                    result.degradation.is_none(),
+                    "the FlowReturn memo never stores a degraded success (ReturnOnly by contract)"
+                );
+                Some((*result).clone())
+            }
             // Structural invariant: the flow-return authority only ever
             // stores `FlowReturn` payloads in `FlowReturn` family entries.
             other => {
@@ -161,13 +167,20 @@ impl SemanticGraphStore {
     /// Publish ONE decided flow-return member at its SCC's batched close,
     /// riding the root's union carrier (read-set signature, self roots,
     /// generation stamp). Fenced exactly like the relation member
-    /// publish: only `Complete` results publish, and only through the
-    /// store-owned flight.
+    /// publish: only `Complete`, NON-DEGRADED results publish, and only
+    /// through the store-owned flight — a degraded success is `ReturnOnly`
+    /// by contract, so THIS single member-publish entry refuses it
+    /// (aborting the flight) rather than trusting call-site discipline.
+    /// `materialized` is the point set the member's compute ACTUALLY
+    /// produced — recorded by the compute, never re-derived from the
+    /// nominal key here.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish_flow_return_member_fenced(
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
         key: crate::semantic_query::FlowReturnKey,
         result: crate::semantic_query::FlowReturnResult,
+        materialized: MaterializedSet,
         carrier: crate::fact_signature_helpers::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         validated_at_generation: u64,
@@ -179,6 +192,16 @@ impl SemanticGraphStore {
             }),
             "an inline flow-return flight must publish its own exact full key"
         );
+        if result.degradation.is_some() {
+            // Degraded success: a usable value, but ReturnOnly — no memo
+            // entry, no fact signature, no reverse-index metadata. The
+            // caller already holds the value; waiting joiners wake on the
+            // abort sentinel and retry admission.
+            if let Some(flight) = flight {
+                self.abort_inline_flow_return_flight(&flight);
+            }
+            return false;
+        }
         let completed =
             QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result.clone())));
         let family = FamilyKey::FlowReturn { key: Box::new(key) };
@@ -191,7 +214,7 @@ impl SemanticGraphStore {
             dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
             self_root_canonicals: Arc::clone(&self_root_canonicals),
             walker_diagnostics: Arc::from([]),
-            satisfied_projection: flow_return_satisfied_projection(),
+            satisfied_projection: materialized,
             validated_at_generation,
             admission_seq,
         };

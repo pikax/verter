@@ -36,16 +36,13 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    ArrowFunctionExpression, BindingPattern, Class, ClassElement, Declaration,
-    ExportDefaultDeclarationKind, Expression, FormalParameters, Function, FunctionBody,
-    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement,
-    TSModuleDeclaration, TSModuleDeclarationBody, TSTypeParameterDeclaration, VariableDeclaration,
-    VariableDeclarationKind,
+    BindingPattern, Expression, FormalParameters, ObjectPropertyKind, Program, PropertyKey,
+    PropertyKind, Statement, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
 use verter_semantic::analysis::function_program::{
-    inventory_statement_list, FunctionBindingKind, FunctionBodyLocator, FunctionControlRegion,
-    FunctionDescentStep, FunctionProgramEntry,
+    inventory_statement_list, resolve_function_node, FunctionBindingKind, FunctionControlRegion,
+    FunctionNode, FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
     infer_declaration_expression_type, infer_expression_type,
@@ -281,43 +278,6 @@ pub enum FlowIrUnsupported {
     ModuleDeclaration,
 }
 
-/// The function node a locator descent lands on.
-enum FunctionNode<'a> {
-    /// A `function` declaration / expression or a class/object method.
-    Function(&'a Function<'a>),
-    /// An arrow function.
-    Arrow(&'a ArrowFunctionExpression<'a>),
-}
-
-impl<'a> FunctionNode<'a> {
-    fn params(&self) -> &'a FormalParameters<'a> {
-        match self {
-            Self::Function(func) => &func.params,
-            Self::Arrow(arrow) => &arrow.params,
-        }
-    }
-
-    fn body(&self) -> Option<&'a FunctionBody<'a>> {
-        match self {
-            Self::Function(func) => func.body.as_deref(),
-            Self::Arrow(arrow) => Some(&arrow.body),
-        }
-    }
-
-    /// Whether this is an expression-bodied arrow (`(x) => x * 2`).
-    fn is_expression_body(&self) -> bool {
-        matches!(self, Self::Arrow(arrow) if arrow.expression)
-    }
-
-    /// The function's own type parameter clause, when authored.
-    fn type_parameters(&self) -> Option<&TSTypeParameterDeclaration<'_>> {
-        match self {
-            Self::Function(func) => func.type_parameters.as_deref(),
-            Self::Arrow(arrow) => arrow.type_parameters.as_deref(),
-        }
-    }
-}
-
 /// Lower one function node's own type parameter clause (name, lowered
 /// constraint, lowered default) — shared by the whole-function node and
 /// every nested function value.
@@ -411,179 +371,11 @@ pub(crate) fn build_whole_function_flow_ir(
     })
 }
 
-/// The declaration view of a statement, unwrapping the export wrappers the
-/// locator descent does not record (the index discovers through
-/// `export { … }` / `export default` transparently).
-enum DeclRef<'a> {
-    /// A function declaration.
-    Function(&'a Function<'a>),
-    /// A variable declaration.
-    Variable(&'a VariableDeclaration<'a>),
-    /// A class declaration.
-    Class(&'a Class<'a>),
-    /// A namespace (`TSModuleDeclaration`).
-    Module(&'a TSModuleDeclaration<'a>),
-    /// An `export default { … }` object expression.
-    ExportDefaultObject(&'a ObjectExpression<'a>),
-}
-
-fn declaration_of<'a>(statement: &'a Statement<'a>) -> Option<DeclRef<'a>> {
-    match statement {
-        Statement::FunctionDeclaration(func) => Some(DeclRef::Function(func)),
-        Statement::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
-        Statement::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-        Statement::TSModuleDeclaration(module) => Some(DeclRef::Module(module)),
-        Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref()? {
-            Declaration::FunctionDeclaration(func) => Some(DeclRef::Function(func)),
-            Declaration::VariableDeclaration(decl) => Some(DeclRef::Variable(decl)),
-            Declaration::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-            Declaration::TSModuleDeclaration(module) => Some(DeclRef::Module(module)),
-            _ => None,
-        },
-        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                Some(DeclRef::Function(func))
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => Some(DeclRef::Class(class)),
-            other => match other.as_expression() {
-                Some(Expression::ObjectExpression(obj)) => Some(DeclRef::ExportDefaultObject(obj)),
-                _ => None,
-            },
-        },
-        _ => None,
-    }
-}
-
-/// The function node behind an initializer expression: an arrow or a
 /// Unwrap a parenthesized expression (the IIFE callee shape).
 fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => unwrap_parenthesized(&paren.expression),
         inner => inner,
-    }
-}
-
-/// function expression, nothing else.
-fn function_from_expression<'a>(expression: &'a Expression<'a>) -> Option<FunctionNode<'a>> {
-    match expression {
-        Expression::FunctionExpression(func) => Some(FunctionNode::Function(func)),
-        Expression::ArrowFunctionExpression(arrow) => Some(FunctionNode::Arrow(arrow)),
-        _ => None,
-    }
-}
-
-/// Resolve one function's locator against the retained snapshot: the
-/// contributing top-level statement, then the ordinal descent. Also
-/// derives the function's bare-identifier SELF name for direct-recursion
-/// detection: a function declaration contributes its id, a variable
-/// initializer its declarator binding; class members and object-literal
-/// members have no bare-identifier self name. Any miss is a typed `None`.
-fn resolve_function_node<'a>(
-    program: &'a Program<'a>,
-    locator: &FunctionBodyLocator,
-) -> Option<(FunctionNode<'a>, Option<Arc<str>>)> {
-    let mut statement = program
-        .body
-        .get(locator.contributor.contributor_index as usize)?;
-    let mut steps = locator.descent.iter();
-    loop {
-        match steps.next()? {
-            FunctionDescentStep::NamespaceMember { statement_ordinal } => {
-                let DeclRef::Module(module) = declaration_of(statement)? else {
-                    return None;
-                };
-                let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref()
-                else {
-                    return None;
-                };
-                statement = block.body.get(*statement_ordinal as usize)?;
-            }
-            FunctionDescentStep::FunctionDeclaration => {
-                // Terminal step: the statement IS the function declaration.
-                if steps.next().is_some() {
-                    return None;
-                }
-                let DeclRef::Function(func) = declaration_of(statement)? else {
-                    return None;
-                };
-                let self_name = func.id.as_ref().map(|id| Arc::from(id.name.as_str()));
-                return Some((FunctionNode::Function(func), self_name));
-            }
-            FunctionDescentStep::VariableInitializer { declarator_ordinal } => {
-                let DeclRef::Variable(var_decl) = declaration_of(statement)? else {
-                    return None;
-                };
-                let declarator = var_decl.declarations.get(*declarator_ordinal as usize)?;
-                let self_name = match &declarator.id {
-                    BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
-                    _ => None,
-                };
-                let init = declarator.init.as_ref()?;
-                match steps.next() {
-                    None => {
-                        return Some((function_from_expression(init)?, self_name));
-                    }
-                    Some(FunctionDescentStep::ObjectMember { member_ordinal }) => {
-                        // Terminal step: the object-literal member inside
-                        // the current initializer object expression.
-                        if steps.next().is_some() {
-                            return None;
-                        }
-                        let Expression::ObjectExpression(obj) = init else {
-                            return None;
-                        };
-                        let prop = obj.properties.get(*member_ordinal as usize)?;
-                        let ObjectPropertyKind::ObjectProperty(property) = prop else {
-                            return None;
-                        };
-                        // Object members have no bare-identifier self name.
-                        return Some((function_from_expression(&property.value)?, None));
-                    }
-                    Some(_) => return None,
-                }
-            }
-            FunctionDescentStep::ClassMember { member_ordinal } => {
-                // Terminal step: the class member at `member_ordinal`.
-                if steps.next().is_some() {
-                    return None;
-                }
-                let DeclRef::Class(class) = declaration_of(statement)? else {
-                    return None;
-                };
-                let element = class.body.body.get(*member_ordinal as usize)?;
-                let node = match element {
-                    ClassElement::MethodDefinition(method) => FunctionNode::Function(&method.value),
-                    ClassElement::PropertyDefinition(property) => {
-                        function_from_expression(property.value.as_ref()?)?
-                    }
-                    _ => return None,
-                };
-                // Class members have no bare-identifier self name.
-                return Some((node, None));
-            }
-            FunctionDescentStep::ExportDefaultObjectMember { member_ordinal } => {
-                // Terminal step: the object-literal method at
-                // `member_ordinal` inside the `export default { … }`
-                // object expression.
-                if steps.next().is_some() {
-                    return None;
-                }
-                let DeclRef::ExportDefaultObject(obj) = declaration_of(statement)? else {
-                    return None;
-                };
-                let prop = obj.properties.get(*member_ordinal as usize)?;
-                let ObjectPropertyKind::ObjectProperty(property) = prop else {
-                    return None;
-                };
-                // Object members have no bare-identifier self name.
-                return Some((function_from_expression(&property.value)?, None));
-            }
-            FunctionDescentStep::ObjectMember { .. } => {
-                // Only valid immediately after a VariableInitializer step
-                // (handled there).
-                return None;
-            }
-        }
     }
 }
 

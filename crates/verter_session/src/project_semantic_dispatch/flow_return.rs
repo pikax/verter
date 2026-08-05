@@ -53,14 +53,17 @@ pub(crate) enum FunctionReturnNode {
 
 /// The popped root's close outcome.
 enum FlowRootClose {
-    /// Complete evaluation: the admitted result plus the component's
-    /// UNIONED self-roots (every drained member's file roots across both
-    /// domains).
+    /// Complete evaluation: the result (possibly a DEGRADED success —
+    /// the caller still receives the value; only admission is refused),
+    /// the component's UNIONED self-roots (every drained member's file
+    /// roots across both domains), and the materialised point set the
+    /// root's compute actually produced (§3.4).
     Complete(
         FlowReturnResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        crate::semantic_query::demand::MaterializedSet,
     ),
-    /// Typed failure — `ReturnOnly`, never admitted.
+    /// Typed NO-VALUE failure — `ReturnOnly`, never admitted.
     Degraded(FlowReturnFailure),
 }
 
@@ -145,6 +148,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
+            // The canonical production point: whole return, empty input.
+            // The axes are KEY DATA — a narrower demand or a contextual
+            // input is a distinct cache and re-entry identity, never an
+            // implicit default.
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
         }
     }
 
@@ -303,6 +312,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(self.ctx),
                 member.key,
                 member.result,
+                member.materialized,
                 carrier.read_set_signature.clone(),
                 Arc::clone(&carrier.self_root_canonicals),
                 carrier.validated_at_generation,
@@ -325,27 +335,47 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         }
         let idx = self.flow_frame_open(&key);
-        let (outcome, self_roots, holds) = self.evaluate_flow_return(&key);
-        self.flow_frame_close(idx, outcome, holds, self_roots)
+        let (outcome, self_roots, holds, materialized) = self.evaluate_flow_return(&key);
+        self.flow_frame_close(idx, outcome, holds, self_roots, materialized)
     }
 
     /// The family cold-build arm (the `execute(FlowReturn)` reducer).
     /// Runs the root frame and maps the close onto the admission boundary:
-    /// `Complete` ⇒ publish; every degraded shape ⇒ `Error(Miss)`,
-    /// suppressed admission.
+    /// a NON-DEGRADED `Complete` ⇒ publish, carrying the compute-recorded
+    /// `satisfied_projection`; a DEGRADED SUCCESS ⇒ the value RETURNS
+    /// through the SUCCESS carrier with admission suppressed (`ReturnOnly`
+    /// — no memo entry, no fact signature, no reverse-index metadata); a
+    /// NO-VALUE failure ⇒ `Error(Miss)`, suppressed admission, the typed
+    /// failure riding the transaction's root-failure channel.
     pub(super) fn build_flow_return(
         &self,
         key: &FlowReturnKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
         let fence = self.project_generation_signature();
         let idx = self.flow_frame_open(key);
-        let (outcome, self_roots, holds) = self.evaluate_flow_return(key);
-        match self.flow_frame_close_root(idx, outcome, holds, self_roots) {
-            FlowRootClose::Complete(result, scc_self_roots) => QueryBuildOutput::from((
-                QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result))),
-                fence,
-            ))
-            .with_observed_self_roots(scc_self_roots),
+        let (outcome, self_roots, holds, materialized) = self.evaluate_flow_return(key);
+        match self.flow_frame_close_root(idx, outcome, holds, self_roots, materialized) {
+            FlowRootClose::Complete(result, scc_self_roots, materialized) => {
+                let degraded = result.degradation.is_some();
+                let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
+                    QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result))),
+                    fence,
+                ))
+                .with_observed_self_roots(scc_self_roots);
+                // §3.4: the published entry's `satisfied_projection` is
+                // the point set the compute ACTUALLY produced — recorded
+                // by the evaluation, never the nominal request echoed at
+                // publish time.
+                output.satisfied_projection = materialized;
+                if degraded {
+                    // Degraded SUCCESS: a usable value, ReturnOnly by the
+                    // split result/carrier contract — it may warm only
+                    // under an explicit fact-rooted admission row, and
+                    // none exists.
+                    output.cache_suppress = true;
+                }
+                output
+            }
             FlowRootClose::Degraded(failure) => {
                 let mut output: QueryBuildOutput<SemanticQueryValue> =
                     (QueryResult::Error(QueryError::Miss), fence).into();
@@ -391,11 +421,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         outcome: FlowReturnPendingOutcome,
         holds: Vec<FlowReturnKey>,
         self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        materialized: crate::semantic_query::demand::MaterializedSet,
     ) -> FlowReturnStep {
-        match self.flow_frame_pop(idx, outcome, holds, self_roots, false) {
+        match self.flow_frame_pop(idx, outcome, holds, self_roots, materialized, false) {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
-                FlowRootClose::Complete(result, _) => FlowReturnStep::Complete(result),
+                FlowRootClose::Complete(result, _, _) => FlowReturnStep::Complete(result),
                 FlowRootClose::Degraded(failure) => FlowReturnStep::Degraded(failure),
             },
         }
@@ -408,8 +439,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         outcome: FlowReturnPendingOutcome,
         holds: Vec<FlowReturnKey>,
         self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        materialized: crate::semantic_query::demand::MaterializedSet,
     ) -> FlowRootClose {
-        match self.flow_frame_pop(idx, outcome, holds, self_roots, true) {
+        match self.flow_frame_pop(idx, outcome, holds, self_roots, materialized, true) {
             FlowFramePop::RootClose(close) => close,
             FlowFramePop::Provisional(_) => unreachable!(
                 "the machinery root frame is always its SCC's root: the stack is \
@@ -430,6 +462,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         outcome: FlowReturnPendingOutcome,
         holds: Vec<FlowReturnKey>,
         self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+        materialized: crate::semantic_query::demand::MaterializedSet,
         machinery_root: bool,
     ) -> FlowFramePop {
         let popped = self.dispatch_txn.borrow_mut().reentry_mut().pop();
@@ -476,6 +509,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     inline_flight,
                     holds,
                     self_roots,
+                    materialized,
                 }),
             });
             return FlowFramePop::Provisional(step);
@@ -515,6 +549,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inline_flight: state.inline_flight,
                         holds: state.holds,
                         self_roots: state.self_roots,
+                        materialized: state.materialized,
                     });
                 }
             }
@@ -627,7 +662,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match outcome {
             FlowReturnPendingOutcome::Complete(result) => {
                 if machinery_root {
-                    FlowFramePop::RootClose(FlowRootClose::Complete(result, scc_self_roots))
+                    FlowFramePop::RootClose(FlowRootClose::Complete(
+                        result,
+                        scc_self_roots,
+                        materialized,
+                    ))
                 } else {
                     self.dispatch_txn.borrow_mut().flow.completed_members.push(
                         CompletedFlowReturnMember {
@@ -635,6 +674,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             result: result.clone(),
                             inline_flight,
                             self_roots,
+                            materialized,
                         },
                     );
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
@@ -676,13 +716,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let mut progressed = false;
             for i in 0..entries.len() {
                 let mut arms: Vec<SemanticNodeId> = Vec::new();
+                // Degradation propagates through the join: a result built
+                // from a degraded contributor is itself degraded
+                // (first-observed reason wins, deterministic in entry /
+                // hold order).
+                let mut degradation = current[i].as_ref().and_then(|result| result.degradation);
                 if let Some(result) = &current[i] {
                     arms.push(result.return_type);
                 }
                 let mut ready = true;
                 for target in &entries[i].holds {
                     match index.get(target).and_then(|j| current[*j].as_ref()) {
-                        Some(result) => arms.push(result.return_type),
+                        Some(result) => {
+                            arms.push(result.return_type);
+                            if degradation.is_none() {
+                                degradation = result.degradation;
+                            }
+                        }
                         // A target outside this component, or one that has
                         // not discharged: undecided — the entry cannot move.
                         None => {
@@ -713,6 +763,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     can_fall_through: current[i]
                         .as_ref()
                         .is_some_and(|result| result.can_fall_through),
+                    degradation,
                 };
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
@@ -823,9 +874,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Evaluate one demanded function through its flow IR. Reads the
     /// whole-body identity from the per-file `FunctionProgramIndex`
-    /// (recording the `ProgramAnalysisFactRef::FlowBody` fact rail) and
-    /// the lazy whole-body flow IR, then joins the return-site
-    /// contributors with return widening and the fallthrough seed.
+    /// (recording the `ProgramAnalysisFactRef::FlowBody` fact rail),
+    /// plans + hashes the demand slice through the project-global
+    /// flow-slice nodes (the budget outcome gates admission — an
+    /// over-budget plan is a typed `Budget` failure, `ReturnOnly` at the
+    /// memo), and evaluates the body, joining the return-site
+    /// contributors with return widening and the fallthrough seed. The
+    /// returned [`MaterializedSet`] is the point set this compute
+    /// ACTUALLY produced (§3.4) — recorded here, at the one place the
+    /// compute knows what it served.
+    ///
+    /// [`MaterializedSet`]: crate::semantic_query::demand::MaterializedSet
     fn evaluate_flow_return(
         &self,
         key: &FlowReturnKey,
@@ -833,16 +892,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
         FlowReturnPendingOutcome,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
         Vec<FlowReturnKey>,
+        crate::semantic_query::demand::MaterializedSet,
     ) {
+        use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
+        let degraded =
+            |failure: FlowReturnFailure,
+             self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>| {
+                (
+                    FlowReturnPendingOutcome::Degraded(failure),
+                    self_roots,
+                    Vec::new(),
+                    MaterializedSet::empty(),
+                )
+            };
+        // The evaluation models exactly the whole-return / empty-input
+        // point today. Any other demand/input point fails CLOSED with a
+        // typed no-value outcome — never a silently widened whole-return
+        // result, never a sibling materialisation the narrower demand did
+        // not ask for.
+        if !key.demand.is_whole_return() || !key.input.is_empty() {
+            return degraded(FlowReturnFailure::UnmodeledDemandPoint, Vec::new());
+        }
         let canonical = key.function.declaration_slot.defining_canonical.as_ref();
         let owner = key.function.declaration_slot.owner;
         let name = key.function.declaration_slot.merged_symbol_name.as_ref();
         let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical) else {
-            return (
-                FlowReturnPendingOutcome::Degraded(FlowReturnFailure::Missing),
-                Vec::new(),
-                Vec::new(),
-            );
+            return degraded(FlowReturnFailure::Missing, Vec::new());
         };
         let indexed = serve.indexed;
         let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
@@ -854,11 +929,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 && entry.key.part == key.function.function_part
                 && entry.key.overload_ordinal == key.function.overload_ordinal
         }) else {
-            return (
-                FlowReturnPendingOutcome::Degraded(FlowReturnFailure::Missing),
-                self_roots,
-                Vec::new(),
-            );
+            return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // The whole-body fact rail: the candidate roots on the indexed
         // whole-body hash (never re-lowered at validation).
@@ -868,26 +939,82 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 flow_body_stable_hash: entry.flow_body_stable_hash,
             },
         ));
+        // The demand-slice substrate: plan the demanded slice as graph
+        // reachability over the once-per-content-version
+        // `FunctionFlowGraph` and hash exactly the selection, through the
+        // project-global content-addressed hash node. The whole-return
+        // demand maps to the empty projection path. The outcome gates
+        // admission: an over-budget plan is a typed `Budget` failure the
+        // memo refuses (`ReturnOnly` — the fourth non-admission layer,
+        // on top of the planner's typed refusal, the hash node's
+        // `ReturnOnly`, and the unaddressable lowered store).
+        let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
+            function: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+                canonical_id: Arc::from(canonical),
+                function: entry.key.clone(),
+                flow_body_stable_hash: entry.flow_body_stable_hash,
+                parse_env_hash: key.context.parse_env_hash,
+                parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
+            },
+            demand: crate::cache_runtime::flow_slice_node::FlowSliceDemandIdentity {
+                projection_path: Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            },
+        };
+        let flow_slice = self.ctx.project_type_store().flow_slice();
+        match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx) {
+            None => {
+                // The skeleton source could not serve the pinned content
+                // version (a torn view between the served index and the
+                // retained snapshot): undecided, never a fabricated slice.
+                return degraded(FlowReturnFailure::Unresolved, self_roots);
+            }
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
+                exceeded,
+            )) => {
+                tracing::debug!(
+                    axis = ?exceeded.axis,
+                    limit = exceeded.limit,
+                    observed = exceeded.observed,
+                    "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
+                );
+                return degraded(
+                    FlowReturnFailure::Budget(
+                        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                    ),
+                    self_roots,
+                );
+            }
+            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
+                slice_hash,
+            )) => {
+                // Hash-then-lower: the minted slice identity keys the
+                // lowered-slice artifact (the key is unconstructible
+                // without it), and the lowered node lowers ONLY the
+                // planned slice. A lowered miss on the pinned content is
+                // a torn view — undecided, never a fabricated slice.
+                let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
+                    hash_key: slice_key,
+                    slice_hash,
+                };
+                if crate::cache_runtime::lookup(flow_slice.lowered_node(), lowered_key, self.ctx)
+                    .is_none()
+                {
+                    return degraded(FlowReturnFailure::Unresolved, self_roots);
+                }
+            }
+        }
         let Some(ir) = indexed
             .shallow_state
             .decl_bodies()
             .whole_function_flow_ir(entry)
         else {
-            return (
-                FlowReturnPendingOutcome::Degraded(FlowReturnFailure::Missing),
-                self_roots,
-                Vec::new(),
-            );
+            return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // A budget edge in one leaf's expression lowering stops the whole
         // evaluation with the typed reason (the scanner's `Unavailable`
         // verdict for the same leaf).
         if let Some(reason) = ir.budget_failure {
-            return (
-                FlowReturnPendingOutcome::Degraded(FlowReturnFailure::Budget(reason)),
-                self_roots,
-                Vec::new(),
-            );
+            return degraded(FlowReturnFailure::Budget(reason), self_roots);
         }
         // The ONE binder environment: the function's OWN type parameters
         // are binders in scope for the parameter and body-leaf lowering (a
@@ -919,11 +1046,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             binder_env: &binder_env,
             locals: rustc_hash::FxHashMap::default(),
             holds: Vec::new(),
+            degradation: None,
+            degraded_locals: rustc_hash::FxHashSet::default(),
         };
         let holds;
+        let degradation;
         let (contributors, _) = {
             let outcome = evaluator.eval_region(&ir.body);
             holds = std::mem::take(&mut evaluator.holds);
+            degradation = evaluator.degradation;
             outcome
         };
         let contributors = match contributors {
@@ -933,24 +1064,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     FlowReturnPendingOutcome::Degraded(failure),
                     self_roots,
                     holds,
+                    MaterializedSet::empty(),
                 );
             }
         };
-        let result =
-            match self.join_flow_return_contributors(contributors, ir.can_fall_through, &holds) {
-                Ok(result) => result,
-                Err(failure) => {
-                    return (
-                        FlowReturnPendingOutcome::Degraded(failure),
-                        self_roots,
-                        holds,
-                    );
-                }
-            };
+        let result = match self.join_flow_return_contributors(
+            contributors,
+            ir.can_fall_through,
+            &holds,
+            degradation,
+        ) {
+            Ok(result) => result,
+            Err(failure) => {
+                return (
+                    FlowReturnPendingOutcome::Degraded(failure),
+                    self_roots,
+                    holds,
+                    MaterializedSet::empty(),
+                );
+            }
+        };
+        // §3.4: record the point this compute ACTUALLY materialised — the
+        // whole-return point it just evaluated (the demand gate above
+        // proves it is the only point this evaluation serves). Recorded by
+        // the compute, never re-derived from the nominal key at publish.
+        let materialized =
+            MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()));
         (
             FlowReturnPendingOutcome::Complete(result),
             self_roots,
             holds,
+            materialized,
         )
     }
 
@@ -965,6 +1109,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         contributors: Vec<SemanticNodeId>,
         can_fall_through: bool,
         holds: &[FlowReturnKey],
+        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     ) -> Result<FlowReturnResult, FlowReturnFailure> {
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = contributors;
@@ -985,6 +1130,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Ok(FlowReturnResult {
             return_type,
             can_fall_through,
+            degradation,
         })
     }
 }
@@ -1026,9 +1172,24 @@ struct FlowEvaluator<'d, 'b> {
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle outcome on its targets' admitted returns.
     holds: Vec<FlowReturnKey>,
+    /// The first typed degradation this evaluation observed (a
+    /// modeled-`any` substitution for a value it could not model). Rides
+    /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
+    degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// Names bound to `any` because their initializer FAILED with a
+    /// typed flow failure. Observing such a binding is the
+    /// `FailedBindingInitializer` degradation; an unobserved failed
+    /// binding degrades nothing.
+    degraded_locals: rustc_hash::FxHashSet<String>,
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
+    /// Record a typed degradation (first-observed reason wins,
+    /// deterministic in source order).
+    fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
+        self.degradation.get_or_insert(degradation);
+    }
+
     /// Evaluate one region, returning its contributor nodes and whether
     /// the region falls through (mirrors the IR's reachability — this
     /// recomputes nothing, it only evaluates contributors).
@@ -1064,6 +1225,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // under its own local scope (the reaching definitions
                     // of a `const` inside an arm never escape it).
                     let saved = self.locals.clone();
+                    let saved_degraded = self.degraded_locals.clone();
                     let (consequent_result, _) = self.eval_region(consequent);
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
@@ -1071,6 +1233,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     contributors.extend(consequent_contributors);
                     self.locals = saved.clone();
+                    self.degraded_locals = saved_degraded.clone();
                     if let Some(alternate) = alternate {
                         let (alternate_result, _) = self.eval_region(alternate);
                         let alternate_contributors = match alternate_result {
@@ -1080,11 +1243,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         contributors.extend(alternate_contributors);
                     }
                     self.locals = saved;
+                    self.degraded_locals = saved_degraded;
                 }
                 crate::flow_ir::FlowIrStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
                     // never escapes it.
                     let saved = self.locals.clone();
+                    let saved_degraded = self.degraded_locals.clone();
                     let (result, _) = self.eval_region(block);
                     let block_contributors = match result {
                         Ok(contributors) => contributors,
@@ -1092,20 +1257,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     contributors.extend(block_contributors);
                     self.locals = saved;
+                    self.degraded_locals = saved_degraded;
                 }
                 crate::flow_ir::FlowIrStatement::Binding { name, init, .. } => {
                     if let Some(init) = init {
                         match self.eval_expr(init) {
                             Ok(Some(node)) => {
+                                self.degraded_locals.remove(name.as_ref());
                                 self.locals.insert(name.to_string(), node);
                             }
                             Ok(None) => {}
                             // A failed initializer binds `any` — the
                             // declaration itself is not a return
                             // contribution; the binding's failure only
-                            // surfaces where the binding is observed (as
-                            // `any`, never a poison).
+                            // surfaces where the binding is OBSERVED: the
+                            // observation evaluates to `any` and records
+                            // the `FailedBindingInitializer` degradation
+                            // (never a poison; an unobserved failed
+                            // binding degrades nothing).
                             Err(_) => {
+                                self.degraded_locals.insert(name.to_string());
                                 self.locals.insert(
                                     name.to_string(),
                                     self.dispatch
@@ -1190,6 +1361,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             });
         }
         let nested_holds;
+        let nested_degradation;
         let (contributors, _) = {
             let mut nested_evaluator = FlowEvaluator {
                 dispatch: self.dispatch,
@@ -1200,17 +1372,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 binder_env: &binder_env,
                 locals: rustc_hash::FxHashMap::default(),
                 holds: Vec::new(),
+                degradation: None,
+                degraded_locals: rustc_hash::FxHashSet::default(),
             };
             let outcome = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
+            nested_degradation = nested_evaluator.degradation;
             self.holds.append(&mut nested_evaluator.holds);
             outcome
         };
+        // A degraded nested body degrades the enclosing value that
+        // embeds its signature.
+        if let Some(degradation) = nested_degradation {
+            self.record_degradation(degradation);
+        }
         let contributors = contributors?;
         let result = self.dispatch.join_flow_return_contributors(
             contributors,
             can_fall_through,
             &nested_holds,
+            nested_degradation,
         )?;
         Ok(graph.intern_node(SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
@@ -1254,11 +1435,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 .copied()
                 .map(Some)
                 .ok_or(FlowReturnFailure::Unresolved),
-            crate::flow_ir::FlowIrExpr::Local { name } => Ok(Some(
-                self.locals.get(name.as_ref()).copied().unwrap_or_else(|| {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                }),
-            )),
+            crate::flow_ir::FlowIrExpr::Local { name } => {
+                // Observing a binding whose initializer FAILED is the
+                // `FailedBindingInitializer` degradation: the value is a
+                // modeled `any`, not the initializer's real type. A plain
+                // unbound local (hoisted `var` / TDZ forward reference)
+                // stays the undegraded implicit-`any`.
+                if self.degraded_locals.contains(name.as_ref()) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
+                    );
+                }
+                Ok(Some(
+                    self.locals.get(name.as_ref()).copied().unwrap_or_else(|| {
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                    }),
+                ))
+            }
             crate::flow_ir::FlowIrExpr::Object { members } => {
                 // Structural object-literal return: each member value
                 // evaluates as a flow expression (parameter / local
@@ -1389,6 +1582,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             .pending_len();
                         match self.dispatch.execute_flow_return(key.clone()) {
                             FlowReturnStep::Complete(result) => {
+                                // A degraded callee value degrades every
+                                // consumer of that value: absorb the
+                                // callee's typed reason into this frame.
+                                if let Some(degradation) = result.degradation {
+                                    self.record_degradation(degradation);
+                                }
                                 // A callee that pops as a PROVISIONAL
                                 // member of THIS component leaves its
                                 // result provisional until the close's
@@ -1444,8 +1643,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             crate::flow_ir::FlowIrExpr::CallOnBinding { param, name } => {
                 // A call on a function-typed binding: the call's value is
-                // the binding's signature return (the established `any`
-                // fallback for a non-function binding).
+                // the binding's signature return. Calling an `any`-typed
+                // or unbound binding is `any` EXACTLY (the implicit-`any`
+                // call); calling a binding whose value is neither
+                // callable nor `any` is the `NonCallableBinding`
+                // DEGRADATION — a modeled `any`, not the real semantics.
                 let node = match param {
                     Some(ordinal) => self.params.get(*ordinal as usize).copied(),
                     None => self.locals.get(name.as_ref()).copied(),
@@ -1458,9 +1660,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 let data = graph.node_data(node);
                 match data.as_deref() {
                     Some(SemanticNodeData::Signature { return_type, .. }) => Ok(Some(*return_type)),
-                    _ => Ok(Some(
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => Ok(Some(
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
                     )),
+                    _ => {
+                        self.record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::NonCallableBinding,
+                        );
+                        Ok(Some(graph.intern_node(SemanticNodeData::Primitive(
+                            PrimitiveKind::Any,
+                        ))))
+                    }
                 }
             }
             crate::flow_ir::FlowIrExpr::LocalFunctionShadow => {
@@ -1486,22 +1696,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
-                // call-bucket return — an unrepresentable callee stays the
-                // established `any` fallback.
+                // call-bucket return — an unrepresentable / unresolvable
+                // callee is the `UnrepresentableCallee` DEGRADATION: a
+                // usable modeled-`any`, `ReturnOnly` by contract.
                 let graph = self.dispatch.graph();
+                let degraded_any = |evaluator: &mut Self| {
+                    evaluator.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+                    );
+                    Ok(Some(graph.intern_node(SemanticNodeData::Primitive(
+                        PrimitiveKind::Any,
+                    ))))
+                };
                 let verter_type_expr::TypeExpr::Ref {
                     name,
                     type_arguments,
                 } = ty
                 else {
-                    return Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    ));
+                    return degraded_any(self);
                 };
                 if name.as_ref() != "ReturnType" || type_arguments.len() != 1 {
-                    return Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    ));
+                    return degraded_any(self);
                 }
                 let Some(callee_node) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
                     self.canonical,
@@ -1509,9 +1724,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     &type_arguments[0],
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 ) else {
-                    return Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    ));
+                    return degraded_any(self);
                 };
                 let resolved = self.dispatch.resolve_signature_source_carrier(
                     callee_node,
@@ -1526,9 +1739,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let return_type = match data.as_deref() {
                             Some(SemanticNodeData::Signature { return_type, .. }) => *return_type,
                             _ => {
-                                return Ok(Some(graph.intern_node(SemanticNodeData::Primitive(
-                                    PrimitiveKind::Any,
-                                ))));
+                                return degraded_any(self);
                             }
                         };
 
@@ -1551,9 +1762,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             ),
                         ))
                     }
-                    None => Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    )),
+                    None => degraded_any(self),
                 }
             }
             crate::flow_ir::FlowIrExpr::Any => Ok(Some(

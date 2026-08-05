@@ -95,6 +95,29 @@ export function subOverloaded(a: number) {
 export function subJsdocReturn() {
   return "doc";
 }
+
+export function subNonCallableCall() {
+  const notFn = { a: 1 };
+  return notFn();
+}
+
+export function subObservesBrokenInit() {
+  const x = subSwitchReturn(1);
+  return x;
+}
+
+export function subIgnoresBrokenInit() {
+  const x = subSwitchReturn(1);
+  return 2;
+}
+
+export function subInner() {
+  return { pay: "load" };
+}
+
+export function subOuterCallsInner() {
+  return subInner();
+}
 "#;
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
@@ -140,6 +163,8 @@ fn flow_result_for_file(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
     };
     flow_result(dispatch, host, key)
 }
@@ -160,6 +185,8 @@ fn flow_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CANONICAL),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
     }
 }
 
@@ -804,6 +831,8 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
         };
         let roots = dispatch
             .graph()
@@ -1422,5 +1451,476 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed
                 "the nested-value self-name shadow fails closed (never EmptyCycle), got {other:?}"
             ),
         }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Key axes (SCC-1), the split result model (SCC-2), the fourth budget
+// layer, the sole warm rail (SCC-9), and the recorded materialised point.
+// ────────────────────────────────────────────────────────────────────────
+
+fn flow_result_value(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    key: FlowReturnKey,
+) -> crate::semantic_query::FlowReturnResult {
+    let QueryResult::Value(SemanticQueryOutput {
+        value: SemanticQueryValue::FlowReturn(result),
+        ..
+    }) = execute_flow(dispatch, key)
+    else {
+        panic!("expected a FlowReturn SUCCESS carrier");
+    };
+    (*result).clone()
+}
+
+fn key_hash(key: &FlowReturnKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// SCC-1 (`flow_return_key_covers_input_context_and_projection_demand`):
+/// the key RETAINS the demand and input axes — two keys differing ONLY in
+/// `ReturnProjectionDemand` (the walked projection path) or ONLY in
+/// `FlowInputContext` (the contextual input identity) hash unequal and are
+/// distinct identities (the family key embeds the full `FlowReturnKey`,
+/// so distinct hashes ARE distinct candidate slots). The canonical
+/// whole-return / empty-input point is one stable identity.
+#[test]
+fn flow_return_key_covers_input_context_and_projection_demand() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let base = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(base.demand.is_whole_return());
+        assert!(base.input.is_empty());
+
+        // Demand axis: same function/env/input, narrower projection path.
+        let mut narrower = base.clone();
+        narrower.demand = crate::semantic_query::ReturnProjectionDemand {
+            point: {
+                let mut point = crate::semantic_query::demand::Demand::identity();
+                point.projection.path =
+                    crate::semantic_query::demand::ProjectionPath::from_segments([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from("b")),
+                        ),
+                    ]);
+                point
+            },
+        };
+        assert_ne!(
+            base, narrower,
+            "the demand axis is identity, not decoration"
+        );
+        assert_ne!(
+            key_hash(&base),
+            key_hash(&narrower),
+            "two keys differing only in the demand point must hash unequal"
+        );
+
+        // Input axis: same function/env/demand, a contextual input binding.
+        let contextual =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Number,
+                ));
+        let mut with_input = base.clone();
+        with_input.input = crate::semantic_query::FlowInputContext {
+            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+        };
+        assert_ne!(
+            base, with_input,
+            "the input axis is identity, not decoration"
+        );
+        assert_ne!(
+            key_hash(&base),
+            key_hash(&with_input),
+            "two keys differing only in the contextual input must hash unequal"
+        );
+
+        // The canonical point is stable: two independent constructions of
+        // the whole-return / empty-input point are the SAME identity.
+        let again = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert_eq!(base, again);
+        assert_eq!(key_hash(&base), key_hash(&again));
+    });
+}
+
+/// A narrower-than-whole-return demand point fails CLOSED with a typed
+/// no-value outcome — never a silently widened whole-return result, never
+/// a sibling materialisation the narrower demand did not ask for.
+#[test]
+fn flow_return_narrower_demand_point_fails_closed_unmodeled() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let mut key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.demand = crate::semantic_query::ReturnProjectionDemand {
+            point: {
+                let mut point = crate::semantic_query::demand::Demand::identity();
+                point.projection.path =
+                    crate::semantic_query::demand::ProjectionPath::from_segments([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from("b")),
+                        ),
+                    ]);
+                point
+            },
+        };
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an unmodeled demand point is a typed no-value outcome"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unmodeled demand point admits nothing"
+        );
+    });
+}
+
+/// SCC-2 — the split result/carrier model. A DEGRADED SUCCESS (a usable
+/// value whose evaluation substituted a modeled-`any`) returns through
+/// the SUCCESS carrier with its typed reason and admits NOTHING (memo,
+/// facts, reverse index all untouched — candidate count stays zero); a
+/// NO-VALUE failure returns through `Error(Miss)` and admits nothing; a
+/// clean COMPLETE result admits warm. The two degraded shapes are
+/// DIFFERENT public outcomes: one is a value, the other is not.
+#[test]
+fn flow_return_degraded_success_returns_value_and_admits_nothing() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        // Degraded SUCCESS: calling a non-callable binding.
+        let degraded_key = flow_key(
+            dispatch,
+            "subNonCallableCall",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, degraded_key.clone());
+        assert_eq!(
+            result.degradation,
+            Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
+            "a usable degraded value carries its typed reason on the SUCCESS carrier"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("a degraded success is a USABLE value");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    degraded_key.clone()
+                ))),
+            0,
+            "a degraded success is ReturnOnly: zero memo entries"
+        );
+        // A second demand recomputes (still a value, still not admitted).
+        let again = flow_result_value(dispatch, degraded_key.clone());
+        assert_eq!(again.degradation, result.degradation);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    degraded_key
+                ))),
+            0
+        );
+
+        // NO-VALUE failure: an unsupported `switch` body.
+        let failure_key = flow_key(
+            dispatch,
+            "subSwitchReturn",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, failure_key.clone()),
+            "a no-value failure is Error(Miss), never a fabricated value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    failure_key
+                ))),
+            0,
+            "a no-value failure admits nothing"
+        );
+
+        // Clean COMPLETE: admits warm.
+        let clean_key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let clean = flow_result_value(dispatch, clean_key.clone());
+        assert_eq!(clean.degradation, None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(clean_key))),
+            1,
+            "a clean complete result is the warm-admissible arm"
+        );
+    });
+}
+
+/// The `FailedBindingInitializer` degradation fires only when the failed
+/// binding is OBSERVED: `return x` over a broken initializer is a
+/// degraded success; ignoring the broken binding entirely stays a clean
+/// complete result.
+#[test]
+fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let observed = flow_result_value(
+            dispatch,
+            flow_key(
+                dispatch,
+                "subObservesBrokenInit",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            observed.degradation,
+            Some(crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer)
+        );
+
+        let ignored_key = flow_key(
+            dispatch,
+            "subIgnoresBrokenInit",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let ignored = flow_result_value(dispatch, ignored_key.clone());
+        assert_eq!(
+            ignored.degradation, None,
+            "an unobserved failed binding degrades nothing"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    ignored_key
+                ))),
+            1,
+            "the clean sibling still admits warm"
+        );
+    });
+}
+
+/// The FOURTH budget non-admission layer: an over-budget demand slice is
+/// refused at the `SemanticGraphStore` memo — the result is a typed
+/// no-value Budget failure, ZERO memo candidates, ZERO slice-node
+/// entries (the first three layers), and the SAME demand under the
+/// restored armed budget completes and admits (the discrimination that
+/// the budget, and nothing else, caused the refusal).
+#[test]
+fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
+    use verter_semantic::analysis::flow::peeker::FlowSliceBudget;
+    let host = make_host();
+    host.project_type_store()
+        .flow_slice()
+        .set_budget_for_test(FlowSliceBudget {
+            max_return_sites: 256,
+            max_selected_nodes: 1,
+        });
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLocalConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        assert!(
+            flow_is_miss(dispatch, key.clone()),
+            "an over-budget slice is a typed Budget failure, never a value"
+        );
+        let store = host.project_type_store();
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "layer 4: the SemanticGraphStore memo admits nothing for an over-budget slice"
+        );
+        assert_eq!(
+            store.flow_slice().hash_node().entry_count(),
+            0,
+            "the hash node publishes nothing (ReturnOnly)"
+        );
+        assert_eq!(
+            store.flow_slice().lowered_node().entry_count(),
+            0,
+            "no slice hash exists, so the lowered store is unaddressable and empty"
+        );
+
+        // Restore the armed budget: the SAME key completes and admits —
+        // the budget, and nothing else, caused the refusal.
+        store
+            .flow_slice()
+            .set_budget_for_test(FlowSliceBudget::default());
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation, None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1
+        );
+    });
+}
+
+/// SCC-9 (sole warm rail, behavioral half): a warm `FlowReturn` read
+/// validates through the `FlowBody` rooting + the unioned consumed facts
+/// ONLY — it consults NO slice state. Discriminating probe: evict every
+/// flow-slice artifact after the cold build; a fresh request's warm read
+/// still serves (and rebuilds NO graph — a slice consult on the warm
+/// path would have had to rebuild the evicted graph and republish the
+/// evicted hash entry).
+#[test]
+fn flow_return_warm_read_consults_no_slice_state() {
+    let host = make_host();
+    let cold = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        flow_result_value(dispatch, key)
+    });
+    let store = host.project_type_store();
+    let builds_after_cold = store.flow_slice().graphs().build_count();
+    assert!(builds_after_cold >= 1, "the cold path built the flow graph");
+
+    // Drop EVERY flow-slice artifact for the canonical.
+    store.flow_slice().remove_canonical(CANONICAL);
+    assert_eq!(store.flow_slice().hash_node().entry_count(), 0);
+
+    // A FRESH request (live store view) warm-reads the published entry.
+    let warm = with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let warm_read = dispatch
+            .graph()
+            .get_flow_return_result(dispatch.ctx, &key)
+            .expect("the published FlowReturn entry warm-validates on a live view");
+        assert_eq!(warm_read, cold);
+        flow_result_value(dispatch, key)
+    });
+    assert_eq!(warm, cold, "the warm read serves the published result");
+    assert_eq!(
+        store.flow_slice().graphs().build_count(),
+        builds_after_cold,
+        "the warm path re-derived NO slice state (no graph rebuild, no re-plan)"
+    );
+    assert_eq!(
+        store.flow_slice().hash_node().entry_count(),
+        0,
+        "the warm path re-published NO slice artifact"
+    );
+}
+
+/// §3.4 recorded-point identity: a published `FlowReturn` entry's
+/// `satisfied_projection` is the point set the compute ACTUALLY produced
+/// — the whole-return demand point — never an empty set and never a
+/// synthetic slot preset detached from the key's own demand axis.
+#[test]
+fn flow_return_publishes_compute_recorded_whole_return_point() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        let recorded = dispatch
+            .graph()
+            .entry_satisfied_projection_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                key.clone(),
+            )))
+            .expect("the clean complete result published");
+        let points = recorded.points();
+        assert_eq!(points.len(), 1, "one materialised point: the whole return");
+        assert_eq!(
+            points[0].point(),
+            &key.demand.point,
+            "the recorded point IS the whole-return demand point the compute served"
+        );
+        assert!(
+            points[0].path().is_empty(),
+            "the whole-return point materialises at the empty path"
+        );
+
+        // The MEMBER publish rail: a nested callee published at the SCC
+        // drain carries ITS compute-recorded point (threaded through the
+        // pending ledger — there is no publish-time default on the
+        // member path).
+        let root = flow_key(
+            dispatch,
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // The typed entry (the production consumer path) drains the
+        // SCC-closed member batch onto the root's carrier.
+        let step = dispatch.execute_flow_return(root);
+        assert!(matches!(
+            step,
+            crate::semantic_query::FlowReturnStep::Complete(_)
+        ));
+        let member = flow_key(
+            dispatch,
+            "subInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let member_recorded = dispatch
+            .graph()
+            .entry_satisfied_projection_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                member.clone(),
+            )))
+            .expect("the drained member published its own family entry");
+        let member_points = member_recorded.points();
+        assert_eq!(member_points.len(), 1);
+        assert_eq!(
+            member_points[0].point(),
+            &member.demand.point,
+            "the member entry's recorded point is the point ITS compute served"
+        );
     });
 }

@@ -1449,12 +1449,76 @@ pub struct FlowReturnContext {
     pub policy: FlowReturnPolicy,
 }
 
-/// The full identity of one whole-function `FlowReturn` demand. Reentry
-/// identity on the obligation runtime IS this key exactly. Content-free:
-/// the function slot is content-free (R7), the whole-body content hash
-/// lives on the `ProgramAnalysisFactRef::FlowBody` fact rail, never in
-/// this key. There is NO demand path, projection mode, callback input,
-/// content hash, generation, budget, or slice hash.
+/// The demand axis of a [`FlowReturnKey`]: the flow-typed
+/// `(ProjectionDemand, EvalPolicy)` point over the shared demand lattice
+/// ([`demand::Demand`]). Content-free (R6). The canonical WHOLE-RETURN
+/// point ([`Self::whole_return`]) is the only point production
+/// constructs today; the axis is key data — not an implicit default —
+/// so a narrower projection demand hashes unequal and coexists as a
+/// distinct candidate, and satisfaction/backfill run through the shared
+/// demand-lattice dominance machinery, never a flow-private order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReturnProjectionDemand {
+    /// The demanded `(projection, eval-policy)` point.
+    pub point: demand::Demand,
+}
+
+impl ReturnProjectionDemand {
+    /// The canonical whole-return point: the regime-bottom identity
+    /// demand at the empty projection path (the same modeless point the
+    /// `Single` slot denotes).
+    #[must_use]
+    pub fn whole_return() -> Self {
+        Self {
+            point: demand::Demand::identity(),
+        }
+    }
+
+    /// Whether this is the canonical whole-return point.
+    #[must_use]
+    pub fn is_whole_return(&self) -> bool {
+        *self == Self::whole_return()
+    }
+}
+
+/// The input axis of a [`FlowReturnKey`]: the contextual callback input
+/// signature the demanding call pre-binds. Content-free (R6) — interned
+/// node identities only. The canonical EMPTY point ([`Self::empty`]) is
+/// the only point production constructs today; the axis is key data so
+/// two re-entries differing only in contextual input identity hash
+/// unequal and coexist as distinct candidates (a narrow key would mask
+/// one re-entry's result with the other's sentinel on the obligation
+/// runtime).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FlowInputContext {
+    /// Contextual parameter-type bindings pre-bound by the demanding
+    /// call, in parameter order (empty = no contextual input).
+    pub contextual_parameters: Arc<[SemanticNodeId]>,
+}
+
+impl FlowInputContext {
+    /// The canonical empty input point (no contextual input).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Whether this is the canonical empty input point.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.contextual_parameters.is_empty()
+    }
+}
+
+/// The full identity of one `FlowReturn` demand. Reentry identity on the
+/// obligation runtime IS this key exactly. Content-free: the function
+/// slot is content-free (R7), the whole-body content hash lives on the
+/// `ProgramAnalysisFactRef::FlowBody` fact rail, never in this key.
+/// There is NO content hash, generation, budget, or slice hash. The
+/// demand axis ([`ReturnProjectionDemand`]) and the input axis
+/// ([`FlowInputContext`]) ARE key fields — production passes the
+/// whole-return / empty-input point, and any other point is a distinct
+/// cache and re-entry identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowReturnKey {
     /// The served function position.
@@ -1464,20 +1528,57 @@ pub struct FlowReturnKey {
     pub normalized_type_args: Arc<[SemanticNodeId]>,
     /// Env + substitution + policy.
     pub context: FlowReturnContext,
+    /// The demanded return-projection point (whole-return is the
+    /// canonical production point).
+    pub demand: ReturnProjectionDemand,
+    /// The contextual input point (empty is the canonical production
+    /// point).
+    pub input: FlowInputContext,
 }
 
-/// The admitted value of a `FlowReturn` query. Only a COMPLETE evaluation
-/// produces this — unsupported, missing, budgeted, cyclic-empty, torn, or
-/// otherwise partial results are typed `FlowReturnFailure`s through
-/// `ReturnOnly` and never enter the family memo. The whole-return node is
-/// canonical and carrier-preserving; consumers project or publish it
-/// afterward under their own mode.
+/// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
+/// successes. A no-value failure and a usable degraded value are
+/// different public outcomes: a degraded success (a usable result whose
+/// evaluation substituted a modeled-`any` for something it could not
+/// model) returns through THIS carrier with its typed
+/// [`FlowReturnDegradation`] reason and defaults to `ReturnOnly` — it
+/// never warms the family memo (a later explicit fact-rooted
+/// admission-table row is the only thing that could change that; none
+/// exists). Only a COMPLETE, non-degraded evaluation is admitted warm;
+/// unsupported, missing, budgeted, cyclic-empty, torn, or otherwise
+/// NO-VALUE results are typed [`FlowReturnFailure`]s through
+/// `ReturnOnly`. The whole-return node is canonical and
+/// carrier-preserving; consumers project or publish it afterward under
+/// their own mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowReturnResult {
     /// The whole-function return type (widened join of every contributor).
     pub return_type: SemanticNodeId,
     /// Whether execution can reach the end of the body without a return.
     pub can_fall_through: bool,
+    /// The typed degradation reason, when the evaluation produced a
+    /// USABLE result through a modeled-`any` substitution. `Some` gates
+    /// the result to `ReturnOnly`; `None` is the warm-admissible arm.
+    pub degradation: Option<FlowReturnDegradation>,
+}
+
+/// A typed degradation reason riding a USABLE [`FlowReturnResult`] — the
+/// evaluation completed but substituted `any` for a value it could not
+/// model. NEVER a failure substitute: a no-value outcome is a
+/// [`FlowReturnFailure`], and a degraded success cannot be represented
+/// there (it has a value). First-observed reason wins (deterministic in
+/// source order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowReturnDegradation {
+    /// A call on a binding whose value is neither callable nor `any`
+    /// evaluated to `any`.
+    NonCallableBinding,
+    /// A symbolic call carrier whose callee could not be represented or
+    /// resolved to a signature evaluated to `any`.
+    UnrepresentableCallee,
+    /// A binding whose initializer failed with a typed flow failure was
+    /// observed; the observation evaluated to `any`.
+    FailedBindingInitializer,
 }
 
 /// A typed `FlowReturn` failure — carried through `ReturnOnly` (never
@@ -1497,6 +1598,11 @@ pub enum FlowReturnFailure {
     /// The recursive component has no concrete semantic seed (an empty
     /// recursive cycle — holds only).
     EmptyCycle,
+    /// The demanded `(demand, input)` point is beyond the whole-return /
+    /// empty-input point the evaluation models — fail closed, never a
+    /// silently widened whole-return result and never a sibling
+    /// materialisation the narrower demand did not ask for.
+    UnmodeledDemandPoint,
     /// A budget edge stopped the evaluation (the shallow expression
     /// lowering's depth / work budget, or the obligation runtime's
     /// connected-demand cap — surfaced as the work budget).
@@ -4253,9 +4359,12 @@ pub enum SemanticQueryValue {
     /// runtime lowering. The classifier is a semantic query, not a consumer-
     /// local graph walk.
     BroadRuntime(BroadRuntimeClassification),
-    /// The whole-function return produced by a `FlowReturn` query — only
-    /// a COMPLETE evaluation reaches this domain; every degraded shape is
-    /// a typed `FlowReturnFailure` through `ReturnOnly` and never admits.
+    /// The whole-function return produced by a `FlowReturn` query — the
+    /// SUCCESS carrier, degraded successes included: a usable degraded
+    /// value returns here with its typed `FlowReturnDegradation` and
+    /// defaults to `ReturnOnly` (only a non-degraded COMPLETE evaluation
+    /// admits warm); every NO-VALUE outcome is a typed
+    /// `FlowReturnFailure` through `ReturnOnly` and never admits.
     FlowReturn(Arc<FlowReturnResult>),
     /// The sealed materialization cycle-gate outcome — the LIVE value domain
     /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
@@ -8435,6 +8544,7 @@ mod tests {
                 SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult {
                     return_type: node,
                     can_fall_through: false,
+                    degradation: None,
                 })),
                 SemanticQueryValueTag::FlowReturn,
             ),

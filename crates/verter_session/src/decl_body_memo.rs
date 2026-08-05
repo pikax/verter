@@ -1264,6 +1264,55 @@ impl DeclBodyMemo {
         )
     }
 
+    /// The arena-free [`FunctionBodySkeleton`] of one indexed function —
+    /// the demand-sliced flow substrate's structural input, built through
+    /// the same lease-only retained-snapshot run every other body product
+    /// uses (pure job, owned output, no host re-entry). NOT memoized
+    /// here: the project-global `FunctionFlowGraphStore` is the
+    /// once-per-content-version authority and consults this producer at
+    /// most once per pinned content version. Returns `None` on a locator
+    /// miss (a typed miss, never a panic) or on a seeded memo / broken
+    /// lease pin.
+    ///
+    /// [`FunctionBodySkeleton`]: verter_semantic::analysis::flow::FunctionBodySkeleton
+    pub fn function_body_skeleton(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let entry = entry.clone();
+        let Some(skeleton) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                use verter_semantic::analysis::flow::{
+                    build_function_body_skeleton, FunctionBodySource,
+                };
+                use verter_semantic::analysis::function_program::{
+                    resolve_function_node, FunctionNode,
+                };
+                let (node, _self_name) =
+                    resolve_function_node(p.borrow_dependent(), &entry.locator)?;
+                let source = match &node {
+                    FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
+                    FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                };
+                Some(build_function_body_skeleton(&source))
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        skeleton
+    }
+
     /// Whether the whole-file env has already been materialised (test
     /// observability — never a validity signal).
     #[cfg(test)]

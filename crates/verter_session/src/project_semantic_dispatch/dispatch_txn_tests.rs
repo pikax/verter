@@ -418,6 +418,8 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
             policy: crate::semantic_query::FlowReturnPolicy {},
         },
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
     };
     stack.push_relate(relation_key(501), occurrence, 0);
     stack.push_flow_return(flow_key("nested"), 0);

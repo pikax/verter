@@ -76,8 +76,13 @@ impl PreparedKeyHandle {
         let (family, slot) = family_and_slot(&key);
         let requested_path = requested_path_for_key(&key);
         // Same formula as `family::requested_point_for_key`, reusing
-        // the `family_and_slot` result instead of re-projecting.
-        let requested_point = MaterializedPoint::new(point_for_slot(slot, &requested_path));
+        // the `family_and_slot` result instead of re-projecting. Keys
+        // that embed their own demand point (`FlowReturn`) gate on that
+        // point, not the slot preset.
+        let requested_point = match super::family::requested_demand_override(&key) {
+            Some(point) => MaterializedPoint::new(point),
+            None => MaterializedPoint::new(point_for_slot(slot, &requested_path)),
+        };
         let cached_hash = hash_key(&key);
         Self(Arc::new(PreparedQueryIdentity {
             key,

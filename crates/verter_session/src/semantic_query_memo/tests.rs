@@ -10429,6 +10429,8 @@ mod prepared_identity_bijection {
                 type_substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
                 policy: crate::semantic_query::FlowReturnPolicy {},
             },
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
         }))
     }
 
