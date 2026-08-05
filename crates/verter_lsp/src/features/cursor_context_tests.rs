@@ -1365,7 +1365,8 @@ fn test_svelte_snippet_name_context() {
 fn test_svelte_render_callee_context() {
     // `{@render |` — completing an in-scope snippet name.
     let source = "<ul>\n  {@render \n</ul>";
-    let blocks = test_carrier_blocks(source);
+    let structure = test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
 
     let mut template = empty_template();
     template.elements.push(make_element("ul", (0, 20), 4, 15));
@@ -1378,11 +1379,46 @@ fn test_svelte_render_callee_context() {
         &blocks,
         Some(&analysis),
         Some(CarrierTemplateLanguage::Svelte),
-        None,
+        Some(&structure),
     );
     match ctx {
         CursorContext::Template(TemplateCursorContext::SvelteRenderCallee) => {}
         other => panic!("expected SvelteRenderCallee, got: {:?}", other),
+    }
+}
+
+#[test]
+fn svelte_head_context_ignores_marker_decoys_inside_attribute_strings() {
+    for (marker, fabricated) in [
+        ("{#snippet decoy", "snippet-name"),
+        ("{@render decoy", "render-callee"),
+    ] {
+        let source = format!("<Child title=\"{marker}\"></Child>");
+        let structure = test_structure(&source, true);
+        let blocks = project_carrier_blocks(&structure);
+        let cursor = (source.find(marker).expect("decoy marker") + marker.len()) as u32;
+        let context = classify_cursor_context_for_language(
+            cursor,
+            &source,
+            &blocks,
+            None,
+            Some(CarrierTemplateLanguage::Svelte),
+            Some(&structure),
+        );
+        let fabricated_context = match context {
+            CursorContext::Template(TemplateCursorContext::SvelteSnippetName { .. }) => {
+                Some("snippet-name")
+            }
+            CursorContext::Template(TemplateCursorContext::SvelteRenderCallee) => {
+                Some("render-callee")
+            }
+            _ => None,
+        };
+        assert_ne!(
+            fabricated_context,
+            Some(fabricated),
+            "attribute-string marker decoy must not fabricate a Svelte head context"
+        );
     }
 }
 

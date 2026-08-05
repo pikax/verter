@@ -80,9 +80,9 @@
         "proof": "Evidence lives in the FL2-B DISCOVERY-RECEIPT.md input-bound receipt (fixed tip, input hashes/counts, per-hit dispositions, ledger diff) plus the FL2-B2 unit's RED-first decoy tests named on the residual rows; ledger-internal statistics above are freshness checks of this document only, never discovery proof."
     },
     "statistics": {
-        "rows_total": 47,
+        "rows_total": 48,
         "by_capability_class": {
-            "manual_geometry": 14,
+            "manual_geometry": 15,
             "root_scanner": 5,
             "nested_language_parser": 2,
             "pre_registration_probe": 1,
@@ -95,7 +95,7 @@
         },
         "by_disposition": {
             "delete": 27,
-            "migrate": 17,
+            "migrate": 18,
             "allowed_nested": 2,
             "allowed_standalone": 1
         }
@@ -260,6 +260,22 @@
             "acceptance_id": "B-19",
             "test": "analysis_absent_fallback_ignores_interpolation_decoy_inside_attribute_value; analysis_absent_fallback_keeps_angle_decoy_in_text_as_text; analysis_absent_fallback_treats_comment_interior_as_text; slot_name_recovery_ignores_decoy_component_tag_inside_html_comment; svelte_braced_attribute_survives_decoy_close_tag_literal_in_value",
             "architecture_guard": "analysis_absent_fallback_requires_parser_facts_not_a_source_scan; svelte_braced_attribute_requires_parser_facts_not_a_source_scan"
+        },
+        {
+            "path": "crates/verter_lsp/src/features/cursor_context.rs",
+            "symbol": "svelte_snippet_render_marker_scans",
+            "runtime_role": "production_runtime",
+            "provenance": "source",
+            "shipped_artifact": null,
+            "shipping_target": null,
+            "rust_target": null,
+            "candidate_evidence": "R3-A-02/R3-B-03 — MIGRATED: free-form same-line marker scans deleted; cursor classification now consumes parser-minted SvelteControlBlockHead::Snippet and SvelteStandaloneTagFamily::Render facts with their registered payload spans",
+            "processor_authority": null,
+            "capability_class": "manual_geometry",
+            "disposition": "migrate",
+            "acceptance_id": "B-19",
+            "test": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings; test_svelte_snippet_name_context; test_svelte_render_callee_context",
+            "architecture_guard": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings"
         },
         {
             "path": "crates/verter_lsp/src/features/definition.rs",
@@ -983,6 +999,19 @@
             "edit": "required",
             "close_reopen": "required",
             "test": "svelte_braced_attribute_survives_decoy_close_tag_literal_in_value",
+            "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
+        },
+        {
+            "path": "crates/verter_lsp/src/features/cursor_context.rs",
+            "symbol": "svelte_snippet_render_marker_scans",
+            "Vue": "required",
+            "Svelte": "required",
+            "cold": "required",
+            "warm": "required",
+            "pre_semantic": "required",
+            "edit": "required",
+            "close_reopen": "required",
+            "test": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
