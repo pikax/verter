@@ -3,7 +3,8 @@
     "generated_from_head": "72d7608a9623b372dd9d4361e9102eebcc3c52f1",
     "authority": [
         "scanners-replacement-verter §6 B0/§7/§8.2-8.3",
-        "T-B schema ratification v2"
+        "T-B schema ratification v2",
+        "2026-08-05 stamped-handoff reconciliation: eight handoff rows migrate; ContentOverrideWithParse remains B-44 delete"
     ],
     "verification": "scripts/verify-scanners-replacement.mjs is the campaign-gate execution-proof orchestrator for this cutover, run manually by the orchestrator at plan gates (not a CI job); durable enforcement stays the in-suite structural guards that run in normal CI workspace suites.",
     "row_schema": [
