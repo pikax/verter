@@ -438,7 +438,7 @@ pub fn process_script_setup<'alloc>(
     } else {
         (false, false)
     };
-    let wrapper_start = build_setup_wrapper_start(
+    let mut wrapper_start = build_setup_wrapper_start(
         options.component_name,
         parse_result.is_async,
         macro_state.has_expose,
@@ -451,6 +451,12 @@ pub fn process_script_setup<'alloc>(
         uses_slots,
         wrap,
     );
+    if prepared.companion().is_some() {
+        // The setup open tag can immediately follow companion-script content.
+        // Start the inserted wrapper on a new statement boundary even when the
+        // carrier supplied no whitespace between the two script blocks.
+        wrapper_start.insert(0, '\n');
+    }
 
     // Overwrite open tag with wrapper
     ctx.out
@@ -548,9 +554,13 @@ pub fn process_script_only<'alloc>(
 
     // Build close tag replacement
     let mut close_text = String::with_capacity(64);
+    // The authored default-export expression may end immediately before the
+    // closing tag. Keep the generated module export in a fresh statement even
+    // when the carrier supplied no trailing whitespace or semicolon.
+    close_text.push('\n');
     if !has_default_export {
         // No default export — create a minimal __sfc__
-        close_text.push_str("\nconst __sfc__ = {};\n");
+        close_text.push_str("const __sfc__ = {};\n");
     }
     if options.is_vapor {
         close_text.push_str("__sfc__.__vapor = true;\n");

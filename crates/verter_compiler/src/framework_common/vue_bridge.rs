@@ -658,6 +658,22 @@ impl CarrierCompiler for VueCarrierCompiler {
             });
         };
 
+        // A selected template fragment is inserted at the compiler-registered
+        // IDE hole. For a carrier with only a plain script that hole is the
+        // script-content boundary, which is mid-module rather than a valid JSX
+        // statement position. These are parser-owned carrier facts plus the
+        // host-selected block input; do not rediscover the geometry by scanning
+        // source text. Keep this exact partially-capable class fail-closed.
+        if opts.want_ide
+            && opts.block_content.template.is_some()
+            && parsed.script().is_some()
+            && parsed.script_setup().is_none()
+        {
+            return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                adapter_id: self.adapter_id(),
+            });
+        }
+
         match (
             opts.block_content.script.as_ref(),
             opts.block_content.script_setup.as_ref(),
@@ -1247,66 +1263,226 @@ mod tests {
         launcher
     }
 
-    fn assert_typescript_syntax_valid(name: &str, code: &str) {
+    fn typescript_syntax_check(
+        node_program: &Path,
+        launcher: &Path,
+        name: &str,
+        code: &str,
+        is_jsx: bool,
+        extra_args: &[&str],
+    ) -> Result<(), String> {
         let project = tempfile::tempdir().expect("create TSX validity directory");
-        let path = project.path().join(format!("{name}.tsx"));
+        let extension = if is_jsx { "jsx" } else { "tsx" };
+        let path = project.path().join(format!("{name}.{extension}"));
+        let environment = project.path().join("jsx-runtime.d.ts");
         fs::write(&path, code).expect("write emitted TSX");
-        let output = Command::new("node")
-            .arg(typescript_launcher())
+        fs::write(
+            &environment,
+            concat!(
+                "declare module 'vue/jsx-runtime' {\n",
+                "  export const Fragment: any;\n",
+                "  export function jsx(...args: any[]): any;\n",
+                "  export function jsxs(...args: any[]): any;\n",
+                "}\n",
+            ),
+        )
+        .expect("write JSX runtime validity stub");
+        let output = Command::new(node_program)
+            .arg(launcher)
             .args([
                 "--noEmit",
                 "--skipLibCheck",
                 "--ignoreConfig",
+                "--allowJs",
+                "--checkJs",
+                "false",
                 "--jsx",
                 "preserve",
+                "--strictNullChecks",
+                "false",
+                "--pretty",
+                "false",
+                "--listFiles",
             ])
+            .args(extra_args)
+            .arg(&environment)
             .arg(&path)
             .current_dir(project.path())
             .output()
-            .expect("run tsc syntax gate");
+            .map_err(|error| format!("failed to run tsc syntax gate: {error}"))?;
         let diagnostics = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         println!("TSC_VALIDITY {name} EXIT={:?}", output.status.code());
-        let syntax_diagnostics = diagnostics
-            .lines()
-            .filter(|line| {
-                let Some(code_start) = line.find("error TS") else {
-                    return false;
-                };
-                let digits = line[code_start + "error TS".len()..]
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>();
-                digits
-                    .parse::<u32>()
-                    .is_ok_and(|code| (1000..2000).contains(&code) || code == 2657)
-            })
+        let Some(exit_code) = output.status.code() else {
+            return Err(format!(
+                "tsc terminated without an exit code for {name}:\n{diagnostics}"
+            ));
+        };
+        let target_name = format!("{name}.{extension}");
+        let analyzed_target = diagnostics.lines().any(|line| {
+            Path::new(line.trim())
+                .file_name()
+                .is_some_and(|file_name| file_name == target_name.as_str())
+        });
+
+        let mut parsed_diagnostics = Vec::new();
+        for line in diagnostics.lines() {
+            let Some(code_start) = line.find("error TS") else {
+                continue;
+            };
+            let digits = line[code_start + "error TS".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            let diagnostic_code = digits.parse::<u32>().map_err(|_| {
+                format!("unparseable tsc diagnostic for {name}: {line}\n{diagnostics}")
+            })?;
+            parsed_diagnostics.push((diagnostic_code, line));
+        }
+
+        let rejected = parsed_diagnostics
+            .iter()
+            .filter(|(diagnostic_code, _)| !matches!(diagnostic_code, 2307 | 7026))
+            .map(|(_, line)| *line)
             .collect::<Vec<_>>();
-        assert!(
-            syntax_diagnostics.is_empty(),
-            "tsc reported syntax diagnostics for {name}:\n{diagnostics}\n--- emitted ---\n{code}"
-        );
+        if !analyzed_target
+            || !rejected.is_empty()
+            || (exit_code != 0 && parsed_diagnostics.is_empty())
+        {
+            let failure_output = if rejected.is_empty() {
+                diagnostics.clone()
+            } else {
+                rejected.join("\n")
+            };
+            return Err(format!(
+                "tsc did not complete a clean syntax analysis for {name} (exit {exit_code}, analyzed_target={analyzed_target}):\n{}\n--- emitted ---\n{code}",
+                failure_output
+            ));
+        }
+        Ok(())
     }
 
-    fn assert_javascript_module_valid(name: &str, code: &str) {
+    fn assert_typescript_syntax_valid(name: &str, code: &str, is_jsx: bool) {
+        typescript_syntax_check(
+            Path::new("node"),
+            &typescript_launcher(),
+            name,
+            code,
+            is_jsx,
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn javascript_module_check(node_program: &Path, name: &str, code: &str) -> Result<(), String> {
         let project = tempfile::tempdir().expect("create JS validity directory");
         let path = project.path().join(format!("{name}.mjs"));
         fs::write(&path, code).expect("write emitted module");
-        let output = Command::new("node")
+        let output = Command::new(node_program)
             .arg("--check")
             .arg(&path)
             .current_dir(project.path())
             .output()
-            .expect("run node syntax gate");
+            .map_err(|error| format!("failed to run node syntax gate: {error}"))?;
         println!("NODE_CHECK {name} EXIT={:?}", output.status.code());
+        let Some(exit_code) = output.status.code() else {
+            return Err(format!(
+                "node --check terminated without an exit code for {name}"
+            ));
+        };
+        if exit_code != 0 {
+            return Err(format!(
+                "node --check rejected {name}:\n{}{}\n--- emitted ---\n{code}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    fn assert_javascript_module_valid(name: &str, code: &str) {
+        javascript_module_check(Path::new("node"), name, code)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    /// @ai-generated - Negative control for the real TypeScript gate: JSX
+    /// closing-tag syntax must be rejected rather than treated as environment noise.
+    #[test]
+    fn typescript_syntax_gate_rejects_jsx_mismatched_closing_tag() {
+        let rejected = typescript_syntax_check(
+            Path::new("node"),
+            &typescript_launcher(),
+            "mismatched_jsx",
+            "const view = <Foo><Bar></Foo>;\n",
+            false,
+            &[],
+        );
+        assert!(rejected.is_err(), "the gate accepted malformed JSX");
+    }
+
+    /// @ai-generated - Execution and malformed-output controls for the tsc gate.
+    #[test]
+    fn typescript_syntax_gate_proves_execution_and_rejects_invalid_output() {
+        let launcher = typescript_launcher();
+        let invalid = typescript_syntax_check(
+            Path::new("node"),
+            &launcher,
+            "invalid_emitted_fixture",
+            "export const value = ;\n",
+            false,
+            &[],
+        );
+        assert!(invalid.is_err(), "the gate accepted invalid emitted TSX");
+
+        let non_invocation = typescript_syntax_check(
+            Path::new("node"),
+            &launcher,
+            "unknown_option",
+            "export const value = 1;\n",
+            false,
+            &["--ignoreConfigZZ"],
+        )
+        .expect_err("an unknown option must not pass without analysing the fixture");
         assert!(
-            output.status.success(),
-            "node --check rejected {name}:\n{}{}\n--- emitted ---\n{code}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            non_invocation.contains("TS5023") || non_invocation.contains("analyzed_target=false"),
+            "unexpected non-invocation evidence: {non_invocation}"
+        );
+
+        let missing_binary = workspace_root().join("__missing_node_for_tsc_validity_gate__");
+        assert!(
+            typescript_syntax_check(
+                &missing_binary,
+                &launcher,
+                "missing_binary",
+                "export const value = 1;\n",
+                false,
+                &[],
+            )
+            .is_err(),
+            "a missing node binary passed the tsc gate"
+        );
+    }
+
+    /// @ai-generated - Execution and malformed-output controls for node --check.
+    #[test]
+    fn javascript_syntax_gate_proves_execution_and_rejects_invalid_output() {
+        assert!(
+            javascript_module_check(
+                Path::new("node"),
+                "invalid_emitted_fixture",
+                "export const value = ;\n",
+            )
+            .is_err(),
+            "node --check accepted an invalid emitted module"
+        );
+
+        let missing_binary = workspace_root().join("__missing_node_for_js_validity_gate__");
+        assert!(
+            javascript_module_check(&missing_binary, "missing_binary", "export {};\n").is_err(),
+            "a missing node binary passed the node --check gate"
         );
     }
 
@@ -1566,6 +1742,54 @@ mod tests {
             raw_map.contains("space:html"),
             "external source absent from map: {raw_map}"
         );
+    }
+
+    /// @ai-generated - The Options API script geometry places an external
+    /// template fragment mid-module, so both compiler IDE entry points must fail closed.
+    #[test]
+    fn external_template_with_plain_script_is_ide_typed_unavailable() {
+        let source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script>export default { data: () => ({ count: 1 }) }</script>"
+        );
+        let compiler = VueCarrierCompiler::default();
+        let artifact = artifact_for(source);
+        let block_content = RuntimeBlockContentInputs {
+            template: Some(projected_script("<div>{{ count }}</div>", "html")),
+            ..Default::default()
+        };
+        let alloc = oxc_allocator::Allocator::new();
+
+        let bundle = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("ExternalPlain.vue".to_string()),
+                source_map: true,
+                want_ide: true,
+                block_content: block_content.clone(),
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(matches!(
+            bundle,
+            Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
+        ));
+
+        let direct = compiler.compile_ide(
+            source,
+            &artifact,
+            &IdeCompileOptions {
+                filename: Some("ExternalPlain.vue".to_string()),
+                block_content,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            direct,
+            Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
+        ));
     }
 
     #[test]
@@ -1873,6 +2097,8 @@ mod tests {
         );
     }
 
+    /// @ai-generated - Exercises every currently lifted IDE carrier/template
+    /// geometry through the real, execution-proving TypeScript syntax gate.
     #[test]
     fn lifted_ide_classes_pass_tsc_syntax_validation() {
         let compiler = VueCarrierCompiler::default();
@@ -1897,7 +2123,32 @@ mod tests {
             .expect("native IDE compile")
             .tsx
             .expect("native IDE output");
-        assert_typescript_syntax_valid("native", &native.code);
+        assert_typescript_syntax_valid("native", &native.code, native.is_jsx);
+
+        let native_plain_source = concat!(
+            "<script lang=\"ts\">export default { data: () => ({ count: 1 }) }</script>",
+            "<template><div>{{ count }}</div></template>"
+        );
+        let native_plain = compiler
+            .compile_bundle(
+                native_plain_source,
+                &artifact_for(native_plain_source),
+                &RuntimeCompileOptions {
+                    filename: Some("NativePlain.vue".to_string()),
+                    source_map: true,
+                    want_ide: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("native plain-script IDE compile")
+            .tsx
+            .expect("native plain-script IDE output");
+        assert_typescript_syntax_valid(
+            "native_plain_script",
+            &native_plain.code,
+            native_plain.is_jsx,
+        );
 
         let external_source = concat!(
             "<template src=\"./view.html\"></template>",
@@ -1922,9 +2173,89 @@ mod tests {
             .expect("external template IDE compile")
             .tsx
             .expect("external template IDE output");
-        assert_typescript_syntax_valid("external_template", &external.code);
+        assert_typescript_syntax_valid("external_template", &external.code, external.is_jsx);
+
+        for (name, source, selected_template) in [
+            (
+                "external_no_script",
+                "<template src=\"./view.html\"></template>",
+                "<div>external-only</div>",
+            ),
+            (
+                "external_both_scripts",
+                concat!(
+                    "<template src=\"./view.html\"></template>",
+                    "<script lang=\"ts\">export default {}</script>",
+                    "<script setup lang=\"ts\">const count = 1</script>"
+                ),
+                "<div>{{ count }}</div>",
+            ),
+            (
+                "external_empty_template",
+                concat!(
+                    "<template src=\"./view.html\"></template>",
+                    "<script setup lang=\"ts\">const count = 1</script>"
+                ),
+                "",
+            ),
+            (
+                "external_jsx_hostile_attribute",
+                concat!(
+                    "<template src=\"./view.html\"></template>",
+                    "<script setup lang=\"ts\">const count = 1</script>"
+                ),
+                "<div title=\"a`b\">{{ count }}</div>",
+            ),
+            (
+                "validated_supplied_template",
+                concat!(
+                    "<template lang=\"pug\">div authored-only</template>",
+                    "<script setup lang=\"ts\">const count = 1</script>"
+                ),
+                "<div>{{ count }}</div>",
+            ),
+        ] {
+            let ide = compiler
+                .compile_bundle(
+                    source,
+                    &artifact_for(source),
+                    &RuntimeCompileOptions {
+                        filename: Some(format!("{name}.vue")),
+                        source_map: true,
+                        want_ide: true,
+                        block_content: RuntimeBlockContentInputs {
+                            template: Some(projected_script(selected_template, "html")),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    &alloc,
+                )
+                .unwrap_or_else(|error| panic!("{name} IDE compile failed: {error:?}"))
+                .tsx
+                .unwrap_or_else(|| panic!("{name} IDE output missing"));
+            assert_typescript_syntax_valid(name, &ide.code, ide.is_jsx);
+        }
+
+        let direct = compiler
+            .compile_ide(
+                external_source,
+                &artifact_for(external_source),
+                &IdeCompileOptions {
+                    filename: Some("DirectExternalTemplate.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("direct external-template IDE compile");
+        assert_typescript_syntax_valid("direct_external_template", &direct.code, direct.is_jsx);
     }
 
+    /// @ai-generated - Exercises every lifted runtime topology, including the
+    /// carrier plain-script arm, through real node --check.
     #[test]
     fn lifted_runtime_classes_pass_node_check() {
         let compiler = VueCarrierCompiler::default();
@@ -1992,6 +2323,99 @@ mod tests {
             &external_template
                 .template
                 .expect("external render output")
+                .code,
+        );
+
+        let external_plain_source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script>export default { data: () => ({ count: 1 }) }</script>"
+        );
+        let external_plain = compiler
+            .compile_bundle(
+                external_plain_source,
+                &artifact_for(external_plain_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalPlain.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("external template with carrier plain script runtime compile");
+        assert_javascript_module_valid(
+            "external_plain_script",
+            &external_plain
+                .script
+                .expect("carrier plain script output")
+                .code,
+        );
+        assert_javascript_module_valid(
+            "external_plain_render",
+            &external_plain
+                .template
+                .expect("external plain-script render output")
+                .code,
+        );
+
+        let external_both_source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script>export default {}</script>",
+            "<script setup>const count = 1</script>"
+        );
+        let external_both = compiler
+            .compile_bundle(
+                external_both_source,
+                &artifact_for(external_both_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalBoth.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("external template with both carrier scripts runtime compile");
+        assert_javascript_module_valid(
+            "external_both_script",
+            &external_both.script.expect("both-scripts output").code,
+        );
+        assert_javascript_module_valid(
+            "external_both_render",
+            &external_both
+                .template
+                .expect("both-scripts render output")
+                .code,
+        );
+
+        let external_no_script_source = "<template src=\"./view.html\"></template>";
+        let external_no_script = compiler
+            .compile_bundle(
+                external_no_script_source,
+                &artifact_for(external_no_script_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalNoScript.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>external-only</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("external template without carrier scripts runtime compile");
+        if let Some(script) = external_no_script.script {
+            assert_javascript_module_valid("external_no_script_shell", &script.code);
+        }
+        assert_javascript_module_valid(
+            "external_no_script_render",
+            &external_no_script
+                .template
+                .expect("no-script render output")
                 .code,
         );
 

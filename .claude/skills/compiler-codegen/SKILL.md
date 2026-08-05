@@ -153,8 +153,8 @@ Current Vue capability gates:
 
 - Style analysis publishes carrier-absolute CSS/v-bind spans only for native carrier content. External or validated-supplied style bytes keep their availability/provenance but publish `css: None` and no located rows until LSP consumers understand the declared source space. Native SCSS/Sass/Less/Stylus does not mint an optional supplied-output request.
 - Runtime lowering supports external/validated-supplied templates with transferred carrier script metadata, projected setup script with a carrier template, and the validated supplied-inline template topology. Projected plain script and simultaneous projected plain+setup remain `BlockContentRuntimeUnavailable`.
-- IDE lowering supports native carriers and external/validated-supplied templates with composed maps. Any projected plain or setup script remains `BlockContentIdeUnavailable`, including the simultaneous case.
-- Every lifted IDE class must pass the real TypeScript syntax gate; every lifted runtime class must pass `node --check`. A compiler `Ok` result alone is not proof of capability.
+- IDE lowering supports native carriers and external/validated-supplied templates with composed maps when the carrier has no script, a setup script, or both plain and setup scripts. An external/validated-supplied template with only a carrier plain script remains `BlockContentIdeUnavailable` because its registered template hole is mid-module. Any projected plain or setup script also remains `BlockContentIdeUnavailable`, including the simultaneous case.
+- Every lifted IDE class must pass the real TypeScript syntax gate; the gate must prove tsc analyzed the emitted file and may tolerate only missing-module/intrinsic-environment diagnostics TS2307 and TS7026. Every lifted runtime class must pass `node --check`, with both gates carrying invalid-output and non-execution controls. A compiler `Ok` result alone is not proof of capability.
 
 ### Svelte IDE structural projection
 

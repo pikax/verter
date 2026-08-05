@@ -472,6 +472,48 @@ fn external_template_ide_compile_contains_selected_bytes() {
     );
 }
 
+/// @ai-generated - The host must preserve the compiler's typed refusal for an
+/// external template whose carrier has only an Options API script.
+#[test]
+fn external_template_with_plain_script_has_no_host_ide_surface() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/workspace/view.html",
+        "<div>{{ count }}</div>",
+        FileLanguage::script_ts(),
+    );
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/App.vue".to_string(),
+            source: Arc::from(concat!(
+                "<template src=\"./view.html\"></template>",
+                "<script>export default { data: () => ({ count: 1 }) }</script>"
+            )),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let profile = CompileProfile::default();
+
+    let error = host
+        .ensure_ide_compiled(&update.canonical_id, &profile)
+        .expect_err("plain-script external-template IDE must fail closed");
+    let HostError::CompileError(failure) = error else {
+        panic!("unexpected refusal: {error:?}");
+    };
+    assert!(failure
+        .diagnostics
+        .diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE" }));
+    assert!(
+        host.get_ide(&update.canonical_id, &profile).is_none(),
+        "a refused compile must not publish broken TSX"
+    );
+}
+
 #[test]
 fn supplied_style_analysis_fails_closed_without_carrier_absolute_spans() {
     let host = VerterHost::new_standalone(HostConfig::default());
