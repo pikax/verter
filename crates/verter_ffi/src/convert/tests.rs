@@ -17,6 +17,150 @@ use super::offset::*;
 use super::string_helpers::*;
 use super::*;
 
+fn external_source_request(kind: host::ExternalBlockKind) -> host::ExternalSourceRequest {
+    let source = match kind {
+        host::ExternalBlockKind::Script => "<script src=\"./external.ts\"></script>",
+        host::ExternalBlockKind::Template => "<template src=\"./external.html\"></template>",
+        host::ExternalBlockKind::Style => "<style src=\"./external.css\"></style>",
+        host::ExternalBlockKind::Custom => "<docs src=\"./external.md\"></docs>",
+    };
+    host::VerterHost::new_standalone(host::HostConfig::default())
+        .upsert(host::UpsertRequest {
+            canonical_id: Some("/src/App.vue".to_string()),
+            input_id: "/src/App.vue".to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("external request fixture must parse")
+        .external_source_requests
+        .into_iter()
+        .next()
+        .expect("external request fixture")
+}
+
+fn valid_block_override_entry() -> FfiBlockOverrideEntry {
+    FfiBlockOverrideEntry {
+        correlation_token: "correlation".to_string(),
+        block_token: "block".to_string(),
+        owner_revision: "revision".to_string(),
+        artifact_token: "artifact".to_string(),
+        expected_language: "pug".to_string(),
+        prior_basis_token: Some("prior-basis".to_string()),
+        basis_token: "basis".to_string(),
+        source_space_token: "source-space".to_string(),
+        code: "compiled".to_string(),
+        code_hash: "code-hash".to_string(),
+        source_map: Some("{}".to_string()),
+        source_map_hash: Some("map-hash".to_string()),
+        supplied_provenance: None,
+    }
+}
+
+fn block_override_entry_with_invalid_token(field: &str) -> FfiBlockOverrideEntry {
+    let mut entry = valid_block_override_entry();
+    match field {
+        "correlationToken" => entry.correlation_token.clear(),
+        "blockToken" => entry.block_token.clear(),
+        "ownerRevision" => entry.owner_revision.clear(),
+        "artifactToken" => entry.artifact_token.clear(),
+        "priorBasisToken" => entry.prior_basis_token = Some(String::new()),
+        "basisToken" => entry.basis_token.clear(),
+        "sourceSpaceToken" => entry.source_space_token.clear(),
+        "codeHash" => entry.code_hash.clear(),
+        "sourceMapHash" => entry.source_map_hash = Some(String::new()),
+        _ => panic!("unknown token field {field}"),
+    }
+    entry
+}
+
+#[test]
+fn block_override_wire_reconstructs_the_exact_captured_echo() {
+    let converted = ffi_block_override_to_host(FfiBlockOverrideRequest {
+        canonical_id: "/src/App.vue".to_string(),
+        compile_profile: None,
+        overrides: vec![valid_block_override_entry()],
+    })
+    .expect("valid bounded tokens must cross the FFI boundary");
+    let entry = &converted.overrides[0];
+    let echo = &entry.captured_echo;
+
+    assert_eq!(echo.request.correlation_token.as_str(), "correlation");
+    assert_eq!(echo.request.canonical_id, "/src/App.vue");
+    assert_eq!(echo.request.block_token.as_str(), "block");
+    assert_eq!(echo.request.owner_revision.as_str(), "revision");
+    assert_eq!(echo.request.artifact_token.as_str(), "artifact");
+    assert_eq!(echo.request.expected_language, "pug");
+    assert_eq!(
+        echo.request
+            .prior_basis_token
+            .as_ref()
+            .map(|token| token.as_str()),
+        Some("prior-basis")
+    );
+    assert_eq!(echo.basis_token.as_str(), "basis");
+}
+
+#[test]
+fn block_override_wire_rejects_every_malformed_nominal_token() {
+    for field in [
+        "correlationToken",
+        "blockToken",
+        "ownerRevision",
+        "artifactToken",
+        "priorBasisToken",
+        "basisToken",
+        "sourceSpaceToken",
+        "codeHash",
+        "sourceMapHash",
+    ] {
+        let error = ffi_block_override_to_host(FfiBlockOverrideRequest {
+            canonical_id: "/src/App.vue".to_string(),
+            compile_profile: None,
+            overrides: vec![block_override_entry_with_invalid_token(field)],
+        })
+        .expect_err("an empty sealed token must fail at the wire boundary");
+        assert!(
+            matches!(
+                error,
+                FfiConversionError::InvalidBlockContentToken(actual) if actual == field
+            ),
+            "wrong refusal for {field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn preprocessor_wire_preserves_tokenless_first_resolution() {
+    let request = host::VerterHost::new_standalone(host::HostConfig::default())
+        .upsert(host::UpsertRequest {
+            canonical_id: Some("/src/App.vue".to_string()),
+            input_id: "/src/App.vue".to_string(),
+            source: Arc::from("<template lang=\"pug\">p tokenless</template>"),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("preprocessor fixture must parse")
+        .preprocessor_requests
+        .into_iter()
+        .next()
+        .expect("Pug must materialize one preprocessor request");
+
+    let ffi = host_preprocessor_request_to_ffi(&request);
+    assert_eq!(ffi.expected_language, "pug");
+    assert_eq!(ffi.prior_basis_token, None);
+    assert_eq!(ffi.correlation_token, request.correlation_token.to_string());
+    assert_eq!(ffi.block_token, request.block_token.to_string());
+    assert_eq!(ffi.owner_revision, request.owner_revision.to_string());
+    assert_eq!(ffi.artifact_token, request.artifact_token.to_string());
+    assert_eq!(ffi.basis_token, request.basis_token.to_string());
+    assert_eq!(
+        ffi.source_space_token,
+        request.source_space_token.to_string()
+    );
+    assert_eq!(ffi.content_hash, request.content_hash.to_string());
+}
+
 fn publication_fixture(
     position: verter_type_expr::facts::SourcePosition,
 ) -> verter_type_expr::TypePublication {
@@ -1477,13 +1621,7 @@ fn update_result_full_round_trip() {
             }],
             has_errors: false,
         },
-        external_source_requests: vec![host::ExternalSourceRequest {
-            owner_canonical_id: "/src/App.vue".to_string(),
-            block_kind: host::ExternalBlockKind::Script,
-            index: 0,
-            specifier: "./script.ts".to_string(),
-            resolved_canonical_id: "/src/script.ts".to_string(),
-        }],
+        external_source_requests: vec![external_source_request(host::ExternalBlockKind::Script)],
         import_specifiers: vec![host::ScriptImportInfo {
             source: "vue".to_string(),
             is_type_only: false,
@@ -1543,8 +1681,9 @@ fn update_result_full_round_trip() {
         "/src/App.vue"
     );
     assert_eq!(ffi.external_source_requests[0].block_kind, "script");
-    assert_eq!(ffi.external_source_requests[0].index, 0);
-    assert_eq!(ffi.external_source_requests[0].specifier, "./script.ts");
+    assert!(!ffi.external_source_requests[0].block_token.is_empty());
+    assert!(!ffi.external_source_requests[0].owner_revision.is_empty());
+    assert_eq!(ffi.external_source_requests[0].specifier, "./external.ts");
 
     // import specifiers
     assert_eq!(ffi.import_specifiers.len(), 1);
@@ -1672,13 +1811,7 @@ fn update_result_external_block_kinds() {
     ];
     for (host_kind, expected_str) in &kinds {
         let result = host::HostUpdateResult {
-            external_source_requests: vec![host::ExternalSourceRequest {
-                owner_canonical_id: "x".to_string(),
-                block_kind: *host_kind,
-                index: 0,
-                specifier: "s".to_string(),
-                resolved_canonical_id: "r".to_string(),
-            }],
+            external_source_requests: vec![external_source_request(*host_kind)],
             ..host::HostUpdateResult::no_change("x".to_string())
         };
         let ffi = host_update_to_ffi(result, Some("source"));

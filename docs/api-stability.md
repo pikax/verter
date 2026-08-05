@@ -66,11 +66,15 @@ The inline suppression syntax is stable:
 | ---------------------------------- | --------------------- |
 | `$/verter/getVirtualFiles`         | Stable                |
 | `$/verter/getAnalysis`             | Stable                |
-| `$/verter/applyStyleOverrides`     | Stable                |
 | `$/verter/getRouteTree`            | Stable                |
 | `$/verter/heartbeat`               | Stable                |
 | `$/verter/tsgoLimitation`          | Stable (notification) |
 | `$/verter/viteConfigTrustRequired` | Stable (notification) |
+
+The pre-release `$/verter/applyStyleOverrides` method was removed by the sealed
+block-content cutover. The LSP does not accept processor-produced bytes;
+bundler and host integrations use `applyBlockOverrides` with block, revision,
+artifact, basis, source-space, and hash stamps.
 
 ### Native Host API (`@verter/native`)
 

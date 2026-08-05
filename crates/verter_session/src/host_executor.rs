@@ -320,6 +320,16 @@ impl StageExecutor for HostStageExecutor {
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
+            let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
+                host_instance: self.host_instance,
+                file_incarnation,
+                source_generation,
+            };
+            crate::block_content::attach_external_request_tokens(
+                &structure,
+                revision_token,
+                &mut parse_snapshot.external_requests,
+            );
             let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
             let source_type =
                 imported_eval_source_type(&file_language, Some(framework_parse.as_ref()));
@@ -332,11 +342,7 @@ impl StageExecutor for HostStageExecutor {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
                     structure: Some(structure),
-                    revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
-                        host_instance: self.host_instance,
-                        file_incarnation,
-                        source_generation,
-                    },
+                    revision_token,
                     file_language,
                     source_type,
                     parse_duration_ms,

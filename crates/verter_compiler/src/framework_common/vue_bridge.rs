@@ -155,6 +155,8 @@ pub struct VueRuntimeCompileExtras {
     pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
     /// Binding names referenced in style `v-bind()` expressions.
     pub style_v_bind_vars: Vec<String>,
+    /// Whether every projected-style `v-bind()` expression was parsed.
+    pub style_v_bind_usage_complete: bool,
 }
 
 /// The Vue carrier parser version stamped on the produced artifact's
@@ -421,6 +423,17 @@ impl CarrierCompiler for VueCarrierCompiler {
             });
         };
 
+        if opts.want_ide && opts.block_content.has_external_semantic_unit() {
+            return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                adapter_id: self.adapter_id(),
+            });
+        }
+        if opts.block_content.has_external_semantic_unit() {
+            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
+                adapter_id: self.adapter_id(),
+            });
+        }
+
         // The Vue runtime target. The host's old `compile_entry` always
         // emitted the bundler blocks (script/template/styles/custom) and
         // additionally requested the IDE TSX + template-data bits when its
@@ -474,6 +487,12 @@ impl CarrierCompiler for VueCarrierCompiler {
             style_v_bind_vars: extras
                 .map(|e| e.style_v_bind_vars.clone())
                 .unwrap_or_default(),
+            style_v_bind_usage_complete: opts
+                .block_content
+                .styles
+                .iter()
+                .any(Option::is_some)
+                .then(|| extras.is_some_and(|e| e.style_v_bind_usage_complete)),
         };
 
         // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
@@ -491,8 +510,32 @@ impl CarrierCompiler for VueCarrierCompiler {
             &macro_semantics,
             alloc,
         );
+        let mut bundle = vue_result_to_runtime_bundle(result);
 
-        Ok(vue_result_to_runtime_bundle(result))
+        for (slot, selected) in opts
+            .block_content
+            .styles
+            .iter()
+            .zip(bundle.styles.iter_mut())
+        {
+            if let Some(input) = slot {
+                selected.code = input.code.to_string();
+                selected.source_map = input.source_map.as_deref().map(str::to_string);
+                selected.lang = Some(input.lang.clone());
+            }
+        }
+        for (slot, selected) in opts
+            .block_content
+            .custom_blocks
+            .iter()
+            .zip(bundle.custom_blocks.iter_mut())
+        {
+            if let Some(input) = slot {
+                selected.content = input.code.to_string();
+            }
+        }
+
+        Ok(bundle)
     }
 }
 
@@ -584,6 +627,7 @@ pub fn vue_result_to_runtime_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::framework_common::{RuntimeBlockContentInput, RuntimeBlockContentInputs};
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
@@ -624,6 +668,125 @@ mod tests {
             )
             .into_framework_parse_artifact(),
         )
+    }
+
+    fn projected_script(code: &str, lang: &str) -> RuntimeBlockContentInput {
+        RuntimeBlockContentInput {
+            code: Arc::from(code),
+            source_map: None,
+            lang: lang.to_string(),
+            content_artifact_token: format!("content:{lang}"),
+            source_space_token: format!("space:{lang}"),
+        }
+    }
+
+    #[test]
+    fn projected_template_runtime_fails_closed_without_binding_transfer() {
+        let source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script setup>import Foo from './Foo.vue'</script>"
+        );
+        let compiler = VueCarrierCompiler::default();
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("Projected.vue".to_string()),
+                block_content: RuntimeBlockContentInputs {
+                    template: Some(projected_script("<Foo />", "html")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
+        );
+
+        match result {
+            Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. }) => {}
+            Err(other) => panic!("unexpected typed refusal: {other:?}"),
+            Ok(output) => {
+                let template = output
+                    .template
+                    .expect("the pre-amendment path emitted a detached render");
+                let render = template.code;
+                assert!(
+                    template
+                        .imports
+                        .iter()
+                        .any(|name| name.contains("resolveComponent"))
+                        && render.contains("_component_Foo"),
+                    "the RED must reproduce the binding-unfaithful resolveComponent lookup; imports={:?}\n{render}",
+                    template.imports
+                );
+                panic!(
+                    "projected template compiled without the inline setup binding; wrong render:\n{render}"
+                );
+            }
+        }
+
+        for block_content in [
+            RuntimeBlockContentInputs {
+                script: Some(projected_script("export default {}", "js")),
+                ..Default::default()
+            },
+            RuntimeBlockContentInputs {
+                script_setup: Some(projected_script("const answer = 42", "js")),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                compiler.compile_bundle(
+                    "<script src=\"./logic.js\"></script>",
+                    &artifact_for("<script src=\"./logic.js\"></script>"),
+                    &RuntimeCompileOptions {
+                        block_content,
+                        ..Default::default()
+                    },
+                    &alloc,
+                ),
+                Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn projected_template_ide_fails_closed_instead_of_emitting_an_empty_tsx_surface() {
+        let source = "<template src=\"./view.html\"></template>";
+        let compiler = VueCarrierCompiler::default();
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                filename: Some("Projected.vue".to_string()),
+                want_ide: true,
+                block_content: RuntimeBlockContentInputs {
+                    template: Some(projected_script("<div>projected-ide-marker</div>", "html")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
+        );
+
+        match result {
+            Err(CompileUnsupported::BlockContentIdeUnavailable { .. }) => {}
+            Err(other) => panic!("unexpected typed refusal: {other:?}"),
+            Ok(output) => {
+                let tsx = output
+                    .tsx
+                    .map(|tsx| tsx.code)
+                    .unwrap_or_else(|| "<no TSX artifact>".to_string());
+                assert!(
+                    !tsx.contains("projected-ide-marker"),
+                    "the RED must reproduce the silently omitted projected block:\n{tsx}"
+                );
+                panic!("IDE compile returned a silently empty projected surface:\n{tsx}");
+            }
+        }
     }
 
     #[test]

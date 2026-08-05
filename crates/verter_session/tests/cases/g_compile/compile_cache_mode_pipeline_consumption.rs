@@ -13,9 +13,10 @@ use std::sync::Arc;
 
 use verter_session::host_compile::{CompileBatchInput, CompileBatchOptions};
 use verter_session::{
-    BlockOverrideEntry, BlockOverrideRequest, CompileCacheMode, CompileErrorPolicy, CompileProfile,
-    DowngradeReason, FileLanguage, HostConfig, PreprocessorBlockType, UpsertRequest, VerterHost,
-    VirtualNodeKind, VirtualQuery,
+    hash_block_content, BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest,
+    CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileLanguage,
+    HostConfig, HostError, PreprocessorRequest, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
 
 /// A production (non-dev) host config. The default `HostConfig` enables
@@ -66,16 +67,80 @@ fn compile(
 }
 
 // A fact-free SFC carrying a style block: no cross-file deps (so a Content
-// request runs as Content) but a style block exists so a style override is
-// applicable.
+// request runs as Content) but a style block exists so supplied processed
+// content is applicable.
 const SFC_WITH_STYLE: &str = "<script setup lang=\"ts\">const n = 1</script>\
      <template><div>{{ n }}</div></template>\
-     <style>.a{color:red}</style>";
+     <style lang=\"scss\">.a{color:red}</style>";
+
+fn supplied(request: &PreprocessorRequest, code: &str) -> BlockOverrideEntry {
+    BlockOverrideEntry {
+        correlation_token: request.correlation_token.clone(),
+        block_token: request.block_token.clone(),
+        owner_revision: request.owner_revision.clone(),
+        artifact_token: request.artifact_token.clone(),
+        basis_token: request.basis_token.clone(),
+        captured_echo: request.captured_echo.clone(),
+        source_space_token: request.source_space_token.clone(),
+        code: Arc::from(code),
+        code_hash: hash_block_content(code),
+        source_map: None,
+        source_map_hash: None,
+        supplied_provenance: Some("test".to_string()),
+    }
+}
+
+fn unissued(code: &str) -> BlockOverrideEntry {
+    let correlation_token =
+        verter_session::BlockContentCorrelationToken::parse_untrusted("not-issued").unwrap();
+    let block_token =
+        verter_session::carrier_publication_store::ArtifactBlockToken::parse_untrusted(
+            "not-issued",
+        )
+        .unwrap();
+    let owner_revision =
+        verter_session::BlockContentOwnerRevisionToken::parse_untrusted("not-issued").unwrap();
+    let artifact_token =
+        verter_session::carrier_publication_store::FrameworkArtifactToken::parse_untrusted(
+            "not-issued",
+        )
+        .unwrap();
+    let basis_token =
+        verter_session::BlockContentBasisToken::parse_untrusted("not-issued").unwrap();
+    BlockOverrideEntry {
+        correlation_token: correlation_token.clone(),
+        block_token: block_token.clone(),
+        owner_revision: owner_revision.clone(),
+        artifact_token: artifact_token.clone(),
+        basis_token: basis_token.clone(),
+        captured_echo: verter_session::BlockContentCapturedEcho {
+            request: verter_session::BlockContentPreCaptureEcho {
+                correlation_token,
+                canonical_id: "not-issued".to_string(),
+                block_token,
+                owner_revision,
+                artifact_token,
+                expected_language: "not-issued".to_string(),
+                prior_basis_token: None,
+            },
+            basis_token,
+        },
+        source_space_token: verter_session::BlockContentSourceSpaceToken::parse_untrusted(
+            "not-issued",
+        )
+        .unwrap(),
+        code: Arc::from(code),
+        code_hash: hash_block_content(code),
+        source_map: None,
+        source_map_hash: None,
+        supplied_provenance: None,
+    }
+}
 
 /// Fix 2 — a `Content` warm hit must NOT be served when a request-time
 /// override forces a downgrade. After a `Content` compile publishes a
-/// content-addressed entry, applying a style override (which removes the
-/// session slot but does NOT bump `whole_hash` nor evict the
+/// content-addressed entry, admitting supplied block content (which does NOT
+/// bump `whole_hash` nor evict the
 /// content-addressed entry) must make the next `Content` request classify
 /// to `Stateless` BEFORE the warm-hit consult, so the stale entry is never
 /// served.
@@ -83,11 +148,20 @@ const SFC_WITH_STYLE: &str = "<script setup lang=\"ts\">const n = 1</script>\
 /// Discriminates: on a tree that consults the content node before
 /// classifying, the second request serves `actual_mode == Content,
 /// downgrade_reason == None` (the stale entry); after the fix it reports
-/// `actual_mode == Stateless, downgrade_reason == Some(HasStyleOverride)`.
+/// `actual_mode == Stateless, downgrade_reason == Some(HasBlockOverride)`.
 #[test]
+#[ignore = "supplied multi-unit carrier lowering is deferred to block 3A"]
 fn content_warm_hit_not_served_when_override_forces_downgrade() {
     let host = prod_host();
-    upsert_vue(&host, "/S.vue", SFC_WITH_STYLE);
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/S.vue".to_string()),
+            input_id: "/S.vue".to_string(),
+            source: SFC_WITH_STYLE.into(),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert vue");
     let profile = content_profile();
 
     // First Content compile publishes a content-addressed entry.
@@ -104,20 +178,15 @@ fn content_warm_hit_not_served_when_override_forces_downgrade() {
         "first Content compile must publish one content-addressed entry"
     );
 
-    // Apply a style override under the same profile. This removes the
-    // session slot but does NOT change the .vue's own source.
+    // Admit supplied block content under the same profile. This does not
+    // change the .vue's own authored source.
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/S.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Style,
-                index: 0,
-                code: Arc::from(".a{color:blue}"),
-                source_map: None,
-            }],
+            overrides: vec![supplied(&update.preprocessor_requests[0], ".a{color:blue}")],
         })
-        .expect("style override");
+        .expect("supplied style content");
 
     // The next Content request must classify to Stateless BEFORE consulting
     // the (still-present) content-addressed entry, so the stale entry is
@@ -126,13 +195,13 @@ fn content_warm_hit_not_served_when_override_forces_downgrade() {
     assert_eq!(
         second.actual_mode,
         CompileCacheMode::Stateless,
-        "a Content request with an active style override MUST classify to \
+        "a Content request with supplied block content MUST classify to \
          Stateless, not serve the stale content-addressed entry"
     );
     assert_eq!(
         second.downgrade_reason,
-        Some(DowngradeReason::HasStyleOverride),
-        "the downgrade reason must be HasStyleOverride"
+        Some(DowngradeReason::HasBlockOverride),
+        "the downgrade reason must be HasBlockOverride"
     );
     assert_eq!(
         second.requested_mode,
@@ -144,8 +213,7 @@ fn content_warm_hit_not_served_when_override_forces_downgrade() {
 /// Fix 2 (block override variant) — the same gap closes for a block
 /// (template/script) override, which fires `HasBlockOverride`.
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn content_warm_hit_not_served_when_block_override_forces_downgrade() {
+fn native_block_override_without_handoff_is_typed_refusal() {
     let host = prod_host();
     let src = "<script setup lang=\"ts\">const n = 1</script>\
          <template><div>{{ n }}</div></template>";
@@ -157,30 +225,19 @@ fn content_warm_hit_not_served_when_block_override_forces_downgrade() {
     assert_eq!(host.compile_output_pure_content_entry_count(), 1);
 
     // Override the script block.
-    let _ = host
+    let before = host.compile_output_pure_content_entry_count();
+    let err = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/B.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("const n = 2"),
-                source_map: None,
-            }],
+            overrides: vec![unissued("const n = 2")],
         })
-        .expect("block override");
-
-    let second = compile(&host, "/B.vue", VirtualNodeKind::Main, &profile);
-    assert_eq!(
-        second.actual_mode,
-        CompileCacheMode::Stateless,
-        "a Content request with an active block override MUST classify to Stateless"
-    );
-    assert_eq!(
-        second.downgrade_reason,
-        Some(DowngradeReason::HasBlockOverride),
-        "the downgrade reason must be HasBlockOverride"
-    );
+        .expect_err("unissued identities must be refused");
+    assert!(matches!(
+        err,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationMismatch)
+    ));
+    assert_eq!(host.compile_output_pure_content_entry_count(), before);
 }
 
 /// Fix 4 — `clear_compile_cache` must flush the content-addressed node.

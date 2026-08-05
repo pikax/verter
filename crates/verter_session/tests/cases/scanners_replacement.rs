@@ -54,8 +54,10 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "AwaitHead",
     "Base64UrlStringV1",
     "BlockContentArtifactSchemaVersion",
+    "BlockContentAvailabilityV1",
     "BlockContentBasisTokenV1",
     "BlockContentCapturedEchoV1",
+    "BlockContentCorrelationTokenV1",
     "BlockContentOriginFingerprintV1",
     "BlockContentOriginV1",
     "BlockContentOriginV1External",
@@ -275,6 +277,8 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "StructureBlockV1",
     "StructureProtocolVersion",
     "StructureSectionV1",
+    "StampedBlockContentRequestV1",
+    "StampedBlockContentResultV1",
     "StyleDialectV1",
     "StyleDialectV1Css",
     "StyleDialectV1Custom",
@@ -695,6 +699,157 @@ fn scanners_replacement_schema_declaration_deletion_is_rejected() {
     assert!(validate_frozen_schema(&schema)
         .unwrap_err()
         .contains("DocumentStructureResponseV1Available"));
+}
+
+fn validate_stamped_block_content_contract(schema: &Value) -> Result<(), String> {
+    let declarations = schema["declarations"]
+        .as_object()
+        .ok_or("missing declarations")?;
+    let require_exact_record = |name: &str, expected_fields: Value| {
+        let declaration = declarations
+            .get(name)
+            .ok_or_else(|| format!("missing {name} declaration"))?;
+        if declaration["kind"] != "record" {
+            return Err(format!("{name} is not a record"));
+        }
+        if declaration["fields"] != expected_fields {
+            return Err(format!("{name} field ledger drifted"));
+        }
+        Ok(())
+    };
+
+    if declarations["BlockContentAvailabilityV1"]["kind"] != "enum"
+        || declarations["BlockContentAvailabilityV1"]["values"]
+            != serde_json::json!([
+                {"name":"NativeAvailable","number":1},
+                {"name":"ProcessedContentRequired","number":2},
+                {"name":"SuppliedAvailable","number":3},
+                {"name":"Missing","number":4},
+                {"name":"Conflict","number":5},
+                {"name":"Stale","number":6}
+            ])
+    {
+        return Err("BlockContentAvailabilityV1 closed algebra drifted".into());
+    }
+
+    require_exact_record(
+        "StampedBlockContentRequestV1",
+        serde_json::json!([
+            {"name":"correlation_token","type":"BlockContentCorrelationTokenV1","tag":1,"presence":"R"},
+            {"name":"block_token","type":"ArtifactBlockTokenV1","tag":2,"presence":"R"},
+            {"name":"owner_revision","type":"DocumentRevisionTokenV1","tag":3,"presence":"R"},
+            {"name":"artifact_token","type":"FrameworkArtifactTokenV1","tag":4,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":5,"presence":"R"},
+            {"name":"source_space_token","type":"SourceSpaceTokenV1","tag":6,"presence":"R"},
+            {"name":"availability","type":"BlockContentAvailabilityV1","tag":7,"presence":"R"},
+            {"name":"language","type":"ResolvedLanguageV1","tag":8,"presence":"R"},
+            {"name":"content","type":"Utf8TextV1","tag":9,"presence":"R"},
+            {"name":"content_hash","type":"ContentHashV1","tag":10,"presence":"R"},
+            {"name":"prior_basis_token","type":"BlockContentBasisTokenV1","tag":11,"presence":"O"}
+        ]),
+    )?;
+    require_exact_record(
+        "StampedBlockContentResultV1",
+        serde_json::json!([
+            {"name":"correlation_token","type":"BlockContentCorrelationTokenV1","tag":1,"presence":"R"},
+            {"name":"block_token","type":"ArtifactBlockTokenV1","tag":2,"presence":"R"},
+            {"name":"owner_revision","type":"DocumentRevisionTokenV1","tag":3,"presence":"R"},
+            {"name":"artifact_token","type":"FrameworkArtifactTokenV1","tag":4,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":5,"presence":"R"},
+            {"name":"source_space_token","type":"SourceSpaceTokenV1","tag":6,"presence":"R"},
+            {"name":"code","type":"Utf8TextV1","tag":7,"presence":"R"},
+            {"name":"code_hash","type":"ContentHashV1","tag":8,"presence":"R"},
+            {"name":"source_map","type":"Utf8TextV1","tag":9,"presence":"O"},
+            {"name":"source_map_hash","type":"ContentHashV1","tag":10,"presence":"O"},
+            {"name":"supplied_provenance","type":"BlockContentOriginFingerprintV1","tag":11,"presence":"O"},
+            {"name":"expected_language","type":"ResolvedLanguageV1","tag":12,"presence":"R"},
+            {"name":"prior_basis_token","type":"BlockContentBasisTokenV1","tag":13,"presence":"O"}
+        ]),
+    )?;
+    require_exact_record(
+        "BlockContentCapturedEchoV1",
+        serde_json::json!([
+            {"name":"request","type":"BlockContentPreCaptureEchoV1","tag":1,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":2,"presence":"R"}
+        ]),
+    )?;
+
+    let captured_echo_field = serde_json::json!({
+        "name":"echo",
+        "type":"BlockContentCapturedEchoV1",
+        "tag":1,
+        "presence":"R"
+    });
+    for terminal in [
+        "BlockContentResolveResponseV1Resolved",
+        "BlockContentResolveResponseV1PostCaptureFailed",
+        "BlockContentResolveResponseV1PostCaptureStaleWithReplacement",
+        "BlockContentResolveResponseV1PostCaptureStaleNeedsRecapture",
+        "BlockContentResolveResponseV1PostCaptureSuperseded",
+        "BlockContentResolveResponseV1PostCaptureClosed",
+        "BlockContentResolveResponseV1PostCaptureCancelled",
+    ] {
+        let fields = declarations
+            .get(terminal)
+            .and_then(|declaration| declaration["fields"].as_array())
+            .ok_or_else(|| format!("missing {terminal} fields"))?;
+        if fields.first() != Some(&captured_echo_field) {
+            return Err(format!("{terminal} lost the captured echo"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stamped_block_content_schema_is_additive_and_capture_complete() {
+    let schema = read_json("schemas/scanners-replacement-v1.schema.json");
+    validate_stamped_block_content_contract(&schema).unwrap();
+
+    let mut missing_prior = schema.clone();
+    missing_prior["declarations"]["StampedBlockContentRequestV1"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field["name"] != "prior_basis_token");
+    assert_eq!(
+        validate_stamped_block_content_contract(&missing_prior).unwrap_err(),
+        "StampedBlockContentRequestV1 field ledger drifted"
+    );
+
+    let mut open_availability = schema.clone();
+    open_availability["declarations"]["BlockContentAvailabilityV1"]["values"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name":"Unknown","number":7}));
+    assert_eq!(
+        validate_stamped_block_content_contract(&open_availability).unwrap_err(),
+        "BlockContentAvailabilityV1 closed algebra drifted"
+    );
+
+    let mut unsealed_hash = schema.clone();
+    unsealed_hash["declarations"]["StampedBlockContentResultV1"]["fields"][7]["type"] =
+        Value::String("Utf8TextV1".into());
+    assert_eq!(
+        validate_stamped_block_content_contract(&unsealed_hash).unwrap_err(),
+        "StampedBlockContentResultV1 field ledger drifted"
+    );
+
+    let mut missing_capture_basis = schema.clone();
+    missing_capture_basis["declarations"]["BlockContentCapturedEchoV1"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert_eq!(
+        validate_stamped_block_content_contract(&missing_capture_basis).unwrap_err(),
+        "BlockContentCapturedEchoV1 field ledger drifted"
+    );
+
+    let mut pre_capture_terminal = schema;
+    pre_capture_terminal["declarations"]["BlockContentResolveResponseV1PostCaptureClosed"]
+        ["fields"][0]["type"] = Value::String("BlockContentPreCaptureEchoV1".into());
+    assert_eq!(
+        validate_stamped_block_content_contract(&pre_capture_terminal).unwrap_err(),
+        "BlockContentResolveResponseV1PostCaptureClosed lost the captured echo"
+    );
 }
 
 #[test]

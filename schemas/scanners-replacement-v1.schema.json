@@ -461,6 +461,10 @@
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
     },
+    "BlockContentCorrelationTokenV1": {
+      "kind": "newtype",
+      "storage": "OpaqueCapabilityTokenV1"
+    },
     "PositionEncodingSessionTokenV1": {
       "kind": "newtype",
       "storage": "OpaqueCapabilityTokenV1"
@@ -591,6 +595,189 @@
           "name": "external",
           "type": "BlockContentOriginV1External",
           "tag": 2
+        }
+      ]
+    },
+    "BlockContentAvailabilityV1": {
+      "kind": "enum",
+      "values": [
+        {
+          "name": "NativeAvailable",
+          "number": 1
+        },
+        {
+          "name": "ProcessedContentRequired",
+          "number": 2
+        },
+        {
+          "name": "SuppliedAvailable",
+          "number": 3
+        },
+        {
+          "name": "Missing",
+          "number": 4
+        },
+        {
+          "name": "Conflict",
+          "number": 5
+        },
+        {
+          "name": "Stale",
+          "number": 6
+        }
+      ]
+    },
+    "StampedBlockContentRequestV1": {
+      "kind": "record",
+      "fields": [
+        {
+          "name": "correlation_token",
+          "type": "BlockContentCorrelationTokenV1",
+          "tag": 1,
+          "presence": "R"
+        },
+        {
+          "name": "block_token",
+          "type": "ArtifactBlockTokenV1",
+          "tag": 2,
+          "presence": "R"
+        },
+        {
+          "name": "owner_revision",
+          "type": "DocumentRevisionTokenV1",
+          "tag": 3,
+          "presence": "R"
+        },
+        {
+          "name": "artifact_token",
+          "type": "FrameworkArtifactTokenV1",
+          "tag": 4,
+          "presence": "R"
+        },
+        {
+          "name": "basis_token",
+          "type": "BlockContentBasisTokenV1",
+          "tag": 5,
+          "presence": "R"
+        },
+        {
+          "name": "source_space_token",
+          "type": "SourceSpaceTokenV1",
+          "tag": 6,
+          "presence": "R"
+        },
+        {
+          "name": "availability",
+          "type": "BlockContentAvailabilityV1",
+          "tag": 7,
+          "presence": "R"
+        },
+        {
+          "name": "language",
+          "type": "ResolvedLanguageV1",
+          "tag": 8,
+          "presence": "R"
+        },
+        {
+          "name": "content",
+          "type": "Utf8TextV1",
+          "tag": 9,
+          "presence": "R"
+        },
+        {
+          "name": "content_hash",
+          "type": "ContentHashV1",
+          "tag": 10,
+          "presence": "R"
+        },
+        {
+          "name": "prior_basis_token",
+          "type": "BlockContentBasisTokenV1",
+          "tag": 11,
+          "presence": "O"
+        }
+      ]
+    },
+    "StampedBlockContentResultV1": {
+      "kind": "record",
+      "fields": [
+        {
+          "name": "correlation_token",
+          "type": "BlockContentCorrelationTokenV1",
+          "tag": 1,
+          "presence": "R"
+        },
+        {
+          "name": "block_token",
+          "type": "ArtifactBlockTokenV1",
+          "tag": 2,
+          "presence": "R"
+        },
+        {
+          "name": "owner_revision",
+          "type": "DocumentRevisionTokenV1",
+          "tag": 3,
+          "presence": "R"
+        },
+        {
+          "name": "artifact_token",
+          "type": "FrameworkArtifactTokenV1",
+          "tag": 4,
+          "presence": "R"
+        },
+        {
+          "name": "basis_token",
+          "type": "BlockContentBasisTokenV1",
+          "tag": 5,
+          "presence": "R"
+        },
+        {
+          "name": "source_space_token",
+          "type": "SourceSpaceTokenV1",
+          "tag": 6,
+          "presence": "R"
+        },
+        {
+          "name": "code",
+          "type": "Utf8TextV1",
+          "tag": 7,
+          "presence": "R"
+        },
+        {
+          "name": "code_hash",
+          "type": "ContentHashV1",
+          "tag": 8,
+          "presence": "R"
+        },
+        {
+          "name": "source_map",
+          "type": "Utf8TextV1",
+          "tag": 9,
+          "presence": "O"
+        },
+        {
+          "name": "source_map_hash",
+          "type": "ContentHashV1",
+          "tag": 10,
+          "presence": "O"
+        },
+        {
+          "name": "supplied_provenance",
+          "type": "BlockContentOriginFingerprintV1",
+          "tag": 11,
+          "presence": "O"
+        },
+        {
+          "name": "expected_language",
+          "type": "ResolvedLanguageV1",
+          "tag": 12,
+          "presence": "R"
+        },
+        {
+          "name": "prior_basis_token",
+          "type": "BlockContentBasisTokenV1",
+          "tag": 13,
+          "presence": "O"
         }
       ]
     },
@@ -6168,8 +6355,10 @@
       "AwaitHead",
       "Base64UrlStringV1",
       "BlockContentArtifactSchemaVersion",
+      "BlockContentAvailabilityV1",
       "BlockContentBasisTokenV1",
       "BlockContentCapturedEchoV1",
+      "BlockContentCorrelationTokenV1",
       "BlockContentOriginFingerprintV1",
       "BlockContentOriginV1",
       "BlockContentOriginV1External",
@@ -6452,6 +6641,8 @@
       "SvelteStandaloneTagFamilyV1Unknown",
       "SvelteStandaloneTagSyntax",
       "SvelteStandaloneTagSyntaxV1",
+      "StampedBlockContentRequestV1",
+      "StampedBlockContentResultV1",
       "SymbolicEquivalenceProof",
       "SymbolicEquivalenceProofLosslessProjection",
       "SymbolicEquivalenceProofSameResolvedSymbol",

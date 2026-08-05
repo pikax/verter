@@ -1,6 +1,7 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
 import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { relative } from "node:path";
 import type { ResolvedConfig } from "vite";
 import type {
@@ -11,6 +12,7 @@ import type {
 } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 import type {
+  BlockContentHashToken,
   HostCompileProfile,
   HostUpdateResult,
   NativeBlockOverrideEntry,
@@ -28,7 +30,7 @@ import {
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
-import { preprocessBlock } from "./core/preprocessor";
+import { copyCapturedBlockContentEcho, preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type {
@@ -234,26 +236,50 @@ function resolvedIdFromHookResult(result: unknown): string | null {
 async function resolveUpsertDependencies(
   host: VerterHost,
   filename: string,
+  ownerSource: string,
   upsertResult: HostUpdateResult,
   resolveId?: ResolveHook,
-): Promise<void> {
+): Promise<HostUpdateResult> {
+  let refreshedResult = upsertResult;
+  let registeredExternalSource = false;
+
   // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
   if (upsertResult.externalSourceRequests.length > 0) {
     const path = await import("path");
     for (const req of upsertResult.externalSourceRequests) {
       const resolvedId: string = req.resolvedCanonicalId;
       const specifier: string = req.specifier;
-      // Resolve relative to the owner file's directory
+      // Let the bundler choose the bytes when it can resolve this specifier,
+      // while keeping the host-minted canonical ID as the VFS identity.
       const absPath = path.resolve(path.dirname(filename), specifier);
-      const extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
+      const hookReadId = resolveId
+        ? resolvedIdFromHookResult(await resolveId(specifier, filename, { skipSelf: true }))
+        : null;
+      let extSource = hookReadId
+        ? await readTextFileThroughWorkspaceOrDisk(hookReadId)
+        : await readTextFileThroughWorkspaceOrDisk(absPath);
+      if (extSource === null && hookReadId && hookReadId !== absPath) {
+        extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
+      }
       if (extSource !== null) {
         host.upsert({
           inputId: resolvedId,
           source: extSource,
           fileKind: "non_sfc",
         });
+        registeredExternalSource = true;
       }
     }
+  }
+
+  // External requests are stamped when the owner is upserted. Re-publish the
+  // byte-identical owner only after all external bytes are in the host VFS so
+  // processed-content requests capture those exact bytes and fresh stamps.
+  if (registeredExternalSource) {
+    refreshedResult = host.upsert({
+      inputId: filename,
+      source: ownerSource,
+    });
   }
 
   // Resolve exact and finite-set module references, then feed per-specifier
@@ -261,7 +287,7 @@ async function resolveUpsertDependencies(
   const resolutions: HostDependencyResolution[] = [];
   const dependencySpecifiers = collectResolvableModuleReferenceSpecifiers(
     host,
-    upsertResult.moduleReferences ?? [],
+    refreshedResult.moduleReferences ?? [],
   );
   if (dependencySpecifiers.length > 0) {
     const path = await import("path");
@@ -319,13 +345,14 @@ async function resolveUpsertDependencies(
     }
   }
   // Also include external src="..." blocks that were resolved during upsert
-  for (const req of upsertResult.externalSourceRequests ?? []) {
+  for (const req of refreshedResult.externalSourceRequests ?? []) {
     resolutions.push({
       specifier: req.specifier,
       resolvedCanonicalId: req.resolvedCanonicalId,
     });
   }
   host.setImportDependencies(filename, resolutions);
+  return refreshedResult;
 }
 
 /**
@@ -347,15 +374,18 @@ async function applyPreprocessorRequests(
   const overrides: NativeBlockOverrideEntry[] = [];
   for (const req of upsertResult.preprocessorRequests) {
     // In Vite mode, skip style preprocessing — Vite's CSS pipeline handles it.
-    if (viteConfig && req.blockType === "style") continue;
+    if (viteConfig && req.contentClass === "style") continue;
 
     const result = await preprocessBlock(req, filename, viteConfig, customBlocks);
     if (result) {
       overrides.push({
-        blockType: req.blockType,
-        index: req.index,
+        ...copyCapturedBlockContentEcho(req),
+        sourceSpaceToken: req.sourceSpaceToken,
         code: result.code,
+        codeHash: hashBlockContent(result.code),
         sourceMap: result.sourceMap,
+        sourceMapHash: result.sourceMap ? hashBlockContent(result.sourceMap) : undefined,
+        suppliedProvenance: "@verter/unplugin",
       });
     }
   }
@@ -705,13 +735,14 @@ function createFrameworkFactory(
 
           profileCache.set(filename, profile);
 
-          const upsertResult = host.upsert({
+          let upsertResult = host.upsert({
             inputId: filename,
             source,
           });
-          await resolveUpsertDependencies(
+          upsertResult = await resolveUpsertDependencies(
             host,
             filename,
+            source,
             upsertResult,
             typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
           );
@@ -863,11 +894,12 @@ function createFrameworkFactory(
           profileCache.set(filename, profile);
 
           const t0 = timing ? performance.now() : 0;
-          const upsertResult = host.upsert({ inputId: filename, source: code });
+          let upsertResult = host.upsert({ inputId: filename, source: code });
           const t1 = timing ? performance.now() : 0;
-          await resolveUpsertDependencies(
+          upsertResult = await resolveUpsertDependencies(
             host,
             filename,
+            code,
             upsertResult,
             typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
           );
@@ -959,7 +991,7 @@ function createFrameworkFactory(
 
         // Register file in host (handles parsing, caching, change detection)
         const t0 = timing ? performance.now() : 0;
-        const upsertResult = host.upsert({
+        let upsertResult = host.upsert({
           inputId: filename,
           source: code,
         });
@@ -976,9 +1008,10 @@ function createFrameworkFactory(
           );
         }
 
-        await resolveUpsertDependencies(
+        upsertResult = await resolveUpsertDependencies(
           host,
           filename,
+          code,
           upsertResult,
           typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
         );
@@ -1234,3 +1267,10 @@ export const VerterVue = createUnplugin(unpluginFactory);
 export const VerterSvelte = createUnplugin(svelteUnpluginFactory);
 
 export default VerterVue;
+function hashBlockContent(content: string): BlockContentHashToken {
+  const digest = createHash("sha256")
+    .update("verter.block-content.bytes.v1\0")
+    .update(content)
+    .digest("hex");
+  return `sha256:${digest}` as BlockContentHashToken;
+}

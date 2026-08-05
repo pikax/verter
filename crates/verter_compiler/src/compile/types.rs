@@ -362,6 +362,10 @@ pub struct VerterCompileOptions {
     /// Populated from the host's `StyleBlockAnalysis.v_binds` data.
     /// Used by IDE codegen to emit `void(name)` and prevent false unused diagnostics.
     pub style_v_bind_vars: Vec<String>,
+    /// `Some` makes `style_v_bind_vars` the authoritative usage inventory for
+    /// request-projected style bytes. `None` keeps direct compiler callers on
+    /// the registered carrier's raw-style derivation.
+    pub style_v_bind_usage_complete: Option<bool>,
 }
 
 // ── Result types ───────────────────────────────────────────────────

@@ -400,6 +400,11 @@ impl VerterHost {
             registered_source_authority,
             carrier_grammar_authority,
             carrier_publication_store,
+            block_content_state: default_shared(crate::block_content::BlockContentState::default()),
+            block_content_admission_fence: parking_lot::Mutex::new(()),
+            block_content_correlation_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            block_content_admission_seam_hook: parking_lot::Mutex::new(None),
             language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
@@ -1020,9 +1025,8 @@ impl VerterHost {
     /// Reference to the profile-domain DB's underlying storage (D48 split).
     /// Stores [`crate::types::ProfileState`] keyed by canonical id; call
     /// sites use `host.compile_cache().entry(...)` / `.get(...)` / `.iter()`
-    /// etc. to access per-profile compile outputs (`compile_slots`,
-    /// `content_overrides`, `style_overrides`, `latest_diagnostics`,
-    /// `diagnostics_generation`).
+    /// etc. to access per-profile compile outputs (`compile_slots`),
+    /// `latest_diagnostics`, and `diagnostics_generation`.
     #[must_use]
     pub(crate) fn compile_cache(&self) -> &dashmap::DashMap<String, crate::types::ProfileState> {
         self.project_type_store.compile_cache().entries()

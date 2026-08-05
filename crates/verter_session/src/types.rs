@@ -170,9 +170,6 @@ pub enum DowngradeReason {
     /// the result is non-reusable across sessions and a content-
     /// addressed entry would never warm-hit.
     HasBlockOverride,
-    /// The compile input carries a style override (preprocessed
-    /// CSS). Same reasoning as [`Self::HasBlockOverride`].
-    HasStyleOverride,
     /// The compile profile target is IDE-only analysis
     /// (`CompileTarget::TSX` without any runtime codegen). IDE
     /// analysis routes through a different cache shape; the
@@ -249,7 +246,6 @@ impl DowngradeReason {
             Self::HasWorkspaceAlias => 0x02,
             Self::HasModuleAugmentation => 0x03,
             Self::HasBlockOverride => 0x04,
-            Self::HasStyleOverride => 0x05,
             Self::HasIdeOnlyAnalysis => 0x06,
             Self::HasDevLastGood => 0x07,
             Self::CssHashOverridePresent => 0x08,
@@ -266,7 +262,6 @@ impl std::fmt::Display for DowngradeReason {
             Self::HasWorkspaceAlias => "HasWorkspaceAlias",
             Self::HasModuleAugmentation => "HasModuleAugmentation",
             Self::HasBlockOverride => "HasBlockOverride",
-            Self::HasStyleOverride => "HasStyleOverride",
             Self::HasIdeOnlyAnalysis => "HasIdeOnlyAnalysis",
             Self::HasDevLastGood => "HasDevLastGood",
             Self::CssHashOverridePresent => "CssHashOverridePresent",
@@ -325,7 +320,6 @@ impl From<DowngradeReason> for verter_audit::payloads::tags::DowngradeReasonTag 
             DowngradeReason::HasWorkspaceAlias => Self::HasWorkspaceAlias,
             DowngradeReason::HasModuleAugmentation => Self::HasModuleAugmentation,
             DowngradeReason::HasBlockOverride => Self::HasBlockOverride,
-            DowngradeReason::HasStyleOverride => Self::HasStyleOverride,
             DowngradeReason::HasIdeOnlyAnalysis => Self::HasIdeOnlyAnalysis,
             DowngradeReason::HasDevLastGood => Self::HasDevLastGood,
             DowngradeReason::CssHashOverridePresent => Self::CssHashOverridePresent,
@@ -1452,20 +1446,29 @@ pub enum VirtualNodeKind {
 /// A `src="..."` attribute on an SFC block that references an external file.
 ///
 /// Produced during parsing when `<script src="...">`, `<template src="...">`,
-/// or `<style src="...">` is encountered. The host uses these to fetch and
-/// merge external content before compilation.
+/// or `<style src="...">` is encountered. The host registers the external
+/// bytes as their own source artifact; it never merges them into a carrier.
 #[derive(Debug, Clone)]
 pub struct ExternalSourceRequest {
     /// Canonical ID of the SFC that contains the `src` attribute.
     pub owner_canonical_id: String,
     /// Which block kind the `src` belongs to.
     pub block_kind: ExternalBlockKind,
-    /// Block index (relevant for styles and custom blocks).
-    pub index: usize,
+    /// Exact opening position used only to bind this parse-time request to the
+    /// inventory-minted block ref before publication. Never public identity.
+    pub(crate) opening_start: u32,
     /// Raw specifier from the `src` attribute value.
     pub specifier: String,
     /// Resolved canonical path of the external file.
     pub resolved_canonical_id: String,
+    /// Sealed identity of the exact owning carrier block.
+    pub block_token: String,
+    /// Opaque owner revision captured with `block_token`.
+    pub owner_revision: String,
+    /// Opaque carrier artifact captured with `block_token`.
+    pub artifact_token: String,
+    /// Carrier-local source space containing the authored `src` declaration.
+    pub carrier_source_space_token: String,
 }
 
 /// Which SFC block kind an external `src` reference belongs to.
@@ -1577,8 +1580,8 @@ impl From<&verter_semantic::analysis::AnalyzedModuleReference> for ScriptModuleR
     }
 }
 
-/// Result of [`VerterHost::upsert`](crate::VerterHost::upsert) or
-/// [`VerterHost::apply_style_overrides`](crate::VerterHost::apply_style_overrides).
+/// Result of a host mutation such as [`VerterHost::upsert`](crate::VerterHost::upsert)
+/// or [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
 ///
 /// Describes what changed so the caller can trigger targeted HMR updates
 /// and resolve any external dependencies.
@@ -1879,13 +1882,204 @@ pub struct UpsertRequest {
     pub aliases: Vec<String>,
 }
 
-/// Discriminates the SFC block type that needs external preprocessing.
+/// Descriptive content class. This is never block identity: callers correlate
+/// and apply content only through the sealed token and its captured stamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreprocessorBlockType {
+pub enum BlockContentClass {
     Template,
     Script,
     Style,
     Custom,
+}
+
+pub use verter_semantic::analysis::BlockContentAvailability;
+
+macro_rules! block_content_nominal_token {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(Arc<str>);
+
+        impl $name {
+            /// Parse a bounded opaque token at a protocol boundary. This does
+            /// not grant authority; the host still validates the captured
+            /// correlation and all current stamps.
+            pub fn parse_untrusted(value: impl Into<Arc<str>>) -> Option<Self> {
+                let value = value.into();
+                (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
+                    .then_some(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                self.as_str().as_bytes()
+            }
+
+            pub fn into_string(self) -> String {
+                self.0.to_string()
+            }
+
+            pub(crate) fn mint(value: String) -> Self {
+                debug_assert!(!value.is_empty() && value.len() <= 256);
+                Self(Arc::from(value))
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+    };
+}
+
+block_content_nominal_token!(BlockContentCorrelationToken);
+block_content_nominal_token!(BlockContentBasisToken);
+block_content_nominal_token!(BlockContentSourceSpaceToken);
+block_content_nominal_token!(BlockContentArtifactToken);
+block_content_nominal_token!(BlockContentOwnerRevisionToken);
+block_content_nominal_token!(BlockContentHashToken);
+
+/// The sole selected source of a [`BlockContentSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockContentOrigin {
+    InlineAuthored,
+    NativeVfs {
+        canonical_id: String,
+        content_hash: String,
+    },
+    SuppliedValidated {
+        provenance: Option<String>,
+    },
+}
+
+/// Closed source-space role for one selected block-content artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockContentSourceSpaceKind {
+    Owner,
+    External,
+    DerivedTransform,
+}
+
+/// Host-minted descriptor for bytes in one source space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockContentSourceSpaceDescriptor {
+    pub token: BlockContentSourceSpaceToken,
+    pub kind: BlockContentSourceSpaceKind,
+    /// Opaque source identity (owner/block basis for inline/supplied output,
+    /// resolved VFS identity for native external bytes).
+    pub source_token: BlockContentArtifactToken,
+    pub content_hash: BlockContentHashToken,
+    pub utf8_byte_len: u64,
+}
+
+/// A source map qualified by its destination and declared input spaces.
+/// `raw_map == None` is an explicitly qualified no-map edge. It is an identity
+/// only when destination and sole declared space are equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedBlockContentSourceMap {
+    pub map_hash: BlockContentHashToken,
+    pub destination_space_token: BlockContentSourceSpaceToken,
+    pub declared_space_tokens: Vec<BlockContentSourceSpaceToken>,
+    pub raw_map: Option<Arc<str>>,
+}
+
+/// Public query for the host-selected content of one sealed block.
+#[derive(Debug, Clone)]
+pub struct BlockContentQuery {
+    pub canonical_id: String,
+    pub block_token: String,
+    pub compile_profile: CompileProfile,
+    /// Optional caller-held basis. A mismatch returns the typed `Stale` state;
+    /// it never falls through to bytes from a newer source.
+    pub expected_basis_token: Option<String>,
+}
+
+/// One-source projection of current block content.
+#[derive(Debug, Clone)]
+pub struct BlockContentSnapshot {
+    pub availability: BlockContentAvailability,
+    pub origin: Option<BlockContentOrigin>,
+    pub content: Option<Arc<str>>,
+    pub content_class: BlockContentClass,
+    pub lang: String,
+    pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
+    pub owner_revision: BlockContentOwnerRevisionToken,
+    pub artifact_token: crate::carrier_publication_store::FrameworkArtifactToken,
+    /// Identity of the selected byte artifact. For supplied content this is
+    /// distinct from the carrier artifact and includes code/map identity.
+    pub content_artifact_token: BlockContentArtifactToken,
+    pub basis_token: BlockContentBasisToken,
+    /// Source space containing the selected bytes. Supplied output receives a
+    /// host-minted space distinct from its authored input space.
+    pub source_space_token: BlockContentSourceSpaceToken,
+    pub content_hash: Option<BlockContentHashToken>,
+    pub source_map: Option<Arc<str>>,
+    pub source_map_hash: Option<BlockContentHashToken>,
+    pub source_spaces: Vec<BlockContentSourceSpaceDescriptor>,
+    pub final_output_space: BlockContentSourceSpaceDescriptor,
+    pub immediate_maps: Vec<QualifiedBlockContentSourceMap>,
+    pub composed_map: QualifiedBlockContentSourceMap,
+}
+
+/// Typed refusal from the host-only supplied-content admission boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BlockContentRefusal {
+    #[error("block content is unavailable: {availability:?}")]
+    Unavailable {
+        block_token: String,
+        availability: BlockContentAvailability,
+    },
+    #[error("block content owner or block is missing")]
+    Missing,
+    #[error("block content result is stale")]
+    Stale,
+    #[error("block content sources conflict")]
+    Conflict,
+    #[error("block content artifact token mismatch")]
+    ArtifactMismatch,
+    #[error("block content basis token mismatch")]
+    BasisMismatch,
+    #[error("block content source-space token mismatch")]
+    SourceSpaceMismatch,
+    #[error("block content code hash mismatch")]
+    CodeHashMismatch,
+    #[error("block content source-map hash mismatch")]
+    SourceMapHashMismatch,
+    #[error("block content source map is invalid")]
+    InvalidSourceMap,
+    #[error("block content correlation is missing or mismatched")]
+    CorrelationMismatch,
+    #[error("block content correlation is terminal")]
+    CorrelationTerminal,
+    #[error("block content correlation was superseded by a newer owner revision")]
+    CorrelationSuperseded,
+    #[error("block content correlation was closed with its owner")]
+    CorrelationClosed,
+    #[error("block content correlation was cancelled by bounded admission state")]
+    CorrelationCancelled,
+    #[error("a sealed block-content token is malformed")]
+    MalformedToken,
+    #[error("supplied block content exceeds the admission size limit")]
+    PayloadTooLarge,
+    #[error("the request contains the same sealed block more than once")]
+    DuplicateBlock,
 }
 
 /// A block that needs external preprocessing before compilation.
@@ -1895,16 +2089,91 @@ pub enum PreprocessorBlockType {
 /// `<script lang="coffee">`). The caller invokes the appropriate external
 /// compiler and feeds the result back via
 /// [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockContentPreCaptureEcho {
+    pub correlation_token: BlockContentCorrelationToken,
+    pub canonical_id: String,
+    pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
+    pub owner_revision: BlockContentOwnerRevisionToken,
+    pub artifact_token: crate::carrier_publication_store::FrameworkArtifactToken,
+    pub expected_language: String,
+    pub prior_basis_token: Option<BlockContentBasisToken>,
+}
+
+/// Exact host-captured request echo. Post-capture success and every
+/// post-capture terminal outcome carry this value, never a fabricated basis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockContentCapturedEcho {
+    pub request: BlockContentPreCaptureEcho,
+    pub basis_token: BlockContentBasisToken,
+}
+
+/// Payloads returned before a content basis exists are structurally disjoint
+/// from post-capture terminals, which always carry a captured echo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockContentPreCaptureTerminal {
+    Failed,
+    Stale,
+    Unavailable,
+    Closed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockContentPostCaptureTerminal {
+    Failed(BlockContentRefusal),
+    StaleWithReplacement(BlockContentBasisToken),
+    StaleNeedsRecapture,
+    Superseded,
+    Closed,
+    Cancelled,
+    Admitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockContentResolveTerminal {
+    PreCapture(BlockContentPreCaptureTerminal),
+    PostCapture {
+        echo: BlockContentCapturedEcho,
+        outcome: BlockContentPostCaptureTerminal,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct PreprocessorRequest {
-    /// Which block type needs preprocessing.
-    pub block_type: PreprocessorBlockType,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: usize,
+    /// Descriptive parser/compiler class, never identity.
+    pub content_class: BlockContentClass,
     /// The `lang` attribute value (e.g., `"pug"`, `"coffee"`, `"scss"`).
     pub lang: String,
     /// Raw content of the block that needs preprocessing.
     pub content: String,
+    pub availability: BlockContentAvailability,
+    pub correlation_token: BlockContentCorrelationToken,
+    pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
+    pub owner_revision: BlockContentOwnerRevisionToken,
+    pub artifact_token: crate::carrier_publication_store::FrameworkArtifactToken,
+    /// The request's caller-held basis before host capture. `None` is the
+    /// valid first-resolution state; it is never fabricated into a token.
+    pub prior_basis_token: Option<BlockContentBasisToken>,
+    /// The genuinely tokenless first phase. This type has no captured-basis
+    /// field; the second phase below wraps this exact echo with one.
+    pub pre_capture_echo: BlockContentPreCaptureEcho,
+    /// Host-captured basis echoed by the post-capture result.
+    pub basis_token: BlockContentBasisToken,
+    pub captured_echo: BlockContentCapturedEcho,
+    pub source_space_token: BlockContentSourceSpaceToken,
+    pub content_hash: BlockContentHashToken,
+    /// Custom tag name where applicable; descriptive only.
+    pub custom_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPreprocessorRequest {
+    pub(crate) content_class: BlockContentClass,
+    pub(crate) block_ref: verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef,
+    pub(crate) lang: String,
+    pub(crate) content: String,
+    pub(crate) custom_type: Option<String>,
 }
 
 /// A single preprocessed block override to inject into the compile pipeline.
@@ -1913,20 +2182,88 @@ pub struct PreprocessorRequest {
 /// a template, script, style, or custom block.
 #[derive(Debug, Clone)]
 pub struct BlockOverrideEntry {
-    /// Which block type this override applies to.
-    pub block_type: PreprocessorBlockType,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: usize,
+    pub correlation_token: BlockContentCorrelationToken,
+    pub block_token: crate::carrier_publication_store::ArtifactBlockToken,
+    pub owner_revision: BlockContentOwnerRevisionToken,
+    pub artifact_token: crate::carrier_publication_store::FrameworkArtifactToken,
+    pub basis_token: BlockContentBasisToken,
+    pub captured_echo: BlockContentCapturedEcho,
+    pub source_space_token: BlockContentSourceSpaceToken,
     /// Preprocessed code (HTML for template, JS for script, CSS for style).
     pub code: Arc<str>,
+    pub code_hash: BlockContentHashToken,
     /// Source map from the preprocessor, if available.
     pub source_map: Option<Arc<str>>,
+    pub source_map_hash: Option<BlockContentHashToken>,
+    /// Opaque supplied provenance. The host carries but never interprets it.
+    pub supplied_provenance: Option<String>,
+}
+
+#[cfg(test)]
+impl BlockOverrideEntry {
+    pub(crate) fn unissued_for_test(code: impl Into<Arc<str>>) -> Self {
+        let code = code.into();
+        let correlation_token = BlockContentCorrelationToken::mint("not-issued".to_string());
+        let block_token =
+            crate::carrier_publication_store::ArtifactBlockToken::parse_untrusted("not-issued")
+                .unwrap();
+        let owner_revision = BlockContentOwnerRevisionToken::mint("not-issued".to_string());
+        let artifact_token =
+            crate::carrier_publication_store::FrameworkArtifactToken::parse_untrusted("not-issued")
+                .unwrap();
+        let basis_token = BlockContentBasisToken::mint("not-issued".to_string());
+        Self {
+            correlation_token: correlation_token.clone(),
+            block_token: block_token.clone(),
+            owner_revision: owner_revision.clone(),
+            artifact_token: artifact_token.clone(),
+            basis_token: basis_token.clone(),
+            captured_echo: BlockContentCapturedEcho {
+                request: BlockContentPreCaptureEcho {
+                    correlation_token,
+                    canonical_id: "not-issued".to_string(),
+                    block_token,
+                    owner_revision,
+                    artifact_token,
+                    expected_language: "not-issued".to_string(),
+                    prior_basis_token: None,
+                },
+                basis_token,
+            },
+            source_space_token: BlockContentSourceSpaceToken::mint("not-issued".to_string()),
+            code_hash: crate::hash_block_content(&code),
+            code,
+            source_map: None,
+            source_map_hash: None,
+            supplied_provenance: None,
+        }
+    }
+
+    pub(crate) fn supplied_for_test(
+        request: &PreprocessorRequest,
+        code: impl Into<Arc<str>>,
+    ) -> Self {
+        let code = code.into();
+        Self {
+            correlation_token: request.correlation_token.clone(),
+            block_token: request.block_token.clone(),
+            owner_revision: request.owner_revision.clone(),
+            artifact_token: request.artifact_token.clone(),
+            basis_token: request.basis_token.clone(),
+            captured_echo: request.captured_echo.clone(),
+            source_space_token: request.source_space_token.clone(),
+            code_hash: crate::hash_block_content(&code),
+            code,
+            source_map: None,
+            source_map_hash: None,
+            supplied_provenance: Some("rust-test".to_string()),
+        }
+    }
 }
 
 /// Input to [`VerterHost::apply_block_overrides`](crate::VerterHost::apply_block_overrides).
 ///
-/// Unified API for applying preprocessed block overrides. Replaces the
-/// deprecated [`StyleOverrideRequest`] for new code.
+/// Unified API for applying externally preprocessed block content.
 #[derive(Debug, Clone)]
 pub struct BlockOverrideRequest {
     /// Canonical ID of the file whose blocks are being overridden.
@@ -1935,28 +2272,6 @@ pub struct BlockOverrideRequest {
     pub compile_profile: CompileProfile,
     /// Preprocessed block overrides to inject.
     pub overrides: Vec<BlockOverrideEntry>,
-}
-
-/// A single preprocessor-compiled style block to override in the compile cache.
-#[derive(Debug, Clone)]
-pub struct StyleOverrideEntry {
-    /// Style block index this override applies to.
-    pub index: usize,
-    /// Preprocessed CSS code.
-    pub code: Arc<str>,
-    /// Source map from the preprocessor, if available.
-    pub source_map: Option<Arc<str>>,
-}
-
-/// Input to [`VerterHost::apply_style_overrides`](crate::VerterHost::apply_style_overrides).
-#[derive(Debug, Clone)]
-pub struct StyleOverrideRequest {
-    /// Canonical ID of the file whose styles are being overridden.
-    pub canonical_id: String,
-    /// Compile profile to apply the overrides under.
-    pub compile_profile: CompileProfile,
-    /// Preprocessed style blocks to inject.
-    pub overrides: Vec<StyleOverrideEntry>,
 }
 
 /// Result of [`VerterHost::remove`](crate::VerterHost::remove).
@@ -2157,9 +2472,8 @@ pub enum HostError {
     /// The request's parse-affecting profile differs from registered grammar.
     #[error("compile profile grammar differs from registered grammar")]
     GrammarMismatch(crate::carrier_publication_store::GrammarMismatch),
-    /// Typed B2 fail-closed result for external block bytes.
-    #[error("external block content deferred until {0:?}")]
-    ExternalBlockContentDeferred(crate::carrier_publication_store::ExternalBlockContentDeferred),
+    #[error("block content refused: {0}")]
+    BlockContentRefused(BlockContentRefusal),
 }
 
 #[derive(Debug, Clone)]
@@ -2310,34 +2624,7 @@ pub(crate) struct ParseSnapshot {
     /// Empty for Vue (its template element tree carries class facts).
     pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
-    pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct StyleOverrideLayer {
-    pub(crate) hash: u64,
-    pub(crate) by_index: FxHashMap<usize, StyleOverrideEntry>,
-}
-
-/// Preprocessed template/script content that replaces the original block
-/// content before compilation. Stored per compile-profile.
-#[allow(dead_code)] // B4 owns physical retirement after B3 typed content lands.
-#[derive(Debug, Clone)]
-pub(crate) struct ContentOverride {
-    pub(crate) code: Arc<str>,
-    pub(crate) source_map: Option<Arc<str>>,
-}
-
-/// Per-profile layer of content overrides for template and/or script blocks.
-/// The `template` and `script` fields store the preprocessor output for future
-/// source map chain support; currently only `hash` is read by the compile pipeline.
-#[derive(Debug, Clone)]
-pub(crate) struct ContentOverrideLayer {
-    pub(crate) hash: u64,
-    #[allow(dead_code)]
-    pub(crate) template: Option<ContentOverride>,
-    #[allow(dead_code)]
-    pub(crate) script: Option<ContentOverride>,
+    pub(crate) preprocessor_requests: Vec<PendingPreprocessorRequest>,
 }
 
 #[derive(Debug, Clone)]
@@ -2491,7 +2778,6 @@ pub enum PublicApiMode {
 #[derive(Debug, Clone)]
 pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
-    pub(crate) style_override_hash: u64,
     pub(crate) content_override_hash: u64,
     /// The RESOLVED Svelte `cssHash` override captured at publish (byte-exact;
     /// `None` for the default derivation). Compared EXACTLY on every warm hit so
@@ -2544,7 +2830,7 @@ pub(crate) struct CompileSlot {
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
-/// avoids cloning heavy compile_slots and style_overrides maps.
+/// avoiding clones of heavy compile-slot state.
 pub(crate) struct CompileInput {
     pub(crate) canonical_id: String,
     pub(crate) source: Arc<str>,
@@ -2554,9 +2840,9 @@ pub(crate) struct CompileInput {
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
     pub(crate) src_blocks: Vec<SrcBlockInfo>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
-    pub(crate) style_override_layer: Option<StyleOverrideLayer>,
-    /// Content overrides for preprocessed template/script blocks.
-    pub(crate) content_override_layer: Option<ContentOverrideLayer>,
+    /// Classification-only signal; no alternate content bytes are carried here.
+    pub(crate) has_supplied_block_content: bool,
+    pub(crate) block_content_inputs: verter_compiler::framework_common::RuntimeBlockContentInputs,
     /// Macro type dependencies for cross-file type resolution.
     pub(crate) macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
     /// Import declarations from the SFC script analysis.
@@ -2580,6 +2866,8 @@ pub(crate) struct CompileInput {
     /// Binding names referenced in style `v-bind()` expressions.
     /// Extracted from `FileEntry.style_analyses` at cache-miss time.
     pub(crate) style_v_bind_vars: Vec<String>,
+    /// Whether every selected style `v-bind()` expression was parsed cleanly.
+    pub(crate) style_v_bind_usage_complete: bool,
 }
 
 /// Cached Arc-wrapped views of immutable `ScriptAnalysisSnapshot` fields.
@@ -2676,8 +2964,6 @@ impl DependencyResolution {
 /// See the §3.4.2 invalidation matrix.
 #[derive(Debug, Default)]
 pub struct ProfileState {
-    pub(crate) content_overrides: FxHashMap<u64, ContentOverrideWithParse>,
-    pub(crate) style_overrides: FxHashMap<u64, StyleOverrideWithAnalysis>,
     pub(crate) compile_slots: FxHashMap<u64, CompileSlot>,
     pub(crate) latest_diagnostics: FxHashMap<u64, DiagnosticsSnapshot>,
     pub(crate) diagnostics_generation: u64,
@@ -2722,11 +3008,9 @@ impl ProfileState {
     ///
     /// Routed exclusively from the typed compile-output node's
     /// `clear_compile_outputs_for_file` method. Drops ONLY the
-    /// compile-output slots — the sibling `content_overrides`,
-    /// `style_overrides`, `latest_diagnostics`, and
-    /// `diagnostics_generation` fields are compile *inputs* /
-    /// observable state owned by their own invalidation callers and
-    /// are left untouched here.
+    /// compile-output slots. The sibling `latest_diagnostics` and
+    /// `diagnostics_generation` observable state is owned by its own
+    /// invalidation callers and is left untouched here.
     pub(crate) fn compile_slots_clear_for_node(&mut self) {
         self.compile_slots.clear();
     }
@@ -3014,35 +3298,6 @@ pub(crate) struct EffectiveFileState {
     pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) framework_parse: Option<std::sync::Arc<verter_language::FrameworkParseArtifact>>,
     pub(crate) whole_hash: Hash16,
-}
-
-/// Block override + cached re-parse from synthetic source.
-///
-/// When a preprocessor (e.g. Pug → HTML) overrides a block, the host builds a
-/// synthetic SFC source, re-parses it, and stores the result here. The scheduler's
-/// raw source/analysis are never modified by overrides.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Used in apply_block_overrides
-pub(crate) struct ContentOverrideWithParse {
-    pub(crate) layer: ContentOverrideLayer,
-    pub(crate) parse: ParseSnapshot,
-    pub(crate) framework_parse: Option<Arc<verter_language::FrameworkParseArtifact>>,
-    pub(crate) source: Arc<str>,
-}
-
-/// Style override + remapped CSS analyses + lang overrides.
-///
-/// When a style preprocessor (e.g. SCSS → CSS) runs, the compiled CSS and its
-/// remapped CSS analysis (with SFC-absolute spans) are stored here per-profile.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Used in apply_style_overrides
-pub(crate) struct StyleOverrideWithAnalysis {
-    pub(crate) layer: StyleOverrideLayer,
-    /// Per-index: Some(remapped CSS analysis) for overridden blocks, None for raw.
-    pub(crate) analyses: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>>,
-    /// Per-index: Some("css") for overridden blocks, None for raw.
-    pub(crate) lang_overrides: Vec<Option<String>>,
-    pub(crate) hash: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4065,8 +4320,6 @@ pub struct HostMetricsSnapshot {
     pub virtual_loads: u64,
     /// Total number of `resolve()` calls.
     pub resolves: u64,
-    /// Total number of `apply_style_overrides()` calls.
-    pub style_override_calls: u64,
     /// Cumulative time spent in parse/hash phase across all upserts (microseconds).
     pub slice_hash_time_us_total: u64,
     /// Average parse/hash time per upsert (microseconds).
@@ -4087,7 +4340,6 @@ pub(crate) struct HostMetrics {
     pub(crate) compile_cache_hits: std::sync::atomic::AtomicU64,
     pub(crate) virtual_loads: std::sync::atomic::AtomicU64,
     pub(crate) resolves: std::sync::atomic::AtomicU64,
-    pub(crate) style_override_calls: std::sync::atomic::AtomicU64,
     pub(crate) slice_hash_time_us_total: std::sync::atomic::AtomicU64,
     pub(crate) compile_time_us_total: std::sync::atomic::AtomicU64,
     pub(crate) compile_time_us_total_by_profile: std::sync::Mutex<HashMap<u64, u64>>,

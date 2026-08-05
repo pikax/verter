@@ -104,6 +104,18 @@ pub enum CompileUnsupported {
         /// The adapter that declined the IDE compile.
         adapter_id: FrameworkAdapterId,
     },
+    /// Runtime lowering cannot truthfully compile selected template/script
+    /// bytes that live outside the carrier source space.
+    BlockContentRuntimeUnavailable {
+        /// The adapter that declined the runtime compile.
+        adapter_id: FrameworkAdapterId,
+    },
+    /// IDE lowering cannot truthfully include selected template/script bytes
+    /// that live outside the carrier source space in its unified TS surface.
+    BlockContentIdeUnavailable {
+        /// The adapter that declined the IDE compile.
+        adapter_id: FrameworkAdapterId,
+    },
 }
 
 /// Framework-neutral template facts extracted from a carrier parse.
@@ -178,6 +190,11 @@ pub struct RuntimeCompileOptions {
     pub conditional_root_narrowing: bool,
     /// Experimental: strict slot children type checking (IDE codegen).
     pub strict_slots: bool,
+    /// Host-validated content artifacts for blocks whose bytes do not live in
+    /// the carrier source space (external `src` or supplied preprocessor
+    /// output). The host derives these parser-local slots only after resolving
+    /// an exact sealed block reference; no ordinal crosses the public handoff.
+    pub block_content: RuntimeBlockContentInputs,
     /// Inline the render function inside `setup()` (Vue production topology,
     /// official `compileScript({ inlineTemplate: true })`). `None` resolves to
     /// `is_production` — matching the official default (inline in prod
@@ -192,6 +209,50 @@ pub struct RuntimeCompileOptions {
     /// framework's resolution-specific DTOs out of the cross-framework
     /// contract.
     pub framework_extras: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// One compiler-owned block input selected by the registered host.
+#[derive(Debug, Clone)]
+pub struct RuntimeBlockContentInput {
+    pub code: Arc<str>,
+    pub source_map: Option<Arc<str>>,
+    pub lang: String,
+    /// Host-minted identity of the exact selected bytes (including any
+    /// supplied map). Compiler code carries this opaquely; it never accepts
+    /// caller-selected parser ordinals.
+    pub content_artifact_token: String,
+    /// Host-minted source space containing `code`.
+    pub source_space_token: String,
+}
+
+/// Parser-local projection of validated block content. Ordering exists only at
+/// this compiler boundary and is derived from the carrier inventory; callers
+/// cannot address a block by these positions.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeBlockContentInputs {
+    pub template: Option<RuntimeBlockContentInput>,
+    pub script: Option<RuntimeBlockContentInput>,
+    pub script_setup: Option<RuntimeBlockContentInput>,
+    pub styles: Vec<Option<RuntimeBlockContentInput>>,
+    pub custom_blocks: Vec<Option<RuntimeBlockContentInput>>,
+}
+
+impl RuntimeBlockContentInputs {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.template.is_none()
+            && self.script.is_none()
+            && self.script_setup.is_none()
+            && self.styles.iter().all(Option::is_none)
+            && self.custom_blocks.iter().all(Option::is_none)
+    }
+
+    /// Whether selected template or script bytes live outside the carrier
+    /// source space and therefore require multi-unit semantic lowering.
+    #[must_use]
+    pub fn has_external_semantic_unit(&self) -> bool {
+        self.template.is_some() || self.script.is_some() || self.script_setup.is_some()
+    }
 }
 
 /// A framework-neutral severity for a runtime-bundle diagnostic.

@@ -1,4 +1,4 @@
-import type { HostPreprocessorRequest } from "@verter/native";
+import type { HostBlockContentCapturedEchoFields, HostPreprocessorRequest } from "@verter/native";
 import type { BlockPreprocessor } from "./types";
 
 interface PreprocessResult {
@@ -22,7 +22,7 @@ export async function preprocessBlock(
   viteConfig: unknown | null,
   customBlockHandlers?: Record<string, BlockPreprocessor>,
 ): Promise<PreprocessResult | null> {
-  switch (req.blockType) {
+  switch (req.contentClass) {
     case "template":
       return preprocessTemplate(req.lang, req.content, filename);
     case "script":
@@ -30,10 +30,25 @@ export async function preprocessBlock(
     case "style":
       return preprocessStyle(req.lang, req.content, filename, viteConfig);
     case "custom":
-      return preprocessCustom(req.lang, req.content, filename, customBlockHandlers);
+      return preprocessCustom(req, filename, customBlockHandlers);
     default:
       return null;
   }
+}
+
+/** Copy the exact host-captured echo without allowing payload fields into it. */
+export function copyCapturedBlockContentEcho(
+  request: HostPreprocessorRequest,
+): HostBlockContentCapturedEchoFields {
+  return {
+    correlationToken: request.correlationToken,
+    blockToken: request.blockToken,
+    ownerRevision: request.ownerRevision,
+    artifactToken: request.artifactToken,
+    expectedLanguage: request.expectedLanguage,
+    priorBasisToken: request.priorBasisToken,
+    basisToken: request.basisToken,
+  };
 }
 
 export async function preprocessTemplate(
@@ -129,20 +144,17 @@ export async function preprocessStyle(
 }
 
 export async function preprocessCustom(
-  lang: string,
-  content: string,
+  request: HostPreprocessorRequest,
   filename: string,
   customBlockHandlers?: Record<string, BlockPreprocessor>,
 ): Promise<PreprocessResult | null> {
-  // Check user-provided handler first (keyed by block type — but for custom
-  // blocks we only have lang here, so we match by lang)
+  // Select the user-provided handler by the declared custom-block type.
   if (customBlockHandlers) {
     for (const [_type, handler] of Object.entries(customBlockHandlers)) {
-      // The handler is keyed by custom block type (e.g., "i18n"), but at this
-      // point we don't have the block type — only the lang. For now, try all
-      // handlers and use the first non-null result.
-      const result = await handler(content, lang, filename);
-      if (result) return result;
+      if (_type === request.customType) {
+        const result = await handler(request, filename);
+        if (result) return result;
+      }
     }
   }
   return null;

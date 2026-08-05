@@ -1122,13 +1122,20 @@ fn compile_inner(
         // regardless of `target.needs_style()` because the IDE/TSX target does
         // not run full style codegen yet still needs sound style liveness. A
         // single unparseable `v-bind()` marks the set incomplete → fail open.
-        let style_usage = style_usage::extract_style_v_bind_usage(
-            parsed
-                .style_nodes()
-                .iter()
-                .filter_map(|s| s.content.as_ref())
-                .map(|c| &input[c.start as usize..c.end as usize]),
-        );
+        let style_usage = if let Some(complete) = verter_options.style_v_bind_usage_complete {
+            style_usage::StyleVBindUsage {
+                used: verter_options.style_v_bind_vars.iter().cloned().collect(),
+                complete,
+            }
+        } else {
+            style_usage::extract_style_v_bind_usage(
+                parsed
+                    .style_nodes()
+                    .iter()
+                    .filter_map(|s| s.content.as_ref())
+                    .map(|c| &input[c.start as usize..c.end as usize]),
+            )
+        };
 
         let tsx_script_opts = ide::IdeScriptOptions {
             component_name: &component_name,

@@ -341,7 +341,7 @@ impl ScriptAnalysisSnapshot {
         // an unparseable v-bind expression — fail OPEN below.
         let external_deferred = style_analyses
             .iter()
-            .any(crate::analysis::style::StyleBlockAnalysis::is_external_src_deferred);
+            .any(|style| !style.content_is_available());
         for vb in style_analyses.iter().flat_map(|s| &s.v_binds) {
             any_v_bind = true;
             if !vb.roots_complete {

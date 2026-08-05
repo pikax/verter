@@ -143,7 +143,9 @@ fn external_src_compile_never_populates_the_template_slot() {
         .expect_err("external content must fail closed before compilation");
     assert!(matches!(
         error,
-        crate::types::HostError::ExternalBlockContentDeferred(_)
+        crate::types::HostError::CompileError(ref failure)
+            if failure.diagnostics.diagnostics.iter().any(|diagnostic|
+                diagnostic.code == "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE")
     ));
     assert!(!session_slot_present(&host, &profile));
     assert!(template_slot(&host).is_none());

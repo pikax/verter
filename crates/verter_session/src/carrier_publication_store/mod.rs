@@ -181,6 +181,29 @@ macro_rules! public_structure_token {
             pub fn as_str(&self) -> &str {
                 &self.0
             }
+
+            pub fn as_bytes(&self) -> &[u8] {
+                self.as_str().as_bytes()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.as_str().is_empty()
+            }
+
+            /// Parse an opaque token crossing a wire boundary. This validates
+            /// only the bounded token envelope; authority and liveness are
+            /// validated by the owning host after capture.
+            pub fn parse_untrusted(value: impl Into<Arc<str>>) -> Option<Self> {
+                let value = value.into();
+                (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
+                    .then_some(Self(value))
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
         }
     };
 }
@@ -472,6 +495,17 @@ pub struct HostSourceRevisionToken {
     pub host_instance: HostInstanceId,
     pub file_incarnation: FileIncarnation,
     pub source_generation: SourceGeneration,
+}
+
+impl HostSourceRevisionToken {
+    pub fn public_token(self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"verter.host-source-revision.v1\0");
+        digest.update(self.host_instance.get().to_le_bytes());
+        digest.update(format!("{:?}", self.file_incarnation).as_bytes());
+        digest.update(format!("{:?}", self.source_generation).as_bytes());
+        base64url_32(digest.finalize().into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -960,14 +994,5 @@ fn parser_version_for(adapter: &FrameworkAdapterId) -> CarrierParserVersion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrammarMismatch;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExternalBlockContentDeferred {
-    pub acceptance: &'static str,
-}
-
-impl ExternalBlockContentDeferred {
-    pub const B23: Self = Self { acceptance: "B-23" };
-}
 
 fn _acceptance_error_is_closed(_: CarrierAcceptanceError) {}

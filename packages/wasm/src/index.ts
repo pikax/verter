@@ -89,8 +89,6 @@ export type {
   HostVirtualMeta,
   HostVirtualFileResponse,
   HostUpsertRequest,
-  HostStyleOverrideEntry,
-  HostStyleOverrideRequest,
   HostVirtualQuery,
   HostRemoveResult,
   HostTextEdit,
@@ -102,6 +100,21 @@ export type {
   HostSelectorMatchResult,
 } from "@verter/native/host-types";
 
+export type {
+  ArtifactBlockToken,
+  FrameworkArtifactToken,
+  BlockContentOwnerRevisionToken,
+  BlockContentBasisToken,
+  BlockContentCorrelationToken,
+  BlockContentSourceSpaceToken,
+  BlockContentArtifactToken,
+  BlockContentHashToken,
+  HostBlockContentPreCaptureEcho,
+  HostBlockContentCapturedEcho,
+  HostBlockContentCapturedEchoFields,
+  WasmStampedBlockResult,
+} from "./handoff-types";
+
 import type {
   HostConfig,
   HostCompileProfile,
@@ -109,6 +122,7 @@ import type {
   HostModuleReference,
   HostResolvedId,
   HostUpsertRequest,
+  HostBlockOverrideEntry,
   HostBlockOverrideRequest,
   HostUpdateResult,
   HostVirtualQuery,

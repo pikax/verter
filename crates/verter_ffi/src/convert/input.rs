@@ -291,33 +291,95 @@ pub fn ffi_upsert_to_host(
     })
 }
 
-/// Parse a block type string to the host `PreprocessorBlockType` enum.
-pub(super) fn ffi_block_type_to_host(s: &str) -> host::PreprocessorBlockType {
-    match s {
-        "template" => host::PreprocessorBlockType::Template,
-        "script" => host::PreprocessorBlockType::Script,
-        "style" => host::PreprocessorBlockType::Style,
-        _ => host::PreprocessorBlockType::Custom,
-    }
-}
-
 /// Convert FFI block override request to host block override request.
 pub fn ffi_block_override_to_host(
     input: FfiBlockOverrideRequest,
 ) -> Result<host::BlockOverrideRequest, FfiConversionError> {
+    let FfiBlockOverrideRequest {
+        canonical_id,
+        compile_profile,
+        overrides,
+    } = input;
+    let captured_canonical_id = canonical_id.clone();
     Ok(host::BlockOverrideRequest {
-        canonical_id: input.canonical_id,
-        compile_profile: ffi_profile_to_host(input.compile_profile)?,
-        overrides: input
-            .overrides
+        canonical_id,
+        compile_profile: ffi_profile_to_host(compile_profile)?,
+        overrides: overrides
             .into_iter()
-            .map(|entry| host::BlockOverrideEntry {
-                block_type: ffi_block_type_to_host(&entry.block_type),
-                index: entry.index as usize,
-                code: Arc::from(entry.code),
-                source_map: entry.source_map.map(Arc::from),
+            .map(|entry| {
+                let correlation_token =
+                    host::BlockContentCorrelationToken::parse_untrusted(entry.correlation_token)
+                        .ok_or(FfiConversionError::InvalidBlockContentToken(
+                            "correlationToken",
+                        ))?;
+                let block_token =
+                    host::carrier_publication_store::ArtifactBlockToken::parse_untrusted(
+                        entry.block_token,
+                    )
+                    .ok_or(FfiConversionError::InvalidBlockContentToken("blockToken"))?;
+                let owner_revision =
+                    host::BlockContentOwnerRevisionToken::parse_untrusted(entry.owner_revision)
+                        .ok_or(FfiConversionError::InvalidBlockContentToken(
+                            "ownerRevision",
+                        ))?;
+                let artifact_token =
+                    host::carrier_publication_store::FrameworkArtifactToken::parse_untrusted(
+                        entry.artifact_token,
+                    )
+                    .ok_or(FfiConversionError::InvalidBlockContentToken(
+                        "artifactToken",
+                    ))?;
+                let prior_basis_token = entry
+                    .prior_basis_token
+                    .map(|value| {
+                        host::BlockContentBasisToken::parse_untrusted(value).ok_or(
+                            FfiConversionError::InvalidBlockContentToken("priorBasisToken"),
+                        )
+                    })
+                    .transpose()?;
+                let basis_token = host::BlockContentBasisToken::parse_untrusted(entry.basis_token)
+                    .ok_or(FfiConversionError::InvalidBlockContentToken("basisToken"))?;
+                let captured_echo = host::BlockContentCapturedEcho {
+                    request: host::BlockContentPreCaptureEcho {
+                        correlation_token: correlation_token.clone(),
+                        canonical_id: captured_canonical_id.clone(),
+                        block_token: block_token.clone(),
+                        owner_revision: owner_revision.clone(),
+                        artifact_token: artifact_token.clone(),
+                        expected_language: entry.expected_language,
+                        prior_basis_token,
+                    },
+                    basis_token: basis_token.clone(),
+                };
+                Ok(host::BlockOverrideEntry {
+                    correlation_token,
+                    block_token,
+                    owner_revision,
+                    artifact_token,
+                    basis_token,
+                    captured_echo,
+                    source_space_token: host::BlockContentSourceSpaceToken::parse_untrusted(
+                        entry.source_space_token,
+                    )
+                    .ok_or(FfiConversionError::InvalidBlockContentToken(
+                        "sourceSpaceToken",
+                    ))?,
+                    code: Arc::from(entry.code),
+                    code_hash: host::BlockContentHashToken::parse_untrusted(entry.code_hash)
+                        .ok_or(FfiConversionError::InvalidBlockContentToken("codeHash"))?,
+                    source_map: entry.source_map.map(Arc::from),
+                    source_map_hash: entry
+                        .source_map_hash
+                        .map(|value| {
+                            host::BlockContentHashToken::parse_untrusted(value).ok_or(
+                                FfiConversionError::InvalidBlockContentToken("sourceMapHash"),
+                            )
+                        })
+                        .transpose()?,
+                    supplied_provenance: entry.supplied_provenance,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, FfiConversionError>>()?,
     })
 }
 pub fn ffi_virtual_query_to_host(

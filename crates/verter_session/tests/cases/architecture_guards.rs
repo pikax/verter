@@ -3088,6 +3088,14 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "typeinfo_scratch_cache",
             "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
         ),
+        (
+            "block_content_admission_fence",
+            "docs/arch/scanners-replacement-preprocessor-interim.md §Sealed handoff: a mutex serializes validation and atomic admission after asynchronous provider work. NOT a cache; admitted artifacts live in block_content_state.",
+        ),
+        (
+            "block_content_admission_seam_hook",
+            "Block-content admission-fence regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after validation and before publication for deterministic owner-publication races. Compiled out in production builds. NOT a cache.",
+        ),
     ]
     .into_iter()
     .collect()
@@ -5653,6 +5661,8 @@ mod foundations_guards {
         // assembly (compile → bundle → assemble) instead of a hand copy.
         // Test-support public API (consumer: verter_vue_conformance dev-dep).
         "pub use compile::assemble_vue_main_module",
+        // Stamped handoff callers hash code and maps with the host-owned domain.
+        "pub use block_content::hash_block_content",
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
         // verter_napi::meta
@@ -5962,7 +5972,6 @@ mod foundations_guards {
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
-        "pub(crate) mod source_map_remap",
         "pub(crate) mod template_convert",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────

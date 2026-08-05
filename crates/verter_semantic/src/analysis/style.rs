@@ -60,26 +60,30 @@ pub enum SpecialPseudoKind {
 /// Where a style block's content lives, and therefore whether this analysis
 /// carries content facts at all.
 ///
-/// An external `<style src="...">` block's content is DEFERRED (the B-23
-/// external-block-content ruling): the producer must NOT slice the inline
-/// span and fabricate an empty-but-positive analysis for it. Consumers treat
-/// a deferred block as unavailable, and binding-liveness marking fails OPEN
-/// (see [`super::types::ScriptAnalysisSnapshot::mark_bindings_used_in_style`]).
+/// The raw carrier parse never slices an external block's ignored inline span.
+/// The host may later hydrate a native external CSS/SCSS/Sass/Less/Stylus file
+/// from its registered VFS artifact, or hydrate a sealed supplied result for a
+/// processed language. Until that selection is available, consumers fail open
+/// for binding liveness (see
+/// [`super::types::ScriptAnalysisSnapshot::mark_bindings_used_in_style`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum StyleContentAvailability {
+pub enum BlockContentAvailability {
     /// Inline `<style>` content — analyzed in place.
     #[default]
-    Inline,
-    /// `<style src="...">` — the content is an external file and stays
-    /// deferred; this analysis carries NO content facts (`css: None`, no
-    /// v-binds), only the block's declaration facts (lang/scoped/module).
-    ExternalSrcDeferred,
+    NativeAvailable,
+    /// The selected bytes require an external processor and no sealed result
+    /// has been admitted; content facts remain unavailable.
+    ProcessedContentRequired,
+    SuppliedAvailable,
+    Missing,
+    Conflict,
+    Stale,
 }
 
-impl StyleContentAvailability {
-    fn is_inline(&self) -> bool {
-        matches!(self, Self::Inline)
+impl BlockContentAvailability {
+    fn is_native_available(&self) -> bool {
+        matches!(self, Self::NativeAvailable)
     }
 }
 
@@ -106,6 +110,9 @@ pub struct StyleBlockAnalysis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_token: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_space_token: Option<String>,
+
     /// Byte offset of the style block content start within the SFC source.
     /// Stored only for span remapping; it is not block identity.
     #[serde(default)]
@@ -121,8 +128,11 @@ pub struct StyleBlockAnalysis {
     /// Content availability: inline (analyzed) or external-`src` (deferred).
     /// Serialization is byte-identical for inline blocks (the default), so
     /// existing persisted payloads round-trip unchanged.
-    #[serde(default, skip_serializing_if = "StyleContentAvailability::is_inline")]
-    pub content_availability: StyleContentAvailability,
+    #[serde(
+        default,
+        skip_serializing_if = "BlockContentAvailability::is_native_available"
+    )]
+    pub content_availability: BlockContentAvailability,
 
     pub flags: u16,
 }
@@ -135,10 +145,10 @@ impl StyleBlockAnalysis {
 
     /// Whether this block is an external `<style src="...">` whose content
     /// analysis is deferred (unavailable) rather than an analyzed inline block.
-    pub fn is_external_src_deferred(&self) -> bool {
+    pub fn content_is_available(&self) -> bool {
         matches!(
             self.content_availability,
-            StyleContentAvailability::ExternalSrcDeferred
+            BlockContentAvailability::NativeAvailable | BlockContentAvailability::SuppliedAvailable
         )
     }
 }
@@ -687,21 +697,22 @@ pub fn build_scanned_style_analysis(
         module_name: module_name.map(|s| s.to_string()),
         block_ref: None,
         block_token: None,
+        source_space_token: None,
         content_offset,
         v_binds,
         special_pseudos,
         css,
-        content_availability: StyleContentAvailability::Inline,
+        content_availability: BlockContentAvailability::NativeAvailable,
         flags: flags.bits(),
     }
 }
 
 /// Build the TYPED deferred analysis for an external `<style src="...">`
 /// block: declaration facts only (lang/scoped/module), NO content facts —
-/// `css: None`, no v-binds, `content_availability: ExternalSrcDeferred`. The
+/// `css: None`, no v-binds, and a typed unavailable content state. The
 /// external file's content stays deferred (B-23); this never fabricates an
 /// empty-but-positive analysis for content the producer has not seen.
-pub fn build_external_src_deferred_style_analysis(
+pub fn build_external_src_style_analysis(
     lang: StyleAnalysisLang,
     scoped: bool,
     is_module: bool,
@@ -716,11 +727,12 @@ pub fn build_external_src_deferred_style_analysis(
         module_name: module_name.map(|s| s.to_string()),
         block_ref: None,
         block_token: None,
+        source_space_token: None,
         content_offset,
         v_binds: Vec::new(),
         special_pseudos: Vec::new(),
         css: None,
-        content_availability: StyleContentAvailability::ExternalSrcDeferred,
+        content_availability: BlockContentAvailability::Missing,
         flags: flags.bits(),
     }
 }
@@ -747,11 +759,12 @@ pub fn build_preprocessor_style_analysis(
         module_name: module_name.map(|s| s.to_string()),
         block_ref: None,
         block_token: None,
+        source_space_token: None,
         content_offset,
         v_binds,
         special_pseudos,
         css: None,
-        content_availability: StyleContentAvailability::Inline,
+        content_availability: BlockContentAvailability::ProcessedContentRequired,
         flags: flags.bits(),
     }
 }

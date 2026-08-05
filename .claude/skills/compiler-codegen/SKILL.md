@@ -393,11 +393,11 @@ Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preproc
 5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. Runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
 
 **Non-Vite mode** (preprocessor fallback):
-Style preprocessing goes through `preprocessBlock()` -> `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is sent to the Rust host via `applyBlockOverrides()`, and `apply_style_overrides()` updates `meta.style_langs` to `"css"`. The `transform()` hook uses Rust `processStyle()` for CSS scoping only.
+Style preprocessing goes through `preprocessBlock()` -> `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is returned to the Rust host through the sealed `applyBlockOverrides()` handoff: callers echo the host-issued artifact token and revision/artifact/basis/source-space stamps and provide verified code/map hashes. After admission, the host projects the validated content into compiler-owned block inputs and the `transform()` hook uses Rust `processStyle()` for CSS scoping. There is no public style-index override API or LSP RPC.
 
 **Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`, stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
 
-**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/host_upsert.rs` (`apply_style_overrides` -- lang update, non-Vite only), `crates/verter_session/src/id.rs` (`render_ids` -- URL generation).
+**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/block_content.rs` (sealed override admission), `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs` (validated compiler-input projection), `crates/verter_session/src/id.rs` (`render_ids` -- URL generation).
 
 ## CSS Processing Pipeline
 

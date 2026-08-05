@@ -575,6 +575,7 @@ impl VerterHost {
     /// hosts don't keep the Node.js process alive waiting for GC
     /// finalisation.
     pub fn close(&self) {
+        let _block_content_fence = self.block_content_admission_fence.lock();
         // Notify the workspace for each tracked file so overlays AND
         // edge store are cleared before scheduler nodes are removed.
         // Use notify_delete (not notify_close) to clear the VFS edge
@@ -593,6 +594,7 @@ impl VerterHost {
 
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
+        write_lock(&self.block_content_state).close_all();
 
         // AUTHORITY-RESET cascade: close() is a full teardown, one of
         // the two reserved `bump_project_generation_and_evict` callers
@@ -875,7 +877,6 @@ impl VerterHost {
             },
             virtual_loads: self.metrics.virtual_loads.load(Relaxed),
             resolves: self.metrics.resolves.load(Relaxed),
-            style_override_calls: self.metrics.style_override_calls.load(Relaxed),
             slice_hash_time_us_total,
             avg_slice_hash_time_us: if upserts == 0 {
                 0.0
@@ -914,8 +915,6 @@ impl VerterHost {
         // outputs. ProfileState has no `evicted` flag; the eviction
         // marker lives on DerivedRawState.
         if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
-            profile.content_overrides.clear();
-            profile.style_overrides.clear();
             let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();

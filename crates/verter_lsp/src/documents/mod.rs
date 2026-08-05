@@ -14,8 +14,8 @@ use dashmap::DashMap;
 use tower_lsp_server::ls_types::*;
 use verter_session::{
     carrier_publication_store::{HostSourceRevisionToken, RegisteredFileStructure},
-    CompileProfile, FileLanguage, HostUpdateResult, IdeResponse, StyleOverrideEntry,
-    StyleOverrideRequest, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileProfile, FileLanguage, HostUpdateResult, IdeResponse, UpsertRequest, VerterHost,
+    VirtualNodeKind, VirtualQuery,
 };
 
 use crate::server::{CodeBlock, VirtualFileEntry, VirtualFilesResponse};
@@ -102,11 +102,6 @@ pub struct DocumentRegistry {
     /// publication. Tests use it to race an admitted result against an edit.
     #[cfg(test)]
     before_semantic_cache_publication_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
-    /// TEST SEAM: a one-shot callback inside [`Self::apply_style_overrides`]
-    /// AFTER the revision/artifact token validation and BEFORE the host
-    /// apply — the exact window the document-commit fence must close.
-    #[cfg(test)]
-    before_style_override_host_apply_hook: parking_lot::Mutex<Option<AfterCompileHook>>,
 }
 
 /// TEST SEAM callback type — see [`DocumentRegistry::after_compile_hook`].
@@ -330,16 +325,7 @@ impl DocumentRegistry {
             before_semantic_cache_publication_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             after_change_commit_hook: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            before_style_override_host_apply_hook: parking_lot::Mutex::new(None),
         }
-    }
-
-    /// TEST SEAM: arm the one-shot validation→host-apply window callback (see
-    /// [`Self::before_style_override_host_apply_hook`]).
-    #[cfg(test)]
-    pub(crate) fn set_before_style_override_host_apply_hook(&self, hook: AfterCompileHook) {
-        *self.before_style_override_host_apply_hook.lock() = Some(hook);
     }
 
     /// TEST SEAM: arm the one-shot post-compile callback (see
@@ -433,7 +419,7 @@ impl DocumentRegistry {
                 | verter_session::HostError::Scheduler(_)
                 | verter_session::HostError::Superseded
                 | verter_session::HostError::Shutdown
-                | verter_session::HostError::ExternalBlockContentDeferred(_),
+                | verter_session::HostError::BlockContentRefused(_),
             ) => false,
         };
         let content = crate::provider_surface_store::ContentHash::of(attempted_source);
@@ -1465,68 +1451,6 @@ impl DocumentRegistry {
         self.documents.get(uri.as_str())?.virtual_source_uri.clone()
     }
 
-    /// Apply preprocessor-compiled style overrides for a document.
-    ///
-    /// The apply is REVISION-BOUND and both captured structure tokens — the
-    /// `documentRevisionToken` and the `artifactToken` of the structure the
-    /// override was computed against — are REQUIRED: a request missing
-    /// either token is refused typed before any host mutation, and a token
-    /// that no longer matches the live document is refused typed — an async
-    /// transpile result bound to revision A must never overwrite revision
-    /// B's state.
-    ///
-    /// ATOMICITY: the token validation and the host mutation form one
-    /// freshness transaction only while the caller holds the document-commit
-    /// fence (the server's `did_change_mutex`, which every did_change /
-    /// did_open commit path holds across its host upsert + registry commit).
-    /// The LSP handler is the sole production caller and takes that fence.
-    pub fn apply_style_overrides(
-        &self,
-        uri: &Uri,
-        overrides: Vec<StyleOverrideEntry>,
-        expected_revision_token: Option<&str>,
-        expected_artifact_token: Option<&str>,
-    ) -> StyleOverrideApplyOutcome {
-        let (Some(revision_token), Some(artifact_token)) =
-            (expected_revision_token, expected_artifact_token)
-        else {
-            return StyleOverrideApplyOutcome::MissingTokens;
-        };
-        // Compare against the LIVE document in a scoped guard (dropped
-        // before the host call). A closed document matches no token.
-        let matched = {
-            match self.documents.get(uri.as_str()) {
-                Some(doc) => {
-                    revision_token == doc.document_revision.public_token()
-                        && doc.feature_snapshot.as_ref().is_some_and(|snapshot| {
-                            snapshot.structure().public_artifact_token().as_str() == artifact_token
-                        })
-                }
-                None => false,
-            }
-        };
-        if !matched {
-            return StyleOverrideApplyOutcome::RevisionMismatch;
-        }
-        #[cfg(test)]
-        if let Some(hook) = self.before_style_override_host_apply_hook.lock().take() {
-            hook(self, uri);
-        }
-        let canonical_id = uri_to_canonical_id(uri);
-        let req = StyleOverrideRequest {
-            canonical_id,
-            compile_profile: self.tsx_profile.read().clone(),
-            overrides,
-        };
-        match self.host.apply_style_overrides(req) {
-            Ok(_) => StyleOverrideApplyOutcome::Applied,
-            Err(e) => {
-                tracing::warn!("apply_style_overrides failed: {e:?}");
-                StyleOverrideApplyOutcome::Failed
-            }
-        }
-    }
-
     /// Return the URI strings of all currently open documents.
     pub fn open_uris(&self) -> Vec<String> {
         self.documents.iter().map(|e| e.key().clone()).collect()
@@ -1541,21 +1465,6 @@ impl DocumentRegistry {
     pub fn host_arc(&self) -> Arc<VerterHost> {
         Arc::clone(&self.host)
     }
-}
-
-/// Outcome of a revision-bound style-override apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StyleOverrideApplyOutcome {
-    /// The host accepted and applied the overrides.
-    Applied,
-    /// The host refused or failed the apply (typed host error).
-    Failed,
-    /// The captured revision/artifact token no longer matches the live
-    /// document: refused BEFORE any host mutation.
-    RevisionMismatch,
-    /// The request carried no (or only one) captured structure token: a
-    /// revision-unvalidatable apply is refused, never applied unfenced.
-    MissingTokens,
 }
 
 // ── Analysis span conversion ─────────────────────────────────────────

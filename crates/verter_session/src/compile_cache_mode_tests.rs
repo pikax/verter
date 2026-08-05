@@ -5,7 +5,7 @@
 //! 1. **Per-helper tests** — each eligibility predicate
 //!    ([`has_external_src`], [`has_macro_type_deps`],
 //!    [`has_workspace_alias`], [`has_block_override`],
-//!    [`has_style_override`], [`has_ide_only_analysis`],
+//!    [`has_ide_only_analysis`],
 //!    [`has_dev_last_good`]) has a positive + negative case. The
 //!    module-augmentation reason is covered indirectly by the
 //!    classifier-level table (the host computes the boolean via
@@ -37,7 +37,6 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
 use smallvec::smallvec;
 use verter_compiler::compile::CompileTarget;
 use verter_semantic::analysis::{
@@ -49,8 +48,8 @@ use verter_workspace::WorkspaceAlias;
 
 use super::*;
 use crate::types::{
-    CompileErrorPolicy, CompileInput, CompileProfile, ContentOverrideLayer, DiagnosticsSnapshot,
-    ExternalBlockKind, ExternalSourceRequest, FileMeta, HostConfig, StyleOverrideLayer,
+    CompileErrorPolicy, CompileInput, CompileProfile, DiagnosticsSnapshot, ExternalBlockKind,
+    ExternalSourceRequest, FileMeta, HostConfig,
 };
 
 // ── Fixture builders ─────────────────────────────────────────────────
@@ -78,8 +77,8 @@ fn empty_input() -> CompileInput {
         parse_diagnostics: DiagnosticsSnapshot::default(),
         src_blocks: Vec::new(),
         external_requests: Vec::new(),
-        style_override_layer: None,
-        content_override_layer: None,
+        has_supplied_block_content: false,
+        block_content_inputs: Default::default(),
         macro_type_deps: Vec::new(),
         script_imports: Vec::new(),
         script_macros: Vec::new(),
@@ -88,6 +87,7 @@ fn empty_input() -> CompileInput {
         script_vue_api_calls: Vec::new(),
         framework_parse: None,
         style_v_bind_vars: Vec::new(),
+        style_v_bind_usage_complete: true,
     }
 }
 
@@ -97,9 +97,13 @@ fn make_external_src_request() -> ExternalSourceRequest {
     ExternalSourceRequest {
         owner_canonical_id: "/a.vue".to_string(),
         block_kind: ExternalBlockKind::Script,
-        index: 0,
+        opening_start: 0,
         specifier: "./external.ts".to_string(),
         resolved_canonical_id: "/external.ts".to_string(),
+        block_token: String::new(),
+        owner_revision: String::new(),
+        artifact_token: String::new(),
+        carrier_source_space_token: String::new(),
     }
 }
 
@@ -129,21 +133,6 @@ fn make_alias_import(spec: &str) -> AnalyzedImport {
         }],
         span: Span::new(0, 0),
         resolved_canonical_id: None,
-    }
-}
-
-fn make_style_override_layer() -> StyleOverrideLayer {
-    StyleOverrideLayer {
-        hash: 1,
-        by_index: FxHashMap::default(),
-    }
-}
-
-fn make_content_override_layer() -> ContentOverrideLayer {
-    ContentOverrideLayer {
-        hash: 1,
-        template: None,
-        script: None,
     }
 }
 
@@ -289,16 +278,8 @@ fn has_workspace_alias_empty_find_is_skipped() {
 fn has_block_override_positive_and_negative() {
     let mut input = empty_input();
     assert!(!has_block_override(&input));
-    input.content_override_layer = Some(make_content_override_layer());
+    input.has_supplied_block_content = true;
     assert!(has_block_override(&input));
-}
-
-#[test]
-fn has_style_override_positive_and_negative() {
-    let mut input = empty_input();
-    assert!(!has_style_override(&input));
-    input.style_override_layer = Some(make_style_override_layer());
-    assert!(has_style_override(&input));
 }
 
 #[test]
@@ -458,24 +439,12 @@ fn classifier_session_with_external_src_stays_session() {
 #[test]
 fn classifier_session_with_block_override_stays_session() {
     let mut bundle = InputsBundle::empty();
-    bundle.input.content_override_layer = Some(make_content_override_layer());
+    bundle.input.has_supplied_block_content = true;
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Session);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[DowngradeReason::HasBlockOverride]
-    );
-}
-
-#[test]
-fn classifier_session_with_style_override_stays_session() {
-    let mut bundle = InputsBundle::empty();
-    bundle.input.style_override_layer = Some(make_style_override_layer());
-    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
-    assert_eq!(
-        cls.downgrade_reasons.as_slice(),
-        &[DowngradeReason::HasStyleOverride]
     );
 }
 
@@ -594,24 +563,12 @@ fn classifier_session_with_css_hash_override_stays_session() {
 #[test]
 fn classifier_content_with_block_override_downgrades_to_stateless() {
     let mut bundle = InputsBundle::empty();
-    bundle.input.content_override_layer = Some(make_content_override_layer());
+    bundle.input.has_supplied_block_content = true;
     let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[DowngradeReason::HasBlockOverride]
-    );
-}
-
-#[test]
-fn classifier_content_with_style_override_downgrades_to_stateless() {
-    let mut bundle = InputsBundle::empty();
-    bundle.input.style_override_layer = Some(make_style_override_layer());
-    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
-    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
-    assert_eq!(
-        cls.downgrade_reasons.as_slice(),
-        &[DowngradeReason::HasStyleOverride]
     );
 }
 
@@ -689,10 +646,9 @@ fn classifier_mid_priority_mix_macro_then_alias_then_external() {
 }
 
 #[test]
-fn classifier_block_then_style_override_then_ide() {
+fn classifier_block_override_then_ide() {
     let mut bundle = InputsBundle::empty();
-    bundle.input.content_override_layer = Some(make_content_override_layer());
-    bundle.input.style_override_layer = Some(make_style_override_layer());
+    bundle.input.has_supplied_block_content = true;
     bundle.profile = ide_only_profile();
     let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
     assert_eq!(cls.actual_mode, CompileCacheMode::Session);
@@ -700,7 +656,6 @@ fn classifier_block_then_style_override_then_ide() {
         cls.downgrade_reasons.as_slice(),
         &[
             DowngradeReason::HasBlockOverride,
-            DowngradeReason::HasStyleOverride,
             DowngradeReason::HasIdeOnlyAnalysis,
         ]
     );
@@ -726,7 +681,7 @@ fn classifier_module_augmentation_beats_macro_type_deps() {
     );
 }
 
-// ── Classifier: full ordering with all eight reasons triggered ───────
+// ── Classifier: full ordering with all seven reasons triggered ───────
 
 #[test]
 fn classifier_all_reasons_triggered_emit_full_priority_list() {
@@ -739,8 +694,7 @@ fn classifier_all_reasons_triggered_emit_full_priority_list() {
         .input
         .external_requests
         .push(make_external_src_request());
-    bundle.input.content_override_layer = Some(make_content_override_layer());
-    bundle.input.style_override_layer = Some(make_style_override_layer());
+    bundle.input.has_supplied_block_content = true;
     bundle.profile = ide_only_profile();
     bundle.config = dev_last_good_config();
 
@@ -755,7 +709,6 @@ fn classifier_all_reasons_triggered_emit_full_priority_list() {
             DowngradeReason::HasWorkspaceAlias,
             DowngradeReason::HasExternalSrc,
             DowngradeReason::HasBlockOverride,
-            DowngradeReason::HasStyleOverride,
             DowngradeReason::HasIdeOnlyAnalysis,
             DowngradeReason::HasDevLastGood,
         ]
@@ -779,8 +732,7 @@ fn classifier_content_with_all_reasons_floors_to_stateless_with_full_list() {
         .input
         .external_requests
         .push(make_external_src_request());
-    bundle.input.content_override_layer = Some(make_content_override_layer());
-    bundle.input.style_override_layer = Some(make_style_override_layer());
+    bundle.input.has_supplied_block_content = true;
     bundle.profile = ide_only_profile();
     bundle.config = dev_last_good_config();
 
@@ -795,7 +747,6 @@ fn classifier_content_with_all_reasons_floors_to_stateless_with_full_list() {
             DowngradeReason::HasWorkspaceAlias,
             DowngradeReason::HasExternalSrc,
             DowngradeReason::HasBlockOverride,
-            DowngradeReason::HasStyleOverride,
             DowngradeReason::HasIdeOnlyAnalysis,
             DowngradeReason::HasDevLastGood,
         ]
@@ -818,8 +769,7 @@ fn classifier_stateless_with_all_reasons_keeps_reasons_empty() {
         .input
         .external_requests
         .push(make_external_src_request());
-    bundle.input.content_override_layer = Some(make_content_override_layer());
-    bundle.input.style_override_layer = Some(make_style_override_layer());
+    bundle.input.has_supplied_block_content = true;
     bundle.profile = ide_only_profile();
     bundle.config = dev_last_good_config();
 

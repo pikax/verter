@@ -401,7 +401,7 @@
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect; processed_classes_stay_typed_until_a_stamped_result_is_admitted",
             "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
@@ -449,8 +449,8 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "crates/verter_session/src/parse.rs",
@@ -465,7 +465,7 @@
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect; processed_classes_stay_typed_until_a_stamped_result_is_admitted",
             "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
@@ -481,8 +481,8 @@
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-44",
-            "test": "torn_lane_style_override_lives_without_carrier_reparse",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "supplied_template_runtime_compile_is_typed_unavailable; supplied_style_analysis_fails_closed_without_a_source_space_descriptor",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "crates/verter_wasm/src/lib.rs",
@@ -497,8 +497,8 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "extensions/typescript-plugin/index.js",
@@ -561,7 +561,7 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -577,7 +577,7 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -673,7 +673,7 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-94",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -705,7 +705,7 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -721,7 +721,7 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -833,8 +833,8 @@
             "capability_class": "stamped_content_handoff",
             "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -1098,7 +1098,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "external_src_compile_is_typed_and_fail_closed",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1137,7 +1137,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1150,7 +1150,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "external_src_compile_is_typed_and_fail_closed",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1163,7 +1163,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_style_override_lives_without_carrier_reparse",
+            "test": "supplied_template_runtime_compile_is_typed_unavailable; supplied_style_analysis_fails_closed_without_a_source_space_descriptor",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1176,7 +1176,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1228,7 +1228,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1241,7 +1241,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1319,7 +1319,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1345,7 +1345,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1358,7 +1358,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1449,7 +1449,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {

@@ -48,8 +48,6 @@ pub(crate) struct TemplateClassScriptInputs<'a> {
 /// supersession, incomplete self-rooting, unresolved provenance).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TemplateClassFenceReason {
-    /// The bytes are a compile-profile content-override layer.
-    ContentOverride,
     /// The bytes come from a session overlay.
     SessionOverlay,
     /// The bytes are store-published, but the resolver context seeded from a
@@ -1020,10 +1018,8 @@ mod tests {
             "store-published bytes over a KNOWN-STALE seed are fenced — and this \
              is the ONLY fence the seed can produce",
         );
-        for reason in [
-            TemplateClassFenceReason::SessionOverlay,
-            TemplateClassFenceReason::ContentOverride,
-        ] {
+        {
+            let reason = TemplateClassFenceReason::SessionOverlay;
             let fenced = TemplateClassPublicationScope::Fenced(reason);
             assert_eq!(
                 fenced.narrowed_by_seed(&current_seed),

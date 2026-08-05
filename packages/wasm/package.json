@@ -4,8 +4,8 @@
   "description": "WASM bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "compiler",
-    "vue",
     "svelte",
+    "vue",
     "wasm",
     "webassembly"
   ],
@@ -42,14 +42,15 @@
     "build:ts": "tsdown",
     "build:copy-playground": "npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm",
     "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
-    "test": "vitest run"
+    "test:types": "tsc -p tsconfig.types.json",
+    "test": "pnpm run test:types && vitest run"
   },
   "devDependencies": {
     "@verter/native": "workspace:^",
     "@verter/types": "workspace:^",
+    "binaryen": "^130.0.0",
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
-    "binaryen": "^130.0.0",
     "vitest": "^4.1.7"
   },
   "engines": {

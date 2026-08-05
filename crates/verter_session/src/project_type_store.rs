@@ -566,8 +566,8 @@ impl crate::invalidation_domain::InvalidationByCanonical for AnalysisReadyDb {
 /// Profile-domain DB for the per-canonical compile cache (D48).
 ///
 /// Stores [`crate::types::ProfileState`] keyed by canonical id. Holds
-/// per-profile compile outputs (`compile_slots`, `content_overrides`,
-/// `style_overrides`, `latest_diagnostics`, `diagnostics_generation`).
+/// per-profile compile outputs (`compile_slots`), `latest_diagnostics`, and
+/// `diagnostics_generation`.
 /// Profile-flag changes invalidate this entry; source-content changes
 /// preserve it; dep-closure changes preserve it. The unified
 /// `bump_project_generation_and_evict` cascade clears all three domain

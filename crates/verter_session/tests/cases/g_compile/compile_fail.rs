@@ -97,6 +97,19 @@ fn whole_file_script_detector_is_not_public() {
     t.compile_fail("tests/cases/compile-fail/scanners_replacement_script_detector_public.rs");
 }
 
+/// Caller-supplied processed content crosses the sealed block-content handoff.
+/// The retired style-ordinal request and host method must stay absent from the
+/// public session API so callers cannot bypass block/stamp/hash validation.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn style_ordinal_override_api_is_removed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/style_ordinal_override_api_is_not_public.rs");
+}
+
 /// The registered-carrier projector is a module-private capability: callers
 /// outside its defining module can neither name the implementation module nor
 /// reach a parent-module facade path. B2 owns exposing the real projector to

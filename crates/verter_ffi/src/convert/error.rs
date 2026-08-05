@@ -35,6 +35,8 @@ pub enum FfiConversionError {
     InvalidCompileCacheMode(String),
     /// Invalid `getPublicApi` mode string.
     InvalidPublicApiMode(String),
+    /// An opaque block-content token failed its bounded wire-envelope check.
+    InvalidBlockContentToken(&'static str),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -93,6 +95,9 @@ impl std::fmt::Display for FfiConversionError {
                 f,
                 "invalid public api mode '{v}' (expected 'public', 'testing', or 'declaration')"
             ),
+            Self::InvalidBlockContentToken(field) => {
+                write!(f, "invalid sealed block-content token in '{field}'")
+            }
         }
     }
 }

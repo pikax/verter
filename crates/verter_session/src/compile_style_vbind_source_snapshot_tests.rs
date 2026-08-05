@@ -16,7 +16,10 @@
 
 use std::sync::Arc;
 
-use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
+use crate::types::{
+    BlockOverrideEntry, BlockOverrideRequest, CompileProfile, HostConfig, UpsertRequest,
+    VirtualNodeKind, VirtualQuery,
+};
 use crate::VerterHost;
 
 const CANONICAL: &str = "/proj/Themed.vue";
@@ -179,4 +182,68 @@ fn quiescent_compile_with_analysis_present_publishes_the_vbind_vars_warm() {
     assert!(warm.cache_hit, "the quiescent entry must serve warm");
     let warm_tsx = published_tsx(&host).expect("warm slot must keep serving the TSX");
     assert_eq!(warm_tsx, cold_tsx, "warm TSX must be byte-identical");
+}
+
+#[test]
+fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
+    let host = make_host();
+    let source = "<script setup lang=\"ts\">\nconst suppliedOnly = 'blue'\n</script>\n<template><div>x</div></template>\n<style lang=\"customcss\">authored preprocessing input</style>";
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.to_string()),
+            input_id: CANONICAL.to_string(),
+            source: Arc::from(source),
+            file_language: verter_language::LanguageRegistry::global()
+                .classify_static(CANONICAL)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert must request SCSS preprocessing");
+    let request = update
+        .preprocessor_requests
+        .iter()
+        .find(|request| request.lang == "customcss")
+        .expect("the style must have one captured preprocessing request");
+    let profile = ide_profile();
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: update.canonical_id,
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                request,
+                "div { color: v-bind(suppliedOnly); }",
+            )],
+        })
+        .expect("the supplied CSS must be admitted for the IDE profile");
+
+    let source_snapshot = host
+        .scheduler
+        .try_get_source(CANONICAL)
+        .expect("source snapshot must remain live");
+    let source_data = source_snapshot
+        .downcast_data::<crate::host_executor::HostSourceData>()
+        .expect("source snapshot must carry host data");
+    let hydrated = host.capture_compiler_style_content_for_profile(
+        CANONICAL,
+        &source_data.parse.style_analyses,
+        &profile,
+    );
+    assert!(hydrated.usage_complete);
+    assert_eq!(hydrated.analyses.len(), 1);
+    assert_eq!(hydrated.v_bind_vars, ["suppliedOnly"]);
+    assert!(
+        hydrated.analyses[0].v_binds.is_empty() && hydrated.analyses[0].css.is_none(),
+        "compiler-only usage roots must not publish foreign-space spans"
+    );
+
+    let cold = compile(&host);
+    assert!(!cold.cache_hit);
+    let tsx = host
+        .get_ide(CANONICAL, &profile)
+        .expect("the supplied-style compile must publish IDE output")
+        .code;
+    assert!(
+        tsx.contains("void(suppliedOnly);"),
+        "style usage must be scanned from the profile-selected supplied CSS"
+    );
 }
