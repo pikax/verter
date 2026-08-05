@@ -311,7 +311,7 @@ impl<'a> Builder<'a> {
         accepted: &AcceptedRegisteredCarrierSource,
         blocks: Vec<CarrierBlock>,
     ) -> CarrierBlockInventory {
-        CarrierBlockInventory::new(
+        CarrierBlockInventory::new_registered(
             Arc::from([SourceSpaceDescriptor::registered(
                 SourceSpaceId(0),
                 accepted.source(),
@@ -325,6 +325,7 @@ impl<'a> Builder<'a> {
                 nodes: Arc::from(self.nodes),
                 child_ids: Arc::from(self.child_ids),
             }),
+            &[accepted.source()],
         )
         .expect("compiler projector must produce a valid inventory")
     }

@@ -169,11 +169,15 @@ impl PartialEq for CarrierBlockInventory {
 impl Eq for CarrierBlockInventory {}
 
 impl CarrierBlockInventory {
-    pub fn new(
+    /// Adopt source-space descriptors only after jointly binding every
+    /// registered space to its trusted source snapshot. Witnesses are ordered
+    /// like the registered (non-derived) entries in `source_spaces`.
+    pub fn new_registered(
         source_spaces: Arc<[SourceSpaceDescriptor]>,
         normalized_names: Arc<NormalizedNameTable>,
         blocks: Arc<[CarrierBlock]>,
         markup: Arc<MarkupSyntaxArena>,
+        registered_sources: &[&RegisteredSourceSnapshot],
     ) -> Result<Self, InventoryValidationError> {
         let inventory = Self {
             source_spaces,
@@ -183,7 +187,39 @@ impl CarrierBlockInventory {
             artifact_identity: std::sync::OnceLock::new(),
         };
         inventory.validate()?;
+        inventory.validate_registered_sources(registered_sources)?;
         Ok(inventory)
+    }
+
+    fn validate_registered_sources(
+        &self,
+        registered_sources: &[&RegisteredSourceSnapshot],
+    ) -> Result<(), InventoryValidationError> {
+        let mut trusted = registered_sources.iter().copied();
+        for source in self.source_spaces.iter() {
+            let SourceSpaceIdentity::RegisteredSnapshot { snapshot } = &source.identity else {
+                continue;
+            };
+            let Some(expected) = trusted.next() else {
+                return Err(InventoryValidationError::MissingRegisteredSourceWitness(
+                    source.id,
+                ));
+            };
+            if snapshot != expected.snapshot_id()
+                || source.content_hash != expected.content_hash()
+                || source.byte_len != expected.byte_len()
+                || source.encoding != SourceEncoding::Utf8
+                || source.bytes.as_ref() != expected.bytes()
+            {
+                return Err(InventoryValidationError::RegisteredIdentityMismatch(
+                    source.id,
+                ));
+            }
+        }
+        if trusted.next().is_some() {
+            return Err(InventoryValidationError::UnusedRegisteredSourceWitness);
+        }
+        Ok(())
     }
 
     /// Content-addressed identity of this inventory: a digest over every
@@ -642,6 +678,8 @@ pub enum InventoryValidationError {
     SourceLengthMismatch(SourceSpaceId),
     SourceHashMismatch(SourceSpaceId),
     RegisteredIdentityMismatch(SourceSpaceId),
+    MissingRegisteredSourceWitness(SourceSpaceId),
+    UnusedRegisteredSourceWitness,
     UnknownSourceSpace(SourceSpaceId),
     InvalidSpan(SourceSpan),
     UnknownNormalizedName(InternedNameId),
@@ -1765,5 +1803,213 @@ mod entity_decode_tests {
             decode_entities("&unknown;", EntityDecodeRecipe::Html5Text),
             Cow::Borrowed("&unknown;")
         ));
+    }
+}
+
+#[cfg(test)]
+mod registered_identity_adoption_tests {
+    use super::*;
+    use crate::registered_source_authority::{
+        CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+    };
+
+    fn register(
+        authority: &RegisteredSourceAuthority,
+        canonical: &str,
+        incarnation: u64,
+        generation: u64,
+        language: crate::FileLanguage,
+        source: &str,
+    ) -> RegisteredSourceSnapshot {
+        authority
+            .register_source(
+                CanonicalFileId::new(canonical),
+                FileIncarnation::new(incarnation),
+                SourceGeneration::new(generation),
+                language,
+                Arc::from(source),
+            )
+            .expect("registered source")
+    }
+
+    fn adopt(
+        descriptor: SourceSpaceDescriptor,
+        trusted: &RegisteredSourceSnapshot,
+    ) -> Result<CarrierBlockInventory, InventoryValidationError> {
+        CarrierBlockInventory::new_registered(
+            Arc::from([descriptor]),
+            Arc::new(NormalizedNameTable::default()),
+            Arc::default(),
+            Arc::new(MarkupSyntaxArena::default()),
+            &[trusted],
+        )
+    }
+
+    fn identity_difference_count(
+        left: &RegisteredSourceSnapshotId,
+        right: &RegisteredSourceSnapshotId,
+    ) -> usize {
+        [
+            left.authority() != right.authority(),
+            left.canonical_digest() != right.canonical_digest(),
+            left.file_incarnation() != right.file_incarnation(),
+            left.generation() != right.generation(),
+            left.content_hash() != right.content_hash(),
+            left.resolved_file_language() != right.resolved_file_language(),
+        ]
+        .into_iter()
+        .filter(|changed| *changed)
+        .count()
+    }
+
+    fn descriptor_difference_count(
+        left: &SourceSpaceDescriptor,
+        right: &SourceSpaceDescriptor,
+    ) -> usize {
+        [
+            left.id != right.id,
+            left.identity != right.identity,
+            left.content_hash != right.content_hash,
+            left.byte_len != right.byte_len,
+            left.encoding != right.encoding,
+            left.bytes != right.bytes,
+        ]
+        .into_iter()
+        .filter(|changed| *changed)
+        .count()
+    }
+
+    #[test]
+    fn registered_source_adoption_rejects_each_joint_identity_dimension() {
+        const CANONICAL: &str = "file:///workspace/App.vue";
+        const SOURCE: &str = "<template>same</template>";
+        let authority = RegisteredSourceAuthority::new().expect("source authority");
+        let trusted = register(
+            &authority,
+            CANONICAL,
+            7,
+            11,
+            crate::FileLanguage::vue(),
+            SOURCE,
+        );
+        let baseline = SourceSpaceDescriptor::registered(SourceSpaceId(0), &trusted);
+        adopt(baseline.clone(), &trusted).expect("unmodified registered source is accepted");
+
+        let mut bytes = baseline.clone();
+        assert_eq!(bytes.bytes.as_ref(), SOURCE, "bytes plant must be new");
+        bytes.bytes = Arc::from("<template>tame</template>");
+        assert_eq!(
+            bytes.bytes.as_ref(),
+            "<template>tame</template>",
+            "bytes plant applied"
+        );
+        assert_eq!(
+            descriptor_difference_count(&baseline, &bytes),
+            1,
+            "bytes plant must be unique"
+        );
+        assert!(
+            adopt(bytes, &trusted).is_err(),
+            "bytes mismatch must be rejected"
+        );
+
+        let mut hash = baseline.clone();
+        let planted_hash = WholeSourceHash::digest("<template>other</template>");
+        assert_ne!(hash.content_hash, planted_hash, "hash plant must be new");
+        hash.content_hash = planted_hash;
+        assert_eq!(hash.content_hash, planted_hash, "hash plant applied");
+        assert_eq!(
+            descriptor_difference_count(&baseline, &hash),
+            1,
+            "hash plant must be unique"
+        );
+        assert!(
+            adopt(hash, &trusted).is_err(),
+            "hash mismatch must be rejected"
+        );
+
+        let mut length = baseline.clone();
+        let planted_length = length.byte_len + 1;
+        assert_ne!(length.byte_len, planted_length, "length plant must be new");
+        length.byte_len = planted_length;
+        assert_eq!(length.byte_len, planted_length, "length plant applied");
+        assert_eq!(
+            descriptor_difference_count(&baseline, &length),
+            1,
+            "length plant must be unique"
+        );
+        assert!(
+            adopt(length, &trusted).is_err(),
+            "length mismatch must be rejected"
+        );
+
+        let alternate_authority = RegisteredSourceAuthority::new().expect("alternate authority");
+        let authority_mismatch = register(
+            &alternate_authority,
+            CANONICAL,
+            7,
+            11,
+            crate::FileLanguage::vue(),
+            SOURCE,
+        );
+        let canonical_mismatch = register(
+            &authority,
+            "file:///workspace/Other.vue",
+            7,
+            11,
+            crate::FileLanguage::vue(),
+            SOURCE,
+        );
+        let incarnation_mismatch = register(
+            &authority,
+            CANONICAL,
+            8,
+            11,
+            crate::FileLanguage::vue(),
+            SOURCE,
+        );
+        let generation_mismatch = register(
+            &authority,
+            CANONICAL,
+            7,
+            12,
+            crate::FileLanguage::vue(),
+            SOURCE,
+        );
+        let language_mismatch = register(
+            &authority,
+            CANONICAL,
+            7,
+            11,
+            crate::FileLanguage::svelte(),
+            SOURCE,
+        );
+
+        for (dimension, planted) in [
+            ("authority namespace", authority_mismatch),
+            ("canonical identity", canonical_mismatch),
+            ("file incarnation", incarnation_mismatch),
+            ("source generation", generation_mismatch),
+            ("resolved language", language_mismatch),
+        ] {
+            assert_eq!(
+                identity_difference_count(trusted.snapshot_id(), planted.snapshot_id()),
+                1,
+                "{dimension} plant must be unique"
+            );
+            assert_ne!(
+                trusted.snapshot_id(),
+                planted.snapshot_id(),
+                "{dimension} plant must be new and present"
+            );
+            let mut descriptor = baseline.clone();
+            descriptor.identity = SourceSpaceIdentity::RegisteredSnapshot {
+                snapshot: planted.snapshot_id().clone(),
+            };
+            assert!(
+                adopt(descriptor, &trusted).is_err(),
+                "{dimension} mismatch must be rejected"
+            );
+        }
     }
 }

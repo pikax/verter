@@ -383,11 +383,12 @@ impl FrameworkParseArtifact {
         source: &crate::registered_source_authority::RegisteredSourceSnapshot,
     ) -> Self {
         use carrier_inventory::{SourceSpaceDescriptor, SourceSpaceId};
-        let inventory = CarrierBlockInventory::new(
+        let inventory = CarrierBlockInventory::new_registered(
             Arc::from([SourceSpaceDescriptor::registered(SourceSpaceId(0), source)]),
             Arc::new(self.common.inventory.normalized_names().clone()),
             Arc::from(self.common.inventory.blocks().to_vec()),
             Arc::new(self.common.inventory.markup().clone()),
+            &[source],
         )
         .expect("rehomed registered inventory remains valid");
         let hash = compute_carrier_structure_hash(&inventory);

@@ -871,13 +871,14 @@ mod contract_tests {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .into();
-            let inventory = CarrierBlockInventory::new(
+            let inventory = CarrierBlockInventory::new_registered(
                 Arc::from([SourceSpaceDescriptor::registered(source_space, &registered)]),
                 Arc::new(NormalizedNameTable {
                     values: Arc::from([Arc::<str>::from("script")]),
                 }),
                 blocks,
                 Arc::new(MarkupSyntaxArena::default()),
+                &[&registered],
             )
             .expect("fixture inventory");
             Arc::new(FrameworkParseArtifact::new(
