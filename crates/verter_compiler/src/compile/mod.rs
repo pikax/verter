@@ -854,10 +854,20 @@ fn compile_inner(
             let inject_pos = inline_inject_pos.expect("inline mode sets inline_inject_pos");
             ct.move_slice(tpl_start, tpl_end, inject_pos);
         }
-        if verter_options.runtime_template_hole {
-            let inject_pos = inline_inject_pos.expect("inline shell sets inline_inject_pos");
-            ct.prepend_left(inject_pos, "/* verter-runtime-template-hole */");
-        }
+        const RUNTIME_TEMPLATE_HOLE: &str = "/* verter-runtime-template-hole */";
+        let runtime_template_marker = verter_options
+            .runtime_template_hole
+            .then(|| {
+                inline_inject_pos.and_then(|inject_pos| {
+                    ct.prepend_left_with_generated_marker(
+                        inject_pos,
+                        RUNTIME_TEMPLATE_HOLE,
+                        0,
+                        RUNTIME_TEMPLATE_HOLE.len() as u32,
+                    )
+                })
+            })
+            .flatten();
 
         // Emit imports from script codegen. Inline mode merges the script and
         // template helper sets into ONE deduplicated import line (official
@@ -890,15 +900,8 @@ fn compile_inner(
         }
 
         let script_code = ct.build_string();
-        const RUNTIME_TEMPLATE_HOLE: &str = "/* verter-runtime-template-hole */";
-        let generated_template_hole = verter_options
-            .runtime_template_hole
-            .then(|| {
-                script_code
-                    .find(RUNTIME_TEMPLATE_HOLE)
-                    .map(|start| start as u32..(start + RUNTIME_TEMPLATE_HOLE.len()) as u32)
-            })
-            .flatten();
+        let generated_template_hole =
+            runtime_template_marker.and_then(|marker| ct.generated_content_range(marker));
         let sourcemap_start = Instant::now();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
@@ -1477,6 +1480,8 @@ fn compile_inner(
             || template_start
                 .is_some_and(|ts| parsed.script().is_some_and(|s| ts < s.tag_open.start));
 
+        const GENERATED_TEMPLATE_HOLE: &str = "/* verter-generated-template-hole */";
+        let mut generated_template_marker = None;
         if template_before_script {
             if let (Some(ts), Some(te)) = (template_start, template_end) {
                 // Compute move target: after the last script closing tag
@@ -1498,8 +1503,15 @@ fn compile_inner(
 
                 let suffix = tsx_script_result.return_close.as_deref().unwrap_or("");
                 if options.ide_chunk_boundaries {
-                    let suffix = format!("/* verter-generated-template-hole */{suffix}");
-                    tsx_ct.move_with_suffix(ts, te, move_target, &suffix);
+                    let suffix = format!("{GENERATED_TEMPLATE_HOLE}{suffix}");
+                    generated_template_marker = tsx_ct.move_with_suffix_and_generated_marker(
+                        ts,
+                        te,
+                        move_target,
+                        &suffix,
+                        0,
+                        GENERATED_TEMPLATE_HOLE.len() as u32,
+                    );
                 } else {
                     tsx_ct.move_with_suffix(ts, te, move_target, suffix);
                 }
@@ -1509,9 +1521,12 @@ fn compile_inner(
             tsx_script_result.return_close_pos,
         ) {
             if options.ide_chunk_boundaries {
-                tsx_ct.prepend_left(
+                let content = format!("{GENERATED_TEMPLATE_HOLE}{return_close}");
+                generated_template_marker = tsx_ct.prepend_left_with_generated_marker(
                     pos,
-                    &format!("/* verter-generated-template-hole */{return_close}"),
+                    &content,
+                    0,
+                    GENERATED_TEMPLATE_HOLE.len() as u32,
                 );
             } else {
                 tsx_ct.prepend_left(pos, return_close);
@@ -1523,7 +1538,12 @@ fn compile_inner(
                 .or_else(|| parsed.script())
                 .and_then(|script| script.content.as_ref().map(|content| content.end));
             if let Some(script_end) = script_end {
-                tsx_ct.prepend_left(script_end, "/* verter-generated-template-hole */");
+                generated_template_marker = tsx_ct.prepend_left_with_generated_marker(
+                    script_end,
+                    GENERATED_TEMPLATE_HOLE,
+                    0,
+                    GENERATED_TEMPLATE_HOLE.len() as u32,
+                );
             }
         }
 
@@ -1584,15 +1604,8 @@ fn compile_inner(
             }
         }
 
-        const HOLE_MARKER: &str = "/* verter-generated-template-hole */";
-        let generated_template_hole = options
-            .ide_chunk_boundaries
-            .then(|| {
-                tsx_code
-                    .find(HOLE_MARKER)
-                    .map(|start| start as u32..(start + HOLE_MARKER.len()) as u32)
-            })
-            .flatten();
+        let generated_template_hole =
+            generated_template_marker.and_then(|marker| tsx_ct.generated_content_range(marker));
 
         Some(VerterTsxBlock {
             code: tsx_code,

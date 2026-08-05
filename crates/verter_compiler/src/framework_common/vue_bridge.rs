@@ -662,18 +662,34 @@ impl CarrierCompiler for VueCarrierCompiler {
             opts.block_content.script.as_ref(),
             opts.block_content.script_setup.as_ref(),
         ) {
-            (Some(input), None) => {
-                return self
-                    .compile_projected_script_bundle(source, parsed, input, false, opts, alloc);
-            }
-            (None, Some(input)) => {
-                return self
-                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc);
+            (Some(_), Some(_)) if opts.want_ide => {
+                return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                    adapter_id: self.adapter_id(),
+                });
             }
             (Some(_), Some(_)) => {
                 return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                     adapter_id: self.adapter_id(),
                 });
+            }
+            (Some(_), None) if opts.want_ide => {
+                return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                    adapter_id: self.adapter_id(),
+                });
+            }
+            (Some(_), None) => {
+                return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
+                    adapter_id: self.adapter_id(),
+                });
+            }
+            (None, Some(_)) if opts.want_ide => {
+                return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                    adapter_id: self.adapter_id(),
+                });
+            }
+            (None, Some(input)) => {
+                return self
+                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc);
             }
             (None, None) => {}
         }
@@ -1208,7 +1224,91 @@ mod tests {
         carrier_compiler::OutputSourceSpaceKind, RuntimeBlockContentInput,
         RuntimeBlockContentInputs,
     };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crate is <workspace>/crates/verter_compiler")
+            .to_path_buf()
+    }
+
+    fn typescript_launcher() -> PathBuf {
+        let launcher = workspace_root().join("node_modules/typescript/lib/tsc.js");
+        assert!(
+            launcher.is_file(),
+            "output-validity tests require the pinned TypeScript launcher at {}; run pnpm install",
+            launcher.display()
+        );
+        launcher
+    }
+
+    fn assert_typescript_syntax_valid(name: &str, code: &str) {
+        let project = tempfile::tempdir().expect("create TSX validity directory");
+        let path = project.path().join(format!("{name}.tsx"));
+        fs::write(&path, code).expect("write emitted TSX");
+        let output = Command::new("node")
+            .arg(typescript_launcher())
+            .args([
+                "--noEmit",
+                "--skipLibCheck",
+                "--ignoreConfig",
+                "--jsx",
+                "preserve",
+            ])
+            .arg(&path)
+            .current_dir(project.path())
+            .output()
+            .expect("run tsc syntax gate");
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("TSC_VALIDITY {name} EXIT={:?}", output.status.code());
+        let syntax_diagnostics = diagnostics
+            .lines()
+            .filter(|line| {
+                let Some(code_start) = line.find("error TS") else {
+                    return false;
+                };
+                let digits = line[code_start + "error TS".len()..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>();
+                digits
+                    .parse::<u32>()
+                    .is_ok_and(|code| (1000..2000).contains(&code) || code == 2657)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            syntax_diagnostics.is_empty(),
+            "tsc reported syntax diagnostics for {name}:\n{diagnostics}\n--- emitted ---\n{code}"
+        );
+    }
+
+    fn assert_javascript_module_valid(name: &str, code: &str) {
+        let project = tempfile::tempdir().expect("create JS validity directory");
+        let path = project.path().join(format!("{name}.mjs"));
+        fs::write(&path, code).expect("write emitted module");
+        let output = Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .current_dir(project.path())
+            .output()
+            .expect("run node syntax gate");
+        println!("NODE_CHECK {name} EXIT={:?}", output.status.code());
+        assert!(
+            output.status.success(),
+            "node --check rejected {name}:\n{}{}\n--- emitted ---\n{code}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
         use verter_language::carrier_grammar::{
@@ -1360,6 +1460,37 @@ mod tests {
                 block_content: RuntimeBlockContentInputs {
                     script: Some(projected_script("export default {}", "js")),
                     script_setup: Some(projected_script("const answer = 42", "js")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
+        );
+
+        assert!(matches!(
+            result,
+            Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn projected_plain_script_runtime_is_typed_unavailable_until_its_module_is_valid() {
+        let source = concat!(
+            "<script src=\"./logic.js\"></script>",
+            "<template><div>{{ a }}</div></template>"
+        );
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact_for(source),
+            &RuntimeCompileOptions {
+                filename: Some("ProjectedPlain.vue".to_string()),
+                block_content: RuntimeBlockContentInputs {
+                    script: Some(projected_script(
+                        "export default { data: () => ({ a: 1 }) }",
+                        "js",
+                    )),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1526,13 +1657,14 @@ mod tests {
         );
     }
 
-    /// @ai-generated - A projected script and carrier template share the one
-    /// IDE surface with a composed two-source map.
     #[test]
-    fn projected_script_and_inline_template_share_ide_surface() {
+    fn generated_template_hole_uses_registered_geometry_not_user_marker_text() {
         let source = concat!(
-            "<script setup src=\"./logic.ts\"></script>",
-            "<template><div>{{ count }}</div></template>"
+            "<template src=\"./view.html\"></template>",
+            "<script setup>",
+            "const marker = \"/* verter-generated-template-hole */\";",
+            "const count = 1",
+            "</script>"
         );
         let compiler = VueCarrierCompiler::default();
         let alloc = oxc_allocator::Allocator::new();
@@ -1541,41 +1673,140 @@ mod tests {
                 source,
                 &artifact_for(source),
                 &RuntimeCompileOptions {
-                    filename: Some("ProjectedScript.vue".to_string()),
+                    filename: Some("MarkerCollision.vue".to_string()),
                     source_map: true,
                     want_ide: true,
                     block_content: RuntimeBlockContentInputs {
-                        script_setup: Some(projected_script("const count = 1", "ts")),
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
                         ..Default::default()
                     },
                     ..Default::default()
                 },
                 &alloc,
             )
-            .expect("projected script has a multi-unit runtime and IDE path");
+            .expect("external template IDE composition");
         let ide = output.tsx.expect("IDE surface");
         assert!(
-            ide.code.contains("count = 1"),
-            "projected script absent:\n{}",
+            ide.code
+                .contains("const marker = \"/* verter-generated-template-hole */\";"),
+            "the user's marker literal was used as geometry:\n{}",
             ide.code
         );
+        assert!(ide.code.contains("{ count }"));
+    }
+
+    #[test]
+    fn runtime_template_hole_uses_registered_geometry_not_user_marker_text() {
+        let source = concat!(
+            "<template lang=\"pug\">div {{ count }}</template>",
+            "<script setup>",
+            "const marker = \"/* verter-runtime-template-hole */\";",
+            "const count = 1",
+            "</script>"
+        );
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("RuntimeMarkerCollision.vue".to_string()),
+                    is_production: true,
+                    source_map: true,
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("supplied inline template composition");
+        let script = output.script.expect("runtime script");
         assert!(
-            ide.code.contains("{ count }"),
-            "carrier template absent:\n{}",
-            ide.code
+            script
+                .code
+                .contains("const marker = \"/* verter-runtime-template-hole */\";"),
+            "the user's marker literal was used as geometry:\n{}",
+            script.code
         );
-        assert_eq!(
-            ide.output_descriptor.source_map.declared_space_tokens.len(),
-            2
+        assert!(script.code.contains("return (_ctx"));
+    }
+
+    #[test]
+    fn supplied_inline_template_with_carrier_parse_error_is_typed_unavailable() {
+        let source = "<template lang=\"pug\">div</template>\n<script setup>\nconst a = 1";
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact_for(source),
+            &RuntimeCompileOptions {
+                filename: Some("BrokenInline.vue".to_string()),
+                is_production: true,
+                block_content: RuntimeBlockContentInputs {
+                    template: Some(projected_script("<div></div>", "html")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
         );
-        assert!(
-            ide.output_descriptor
-                .source_map
-                .raw_map
-                .as_deref()
-                .is_some_and(|map| map.contains("space:ts")),
-            "projected source-space absent from composed map"
-        );
+        assert!(matches!(
+            result,
+            Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. })
+        ));
+    }
+
+    /// @ai-generated - Projected scripts stay IDE-gated until their composed
+    /// carrier is valid TypeScript and contains no raw SFC markup.
+    #[test]
+    fn projected_scripts_are_ide_typed_unavailable() {
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+        for (source, block_content) in [
+            (
+                concat!(
+                    "<script setup src=\"./logic.ts\"></script>",
+                    "<template><div>{{ count }}</div></template>"
+                ),
+                RuntimeBlockContentInputs {
+                    script_setup: Some(projected_script("const count = 1", "ts")),
+                    ..Default::default()
+                },
+            ),
+            (
+                concat!(
+                    "<script src=\"./logic.ts\"></script>",
+                    "<template><div>{{ count }}</div></template>"
+                ),
+                RuntimeBlockContentInputs {
+                    script: Some(projected_script(
+                        "export default { data: () => ({ count: 1 }) }",
+                        "ts",
+                    )),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let result = compiler.compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("ProjectedScript.vue".to_string()),
+                    source_map: true,
+                    want_ide: true,
+                    block_content,
+                    ..Default::default()
+                },
+                &alloc,
+            );
+            assert!(matches!(
+                result,
+                Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
+            ));
+        }
     }
 
     /// @ai-generated - Pins per-unit output source-space and artifact identity.
@@ -1639,6 +1870,155 @@ mod tests {
             style.output_descriptor.source_map.fidelity,
             SourceMapFidelity::Exact,
             "an unchanged native style is an exact one-space identity"
+        );
+    }
+
+    #[test]
+    fn lifted_ide_classes_pass_tsc_syntax_validation() {
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+
+        let native_source = concat!(
+            "<script setup>const count = 1</script>",
+            "<template><div>{{ count }}</div></template>"
+        );
+        let native = compiler
+            .compile_bundle(
+                native_source,
+                &artifact_for(native_source),
+                &RuntimeCompileOptions {
+                    filename: Some("Native.vue".to_string()),
+                    source_map: true,
+                    want_ide: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("native IDE compile")
+            .tsx
+            .expect("native IDE output");
+        assert_typescript_syntax_valid("native", &native.code);
+
+        let external_source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script setup>const count = 1</script>"
+        );
+        let external = compiler
+            .compile_bundle(
+                external_source,
+                &artifact_for(external_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalTemplate.vue".to_string()),
+                    source_map: true,
+                    want_ide: true,
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("external template IDE compile")
+            .tsx
+            .expect("external template IDE output");
+        assert_typescript_syntax_valid("external_template", &external.code);
+    }
+
+    #[test]
+    fn lifted_runtime_classes_pass_node_check() {
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+
+        let projected_setup_source = concat!(
+            "<script setup src=\"./logic.js\"></script>",
+            "<template><div>{{ count }}</div></template>"
+        );
+        let projected_setup = compiler
+            .compile_bundle(
+                projected_setup_source,
+                &artifact_for(projected_setup_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ProjectedSetup.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        script_setup: Some(projected_script("const count = 1", "js")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("projected setup runtime compile");
+        assert_javascript_module_valid(
+            "projected_setup_script",
+            &projected_setup.script.expect("projected setup script").code,
+        );
+        assert_javascript_module_valid(
+            "projected_setup_template",
+            &projected_setup
+                .template
+                .expect("carrier template output")
+                .code,
+        );
+
+        let external_template_source = concat!(
+            "<template src=\"./view.html\"></template>",
+            "<script setup>const count = 1</script>"
+        );
+        let external_template = compiler
+            .compile_bundle(
+                external_template_source,
+                &artifact_for(external_template_source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalTemplate.vue".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("external template runtime compile");
+        assert_javascript_module_valid(
+            "external_template_script",
+            &external_template
+                .script
+                .expect("carrier script output")
+                .code,
+        );
+        assert_javascript_module_valid(
+            "external_template_render",
+            &external_template
+                .template
+                .expect("external render output")
+                .code,
+        );
+
+        let supplied_inline_source = concat!(
+            "<template lang=\"pug\">div {{ count }}</template>",
+            "<script setup>const count = 1</script>"
+        );
+        let supplied_inline = compiler
+            .compile_bundle(
+                supplied_inline_source,
+                &artifact_for(supplied_inline_source),
+                &RuntimeCompileOptions {
+                    filename: Some("SuppliedInline.vue".to_string()),
+                    is_production: true,
+                    source_map: true,
+                    block_content: RuntimeBlockContentInputs {
+                        template: Some(projected_script("<div>{{ count }}</div>", "html")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("supplied inline runtime compile");
+        assert_javascript_module_valid(
+            "supplied_inline_script",
+            &supplied_inline.script.expect("inline runtime script").code,
         );
     }
 

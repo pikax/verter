@@ -429,13 +429,12 @@ fn pre_capture_outcome(
     availability: BlockContentAvailability,
 ) -> Result<(), BlockContentPreCaptureTerminal> {
     match availability {
-        BlockContentAvailability::ProcessedContentRequired
-        | BlockContentAvailability::NativeAvailable => Ok(()),
+        BlockContentAvailability::ProcessedContentRequired => Ok(()),
         BlockContentAvailability::Stale => Err(BlockContentPreCaptureTerminal::Stale),
         BlockContentAvailability::Conflict => Err(BlockContentPreCaptureTerminal::Failed),
-        BlockContentAvailability::SuppliedAvailable | BlockContentAvailability::Missing => {
-            Err(BlockContentPreCaptureTerminal::Unavailable)
-        }
+        BlockContentAvailability::NativeAvailable
+        | BlockContentAvailability::SuppliedAvailable
+        | BlockContentAvailability::Missing => Err(BlockContentPreCaptureTerminal::Unavailable),
     }
 }
 
@@ -1184,58 +1183,15 @@ impl VerterHost {
                 BlockContentAvailability::NativeAvailable
                     | BlockContentAvailability::SuppliedAvailable
             ) {
-                let content = snapshot.content.as_deref().unwrap_or_default();
-                let lang = if snapshot.availability == BlockContentAvailability::SuppliedAvailable {
-                    verter_semantic::analysis::StyleAnalysisLang::Css
-                } else {
-                    match snapshot.lang.as_str() {
-                        "css" => verter_semantic::analysis::StyleAnalysisLang::Css,
-                        "scss" => verter_semantic::analysis::StyleAnalysisLang::Scss,
-                        "sass" => verter_semantic::analysis::StyleAnalysisLang::Sass,
-                        "less" => verter_semantic::analysis::StyleAnalysisLang::Less,
-                        "stylus" => verter_semantic::analysis::StyleAnalysisLang::Stylus,
-                        _ => verter_semantic::analysis::StyleAnalysisLang::Unknown,
-                    }
-                };
-                let prepass = verter_compiler::css::prepass::prepass(content, "");
-                let vue_input = verter_semantic::analysis::VueStyleInput {
-                    v_binds: prepass
-                        .v_bind_vars
-                        .iter()
-                        .map(|value| {
-                            let roots =
-                                verter_compiler::compile::style_usage::expression_free_roots(
-                                    &value.expression,
-                                );
-                            verter_semantic::analysis::VBindInput {
-                                expression: value.expression.clone(),
-                                quoted: false,
-                                start: value.expr_start,
-                                end: value.expr_end,
-                                generated_var_name: Some(value.var_name.clone()),
-                                roots_complete: roots.is_some(),
-                                expr_roots: roots.unwrap_or_default(),
-                            }
-                        })
-                        .collect(),
-                    special_pseudos: Vec::new(),
-                };
-                let block_ref = style.block_ref.clone();
-                let block_token = style.block_token.clone();
-                let mut qualified = verter_semantic::analysis::build_scanned_style_analysis(
-                    lang,
-                    content,
-                    vue_input,
-                    style.scoped,
-                    style.is_module,
-                    style.module_name.as_deref(),
-                    0,
-                );
-                qualified.block_ref = block_ref;
-                qualified.block_token = block_token;
-                qualified.content_availability = snapshot.availability;
-                qualified.source_space_token = Some(snapshot.source_space_token.to_string());
-                *style = qualified;
+                // LSP consumers interpret these fields as carrier-absolute.
+                // External/supplied bytes occupy another source space, so no
+                // source-located facts may be published here.
+                style.v_binds.clear();
+                style.special_pseudos.clear();
+                style.css = None;
+                style.content_offset = 0;
+                style.content_availability = snapshot.availability;
+                style.source_space_token = Some(snapshot.source_space_token.to_string());
                 analyses_changed = true;
             } else if style.content_availability != snapshot.availability {
                 style.content_availability = snapshot.availability;
@@ -1501,12 +1457,12 @@ impl VerterHost {
                 return Err(terminal_on_error(BlockContentRefusal::Stale));
             }
             match current.availability {
-                BlockContentAvailability::ProcessedContentRequired
-                | BlockContentAvailability::NativeAvailable => {}
+                BlockContentAvailability::ProcessedContentRequired => {}
                 BlockContentAvailability::Conflict => {
                     return Err(terminal_on_error(BlockContentRefusal::Conflict));
                 }
-                availability @ (BlockContentAvailability::SuppliedAvailable
+                availability @ (BlockContentAvailability::NativeAvailable
+                | BlockContentAvailability::SuppliedAvailable
                 | BlockContentAvailability::Missing
                 | BlockContentAvailability::Stale) => {
                     return Err(terminal_on_error(BlockContentRefusal::Unavailable {

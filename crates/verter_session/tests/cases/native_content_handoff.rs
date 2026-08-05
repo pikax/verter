@@ -95,11 +95,11 @@ fn native_external_style_reads_registered_vfs_content_and_parses_its_dialect() {
         style.content_availability,
         BlockContentAvailability::NativeAvailable
     );
-    let css = style.css.as_ref().expect("qualified external style facts");
-    assert!(css
-        .classes
-        .iter()
-        .any(|class| class.name == "external-card"));
+    assert!(
+        style.css.is_none(),
+        "external CSS facts must fail closed: block-local spans would be read as carrier-absolute"
+    );
+    assert!(style.v_binds.is_empty());
     assert_eq!(
         style.source_space_token.as_deref(),
         Some(content.source_space_token.as_str())
@@ -134,10 +134,10 @@ fn external_style_dialect_is_inferred_from_resolved_specifier_extension() {
         BlockContentAvailability::NativeAvailable
     );
     let analysis = host.get_analysis(&owner.canonical_id).unwrap();
-    assert!(analysis.styles[0].css.as_ref().is_some_and(|css| css
-        .classes
-        .iter()
-        .any(|class| class.name == "extension-dialect")));
+    assert!(
+        analysis.styles[0].css.is_none(),
+        "external style analysis must not publish block-local spans as carrier-absolute"
+    );
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn supplied_validated_precedence_exposes_exactly_one_live_source() {
 }
 
 #[test]
-fn validated_supplied_output_wins_over_native_source_bytes() {
+fn native_external_scss_does_not_offer_a_supplied_output_request() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert(
         &host,
@@ -399,30 +399,10 @@ fn validated_supplied_output_wins_over_native_source_bytes() {
             aliases: Vec::new(),
         })
         .unwrap();
-    let request = update
-        .preprocessor_requests
-        .first()
-        .expect("native bytes remain eligible for validated supplied output");
-    let _ = host
-        .apply_block_overrides(BlockOverrideRequest {
-            canonical_id: update.canonical_id.clone(),
-            compile_profile: CompileProfile::default(),
-            overrides: vec![supplied_entry(request, ".supplied-wins { color: blue }")],
-        })
-        .unwrap();
-
-    let selected = host
-        .get_block_content(query(&update.canonical_id, &request.block_token))
-        .unwrap();
-    assert_eq!(
-        selected.availability,
-        BlockContentAvailability::SuppliedAvailable
+    assert!(
+        update.preprocessor_requests.is_empty(),
+        "native style dialects must not widen the supplied-output request surface"
     );
-    assert_eq!(
-        selected.content.as_deref(),
-        Some(".supplied-wins { color: blue }")
-    );
-    assert!(!selected.content.as_deref().unwrap().contains("native-only"));
 }
 
 #[test]
@@ -477,13 +457,23 @@ fn external_template_ide_compile_contains_selected_bytes() {
         })
         .unwrap();
 
-    let _ = host
+    let profile = CompileProfile::default();
+    let compiled = host
         .ensure_ide_compiled(&update.canonical_id, &CompileProfile::default())
         .expect("IDE lowering includes selected template bytes");
+    assert!(compiled, "external template must produce an IDE surface");
+    let ide = host
+        .get_ide(&update.canonical_id, &profile)
+        .expect("compiled IDE surface");
+    assert!(
+        ide.code.contains("external-only"),
+        "selected external template bytes are absent from the IDE surface:\n{}",
+        ide.code
+    );
 }
 
 #[test]
-fn supplied_style_analysis_publishes_spans_in_its_declared_source_space() {
+fn supplied_style_analysis_fails_closed_without_carrier_absolute_spans() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let update = host
         .upsert(UpsertRequest {
@@ -509,16 +499,11 @@ fn supplied_style_analysis_publishes_spans_in_its_declared_source_space() {
         style.content_availability,
         BlockContentAvailability::SuppliedAvailable
     );
-    let css = style.css.as_ref().expect("qualified supplied CSS analysis");
-    let class = css
-        .classes
-        .iter()
-        .find(|class| class.name == "supplied-only")
-        .expect("supplied class");
-    assert_eq!(
-        class.span.start, 1,
-        "span is block-local in the declared space"
+    assert!(
+        style.css.is_none(),
+        "supplied CSS facts must fail closed until LSP consumers understand their source space"
     );
+    assert!(style.v_binds.is_empty());
     assert!(style.source_space_token.is_some());
 }
 
