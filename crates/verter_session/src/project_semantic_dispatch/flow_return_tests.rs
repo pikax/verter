@@ -2128,6 +2128,107 @@ fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {
     });
 }
 
+/// A deeply nested array literal that trips the shallow leaf-lowering
+/// budget (`> MAX_SEMANTIC_INFERENCE_DEPTH` nesting levels).
+fn budget_tripping_array() -> String {
+    let levels = 70;
+    let mut out = String::new();
+    // bounded-loop: fixed 70-level fixture constructor.
+    for _ in 0..levels {
+        out.push('[');
+    }
+    out.push('0');
+    // bounded-loop: fixed 70-level fixture constructor.
+    for _ in 0..levels {
+        out.push(']');
+    }
+    out
+}
+
+/// The demand slice is the ONLY lowered content: an UNREAD binding's
+/// initializer is outside every selected slot, so its content never
+/// lowers — a leaf-lowering budget edge inside it cannot exist, and the
+/// whole-return evaluation stays complete. Mutation recipe: lowering the
+/// whole body (a pre-slice whole-function evaluator) trips the leaf
+/// budget on the unread initializer and degrades the function to a miss.
+#[test]
+fn flow_return_unread_binding_content_never_lowers() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/unread-content.ts".to_string()),
+        input_id: "/ws/unread-content.ts".to_string(),
+        source: Arc::from(format!(
+            "export function sliced() {{\n  const unused = {};\n  return 2;\n}}\n",
+            budget_tripping_array()
+        )),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/unread-content.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/unread-content.ts", "sliced");
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the unread binding's initializer stays unlowered; its budget edge cannot poison"
+        );
+    });
+}
+
+/// The member demand lowers ONLY the demanded member's content: an
+/// elided sibling member whose value would trip the leaf-lowering
+/// budget never lowers, so the demanded member still projects complete.
+/// Mutation recipe: lowering every member of the returned object (a
+/// pre-slice whole-function evaluator) trips the budget on the sibling
+/// and degrades the member demand to a miss.
+#[test]
+fn flow_return_member_demand_never_lowers_elided_sibling_content() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/member-sibling-content.ts".to_string()),
+        input_id: "/ws/member-sibling-content.ts".to_string(),
+        source: Arc::from(format!(
+            "export function memberSliced() {{\n  return {{ a: {}, b: 1 }};\n}}\n",
+            budget_tripping_array()
+        )),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/member-sibling-content.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let mut key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from("/ws/member-sibling-content.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("memberSliced"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+        };
+        key.demand = crate::semantic_query::ReturnProjectionDemand {
+            point: crate::semantic_query::demand::Demand::navigate(
+                crate::semantic_query::demand::ProjectionPath::from_segments([
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("b"),
+                    ),
+                ]),
+            ),
+        };
+        let (expr, _) = flow_result(dispatch, &host, key);
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the elided sibling's content stays unlowered; its budget edge cannot poison"
+        );
+    });
+}
+
 /// The whole-return and single-member demand points COEXIST as distinct
 /// family candidates: neither satisfies the other (the §3.4 two-gate
 /// hit over the RECORDED materialised point), and a warm re-read of the

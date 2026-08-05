@@ -1,13 +1,20 @@
-//! Whole-function flow IR — the OWNED, arena-free, lazy per-function body
-//! artifact of the flow-return substrate.
+//! Demand-sliced flow content — the OWNED, arena-free content lowering
+//! of exactly one planned flow slice.
 //!
 //! The [`FunctionProgramIndex`](verter_semantic::analysis::function_program::FunctionProgramIndex)
 //! is the eager STRUCTURAL inventory (identities + locators, no lowered
-//! types). THIS module is the sole lazy body artifact: on first demand for
-//! one function it reborrows the retained parse snapshot ONCE (through the
-//! memo's lease-only run, exactly like every other body product) and lowers
-//! the complete demanded function into owned typed IR with a block/if
-//! control-flow tree.
+//! types), and the flow-slice substrate (`verter_semantic::analysis::flow`)
+//! plans the demanded slice as graph reachability and lowers it into the
+//! content-free `FlowSliceIR`. THIS module is the content half: on the
+//! cold path of one flow evaluation it reborrows the retained parse
+//! snapshot ONCE (through the memo's lease-only run, exactly like every
+//! other body product) and lowers ONLY the slice-selected expression
+//! content into owned typed IR with a block/if control-flow tree.
+//! Content OUTSIDE the selection never lowers: an unselected binding
+//! initializer is omitted, an unselected object member value and any
+//! unselected root expression ride the typed [`SliceExpr::Elided`]
+//! carrier, and `if`-test / expression-statement positions carry no
+//! content at all (the evaluator never consumes their values).
 //!
 //! Control semantics: sequential region evaluation (a terminal return or
 //! throw ends the region; statements after it are unreachable and
@@ -16,22 +23,22 @@
 //! and return-bearing loop/labeled constructs, `switch`, `try`, `with`,
 //! jumps, and module-level statements are UNSUPPORTED — typed,
 //! fail-closed: the region is produced up to the first
-//! [`FlowIrStatement::Unsupported`] marker and
-//! the marker propagates to the root so the evaluator degrades the whole
-//! result.
+//! [`SliceStatement::Unsupported`] marker and the marker propagates to
+//! the root so the evaluator degrades the whole result.
 //!
-//! Expression lowering reuses the scanner's expression lowering for every
-//! supported form; the flow-only differences are explicit IR carriers:
-//! parameter references become [`FlowIrExpr::Param`], simple local bindings
-//! become [`FlowIrExpr::Local`] (reaching definitions resolved by the
-//! evaluator), a bare-identifier call resolves through ONE lexical binding
-//! authority — a hoisted nested function declaration of the same name is
-//! [`FlowIrExpr::LocalFunctionShadow`] (fail-closed), a parameter or
-//! in-scope local is [`FlowIrExpr::CallOnBinding`], a call to the function
-//! itself is [`FlowIrExpr::DirectSelfCall`] (a recursion hold), an index
-//! exact direct call is [`FlowIrExpr::DirectCall`] — and any other call
-//! rides the scanner's symbolic `ReturnType<typeof …>` carrier (or `any`
-//! for an unrepresentable callee) as [`FlowIrExpr::SymbolicCall`].
+//! Expression content lowers through the ONE shared shallow-pass
+//! per-expression lowering (`infer_declaration_expression_type`); the
+//! flow-only differences are explicit IR carriers: parameter references
+//! become [`SliceExpr::Param`], simple local bindings become
+//! [`SliceExpr::Local`] (reaching definitions resolved by the
+//! evaluator), a bare-identifier call resolves through ONE lexical
+//! binding authority — a hoisted nested function declaration of the same
+//! name is [`SliceExpr::LocalFunctionShadow`] (fail-closed), a parameter
+//! or in-scope local is [`SliceExpr::CallOnBinding`], a call to the
+//! function itself is [`SliceExpr::DirectSelfCall`], an index-exact
+//! direct call is [`SliceExpr::DirectCall`] — and any other call rides
+//! the symbolic `ReturnType<typeof …>` carrier (or `any` for an
+//! unrepresentable callee) as [`SliceExpr::SymbolicCall`].
 
 use std::sync::Arc;
 
@@ -40,42 +47,86 @@ use oxc_ast::ast::{
     PropertyKind, Statement, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
+use rustc_hash::FxHashSet;
+use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::function_program::{
     inventory_statement_list, resolve_function_node, FunctionBindingKind, FunctionControlRegion,
     FunctionNode, FunctionProgramEntry,
 };
-use verter_semantic::analysis::type_eval_build::{
-    infer_declaration_expression_type, infer_expression_type,
-};
+use verter_semantic::analysis::type_eval_build::infer_declaration_expression_type;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
 
-/// The OWNED lazy body IR of one demanded function: lowered parameters,
-/// the root body region, and the region's reachability result.
+/// The demand selection one content lowering serves: the value-selected
+/// expression spans and the value-selected slot names of ONE lowered
+/// flow slice. Derived from the content-free `FlowSliceIR` — the plan is
+/// the sole authority for what lowers; this carrier only transports the
+/// selection into the lease-only run.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowSliceSelection {
+    /// Spans of the slice's VALUE-selected expression records.
+    value_spans: FxHashSet<verter_span::Span>,
+    /// Names of the slice's VALUE-selected slots (the planner selects
+    /// every same-name binding a read can reach, so name identity is
+    /// exactly as precise as the plan's own resolution).
+    value_slot_names: FxHashSet<Arc<str>>,
+}
+
+impl FlowSliceSelection {
+    /// The selection of one lowered slice.
+    pub(crate) fn from_slice_ir(ir: &FlowSliceIR) -> Self {
+        Self {
+            value_spans: ir
+                .exprs
+                .iter()
+                .filter(|expr| expr.role == FlowExprRole::Value)
+                .map(|expr| expr.span)
+                .collect(),
+            value_slot_names: ir
+                .slots
+                .iter()
+                .filter(|slot| slot.value_selected)
+                .map(|slot| Arc::clone(&slot.name))
+                .collect(),
+        }
+    }
+
+    fn value_span(&self, span: verter_span::Span) -> bool {
+        self.value_spans.contains(&span)
+    }
+
+    fn value_slot(&self, name: &str) -> bool {
+        self.value_slot_names.contains(name)
+    }
+}
+
+/// The OWNED content of one demanded slice: lowered parameters, the root
+/// body region with slice-gated expression content, and the region's
+/// reachability result.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WholeFunctionFlowIrNode {
+pub struct SliceContent {
     /// Formal parameters in source order (rest parameter last).
-    pub params: Arc<[FlowIrParam]>,
+    pub params: Arc<[SliceParam]>,
     /// The function's OWN type parameters (the root signature's binders —
     /// the evaluator lowers parameters and body leaves under them, never
     /// under an outer same-name resolution).
-    pub type_parameters: Arc<[FlowIrTypeParam]>,
+    pub type_parameters: Arc<[SliceTypeParam]>,
     /// The root region (the function body statement list). An
     /// expression-bodied arrow lowers to a single `return` of the
     /// expression.
-    pub body: FlowIrRegion,
+    pub body: SliceRegion,
     /// Whether execution can reach past the body without a `return`.
     pub can_fall_through: bool,
-    /// A budget edge one leaf's expression lowering hit (the expression
-    /// itself degrades to `any`, the whole evaluation fails with the typed
-    /// budget reason — the scanner's `Unavailable` verdict for the same
-    /// leaf).
+    /// A budget edge one SELECTED leaf's expression lowering hit (the
+    /// expression itself degrades to `any`, the whole evaluation fails
+    /// with the typed budget reason). Unselected content never lowers,
+    /// so it can never charge this edge.
     pub budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
 }
 
 /// One formal parameter.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowIrParam {
+pub struct SliceParam {
     /// The binding name (`None` for a destructured parameter).
     pub name: Option<Arc<str>>,
     /// Whether the parameter is optional (`?`).
@@ -89,43 +140,42 @@ pub struct FlowIrParam {
 
 /// One sequential statement list with its reachability result.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowIrRegion {
+pub struct SliceRegion {
     /// The reachable statements, in source order. Statements after a
     /// terminal path (return / throw / unsupported construct) are
     /// unreachable and dropped.
-    pub statements: Arc<[FlowIrStatement]>,
+    pub statements: Arc<[SliceStatement]>,
     /// Whether execution can reach past this region without a `return`.
     pub can_fall_through: bool,
 }
 
-/// One statement of the flow IR.
+/// One statement of the slice content.
 #[derive(Debug, Clone, PartialEq)]
-pub enum FlowIrStatement {
+pub enum SliceStatement {
     /// A `return` (bare `return;` carries no argument).
     Return {
         /// The lowered return argument, when present.
-        argument: Option<FlowIrExpr>,
+        argument: Option<SliceExpr>,
     },
-    /// An `if` statement. No guard narrowing: the test lowers as a plain
-    /// expression and each arm is its own region.
+    /// An `if` statement. No guard narrowing: each arm is its own region;
+    /// the test's value is never consumed by the evaluator, so no test
+    /// content is carried.
     If {
-        /// The lowered test expression.
-        test: FlowIrExpr,
         /// The consequent region.
-        consequent: Box<FlowIrRegion>,
+        consequent: Box<SliceRegion>,
         /// The alternate region, when an `else` exists.
-        alternate: Option<Box<FlowIrRegion>>,
+        alternate: Option<Box<SliceRegion>>,
     },
     /// A nested block, as its own region.
-    Block(FlowIrRegion),
+    Block(SliceRegion),
     /// A `const` / `let` / `var` declarator with an identifier binding.
     Binding {
         /// The binding name.
         name: Arc<str>,
         /// The declaration kind.
-        kind: FlowIrBindingKind,
+        kind: SliceBindingKind,
         /// The lowered initializer, when present.
-        init: Option<FlowIrExpr>,
+        init: Option<SliceExpr>,
         /// Whether the binding carries a WIDENING literal type: an
         /// unannotated `const` whose initializer is a bare literal
         /// expression with no const assertion (`const b = 1`). Reads of
@@ -135,9 +185,6 @@ pub enum FlowIrStatement {
         /// and preserve the literal.
         widening_literal: bool,
     },
-    /// An expression statement (evaluation effects; no return
-    /// contribution).
-    Effect(FlowIrExpr),
     /// A return-free loop or labeled construct: effectful but fall-through
     /// transparent.
     TransparentLoop,
@@ -146,12 +193,12 @@ pub enum FlowIrStatement {
     /// statement). The whole function is unsupported: the region is
     /// produced up to this marker and the evaluator degrades the whole
     /// result.
-    Unsupported(FlowIrUnsupported),
+    Unsupported(SliceUnsupported),
 }
 
 /// The kind of one local binding declarator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowIrBindingKind {
+pub enum SliceBindingKind {
     /// A `const` (or `using`) declarator.
     Const,
     /// A `let` declarator.
@@ -160,13 +207,14 @@ pub enum FlowIrBindingKind {
     Var,
 }
 
-/// One expression of the flow IR.
+/// One expression of the slice content.
 #[derive(Debug, Clone, PartialEq)]
-pub enum FlowIrExpr {
+pub enum SliceExpr {
     /// A fully lowered leaf: literals, arrays, objects (spread members ride
     /// as `ObjectMember::Spread` for later delegation to the object-spread
     /// projection), templates, `typeof` paths, `as` / `satisfies` /
-    /// parenthesized results — exactly the scanner's expression lowering.
+    /// parenthesized results — the shared shallow-pass per-expression
+    /// lowering.
     Type(TypeExpr),
     /// A parameter reference, substituted by the evaluator.
     Param {
@@ -182,11 +230,11 @@ pub enum FlowIrExpr {
     /// An object-literal return evaluated STRUCTURALLY: every member value
     /// is a flow expression (parameter / local references substitute). Only
     /// plain string-keyed `Init` properties lower this way — spreads,
-    /// computed keys, and method / accessor members keep the scanner's
-    /// whole-literal lowering.
+    /// computed keys, and method / accessor members keep the whole-literal
+    /// leaf lowering.
     Object {
         /// The members in source order.
-        members: Arc<[FlowIrObjectMember]>,
+        members: Arc<[SliceObjectMember]>,
     },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
@@ -195,20 +243,20 @@ pub enum FlowIrExpr {
     /// scan and never a leaf fallback.
     NestedFunctionValue {
         /// The nested function's formal parameters (rest last).
-        params: Arc<[FlowIrParam]>,
+        params: Arc<[SliceParam]>,
         /// The nested function's own type parameters (the signature's own
         /// binders — carried so the composed signature keeps `<T>`).
-        type_parameters: Arc<[FlowIrTypeParam]>,
+        type_parameters: Arc<[SliceTypeParam]>,
         /// The nested function's body region (an expression-bodied arrow
         /// lowers to a single `return` of the expression).
-        body: FlowIrRegion,
+        body: SliceRegion,
         /// Whether execution can reach past the nested body without a
         /// `return`.
         can_fall_through: bool,
     },
     /// A direct call on a nested function value (an IIFE) — the call's
     /// value is the nested function's evaluated return.
-    NestedCall(Box<FlowIrExpr>),
+    NestedCall(Box<SliceExpr>),
     /// A call on a parameter or in-scope local binding of function type —
     /// the call's value is the binding's signature return (a shadowed
     /// name is never a flow obligation edge).
@@ -232,17 +280,21 @@ pub enum FlowIrExpr {
     /// resolves EXACTLY (a same-file served function position) — a Flow
     /// obligation edge to that target.
     DirectCall(verter_semantic::analysis::function_program::FunctionProgramKey),
-    /// A call lowered to the scanner's symbolic `ReturnType<typeof …>`
-    /// carrier.
+    /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
     SymbolicCall(TypeExpr),
-    /// An expression the scanner cannot represent (its `any` fallback),
-    /// including a call with an unrepresentable callee.
+    /// An expression the leaf lowering cannot represent (its `any`
+    /// fallback), including a call with an unrepresentable callee.
     Any,
+    /// Content the demand slice did NOT select: never lowered, never
+    /// evaluable. Observing an elided value is a planner/content mismatch
+    /// and fails closed at the evaluator — it is never a fabricated
+    /// `any` and never a silently widened sibling.
+    Elided,
 }
 
-/// One type parameter of a nested function value.
+/// One type parameter of a function value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowIrTypeParam {
+pub struct SliceTypeParam {
     /// The parameter name.
     pub name: Arc<str>,
     /// The lowered constraint, when authored.
@@ -253,22 +305,22 @@ pub struct FlowIrTypeParam {
 
 /// One member of a structurally lowered object-literal return.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FlowIrObjectMember {
+pub struct SliceObjectMember {
     /// The static string key.
     pub key: Arc<str>,
     /// The member value.
-    pub value: FlowIrExpr,
+    pub value: SliceExpr,
     /// The authored method / accessor kind (`None` for a plain property).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
     /// The authored member spans (declaration / name) — they keep two
     /// same-shaped return objects at distinct source sites distinct at
-    /// interning (the scanner's member spans do the same).
+    /// interning.
     pub spans: verter_type_expr::MemberSpans,
 }
 
 /// The unsupported-construct classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowIrUnsupported {
+pub enum SliceUnsupported {
     /// A return-bearing loop.
     Loop,
     /// A `switch` statement.
@@ -287,15 +339,15 @@ pub enum FlowIrUnsupported {
 }
 
 /// Lower one function node's own type parameter clause (name, lowered
-/// constraint, lowered default) — shared by the whole-function node and
-/// every nested function value.
-fn lower_flow_type_params(node: &FunctionNode<'_>, source: &str) -> Vec<FlowIrTypeParam> {
+/// constraint, lowered default) — shared by the root content and every
+/// nested function value.
+fn lower_slice_type_params(node: &FunctionNode<'_>, source: &str) -> Vec<SliceTypeParam> {
     node.type_parameters()
         .map(|declaration| {
             declaration
                 .params
                 .iter()
-                .map(|param| FlowIrTypeParam {
+                .map(|param| SliceTypeParam {
                     name: Arc::from(param.name.name.as_str()),
                     constraint: param
                         .constraint
@@ -311,18 +363,20 @@ fn lower_flow_type_params(node: &FunctionNode<'_>, source: &str) -> Vec<FlowIrTy
         .unwrap_or_default()
 }
 
-/// Build the whole-function flow IR for one indexed function entry against
-/// the retained parse snapshot. Runs inside the memo's lease-only job:
-/// pure, owned output, no host re-entry. Returns `None` on any locator
-/// miss (a typed miss, never a panic).
-pub(crate) fn build_whole_function_flow_ir(
+/// Build the slice content for one indexed function entry against the
+/// retained parse snapshot, lowering ONLY `selection`-selected expression
+/// content. Runs inside the memo's lease-only job: pure, owned output, no
+/// host re-entry. Returns `None` on any locator miss (a typed miss, never
+/// a panic).
+pub(crate) fn build_flow_slice_content(
     program: &Program<'_>,
     source: &str,
     entry: &FunctionProgramEntry,
-) -> Option<WholeFunctionFlowIrNode> {
+    selection: &FlowSliceSelection,
+) -> Option<SliceContent> {
     let (node, self_name) = resolve_function_node(program, &entry.locator)?;
     let params = lower_params(node.params(), source);
-    let type_parameters = lower_flow_type_params(&node, source);
+    let type_parameters = lower_slice_type_params(&node, source);
     let body = node.body()?;
     // ONE lexical binding authority, from the index's whole-function
     // binding inventory: hoisted nested function declarations shadow every
@@ -342,6 +396,7 @@ pub(crate) fn build_whole_function_flow_ir(
         .collect();
     let mut lowerer = Lowerer {
         source,
+        selection: Some(selection),
         params: &params,
         self_name: self_name.as_deref(),
         scopes: vec![hoisted_vars],
@@ -353,15 +408,18 @@ pub(crate) fn build_whole_function_flow_ir(
     let region = if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
         // statement; it lowers to a single `return` of the expression (the
-        // scanner's arrow-body behavior: the expression cannot fall
-        // through).
+        // expression cannot fall through).
         let statement = body.statements.first()?;
         let Statement::ExpressionStatement(expression) = statement else {
             return None;
         };
-        let argument = lowerer.lower_expr(&expression.expression, ExprMode::ArrowBody);
-        FlowIrRegion {
-            statements: Arc::from([FlowIrStatement::Return {
+        let argument = if lowerer.value_span_selected(expression.expression.span()) {
+            lowerer.lower_expr(&expression.expression, ExprMode::ArrowBody)
+        } else {
+            SliceExpr::Elided
+        };
+        SliceRegion {
+            statements: Arc::from([SliceStatement::Return {
                 argument: Some(argument),
             }]),
             can_fall_through: false,
@@ -370,7 +428,7 @@ pub(crate) fn build_whole_function_flow_ir(
         lowerer.lower_region(&body.statements).region
     };
     let budget_failure = lowerer.budget_failure;
-    Some(WholeFunctionFlowIrNode {
+    Some(SliceContent {
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
@@ -404,9 +462,8 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
 
 /// Lower the formal parameters: binding name, optional/rest flags, and the
 /// parameter type — the authored TS annotation through `lower_ts_type`,
-/// else the default initializer's inferred type (the scanner's parameter
-/// rule), else `any`.
-fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<FlowIrParam> {
+/// else the default initializer's inferred type, else `any`.
+fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<SliceParam> {
     let mut out = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
     for param in &params.items {
         let name = match &param.pattern {
@@ -431,7 +488,7 @@ fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<FlowIrParam>
         } else {
             ty
         };
-        out.push(FlowIrParam {
+        out.push(SliceParam {
             name,
             optional: param.optional || param.initializer.is_some(),
             rest: false,
@@ -448,7 +505,7 @@ fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<FlowIrParam>
             .as_ref()
             .map(|annotation| lower_ts_type(&annotation.type_annotation, source))
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
-        out.push(FlowIrParam {
+        out.push(SliceParam {
             name,
             optional: false,
             rest: true,
@@ -458,48 +515,47 @@ fn lower_params(params: &FormalParameters<'_>, source: &str) -> Vec<FlowIrParam>
     out
 }
 
-/// The expression-lowering position, selecting which of the scanner's two
-/// entry points a leaf lowers through (and its widening behavior).
+/// The expression-lowering position, selecting the shared shallow-pass
+/// entry's literal policy (and its widening behavior).
 #[derive(Clone, Copy)]
 enum ExprMode {
-    /// Return-argument position: declaration lowering (`preserve_literal =
-    /// false`), exactly the scanner's return-argument behavior — a fresh
-    /// top-level literal widens to its primitive.
+    /// Return-argument position: a fresh top-level literal widens to its
+    /// primitive.
     Return,
-    /// Arrow expression-body position: expression lowering, exactly the
-    /// scanner's arrow-body behavior — a standalone literal keeps its
+    /// Arrow expression-body position: a standalone literal keeps its
     /// literal type.
     ArrowBody,
-    /// Binding-initializer position: the scanner's value-declaration
-    /// initializer behavior — `const` preserves the literal, `let` / `var`
-    /// widen.
-    BindingInit(FlowIrBindingKind),
-    /// Effect / test position: declaration lowering (the value is not a
-    /// return contribution).
-    Plain,
+    /// Binding-initializer position: `const` preserves the literal,
+    /// `let` / `var` widen.
+    BindingInit(SliceBindingKind),
 }
 
 /// The region lowering result: the region plus whether any nested lowering
 /// hit an unsupported construct (the marker is in the tree; the flag
 /// propagates so the root region stops at the same point).
 struct LoweredRegion {
-    region: FlowIrRegion,
+    region: SliceRegion,
     hit_unsupported: bool,
 }
 
-/// The statement/expression lowering state: scanner entry points, the
-/// function's parameters (for [`FlowIrExpr::Param`] ordinals), its
-/// bare-identifier self name (for [`FlowIrExpr::DirectSelfCall`]), the
+/// The statement/expression lowering state: the demand selection (root
+/// frame only — nested function values lower ungated, their bodies are
+/// beyond slice granularity), the shared leaf-lowering entry, the
+/// function's parameters (for [`SliceExpr::Param`] ordinals), its
+/// bare-identifier self name (for [`SliceExpr::DirectSelfCall`]), the
 /// hoisted nested function declaration names (for
-/// [`FlowIrExpr::LocalFunctionShadow`]), and the local-binding scope stack
-/// (for [`FlowIrExpr::Local`]). One scope frame per region; a region
+/// [`SliceExpr::LocalFunctionShadow`]), and the local-binding scope stack
+/// (for [`SliceExpr::Local`]). One scope frame per region; a region
 /// PRE-DECLARES every lexical name its own statements bind (a forward
 /// reference is in scope but unbound at evaluation — the TDZ-honest `any`)
 /// and a binding's reaching definition still enters AFTER its initializer
 /// is lowered.
 struct Lowerer<'a> {
     source: &'a str,
-    params: &'a [FlowIrParam],
+    /// The demand selection gating content lowering (`None` inside a
+    /// nested function value — its whole body is one selected value).
+    selection: Option<&'a FlowSliceSelection>,
+    params: &'a [SliceParam],
     self_name: Option<&'a str>,
     scopes: Vec<Vec<Arc<str>>>,
     /// The function's hoisted nested function declaration names (from the
@@ -514,11 +570,24 @@ struct Lowerer<'a> {
     /// The function's exact direct local call targets (from the per-file
     /// function index), keyed by call span.
     direct_calls: &'a [verter_semantic::analysis::function_program::FunctionDirectCall],
-    /// The first budget edge a leaf's expression lowering hit.
+    /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
 }
 
 impl Lowerer<'_> {
+    /// Whether a root content position is value-selected by the demand
+    /// slice. Ungated (nested function value) frames select everything.
+    fn value_span_selected(&self, span: oxc_span::Span) -> bool {
+        self.selection
+            .is_none_or(|selection| selection.value_span(span.into()))
+    }
+
+    /// Whether a binding slot is value-selected by the demand slice.
+    fn slot_selected(&self, name: &str) -> bool {
+        self.selection
+            .is_none_or(|selection| selection.value_slot(name))
+    }
+
     fn param_ordinal(&self, name: &str) -> Option<u32> {
         self.params
             .iter()
@@ -554,7 +623,8 @@ impl Lowerer<'_> {
         // (one level deep — a nested block's bindings stay block-local): a
         // forward `const` / `let` / `var` reference resolves to the local
         // binding (unbound at evaluation — `any`), never to an outer
-        // same-name callee.
+        // same-name callee. Pre-declaration is selection-INDEPENDENT:
+        // classification never varies with the demand.
         let mut frame: Vec<Arc<str>> = Vec::new();
         for statement in statements {
             let Statement::VariableDeclaration(decl) = statement else {
@@ -567,7 +637,7 @@ impl Lowerer<'_> {
             }
         }
         self.scopes.push(frame);
-        let mut out: Vec<FlowIrStatement> = Vec::new();
+        let mut out: Vec<SliceStatement> = Vec::new();
         let mut can_fall_through = true;
         let mut hit_unsupported = false;
         for statement in statements {
@@ -576,21 +646,26 @@ impl Lowerer<'_> {
             }
             match statement {
                 Statement::ReturnStatement(ret) => {
-                    let argument = ret
-                        .argument
-                        .as_ref()
-                        .map(|arg| self.lower_expr(arg, ExprMode::Return));
-                    out.push(FlowIrStatement::Return { argument });
+                    let argument = ret.argument.as_ref().map(|arg| {
+                        if self.value_span_selected(arg.span()) {
+                            self.lower_expr(arg, ExprMode::Return)
+                        } else {
+                            SliceExpr::Elided
+                        }
+                    });
+                    out.push(SliceStatement::Return { argument });
                     can_fall_through = false;
                 }
                 Statement::BlockStatement(block) => {
                     let child = self.lower_region(&block.body);
                     can_fall_through = child.region.can_fall_through;
                     hit_unsupported = child.hit_unsupported;
-                    out.push(FlowIrStatement::Block(child.region));
+                    out.push(SliceStatement::Block(child.region));
                 }
                 Statement::IfStatement(if_stmt) => {
-                    let test = self.lower_expr(&if_stmt.test, ExprMode::Plain);
+                    // The evaluator never consumes the test's value, so no
+                    // test content lowers (guard narrowing is a later
+                    // edge-class block on the same graph).
                     let consequent = self.lower_arm(&if_stmt.consequent);
                     let alternate = if_stmt
                         .alternate
@@ -605,8 +680,7 @@ impl Lowerer<'_> {
                         || alternate
                             .as_ref()
                             .is_some_and(|region| region.hit_unsupported);
-                    out.push(FlowIrStatement::If {
-                        test,
+                    out.push(SliceStatement::If {
                         consequent: Box::new(consequent.region),
                         alternate: alternate.map(|region| Box::new(region.region)),
                     });
@@ -615,9 +689,9 @@ impl Lowerer<'_> {
                     let kind = match decl.kind {
                         VariableDeclarationKind::Const
                         | VariableDeclarationKind::Using
-                        | VariableDeclarationKind::AwaitUsing => FlowIrBindingKind::Const,
-                        VariableDeclarationKind::Let => FlowIrBindingKind::Let,
-                        VariableDeclarationKind::Var => FlowIrBindingKind::Var,
+                        | VariableDeclarationKind::AwaitUsing => SliceBindingKind::Const,
+                        VariableDeclarationKind::Let => SliceBindingKind::Let,
+                        VariableDeclarationKind::Var => SliceBindingKind::Var,
                     };
                     for declarator in &decl.declarations {
                         let BindingPattern::BindingIdentifier(id) = &declarator.id else {
@@ -625,6 +699,15 @@ impl Lowerer<'_> {
                             // local reaching definitions.
                             continue;
                         };
+                        // A binding OUTSIDE the slice's value-selected
+                        // slot set never lowers: the elided declaration's
+                        // initializer stays cold (no lowering, no
+                        // resolution, no budget charge). Its name is
+                        // already pre-declared, so classification of later
+                        // reads/calls is unchanged.
+                        if !self.slot_selected(id.name.as_str()) {
+                            continue;
+                        }
                         let init = declarator
                             .init
                             .as_ref()
@@ -634,11 +717,11 @@ impl Lowerer<'_> {
                         // const assertion. `let` / `var` initializers
                         // already widened at `BindingInit` lowering, and
                         // an annotation or `as const` pins the literal.
-                        let widening_literal = kind == FlowIrBindingKind::Const
+                        let widening_literal = kind == SliceBindingKind::Const
                             && declarator.type_annotation.is_none()
                             && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
                         let name: Arc<str> = Arc::from(id.name.as_str());
-                        out.push(FlowIrStatement::Binding {
+                        out.push(SliceStatement::Binding {
                             name: Arc::clone(&name),
                             kind,
                             init,
@@ -649,13 +732,12 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Statement::ExpressionStatement(expression) => {
-                    out.push(FlowIrStatement::Effect(
-                        self.lower_expr(&expression.expression, ExprMode::Plain),
-                    ));
-                }
+                // An expression statement's value is never consumed by the
+                // evaluator; its evaluation effects ride the slice's typed
+                // effect obligations, not this content tree.
+                Statement::ExpressionStatement(_) => {}
                 // A `throw` terminates the region path without contributing
-                // a return arm (the scanner's `ThrowStatement → Ok(false)`).
+                // a return arm.
                 Statement::ThrowStatement(_) => {
                     can_fall_through = false;
                 }
@@ -665,39 +747,39 @@ impl Lowerer<'_> {
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
                     if self.control_has_return(statement) {
-                        out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::Loop));
+                        out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
                         can_fall_through = false;
                     } else {
-                        out.push(FlowIrStatement::TransparentLoop);
+                        out.push(SliceStatement::TransparentLoop);
                     }
                 }
                 Statement::LabeledStatement(_) => {
                     if self.control_has_return(statement) {
-                        out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::Labeled));
+                        out.push(SliceStatement::Unsupported(SliceUnsupported::Labeled));
                         hit_unsupported = true;
                         can_fall_through = false;
                     } else {
-                        out.push(FlowIrStatement::TransparentLoop);
+                        out.push(SliceStatement::TransparentLoop);
                     }
                 }
                 Statement::SwitchStatement(_) => {
-                    out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::Switch));
+                    out.push(SliceStatement::Unsupported(SliceUnsupported::Switch));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
                 Statement::TryStatement(_) => {
-                    out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::Try));
+                    out.push(SliceStatement::Unsupported(SliceUnsupported::Try));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
                 Statement::WithStatement(_) => {
-                    out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::With));
+                    out.push(SliceStatement::Unsupported(SliceUnsupported::With));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
                 Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
-                    out.push(FlowIrStatement::Unsupported(FlowIrUnsupported::Jump));
+                    out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
@@ -707,14 +789,14 @@ impl Lowerer<'_> {
                 | Statement::ExportNamedDeclaration(_)
                 | Statement::TSExportAssignment(_)
                 | Statement::TSNamespaceExportDeclaration(_) => {
-                    out.push(FlowIrStatement::Unsupported(
-                        FlowIrUnsupported::ModuleDeclaration,
+                    out.push(SliceStatement::Unsupported(
+                        SliceUnsupported::ModuleDeclaration,
                     ));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
                 // Declaration / no-op statements: transparent (no return
-                // contribution, no flow-IR statement).
+                // contribution, no content statement).
                 Statement::DebuggerStatement(_)
                 | Statement::EmptyStatement(_)
                 | Statement::FunctionDeclaration(_)
@@ -732,7 +814,7 @@ impl Lowerer<'_> {
         }
         self.scopes.pop();
         LoweredRegion {
-            region: FlowIrRegion {
+            region: SliceRegion {
                 statements: Arc::from(out.into_boxed_slice()),
                 can_fall_through,
             },
@@ -751,27 +833,26 @@ impl Lowerer<'_> {
 
     /// Lower one expression. Parameter and in-scope local identifiers
     /// become dedicated carriers; a plain string-keyed object literal
-    /// lowers STRUCTURALLY (each member value is a flow expression); a
-    /// bare-identifier call to the function itself becomes the recursion
-    /// hold; every other form reuses the scanner's expression lowering for
-    /// the position.
-    fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> FlowIrExpr {
+    /// lowers STRUCTURALLY (each member value is a flow expression, gated
+    /// by the demand selection); a bare-identifier call to the function
+    /// itself becomes the recursion hold; every other form lowers through
+    /// the shared shallow-pass per-expression lowering for the position.
+    fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
         match expr {
             Expression::Identifier(identifier) => {
                 let name = identifier.name.as_str();
                 if let Some(ordinal) = self.param_ordinal(name) {
-                    return FlowIrExpr::Param { ordinal };
+                    return SliceExpr::Param { ordinal };
                 }
                 if self.is_local_in_scope(name) {
-                    return FlowIrExpr::Local {
+                    return SliceExpr::Local {
                         name: Arc::from(name),
                     };
                 }
                 self.lower_leaf(expr, mode)
             }
             Expression::ParenthesizedExpression(paren) => {
-                // A parenthesized wrapper is structurally transparent (the
-                // scanner unwraps it the same way).
+                // A parenthesized wrapper is structurally transparent.
                 self.lower_expr(&paren.expression, mode)
             }
             Expression::FunctionExpression(func) => {
@@ -796,10 +877,38 @@ impl Lowerer<'_> {
                             break;
                         }
                     };
+                    // A member value OUTSIDE the demand selection never
+                    // lowers — the elided sibling rides the typed carrier
+                    // (present in the member LIST so missing-member
+                    // detection stays static, content-free forever).
+                    if !self.value_span_selected(p.value.span()) {
+                        members.push(SliceObjectMember {
+                            key,
+                            value: SliceExpr::Elided,
+                            method_kind: match (p.method, p.kind) {
+                                (false, PropertyKind::Init) => None,
+                                (_, PropertyKind::Get) => {
+                                    Some(verter_type_expr::ObjectMethodKind::Get)
+                                }
+                                (_, PropertyKind::Set) => {
+                                    Some(verter_type_expr::ObjectMethodKind::Set)
+                                }
+                                (true, PropertyKind::Init) => {
+                                    Some(verter_type_expr::ObjectMethodKind::Method)
+                                }
+                            },
+                            spans: verter_type_expr::MemberSpans {
+                                declaration: Some(p.span.into()),
+                                name: Some(p.key.span().into()),
+                                type_annotation: None,
+                            },
+                        });
+                        continue;
+                    }
                     // A method / accessor member with a body is a nested
                     // function value (its return evaluates inline through
                     // the same flow machinery); a method without a body
-                    // keeps the scanner's whole-literal lowering.
+                    // keeps the whole-literal leaf lowering.
                     if p.method || !matches!(p.kind, PropertyKind::Init) {
                         let method_kind = match p.kind {
                             PropertyKind::Get => verter_type_expr::ObjectMethodKind::Get,
@@ -818,7 +927,7 @@ impl Lowerer<'_> {
                                 break;
                             }
                         };
-                        members.push(FlowIrObjectMember {
+                        members.push(SliceObjectMember {
                             key,
                             value,
                             method_kind: Some(method_kind),
@@ -843,12 +952,12 @@ impl Lowerer<'_> {
                             );
                     let value = self.lower_expr(&p.value, mode);
                     let value = match (widen_member, value) {
-                        (true, FlowIrExpr::Type(ty)) => FlowIrExpr::Type(
+                        (true, SliceExpr::Type(ty)) => SliceExpr::Type(
                             verter_semantic::analysis::type_eval_build::widen_shallow_literal(ty),
                         ),
                         (_, value) => value,
                     };
-                    members.push(FlowIrObjectMember {
+                    members.push(SliceObjectMember {
                         key,
                         value,
                         method_kind: None,
@@ -860,7 +969,7 @@ impl Lowerer<'_> {
                     });
                 }
                 if structural {
-                    FlowIrExpr::Object {
+                    SliceExpr::Object {
                         members: Arc::from(members.into_boxed_slice()),
                     }
                 } else {
@@ -884,7 +993,7 @@ impl Lowerer<'_> {
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
-                FlowIrExpr::NestedCall(Box::new(function))
+                SliceExpr::NestedCall(Box::new(function))
             }
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
@@ -898,13 +1007,13 @@ impl Lowerer<'_> {
                         .iter()
                         .any(|candidate| candidate.as_ref() == name)
                     {
-                        return FlowIrExpr::LocalFunctionShadow;
+                        return SliceExpr::LocalFunctionShadow;
                     }
                     // 2. A parameter SHADOWS the declaration: the call goes
                     //    through the binding's signature, never a flow
                     //    obligation edge.
                     if let Some(ordinal) = self.param_ordinal(name) {
-                        return FlowIrExpr::CallOnBinding {
+                        return SliceExpr::CallOnBinding {
                             param: Some(ordinal),
                             name: Arc::from(name),
                         };
@@ -912,7 +1021,7 @@ impl Lowerer<'_> {
                     // 3. An in-scope local (pre-declared or already bound)
                     //    shadows the declaration the same way.
                     if self.is_local_in_scope(name) {
-                        return FlowIrExpr::CallOnBinding {
+                        return SliceExpr::CallOnBinding {
                             param: None,
                             name: Arc::from(name),
                         };
@@ -920,7 +1029,7 @@ impl Lowerer<'_> {
                     // 4. A bare-identifier call to the function itself — a
                     //    direct same-slot recursion hold.
                     if Some(name) == self.self_name {
-                        return FlowIrExpr::DirectSelfCall;
+                        return SliceExpr::DirectSelfCall;
                     }
                     // 5. A bare-identifier callee the function index
                     //    resolves EXACTLY (same-file served function
@@ -933,14 +1042,14 @@ impl Lowerer<'_> {
                         .iter()
                         .find(|direct| direct.span == call.span.into())
                     {
-                        return FlowIrExpr::DirectCall(direct.target.clone());
+                        return SliceExpr::DirectCall(direct.target.clone());
                     }
                 }
-                let ty = self.scanner_type(expr, mode);
+                let ty = self.leaf_type(expr, mode);
                 if is_any(&ty) {
-                    FlowIrExpr::Any
+                    SliceExpr::Any
                 } else {
-                    FlowIrExpr::SymbolicCall(ty)
+                    SliceExpr::SymbolicCall(ty)
                 }
             }
             _ => self.lower_leaf(expr, mode),
@@ -951,10 +1060,11 @@ impl Lowerer<'_> {
     /// object-literal method) into an owned nested function value: the
     /// nested body's statements lower under the nested function's OWN
     /// parameter scope — outer parameters and locals are NOT in scope
-    /// (closure capture stays the leaf fallback).
-    fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> FlowIrExpr {
+    /// (closure capture stays the leaf fallback). Nested bodies are one
+    /// selected value: content inside them is never selection-gated.
+    fn lower_nested_function(&mut self, node: &FunctionNode<'_>) -> SliceExpr {
         let params = lower_params(node.params(), self.source);
-        let type_parameters = lower_flow_type_params(node, self.source);
+        let type_parameters = lower_slice_type_params(node, self.source);
         let nested_scopes: Vec<Arc<str>> = params
             .iter()
             .filter_map(|param| param.name.clone())
@@ -981,6 +1091,7 @@ impl Lowerer<'_> {
             };
         let mut nested = Lowerer {
             source: self.source,
+            selection: None,
             params: &params,
             self_name: self_name.as_deref(),
             scopes: vec![nested_scopes],
@@ -1000,12 +1111,12 @@ impl Lowerer<'_> {
                     Statement::ExpressionStatement(expression) => {
                         nested.lower_expr(&expression.expression, ExprMode::ArrowBody)
                     }
-                    _ => FlowIrExpr::Any,
+                    _ => SliceExpr::Any,
                 });
-            FlowIrRegion {
+            SliceRegion {
                 statements: Arc::from(
                     argument
-                        .map(|argument| FlowIrStatement::Return {
+                        .map(|argument| SliceStatement::Return {
                             argument: Some(argument),
                         })
                         .into_iter()
@@ -1017,7 +1128,7 @@ impl Lowerer<'_> {
         } else {
             match node.body() {
                 Some(body) => nested.lower_region(&body.statements).region,
-                None => FlowIrRegion {
+                None => SliceRegion {
                     statements: Arc::from(Vec::new().into_boxed_slice()),
                     can_fall_through: true,
                 },
@@ -1026,7 +1137,7 @@ impl Lowerer<'_> {
         if let Some(reason) = nested.budget_failure {
             self.budget_failure.get_or_insert(reason);
         }
-        FlowIrExpr::NestedFunctionValue {
+        SliceExpr::NestedFunctionValue {
             params: Arc::from(params.into_boxed_slice()),
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),
             can_fall_through: region.can_fall_through,
@@ -1034,39 +1145,36 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower a leaf expression through the scanner, wrapping the result.
-    /// The scanner's `any` fallback surfaces as [`FlowIrExpr::Any`].
-    fn lower_leaf(&mut self, expr: &Expression<'_>, mode: ExprMode) -> FlowIrExpr {
-        let ty = self.scanner_type(expr, mode);
+    /// Lower a leaf expression through the shared shallow-pass entry,
+    /// wrapping the result. The `any` fallback surfaces as
+    /// [`SliceExpr::Any`].
+    fn lower_leaf(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
+        let ty = self.leaf_type(expr, mode);
         if is_any(&ty) {
-            FlowIrExpr::Any
+            SliceExpr::Any
         } else {
-            FlowIrExpr::Type(ty)
+            SliceExpr::Type(ty)
         }
     }
 
-    /// The scanner's expression lowering for the position. Budget
-    /// exhaustion degrades the one expression to `any` — the same carrier
-    /// the scanner emits for unrepresentable forms — and records the typed
-    /// budget edge (the scanner's `Unavailable` verdict for the same leaf).
-    fn scanner_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> TypeExpr {
-        let result = match mode {
-            ExprMode::Return
-            | ExprMode::Plain
-            | ExprMode::BindingInit(FlowIrBindingKind::Let)
-            | ExprMode::BindingInit(FlowIrBindingKind::Var) => {
-                infer_declaration_expression_type(expr, self.source, false)
-            }
-            ExprMode::ArrowBody | ExprMode::BindingInit(FlowIrBindingKind::Const) => {
-                infer_expression_type(expr, self.source)
-            }
-        };
-        result.unwrap_or_else(|reason| {
-            if self.budget_failure.is_none() {
-                self.budget_failure = Some(reason);
-            }
-            TypeExpr::Primitive(PrimitiveName::Any)
-        })
+    /// The shared shallow-pass per-expression lowering for the position
+    /// (`infer_declaration_expression_type`: literal-preserving for arrow
+    /// bodies and `const` initializers, widening for return / `let` /
+    /// `var` positions). Budget exhaustion degrades the one expression to
+    /// `any` and records the typed budget edge.
+    fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> TypeExpr {
+        let preserve_literal = matches!(
+            mode,
+            ExprMode::ArrowBody | ExprMode::BindingInit(SliceBindingKind::Const)
+        );
+        infer_declaration_expression_type(expr, self.source, preserve_literal).unwrap_or_else(
+            |reason| {
+                if self.budget_failure.is_none() {
+                    self.budget_failure = Some(reason);
+                }
+                TypeExpr::Primitive(PrimitiveName::Any)
+            },
+        )
     }
 }
 

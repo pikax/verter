@@ -1,15 +1,18 @@
-//! The whole-function `FlowReturn` authority.
+//! The demand-sliced `FlowReturn` authority.
 //!
 //! One `SemanticQueryKey::FlowReturn` producer through
-//! [`ProjectSemanticDispatch`]: the demanded function's complete body is
-//! evaluated through the lazy whole-body flow IR
-//! ([`crate::flow_ir::WholeFunctionFlowIrNode`]) on the shared tagged
+//! [`ProjectSemanticDispatch`]: the demanded function's slice is planned
+//! as graph reachability over the once-per-content-version
+//! `FunctionFlowGraph`, hashed, lowered (`FlowSliceIR`), and evaluated
+//! through the slice-gated owned content
+//! ([`crate::flow_slice_content::SliceContent`]) on the shared tagged
 //! obligation runtime — return sites, `if` reachability, bare return,
 //! fallthrough, primitive widening, unions, parameters and simple local
 //! reaching definitions, object returns (spread delegated to
 //! `ProjectObjectSpread`), symbolic call returns (`ReturnType<typeof …>`
 //! / `any` carriers), return-free loop transparency, and direct same-slot
-//! recursion through coinductive holds.
+//! recursion through coinductive holds. Content outside the demanded
+//! slice never lowers and never evaluates.
 //!
 //! Only a COMPLETE evaluation admits into the family memo; every degraded
 //! shape is a typed `FlowReturnFailure` through `ReturnOnly` (never
@@ -943,7 +946,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        type_parameters: &[crate::flow_ir::FlowIrTypeParam],
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
     ) -> FlowBinderEnv {
         let graph = self.graph();
         let whole_hash = self
@@ -1132,80 +1135,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
         };
         let flow_slice = self.ctx.project_type_store().flow_slice();
-        let mut member_filter: Option<MemberDemandFilter> = None;
-        match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx) {
-            None => {
-                // The skeleton source could not serve the pinned content
-                // version (a torn view between the served index and the
-                // retained snapshot): undecided, never a fabricated slice.
-                return degraded(FlowReturnFailure::Unresolved, self_roots);
-            }
-            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
-                exceeded,
-            )) => {
-                tracing::debug!(
-                    axis = ?exceeded.axis,
-                    limit = exceeded.limit,
-                    observed = exceeded.observed,
-                    "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
-                );
-                crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
-                return degraded(
-                    FlowReturnFailure::Budget(
-                        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+        let lowered =
+            match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx)
+            {
+                None => {
+                    // The skeleton source could not serve the pinned content
+                    // version (a torn view between the served index and the
+                    // retained snapshot): undecided, never a fabricated slice.
+                    return degraded(FlowReturnFailure::Unresolved, self_roots);
+                }
+                Some(
+                    crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::BudgetExceeded(
+                        exceeded,
                     ),
-                    self_roots,
-                );
-            }
-            Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
-                slice_hash,
-            )) => {
-                // Hash-then-lower: the minted slice identity keys the
-                // lowered-slice artifact (the key is unconstructible
-                // without it), and the lowered node lowers ONLY the
-                // planned slice. A lowered miss on the pinned content is
-                // a torn view — undecided, never a fabricated slice.
-                let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
-                    hash_key: slice_key,
+                ) => {
+                    tracing::debug!(
+                        axis = ?exceeded.axis,
+                        limit = exceeded.limit,
+                        observed = exceeded.observed,
+                        "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
+                    );
+                    crate::flow_return_audit::record_flow_slice_budget_exceeded(&exceeded);
+                    return degraded(
+                        FlowReturnFailure::Budget(
+                            verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                        ),
+                        self_roots,
+                    );
+                }
+                Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
                     slice_hash,
-                };
-                match crate::cache_runtime::lookup(flow_slice.lowered_node(), lowered_key, self.ctx)
-                {
-                    None => {
-                        return degraded(FlowReturnFailure::Unresolved, self_roots);
-                    }
-                    Some(lowered) => {
-                        // The member-projection demand consumes the
-                        // lowered slice's SLOT SELECTION: only the
-                        // bindings the planner value-selected for the
-                        // demanded member evaluate; every unselected
-                        // sibling binding stays cold (no lowering, no
-                        // resolution, no fact).
-                        if let Some(member) = demanded_member.as_ref() {
-                            member_filter = Some(MemberDemandFilter {
-                                member: Arc::clone(member),
-                                selected_locals: lowered
-                                    .slots
-                                    .iter()
-                                    .filter(|slot| slot.value_selected)
-                                    .map(|slot| Arc::clone(&slot.name))
-                                    .collect(),
-                            });
+                )) => {
+                    // Hash-then-lower: the minted slice identity keys the
+                    // lowered-slice artifact (the key is unconstructible
+                    // without it), and the lowered node lowers ONLY the
+                    // planned slice. A lowered miss on the pinned content is
+                    // a torn view — undecided, never a fabricated slice.
+                    let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
+                        hash_key: slice_key,
+                        slice_hash,
+                    };
+                    match crate::cache_runtime::lookup(
+                        flow_slice.lowered_node(),
+                        lowered_key,
+                        self.ctx,
+                    ) {
+                        None => {
+                            return degraded(FlowReturnFailure::Unresolved, self_roots);
                         }
+                        Some(lowered) => lowered,
                     }
                 }
-            }
-        }
+            };
+        // The member-projection demand evaluates ONLY the demanded member
+        // of a structural object return; the slice's VALUE selection
+        // below already keeps every unselected sibling cold.
+        let member_filter: Option<MemberDemandFilter> =
+            demanded_member.as_ref().map(|member| MemberDemandFilter {
+                member: Arc::clone(member),
+            });
+        // The demand selection IS the lowered slice: only slice-selected
+        // expression content and value-selected slots lower — an
+        // unselected binding initializer, sibling member value, or
+        // effect-position expression never lowers (no resolution, no
+        // budget charge, no fact).
+        let selection = crate::flow_slice_content::FlowSliceSelection::from_slice_ir(&lowered);
         let Some(ir) = indexed
             .shallow_state
             .decl_bodies()
-            .whole_function_flow_ir(entry)
+            .flow_slice_content(entry, selection)
         else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
-        // A budget edge in one leaf's expression lowering stops the whole
-        // evaluation with the typed reason (the scanner's `Unavailable`
-        // verdict for the same leaf).
+        // A budget edge in one SELECTED leaf's expression lowering stops
+        // the whole evaluation with the typed reason.
         if let Some(reason) = ir.budget_failure {
             return degraded(FlowReturnFailure::Budget(reason), self_roots);
         }
@@ -1366,13 +1369,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
 /// The single-named-member projection filter of one flow evaluation —
 /// the demand-sliced `ReturnType<typeof f>['b']` point. Carries the
-/// demanded member name and the lowered slice's value-selected slot
-/// names (the ONLY bindings the filtered evaluation may evaluate).
+/// demanded member name; the slice's own value selection already keeps
+/// unselected bindings and sibling member values out of the lowered
+/// content.
 struct MemberDemandFilter {
     /// The demanded member name.
     member: Arc<str>,
-    /// Names of the slice-selected bindings (planner value selection).
-    selected_locals: rustc_hash::FxHashSet<Arc<str>>,
 }
 
 /// The single supported narrow projection point: a one-segment path of a
@@ -1477,13 +1479,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// evaluation and never a fabricated `undefined` member.
     fn eval_member_projected_return(
         &mut self,
-        argument: Option<&crate::flow_ir::FlowIrExpr>,
+        argument: Option<&crate::flow_slice_content::SliceExpr>,
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
         let member_name = match self.member_filter.as_ref() {
             Some(filter) => Arc::clone(&filter.member),
             None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
         };
-        let Some(crate::flow_ir::FlowIrExpr::Object { members }) = argument else {
+        let Some(crate::flow_slice_content::SliceExpr::Object { members }) = argument else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
         // Last write wins for duplicate keys (JS object-literal
@@ -1510,10 +1512,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// parameters, and non-literal values are never rewritten.
     fn widen_if_widening_local_read(
         &self,
-        expr: &crate::flow_ir::FlowIrExpr,
+        expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
-        let crate::flow_ir::FlowIrExpr::Local { name } = expr else {
+        let crate::flow_slice_content::SliceExpr::Local { name } = expr else {
             return node;
         };
         if !self.widening_locals.contains(name.as_ref()) {
@@ -1537,12 +1539,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// recomputes nothing, it only evaluates contributors).
     fn eval_region(
         &mut self,
-        region: &crate::flow_ir::FlowIrRegion,
+        region: &crate::flow_slice_content::SliceRegion,
     ) -> (Result<Vec<SemanticNodeId>, FlowReturnFailure>, bool) {
         let mut contributors = Vec::new();
         for statement in region.statements.iter() {
             match statement {
-                crate::flow_ir::FlowIrStatement::Return { argument } => {
+                crate::flow_slice_content::SliceStatement::Return { argument } => {
                     if self.member_filter.is_some() {
                         // Member-projection demand: evaluate ONLY the
                         // demanded member of a structural object return.
@@ -1575,7 +1577,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_ir::FlowIrStatement::If {
+                crate::flow_slice_content::SliceStatement::If {
                     consequent,
                     alternate,
                     ..
@@ -1607,7 +1609,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.degraded_locals = saved_degraded;
                     self.widening_locals = saved_widening;
                 }
-                crate::flow_ir::FlowIrStatement::Block(block) => {
+                crate::flow_slice_content::SliceStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
                     // never escapes it.
                     let saved = self.locals.clone();
@@ -1623,23 +1625,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.degraded_locals = saved_degraded;
                     self.widening_locals = saved_widening;
                 }
-                crate::flow_ir::FlowIrStatement::Binding {
+                crate::flow_slice_content::SliceStatement::Binding {
                     name,
                     init,
                     widening_literal,
                     ..
                 } => {
-                    // Member-projection demand: a binding OUTSIDE the
-                    // lowered slice's value-selected slot set never
-                    // evaluates — the elided sibling's initializer stays
-                    // cold (no lowering, no resolution, no fact).
-                    if self
-                        .member_filter
-                        .as_ref()
-                        .is_some_and(|filter| !filter.selected_locals.contains(name))
-                    {
-                        continue;
-                    }
+                    // A binding OUTSIDE the slice's value-selected slot
+                    // set never even LOWERS — the content producer elides
+                    // the whole declaration, so nothing here can observe
+                    // an unselected sibling.
                     if let Some(init) = init {
                         match self.eval_expr(init) {
                             Ok(Some(node)) => {
@@ -1675,22 +1670,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_ir::FlowIrStatement::Effect(_) => {}
-                crate::flow_ir::FlowIrStatement::TransparentLoop => {}
-                crate::flow_ir::FlowIrStatement::Unsupported(kind) => {
+                crate::flow_slice_content::SliceStatement::TransparentLoop => {}
+                crate::flow_slice_content::SliceStatement::Unsupported(kind) => {
                     return (
                         Err(FlowReturnFailure::Unsupported(match kind {
-                            crate::flow_ir::FlowIrUnsupported::Loop => FlowReturnUnsupported::Loop,
-                            crate::flow_ir::FlowIrUnsupported::Switch => {
+                            crate::flow_slice_content::SliceUnsupported::Loop => {
+                                FlowReturnUnsupported::Loop
+                            }
+                            crate::flow_slice_content::SliceUnsupported::Switch => {
                                 FlowReturnUnsupported::Switch
                             }
-                            crate::flow_ir::FlowIrUnsupported::Try => FlowReturnUnsupported::Try,
-                            crate::flow_ir::FlowIrUnsupported::Labeled => {
+                            crate::flow_slice_content::SliceUnsupported::Try => {
+                                FlowReturnUnsupported::Try
+                            }
+                            crate::flow_slice_content::SliceUnsupported::Labeled => {
                                 FlowReturnUnsupported::Labeled
                             }
-                            crate::flow_ir::FlowIrUnsupported::Jump => FlowReturnUnsupported::Jump,
-                            crate::flow_ir::FlowIrUnsupported::With => FlowReturnUnsupported::With,
-                            crate::flow_ir::FlowIrUnsupported::ModuleDeclaration => {
+                            crate::flow_slice_content::SliceUnsupported::Jump => {
+                                FlowReturnUnsupported::Jump
+                            }
+                            crate::flow_slice_content::SliceUnsupported::With => {
+                                FlowReturnUnsupported::With
+                            }
+                            crate::flow_slice_content::SliceUnsupported::ModuleDeclaration => {
                                 FlowReturnUnsupported::ModuleDeclaration
                             }
                         })),
@@ -1710,9 +1712,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// the `Signature` node.
     fn eval_nested_function_signature(
         &mut self,
-        nested_params: &[crate::flow_ir::FlowIrParam],
-        type_parameters: &[crate::flow_ir::FlowIrTypeParam],
-        body: &crate::flow_ir::FlowIrRegion,
+        nested_params: &[crate::flow_slice_content::SliceParam],
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
     ) -> Result<SemanticNodeId, FlowReturnFailure> {
         let graph = self.dispatch.graph();
@@ -1803,11 +1805,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// contributor nor a failure).
     fn eval_expr(
         &mut self,
-        expr: &crate::flow_ir::FlowIrExpr,
+        expr: &crate::flow_slice_content::SliceExpr,
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
         let graph = self.dispatch.graph();
         match expr {
-            crate::flow_ir::FlowIrExpr::Type(ty) => {
+            crate::flow_slice_content::SliceExpr::Type(ty) => {
                 // A fully lowered leaf: lowers under the function's OWN
                 // binder environment (a body leaf referencing a root
                 // binder keeps the binder, never an outer same-name
@@ -1824,13 +1826,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 )))
             }
-            crate::flow_ir::FlowIrExpr::Param { ordinal } => self
+            crate::flow_slice_content::SliceExpr::Param { ordinal } => self
                 .params
                 .get(*ordinal as usize)
                 .copied()
                 .map(Some)
                 .ok_or(FlowReturnFailure::Unresolved),
-            crate::flow_ir::FlowIrExpr::Local { name } => {
+            crate::flow_slice_content::SliceExpr::Local { name } => {
                 // Observing a binding whose initializer FAILED is the
                 // `FailedBindingInitializer` degradation: the value is a
                 // modeled `any`, not the initializer's real type. A plain
@@ -1847,7 +1849,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }),
                 ))
             }
-            crate::flow_ir::FlowIrExpr::Object { members } => {
+            crate::flow_slice_content::SliceExpr::Object { members } => {
                 // Structural object-literal return: each member value
                 // evaluates as a flow expression (parameter / local
                 // references substitute); a hold nested in a member value
@@ -1896,7 +1898,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     },
                 ))))
             }
-            crate::flow_ir::FlowIrExpr::NestedFunctionValue {
+            crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,
                 type_parameters,
                 body,
@@ -1913,7 +1915,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 )?;
                 Ok(Some(signature))
             }
-            crate::flow_ir::FlowIrExpr::NestedCall(function) => {
+            crate::flow_slice_content::SliceExpr::NestedCall(function) => {
                 // An IIFE: the call's value is the nested function's
                 // evaluated return.
                 let signature = match self.eval_expr(function)? {
@@ -1926,7 +1928,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     _ => Err(FlowReturnFailure::Unresolved),
                 }
             }
-            crate::flow_ir::FlowIrExpr::DirectCall(target) => {
+            crate::flow_slice_content::SliceExpr::DirectCall(target) => {
                 // An exact same-file direct call — a Flow obligation edge
                 // through the ONE key construction when the callee's return
                 // is body-derived, or its DECLARED carrier when the callee
@@ -2044,7 +2046,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     },
                 }
             }
-            crate::flow_ir::FlowIrExpr::CallOnBinding { param, name } => {
+            crate::flow_slice_content::SliceExpr::CallOnBinding { param, name } => {
                 // A call on a function-typed binding: the call's value is
                 // the binding's signature return. Calling an `any`-typed
                 // or unbound binding is `any` EXACTLY (the implicit-`any`
@@ -2076,14 +2078,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
             }
-            crate::flow_ir::FlowIrExpr::LocalFunctionShadow => {
+            crate::flow_slice_content::SliceExpr::LocalFunctionShadow => {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
                 // recovery of the nested declaration's own return is not
                 // implemented — fail closed, never bind the outer callee.
                 Err(FlowReturnFailure::Unresolved)
             }
-            crate::flow_ir::FlowIrExpr::DirectSelfCall => {
+            crate::flow_slice_content::SliceExpr::DirectSelfCall => {
                 match self.dispatch.execute_flow_return(self.key.clone()) {
                     FlowReturnStep::Hold(_) => {
                         self.holds.push(self.key.clone());
@@ -2095,7 +2097,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     FlowReturnStep::Degraded(failure) => Err(failure),
                 }
             }
-            crate::flow_ir::FlowIrExpr::SymbolicCall(ty) => {
+            crate::flow_slice_content::SliceExpr::SymbolicCall(ty) => {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -2168,9 +2170,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     None => degraded_any(self),
                 }
             }
-            crate::flow_ir::FlowIrExpr::Any => Ok(Some(
+            crate::flow_slice_content::SliceExpr::Any => Ok(Some(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             )),
+            // Content the demand slice did not select: never lowered,
+            // never evaluable. Reaching one is a planner/content mismatch
+            // — undecided, fail closed; never a fabricated `any`.
+            crate::flow_slice_content::SliceExpr::Elided => Err(FlowReturnFailure::Unresolved),
         }
     }
 }

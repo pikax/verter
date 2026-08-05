@@ -531,15 +531,6 @@ pub struct DeclBodyMemo {
     /// snapshot on first Flow demand.
     function_program_index:
         OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
-    /// The memoized whole-function flow IR nodes — the OWNED lazy body
-    /// artifact of the flow-return substrate, one per demanded function
-    /// program key, content-addressed by the owning snapshot (a content
-    /// edit produces a fresh memo). Locator misses are typed `None`s at
-    /// the call site and are never memoized.
-    flow_ir_entries: DashMap<
-        verter_semantic::analysis::function_program::FunctionProgramKey,
-        Arc<crate::flow_ir::WholeFunctionFlowIrNode>,
-    >,
     raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
 }
 
@@ -598,7 +589,6 @@ impl DeclBodyMemo {
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
             function_program_index: OnceLock::new(),
-            flow_ir_entries: DashMap::default(),
             raw_surfaces: DashMap::default(),
         }
     }
@@ -633,7 +623,6 @@ impl DeclBodyMemo {
             aug_value_entries: DashMap::default(),
             whole_env: OnceLock::new(),
             function_program_index: OnceLock::new(),
-            flow_ir_entries: DashMap::default(),
             raw_surfaces: DashMap::default(),
         };
 
@@ -1217,32 +1206,31 @@ impl DeclBodyMemo {
             .clone()
     }
 
-    /// The whole-function flow IR for one indexed function — the OWNED,
-    /// arena-free lazy body artifact of the flow-return substrate. Built
-    /// ONCE per function through the same lease-only retained-snapshot run
-    /// every other body product uses (pure job, owned output, no host
-    /// re-entry) and memoized per function program key. Returns `None` on
-    /// a locator miss (a typed miss, never a panic) or on a seeded memo /
-    /// broken lease pin; misses are never memoized.
-    pub fn whole_function_flow_ir(
+    /// The OWNED slice content of one demanded flow evaluation: the
+    /// slice-gated expression content of `entry`'s body, lowered through
+    /// the same lease-only retained-snapshot run every other body product
+    /// uses (pure job, owned output, no host re-entry). NOT memoized:
+    /// content is per-demand (the selection is demand identity) and the
+    /// family memo's warm hit already prevents same-demand recomputation.
+    /// Returns `None` on a locator miss (a typed miss, never a panic) or
+    /// on a seeded memo / broken lease pin.
+    pub(crate) fn flow_slice_content(
         &self,
         entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
-    ) -> Option<Arc<crate::flow_ir::WholeFunctionFlowIrNode>> {
-        if let Some(cached) = self.flow_ir_entries.get(&entry.key) {
-            return Some(Arc::clone(&cached));
-        }
+        selection: crate::flow_slice_content::FlowSliceSelection,
+    ) -> Option<Arc<crate::flow_slice_content::SliceContent>> {
         let service = self.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
-        let key = entry.key.clone();
         let entry = entry.clone();
         let Some(node) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
-                crate::flow_ir::build_whole_function_flow_ir(
+                crate::flow_slice_content::build_flow_slice_content(
                     p.borrow_dependent(),
                     p.source_str(),
                     &entry,
+                    &selection,
                 )
             })
         }) else {
@@ -1250,18 +1238,12 @@ impl DeclBodyMemo {
             // retry under a live lease recovers.
             tracing::error!(
                 canonical = %self.key.canonical,
-                "decl-body lease pin broken: whole_function_flow_ir's lease-only run missed \
+                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
                  the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
             );
             return None;
         };
-        let node = node?;
-        Some(
-            self.flow_ir_entries
-                .entry(key)
-                .or_insert_with(|| Arc::new(node))
-                .clone(),
-        )
+        node.map(Arc::new)
     }
 
     /// The arena-free [`FunctionBodySkeleton`] of one indexed function —

@@ -5801,11 +5801,11 @@ pub(crate) mod foundations_guards {
         // reach it via `ShallowFileState::decl_bodies()` /
         // `IndexedReady.decl_bodies`; no downstream crate touches it.
         "pub(crate) mod decl_body_memo",
-        // Whole-function flow IR — the owned, arena-free
-        // `WholeFunctionFlowIrNode` body lowering the `FlowReturn`
+        // Demand-sliced flow content — the owned, arena-free
+        // `SliceContent` slice-gated body lowering the `FlowReturn`
         // family evaluates. Crate-private: the flow-return producer is
-        // its only consumer (via `DeclBodyMemo::whole_function_flow_ir`).
-        "pub(crate) mod flow_ir",
+        // its only consumer (via `DeclBodyMemo::flow_slice_content`).
+        "pub(crate) mod flow_slice_content",
         // Scheduler-side lazy lowering service — worker-shard
         // retained eval-program parses (`DeclLoweringService`).
         // Crate-private: the materialise closure and the memo are its

@@ -1,15 +1,20 @@
-//! `WholeFunctionFlowIrNode` contract: the lazy per-function body IR
-//! reborrows the retained parse snapshot once and lowers the whole
-//! function with explicit control semantics (sequential regions, `if`
-//! reachability, terminal return/throw, return-transparent vs
-//! return-bearing loops, typed-unsupported constructs), lowers parameters
-//! and simple local reaching definitions into explicit carriers, marks
-//! direct same-slot recursion, rides the symbolic `ReturnType<typeof …>`
-//! call carrier otherwise, and memoizes per function program key. Locator
-//! misses are typed `None`s, never panics.
+//! `SliceContent` contract: the slice-gated content lowering reborrows
+//! the retained parse snapshot once per demand and lowers ONLY the
+//! demanded slice's selected content, with explicit control semantics
+//! (sequential regions, `if` reachability, terminal return/throw,
+//! return-transparent vs return-bearing loops, typed-unsupported
+//! constructs), parameter / simple local reaching-definition carriers,
+//! direct same-slot recursion holds, and the symbolic
+//! `ReturnType<typeof …>` call carrier. Content outside the selection is
+//! omitted (an unread binding) or rides the typed `Elided` carrier (a
+//! sibling member value). Locator misses are typed `None`s, never
+//! panics.
 
 use std::sync::Arc;
 
+use verter_semantic::analysis::flow::flow_graph::build_function_flow_graph;
+use verter_semantic::analysis::flow::lower::lower_slice_plan;
+use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
 use verter_semantic::analysis::function_program::{
     FunctionDescentStep, FunctionProgramEntry, FunctionProgramIndex,
 };
@@ -17,14 +22,14 @@ use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
-use crate::flow_ir::{
-    FlowIrBindingKind, FlowIrExpr, FlowIrStatement, FlowIrUnsupported, WholeFunctionFlowIrNode,
+use crate::flow_slice_content::{
+    FlowSliceSelection, SliceBindingKind, SliceContent, SliceExpr, SliceStatement, SliceUnsupported,
 };
 
 fn memo_for(source: &str) -> Arc<DeclBodyMemo> {
     let (state, _provenance) =
         crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
-            "/ws/flow_ir.ts",
+            "/ws/flow_slice_content.ts",
             source,
         );
     Arc::clone(state.decl_bodies())
@@ -53,17 +58,43 @@ fn member_entry_of<'a>(
         .unwrap_or_else(|| panic!("{class_name} member {ordinal} must be indexed"))
 }
 
-fn flow_ir_for(source: &str, name: &str) -> Arc<WholeFunctionFlowIrNode> {
+/// The REAL demand selection for `entry` under the return-projection
+/// `path` (empty = whole return): skeleton → graph → plan → lowered
+/// slice → selection — the exact pipeline the flow evaluator runs.
+fn selection_for(
+    memo: &DeclBodyMemo,
+    entry: &FunctionProgramEntry,
+    path: &[Arc<str>],
+) -> FlowSliceSelection {
+    let skeleton = memo
+        .function_body_skeleton(entry)
+        .expect("the skeleton must build for an indexed function");
+    let graph = build_function_flow_graph(&skeleton);
+    let demand = SliceDemand::for_return_projection(&skeleton, path);
+    let plan = ReturnPathPeeker::new(&graph)
+        .plan(&demand, &FlowSliceBudget::default())
+        .expect("the default budget admits these fixtures");
+    let ir = lower_slice_plan(&plan, &graph, &skeleton);
+    FlowSliceSelection::from_slice_ir(&ir)
+}
+
+fn content_for_path(source: &str, name: &str, path: &[Arc<str>]) -> Arc<SliceContent> {
     let memo = memo_for(source);
     let index = memo.function_program_index();
-    memo.whole_function_flow_ir(entry_of(&index, name))
-        .expect("flow IR must build for an indexed function")
+    let entry = entry_of(&index, name);
+    let selection = selection_for(&memo, entry, path);
+    memo.flow_slice_content(entry, selection)
+        .expect("slice content must build for an indexed function")
+}
+
+fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
+    content_for_path(source, name, &[])
 }
 
 /// @ai-generated - block-bodied function with if/else returns: region tree + no fall-through
 #[test]
 fn if_else_returns_build_region_tree_without_fallthrough() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function pick(flag: boolean) {\n\
          \x20 if (flag) {\n\
          \x20   return 1;\n\
@@ -76,25 +107,20 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
     assert!(!node.can_fall_through, "both arms return");
     assert_eq!(node.body.statements.len(), 1, "one if statement");
     assert!(node.body.can_fall_through == node.can_fall_through);
-    let FlowIrStatement::If {
-        test,
+    let SliceStatement::If {
         consequent,
         alternate,
     } = &node.body.statements[0]
     else {
         panic!("the single statement must be an if");
     };
-    assert!(
-        matches!(test, FlowIrExpr::Param { ordinal: 0 }),
-        "the test lowers the parameter reference"
-    );
     assert!(!consequent.can_fall_through, "the then arm returns");
     assert_eq!(consequent.statements.len(), 1);
     assert!(
         matches!(
             &consequent.statements[0],
-            FlowIrStatement::Return {
-                argument: Some(FlowIrExpr::Type(TypeExpr::Primitive(PrimitiveName::Number)))
+            SliceStatement::Return {
+                argument: Some(SliceExpr::Type(TypeExpr::Primitive(PrimitiveName::Number)))
             }
         ),
         "the then arm returns a widened numeric literal"
@@ -105,8 +131,8 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
     assert!(
         matches!(
             &alternate.statements[0],
-            FlowIrStatement::Return {
-                argument: Some(FlowIrExpr::Type(TypeExpr::Primitive(PrimitiveName::String)))
+            SliceStatement::Return {
+                argument: Some(SliceExpr::Type(TypeExpr::Primitive(PrimitiveName::String)))
             }
         ),
         "the else arm returns a widened string literal"
@@ -116,7 +142,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
 /// @ai-generated - if without else falls through: one return in the arm
 #[test]
 fn if_without_else_falls_through() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function pick(flag: boolean) {\n\
          \x20 if (flag) {\n\
          \x20   return 1;\n\
@@ -126,10 +152,9 @@ fn if_without_else_falls_through() {
     );
     assert!(node.can_fall_through, "no else arm: fall-through");
     assert_eq!(node.body.statements.len(), 1);
-    let FlowIrStatement::If {
+    let SliceStatement::If {
         consequent,
         alternate,
-        ..
     } = &node.body.statements[0]
     else {
         panic!("the single statement must be an if");
@@ -139,25 +164,25 @@ fn if_without_else_falls_through() {
     assert_eq!(consequent.statements.len(), 1);
     assert!(matches!(
         &consequent.statements[0],
-        FlowIrStatement::Return { argument: Some(_) }
+        SliceStatement::Return { argument: Some(_) }
     ));
 }
 
 /// @ai-generated - bare return carries no argument and terminates the region
 #[test]
 fn bare_return_carries_no_argument() {
-    let node = flow_ir_for("function done() { return; }\n", "done");
+    let node = content_for("function done() { return; }\n", "done");
     assert!(!node.can_fall_through);
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Return { argument: None }],
+        &[SliceStatement::Return { argument: None }],
     );
 }
 
 /// @ai-generated - return-free loop is fall-through transparent before a return
 #[test]
 fn return_free_loop_is_transparent() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function count() {\n\
          \x20 for (let i = 0; i < 3; i++) {\n\
          \x20 }\n\
@@ -169,18 +194,18 @@ fn return_free_loop_is_transparent() {
     assert_eq!(node.body.statements.len(), 2);
     assert!(matches!(
         node.body.statements[0],
-        FlowIrStatement::TransparentLoop
+        SliceStatement::TransparentLoop
     ));
     assert!(matches!(
         &node.body.statements[1],
-        FlowIrStatement::Return { argument: Some(_) }
+        SliceStatement::Return { argument: Some(_) }
     ));
 }
 
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function spin() {\n\
          \x20 while (true) {\n\
          \x20   return 1;\n\
@@ -191,7 +216,7 @@ fn return_bearing_loop_is_unsupported() {
     );
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Unsupported(FlowIrUnsupported::Loop)],
+        &[SliceStatement::Unsupported(SliceUnsupported::Loop)],
         "the region stops at the unsupported marker; the trailing return is dropped"
     );
     assert!(!node.can_fall_through);
@@ -200,7 +225,7 @@ fn return_bearing_loop_is_unsupported() {
 /// @ai-generated - switch is typed-unsupported
 #[test]
 fn switch_is_unsupported() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function pick(x: number) {\n\
          \x20 switch (x) {\n\
          \x20   case 1:\n\
@@ -212,14 +237,14 @@ fn switch_is_unsupported() {
     );
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Unsupported(FlowIrUnsupported::Switch)],
+        &[SliceStatement::Unsupported(SliceUnsupported::Switch)],
     );
 }
 
 /// @ai-generated - try is typed-unsupported
 #[test]
 fn try_is_unsupported() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function attempt() {\n\
          \x20 try {\n\
          \x20   return 1;\n\
@@ -230,14 +255,14 @@ fn try_is_unsupported() {
     );
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Unsupported(FlowIrUnsupported::Try)],
+        &[SliceStatement::Unsupported(SliceUnsupported::Try)],
     );
 }
 
 /// @ai-generated - return of a parameter lowers to the Param carrier with its annotation
 #[test]
 fn return_of_parameter_is_param_carrier() {
-    let node = flow_ir_for("function id(a: number) { return a; }\n", "id");
+    let node = content_for("function id(a: number) { return a; }\n", "id");
     assert_eq!(node.params.len(), 1);
     assert_eq!(node.params[0].name.as_deref(), Some("a"));
     assert!(!node.params[0].optional);
@@ -249,8 +274,8 @@ fn return_of_parameter_is_param_carrier() {
     );
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Return {
-            argument: Some(FlowIrExpr::Param { ordinal: 0 }),
+        &[SliceStatement::Return {
+            argument: Some(SliceExpr::Param { ordinal: 0 }),
         }],
     );
 }
@@ -258,7 +283,7 @@ fn return_of_parameter_is_param_carrier() {
 /// @ai-generated - optional and rest parameter flags and types lower
 #[test]
 fn optional_and_rest_params_lower() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function collect(a?: string, ...rest: boolean[]) { return; }\n",
         "collect",
     );
@@ -287,7 +312,7 @@ fn optional_and_rest_params_lower() {
 /// @ai-generated - local const binding is a Binding statement and its reference a Local carrier
 #[test]
 fn local_reaching_definition_is_binding_and_local() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function make() {\n\
          \x20 const x = 1;\n\
          \x20 return x;\n\
@@ -295,7 +320,7 @@ fn local_reaching_definition_is_binding_and_local() {
         "make",
     );
     assert_eq!(node.body.statements.len(), 2);
-    let FlowIrStatement::Binding {
+    let SliceStatement::Binding {
         name,
         kind,
         init,
@@ -305,11 +330,11 @@ fn local_reaching_definition_is_binding_and_local() {
         panic!("the first statement must be the const binding");
     };
     assert_eq!(name.as_ref(), "x");
-    assert_eq!(*kind, FlowIrBindingKind::Const);
+    assert_eq!(*kind, SliceBindingKind::Const);
     assert!(
         matches!(
             init,
-            Some(FlowIrExpr::Type(TypeExpr::Literal(LiteralValue::Number(_))))
+            Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::Number(_))))
         ),
         "a const initializer keeps its literal: {init:?}"
     );
@@ -319,8 +344,8 @@ fn local_reaching_definition_is_binding_and_local() {
     );
     assert_eq!(
         node.body.statements[1],
-        FlowIrStatement::Return {
-            argument: Some(FlowIrExpr::Local {
+        SliceStatement::Return {
+            argument: Some(SliceExpr::Local {
                 name: Arc::from("x"),
             }),
         },
@@ -330,11 +355,11 @@ fn local_reaching_definition_is_binding_and_local() {
 /// @ai-generated - bare-identifier call to the function itself is the recursion hold
 #[test]
 fn direct_self_call_is_recursion_hold() {
-    let node = flow_ir_for("function recur() { return recur(); }\n", "recur");
+    let node = content_for("function recur() { return recur(); }\n", "recur");
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Return {
-            argument: Some(FlowIrExpr::DirectSelfCall),
+        &[SliceStatement::Return {
+            argument: Some(SliceExpr::DirectSelfCall),
         }],
     );
 }
@@ -342,13 +367,13 @@ fn direct_self_call_is_recursion_hold() {
 /// @ai-generated - an exact same-file served callee is a Flow obligation edge; unresolved / member calls ride the symbolic carrier or `any`
 #[test]
 fn symbolic_and_unrepresentable_calls() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function helper() { return 1; }\n\
          function run() { return helper(); }\n",
         "run",
     );
-    let [FlowIrStatement::Return {
-        argument: Some(FlowIrExpr::DirectCall(target)),
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::DirectCall(target)),
     }] = node.body.statements.as_ref()
     else {
         panic!(
@@ -370,13 +395,15 @@ fn symbolic_and_unrepresentable_calls() {
          }\n",
     );
     let index = memo.function_program_index();
+    let entry = member_entry_of(&index, "Service", 1);
+    let selection = selection_for(&memo, entry, &[]);
     let node = memo
-        .whole_function_flow_ir(member_entry_of(&index, "Service", 1))
-        .expect("the class method flow IR must build");
+        .flow_slice_content(entry, selection)
+        .expect("the class method slice content must build");
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Return {
-            argument: Some(FlowIrExpr::Any),
+        &[SliceStatement::Return {
+            argument: Some(SliceExpr::Any),
         }],
         "an unrepresentable callee falls back to any"
     );
@@ -385,14 +412,14 @@ fn symbolic_and_unrepresentable_calls() {
 /// @ai-generated - object return keeps the spread member for later spread projection
 #[test]
 fn object_return_rides_spread_member() {
-    let node = flow_ir_for(
+    let node = content_for(
         "function merge(base: { a: number }) {\n\
          \x20 return { ...base, x: 1 };\n\
          }\n",
         "merge",
     );
-    let [FlowIrStatement::Return {
-        argument: Some(FlowIrExpr::Type(TypeExpr::Object(object))),
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Type(TypeExpr::Object(object))),
     }] = node.body.statements.as_ref()
     else {
         panic!(
@@ -414,29 +441,87 @@ fn object_return_rides_spread_member() {
 /// @ai-generated - arrow expression body lowers to a single return of the expression
 #[test]
 fn arrow_expression_body_is_single_return() {
-    let node = flow_ir_for("export const double = (x: number) => x * 2;\n", "double");
+    let node = content_for("export const double = (x: number) => x * 2;\n", "double");
     assert_eq!(node.params.len(), 1);
     assert!(!node.can_fall_through, "an expression body always returns");
     assert_eq!(
         node.body.statements.as_ref(),
-        &[FlowIrStatement::Return {
-            argument: Some(FlowIrExpr::Any),
+        &[SliceStatement::Return {
+            argument: Some(SliceExpr::Any),
         }],
-        "a binary expression is the scanner's any fallback"
+        "a binary expression is the leaf lowering's any fallback"
     );
 }
 
-/// @ai-generated - whole_function_flow_ir memoizes per function key
+/// An UNREAD binding is outside the whole-return slice's value-selected
+/// slots: the content omits the whole declaration (its initializer never
+/// lowers), while the read binding stays. Mutation recipe: lowering every
+/// declarator regardless of selection re-materialises the unread
+/// initializer.
 #[test]
-fn whole_function_flow_ir_memoizes_per_key() {
-    let memo = memo_for("function id(a: number) { return a; }\n");
-    let index = memo.function_program_index();
-    let entry = entry_of(&index, "id");
-    let first = memo.whole_function_flow_ir(entry).expect("builds");
-    let second = memo.whole_function_flow_ir(entry).expect("builds");
+fn unread_binding_is_omitted_from_content() {
+    let node = content_for(
+        "function make() {\n\
+         \x20 const unused = [1, 2, 3];\n\
+         \x20 const x = 1;\n\
+         \x20 return x;\n\
+         }\n",
+        "make",
+    );
+    assert_eq!(
+        node.body.statements.len(),
+        2,
+        "only the read binding and the return remain: {:?}",
+        node.body.statements
+    );
     assert!(
-        Arc::ptr_eq(&first, &second),
-        "the same entry reuses the memoized node"
+        matches!(
+            &node.body.statements[0],
+            SliceStatement::Binding { name, .. } if name.as_ref() == "x"
+        ),
+        "the read binding lowers"
+    );
+    assert!(matches!(
+        &node.body.statements[1],
+        SliceStatement::Return { argument: Some(_) }
+    ));
+}
+
+/// A single-member return-projection demand elides the sibling member's
+/// VALUE (the member list stays complete for static missing-member
+/// detection) and keeps the demanded member's content. Mutation recipe:
+/// lowering every member value regardless of selection re-materialises
+/// the sibling.
+#[test]
+fn member_demand_elides_sibling_member_values() {
+    let node = content_for_path(
+        "function pair() {\n\
+         \x20 return { a: \"heavy\", b: 1 };\n\
+         }\n",
+        "pair",
+        &[Arc::from("b")],
+    );
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Object { members }),
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "pair must return a structural object: {:?}",
+            node.body.statements
+        );
+    };
+    assert_eq!(members.len(), 2, "the member LIST stays complete");
+    assert_eq!(members[0].key.as_ref(), "a");
+    assert!(
+        matches!(members[0].value, SliceExpr::Elided),
+        "the sibling's value is the typed Elided carrier: {:?}",
+        members[0].value
+    );
+    assert_eq!(members[1].key.as_ref(), "b");
+    assert!(
+        matches!(members[1].value, SliceExpr::Type(_)),
+        "the demanded member's value lowers: {:?}",
+        members[1].value
     );
 }
 
@@ -446,11 +531,13 @@ fn locator_miss_is_typed_none() {
     let memo = memo_for("function id(a: number) { return a; }\n");
     let index = memo.function_program_index();
     let entry = entry_of(&index, "id");
+    let selection = selection_for(&memo, entry, &[]);
 
     let mut missing_contributor = entry.clone();
     missing_contributor.locator.contributor.contributor_index = 9999;
     assert!(
-        memo.whole_function_flow_ir(&missing_contributor).is_none(),
+        memo.flow_slice_content(&missing_contributor, selection.clone())
+            .is_none(),
         "an out-of-range contributor is a typed miss"
     );
 
@@ -459,7 +546,7 @@ fn locator_miss_is_typed_none() {
         declarator_ordinal: 99,
     }]);
     assert!(
-        memo.whole_function_flow_ir(&bad_descent).is_none(),
+        memo.flow_slice_content(&bad_descent, selection).is_none(),
         "a mismatched descent is a typed miss"
     );
 }

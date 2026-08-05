@@ -2856,8 +2856,8 @@ fn enrich_params_and_return_with_jsdoc(
     false
 }
 
-/// Enrich an inferred [`FunctionExpr`] `type_annotation` (built by
-/// `infer_expression_type` from a function-expression initializer) with the
+/// Enrich an inferred [`FunctionExpr`] `type_annotation` (built by the
+/// shared per-expression lowering from a function-expression initializer) with the
 /// declaration's JSDoc `@param`/`@returns`, bridging the `Arc<TypeExpr>` return
 /// carrier to the shared [`enrich_params_and_return_with_jsdoc`] core.
 fn enrich_function_expr_with_jsdoc(
@@ -3196,13 +3196,14 @@ fn lower_variable_parts(
         }
 
         if type_annotation.is_none() {
-            let inferred = infer_expression_type(init, source).and_then(|inferred| {
-                if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                    widen_literal_type(inferred)
-                } else {
-                    Ok(inferred)
-                }
-            });
+            let inferred =
+                infer_declaration_expression_type(init, source, true).and_then(|inferred| {
+                    if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
+                        widen_literal_type(inferred)
+                    } else {
+                        Ok(inferred)
+                    }
+                });
             let mut inferred = match inferred {
                 Ok(inferred) => inferred,
                 Err(reason) => {
@@ -3646,23 +3647,6 @@ fn extract_object_literal(
     })
 }
 
-/// Like `extract_object_literal`, but returns a `TypeExpr` directly.
-///
-/// `policy` carries the enclosing object-literal context (see
-/// [`MemberLiteralPolicy`]): a property widens / preserves / preserves+readonly
-/// per the policy, with a per-property `as const` overriding to `ConstAssert`.
-fn extract_object_literal_as_type(
-    obj: &ObjectExpression<'_>,
-    source: &str,
-    policy: MemberLiteralPolicy,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<TypeExpr> {
-    Ok(TypeExpr::Object(Arc::new(extract_object_literal(
-        obj, source, policy, budget, depth,
-    )?)))
-}
-
 use crate::analysis::function_program::static_property_key_name;
 
 /// Infer a simple type from an expression literal.
@@ -3718,22 +3702,13 @@ impl InferenceBudget {
     }
 }
 
-/// Infer the type of a value expression with a FRESH inference budget —
-/// the same lowering whole-file value-declaration initializers and arrow
-/// expression bodies use (standalone literals keep their literal type;
-/// object-literal members widen under the plain widen context). Also the
-/// expression lowering the whole-function flow IR reuses for its
-/// fully-lowered leaf positions.
-pub fn infer_expression_type(expr: &Expression<'_>, source: &str) -> InferenceResult<TypeExpr> {
-    let mut budget = InferenceBudget::default();
-    infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, &mut budget, 0)
-}
-
 /// Infer the type of a declaration-position expression with a FRESH
-/// inference budget — the same lowering return-inference applies to return
-/// arguments (`preserve_literal = false` widens a fresh top-level literal
-/// to its primitive). Also the expression lowering the whole-function flow
-/// IR reuses for return / effect positions.
+/// inference budget — the ONE shared shallow-pass per-expression lowering
+/// entry. `preserve_literal = false` widens a fresh top-level literal to
+/// its primitive (return arguments, `let` / `var` initializers);
+/// `preserve_literal = true` keeps standalone literals (arrow expression
+/// bodies, `const` initializers). Also the expression lowering the
+/// demand-sliced flow content reuses for its selected leaf positions.
 pub fn infer_declaration_expression_type(
     expr: &Expression<'_>,
     source: &str,
@@ -3981,13 +3956,24 @@ fn infer_expression_type_ctx(
             for element in &arr.elements {
                 match element {
                     oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
-                        append_spread_array_element_types(
+                        // A spread element contributes its source's element
+                        // types (array / tuple / union-of-those), else `any`.
+                        // The spread source always infers under the plain
+                        // widen context.
+                        let spread_ty = infer_expression_type_ctx(
                             &spread.argument,
                             source,
-                            &mut element_types,
+                            MemberLiteralPolicy::Widen,
                             budget,
                             depth + 1,
                         )?;
+                        if let Some(spread_elements) =
+                            collect_array_element_types_from_type(&spread_ty)
+                        {
+                            element_types.extend(spread_elements);
+                        } else {
+                            element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
+                        }
                     }
                     oxc_ast::ast::ArrayExpressionElement::Elision(_) => {}
                     _ => {
@@ -4011,9 +3997,9 @@ fn infer_expression_type_ctx(
                 readonly: false,
             })
         }
-        Expression::ObjectExpression(obj) => {
-            extract_object_literal_as_type(obj, source, policy, budget, depth + 1)
-        }
+        Expression::ObjectExpression(obj) => Ok(TypeExpr::Object(Arc::new(
+            extract_object_literal(obj, source, policy, budget, depth + 1)?,
+        ))),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => {
             let mut value = String::new();
             for quasi in &tpl.quasis {
@@ -4154,23 +4140,6 @@ fn collect_static_member_path_with_budget(
     }
     properties.reverse();
     path.extend(properties);
-    Ok(())
-}
-
-fn append_spread_array_element_types(
-    expr: &Expression<'_>,
-    source: &str,
-    element_types: &mut Vec<TypeExpr>,
-    budget: &mut InferenceBudget,
-    depth: usize,
-) -> InferenceResult<()> {
-    let spread_ty =
-        infer_expression_type_ctx(expr, source, MemberLiteralPolicy::Widen, budget, depth)?;
-    if let Some(spread_elements) = collect_array_element_types_from_type(&spread_ty) {
-        element_types.extend(spread_elements);
-    } else {
-        element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
-    }
     Ok(())
 }
 
@@ -5318,5 +5287,5 @@ pub fn parse_value_expression_type(expression: &str) -> Option<TypeExpr> {
 }
 
 fn lower_value_expression(expr: &Expression<'_>, source: &str) -> InferenceResult<TypeExpr> {
-    infer_expression_type(expr, source)
+    infer_declaration_expression_type(expr, source, true)
 }
