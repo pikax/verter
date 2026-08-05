@@ -159,6 +159,28 @@ export function subWriteToUnreadSlot(x: number) {
   dead = x;
   return 1;
 }
+
+export function subStandalonePrecedingWrite(x: string | number) {
+  x = "s";
+  return x;
+}
+
+export declare const q: number;
+
+export function subBlockLetVsOuterConst() {
+  {
+    let q = 0;
+    q = 1;
+  }
+  return q;
+}
+
+export function subHoistedVarBlock() {
+  {
+    var y = 1;
+  }
+  return y;
+}
 "#;
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
@@ -1852,6 +1874,124 @@ fn flow_return_write_to_unread_slot_stays_clean() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
             1,
             "the clean result admits warm"
+        );
+    });
+}
+
+/// R1 — a STANDALONE preceding whole-slot write (`x = "s"; return x`)
+/// reaches the lowered slice's effect obligations exactly like a write
+/// embedded in the returned expression: the slot hub's reverse
+/// eval-effect edge selects the write site, so the unapplied-write rail
+/// degrades (fail closed, ReturnOnly). Before the fix the write site's
+/// only edge ran INTO the hub, the effect frontier (out-edges only)
+/// never selected it, `lower_slice_plan` silently dropped the write
+/// (`effects=[]`), and `string | number` published as COMPLETE +
+/// warm-admitted where tsc narrows to `string`.
+#[test]
+fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subStandalonePrecedingWrite",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation,
+            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            "a preceding whole-slot parameter write is an unapplied effect: \
+             evaluating past it would publish a type tsc narrows (oracle: `string`)"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "the degraded success is ReturnOnly: zero memo entries"
+        );
+        // Still a USABLE degraded value, not a no-value failure.
+        assert!(host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .is_some());
+    });
+}
+
+/// R4 companion (the R1 + R4 unit): a sibling-block `let q` with a
+/// block-local write must NOT degrade a root-region `return q` that
+/// reads the file-scope `declare const q: number` — block-scoped
+/// bindings never hoist, so the all-same-name fallback may not
+/// value-select the block hub (which R1's reverse effect edge would
+/// then turn into a spurious `UnappliedWriteEffect`). Oracle: clean
+/// `number`, warm-admissible.
+#[test]
+fn flow_return_block_let_write_stays_clean_for_root_read_of_outer_const() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subBlockLetVsOuterConst",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation, None,
+            "the block-scoped `let q` is lexically unreachable from the root \
+             read — a kind-blind hoisting fallback spuriously degrades this"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean complete result admits warm"
+        );
+    });
+}
+
+/// R3 — a `var` inside a block is FUNCTION-scoped: the evaluator's
+/// block restore must not clobber it (`{ var y = 1 } return y` is
+/// `number` per tsc, not a silently-clean `any`). The content producer
+/// already hoists the name; this pins the evaluator's kind-aware
+/// scoping end-to-end (the graph-level fallback test only asserts edge
+/// existence and cannot catch the evaluator wipe).
+#[test]
+fn flow_return_block_var_binding_hoists_to_the_function_scope() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subHoistedVarBlock",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation, None, "a hoisted var read is clean");
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the function-scoped `var` survives the block exit (oracle: `number`)"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the clean complete result admits warm"
         );
     });
 }

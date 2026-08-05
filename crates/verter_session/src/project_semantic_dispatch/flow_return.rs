@@ -1311,13 +1311,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: &params,
             binder_env: &binder_env,
             locals: rustc_hash::FxHashMap::default(),
+            var_locals: rustc_hash::FxHashMap::default(),
             widening_locals: rustc_hash::FxHashSet::default(),
+            var_widening_locals: rustc_hash::FxHashSet::default(),
             bare_return_seen: false,
             member_filter,
             holds: Vec::new(),
             degradation: unapplied_write_effect
                 .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             degraded_locals: rustc_hash::FxHashSet::default(),
+            var_degraded_locals: rustc_hash::FxHashSet::default(),
         };
         let holds;
         let degradation;
@@ -1489,13 +1492,24 @@ struct FlowEvaluator<'d, 'b> {
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
     binder_env: &'b FlowBinderEnv,
+    /// The LEXICAL (block-scoped) local layer: `const` / `let` reaching
+    /// definitions. Block / `if`-arm evaluation saves and restores this
+    /// layer (and its widening / degraded membership); the
+    /// function-scoped `var` layer below survives those restores.
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    /// The FUNCTION-scoped local layer: `var`-kind reaching definitions.
+    /// `var` hoists to function scope, so block / `if` restores never
+    /// touch this layer; a lexical same-name binding shadows it only
+    /// while its block scope is live (reads consult `locals` first).
+    var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// Locals bound to a WIDENING literal (`const b = 1` — unannotated,
     /// no const assertion). Reads of these widen to the literal's
     /// primitive at return-object member positions and at the return
     /// join (tsc's widening-literal-type rule); `as const` / annotated
     /// literals never enter this set and stay pinned.
     widening_locals: rustc_hash::FxHashSet<String>,
+    /// The `var`-layer widening membership (same rule, function scope).
+    var_widening_locals: rustc_hash::FxHashSet<String>,
     /// Whether a bare `return;` was evaluated. A body whose ONLY return
     /// contributions are bare returns models as `void` (BL12);
     /// alongside value returns a bare return contributes `undefined`.
@@ -1520,6 +1534,9 @@ struct FlowEvaluator<'d, 'b> {
     /// `FailedBindingInitializer` degradation; an unobserved failed
     /// binding degrades nothing.
     degraded_locals: rustc_hash::FxHashSet<String>,
+    /// The `var`-layer failed-initializer membership (same rule,
+    /// function scope).
+    var_degraded_locals: rustc_hash::FxHashSet<String>,
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
@@ -1527,6 +1544,71 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// deterministic in source order).
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
         self.degradation.get_or_insert(degradation);
+    }
+
+    /// Bind one evaluated declarator into its SCOPE LAYER: a `var`-kind
+    /// binding is function-scoped (the layer block / `if` restores never
+    /// touch — `var` hoists, so `{ var y = 1 } return y` keeps `y`);
+    /// `const` / `let` stay in the lexical layer. `degraded` records a
+    /// failed initializer (the modeled `any`), `widening` the
+    /// widening-literal membership — both ride the SAME layer as the
+    /// value, so a block restore can never split a binding from its own
+    /// flags.
+    fn bind_local(
+        &mut self,
+        name: &str,
+        kind: crate::flow_slice_content::SliceBindingKind,
+        node: SemanticNodeId,
+        widening: bool,
+        degraded: bool,
+    ) {
+        let function_scoped = kind == crate::flow_slice_content::SliceBindingKind::Var;
+        let (locals, widening_set, degraded_set) = if function_scoped {
+            (
+                &mut self.var_locals,
+                &mut self.var_widening_locals,
+                &mut self.var_degraded_locals,
+            )
+        } else {
+            (
+                &mut self.locals,
+                &mut self.widening_locals,
+                &mut self.degraded_locals,
+            )
+        };
+        if degraded {
+            degraded_set.insert(name.to_string());
+        } else {
+            degraded_set.remove(name);
+        }
+        if widening {
+            widening_set.insert(name.to_string());
+        } else {
+            widening_set.remove(name);
+        }
+        locals.insert(name.to_string(), node);
+    }
+
+    /// Resolve a local read across the two scope layers: the lexical
+    /// layer shadows the function-scoped `var` layer while its block is
+    /// live. Returns the bound node with its LAYER-scoped `(degraded,
+    /// widening)` membership — the flags always come from the same layer
+    /// as the value.
+    fn lookup_local(&self, name: &str) -> Option<(SemanticNodeId, bool, bool)> {
+        if let Some(node) = self.locals.get(name) {
+            return Some((
+                *node,
+                self.degraded_locals.contains(name),
+                self.widening_locals.contains(name),
+            ));
+        }
+        self.var_locals.get(name).map(|node| {
+            (
+                *node,
+                self.var_degraded_locals.contains(name),
+                self.var_widening_locals.contains(name),
+            )
+        })
     }
 
     /// Evaluate ONE return site under the member-projection demand: the
@@ -1579,7 +1661,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let crate::flow_slice_content::SliceExpr::Local { name } = expr else {
             return node;
         };
-        if !self.widening_locals.contains(name.as_ref()) {
+        let widening = self
+            .lookup_local(name.as_ref())
+            .is_some_and(|(_, _, widening)| widening);
+        if !widening {
             return node;
         }
         let graph = self.dispatch.graph();
@@ -1688,9 +1773,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
                 crate::flow_slice_content::SliceStatement::Binding {
                     name,
+                    kind,
                     init,
                     widening_literal,
-                    ..
                 } => {
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
@@ -1699,13 +1784,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if let Some(init) = init {
                         match self.eval_expr(init) {
                             Ok(Some(node)) => {
-                                self.degraded_locals.remove(name.as_ref());
-                                if *widening_literal {
-                                    self.widening_locals.insert(name.to_string());
-                                } else {
-                                    self.widening_locals.remove(name.as_ref());
-                                }
-                                self.locals.insert(name.to_string(), node);
+                                self.bind_local(name, *kind, node, *widening_literal, false);
                             }
                             Ok(None) => {}
                             // A failed initializer binds `any` — the
@@ -1717,16 +1796,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // (never a poison; an unobserved failed
                             // binding degrades nothing).
                             Err(_) => {
-                                self.degraded_locals.insert(name.to_string());
-                                self.widening_locals.remove(name.as_ref());
-                                self.locals.insert(
-                                    name.to_string(),
-                                    self.dispatch
-                                        .graph()
-                                        .intern_node(SemanticNodeData::Primitive(
-                                            PrimitiveKind::Any,
-                                        )),
-                                );
+                                let any = self
+                                    .dispatch
+                                    .graph()
+                                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+                                self.bind_local(name, *kind, any, false, true);
                             }
                         }
                     }
@@ -1821,7 +1895,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 params: &params,
                 binder_env: &binder_env,
                 locals: rustc_hash::FxHashMap::default(),
+                var_locals: rustc_hash::FxHashMap::default(),
                 widening_locals: rustc_hash::FxHashSet::default(),
+                var_widening_locals: rustc_hash::FxHashSet::default(),
                 bare_return_seen: false,
                 // A nested function value always evaluates its WHOLE
                 // return (its signature's return type) — the member
@@ -1830,6 +1906,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 holds: Vec::new(),
                 degradation: None,
                 degraded_locals: rustc_hash::FxHashSet::default(),
+                var_degraded_locals: rustc_hash::FxHashSet::default(),
             };
             let outcome = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
@@ -1897,18 +1974,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // Observing a binding whose initializer FAILED is the
                 // `FailedBindingInitializer` degradation: the value is a
                 // modeled `any`, not the initializer's real type. A plain
-                // unbound local (hoisted `var` / TDZ forward reference)
-                // stays the undegraded implicit-`any`.
-                if self.degraded_locals.contains(name.as_ref()) {
-                    self.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
-                    );
+                // unbound local (a not-yet-assigned hoisted `var` / TDZ
+                // forward reference) stays the undegraded implicit-`any`.
+                match self.lookup_local(name.as_ref()) {
+                    Some((node, degraded, _)) => {
+                        if degraded {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
+                            );
+                        }
+                        Ok(Some(node))
+                    }
+                    None => Ok(Some(
+                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+                    )),
                 }
-                Ok(Some(
-                    self.locals.get(name.as_ref()).copied().unwrap_or_else(|| {
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                    }),
-                ))
             }
             crate::flow_slice_content::SliceExpr::Object { members } => {
                 // Structural object-literal return: each member value
@@ -2116,7 +2196,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // DEGRADATION — a modeled `any`, not the real semantics.
                 let node = match param {
                     Some(ordinal) => self.params.get(*ordinal as usize).copied(),
-                    None => self.locals.get(name.as_ref()).copied(),
+                    None => self.lookup_local(name.as_ref()).map(|(node, _, _)| node),
                 };
                 let Some(node) = node else {
                     return Ok(Some(

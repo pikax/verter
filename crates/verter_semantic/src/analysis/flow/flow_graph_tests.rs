@@ -378,6 +378,57 @@ fn flow_graph_read_edges_resolve_nearest_enclosing_binding() {
     );
 }
 
+/// R1 — the write loop emits BOTH effect directions: `site → hub`
+/// (evaluating the site affects the slot) AND `hub → write site` (a
+/// slice selecting the hub must select the write site's evaluation).
+/// The planner's effect frontier walks out-edges only, so without the
+/// reverse edge a standalone preceding write (`x = "s"; return x`) is
+/// never selected and its effect obligation silently drops at lowering.
+#[test]
+fn flow_graph_write_hub_carries_reverse_effect_edge_to_write_site() {
+    let skeleton = skeleton_of(r#"function r1(x: string | number) { x = "s"; return x; }"#);
+    let graph = build_function_flow_graph(&skeleton);
+    let x_hub = graph.binding_node(single_binding(&skeleton, "x"));
+    let write_site = graph.expr_site_node(skeleton.writes[0].site);
+    assert!(
+        has_edge_class(&graph, write_site, x_hub, FlowEdgeClass::EvalEffect),
+        "the forward site → hub effect edge stays"
+    );
+    assert!(
+        has_edge_class(&graph, x_hub, write_site, FlowEdgeClass::EvalEffect),
+        "the hub carries the reverse effect edge to its write site — the \
+         effect frontier can only reach the site through out-edges"
+    );
+}
+
+/// R4 — the all-same-name fallback is the HOISTING arm only: `var` and
+/// nested function declarations hoist past non-enclosing regions;
+/// block-scoped `let` / `const` / class / catch-param bindings never
+/// do. A root-region read of `q` whose only same-name binding is a
+/// sibling-block `let q` gets NO binding edge (the name resolves as a
+/// free file-scope name instead of value-selecting the block hub).
+#[test]
+fn flow_graph_fallback_binds_hoisting_kinds_only() {
+    let skeleton = skeleton_of("function fq() { { let q = 0; } return q; }");
+    let graph = build_function_flow_graph(&skeleton);
+    let q_name = skeleton.name_id("q").expect("q interned");
+    let q_binding = skeleton.bindings_named(q_name).next().expect("q binds");
+    assert_eq!(
+        skeleton.binding(q_binding).kind,
+        crate::analysis::flow::SkeletonBindingKind::Let
+    );
+    let read_site = skeleton.return_sites[0].argument.expect("argument");
+    assert!(
+        !has_edge_class(
+            &graph,
+            graph.expr_site_node(read_site),
+            graph.binding_node(q_binding),
+            FlowEdgeClass::ValueDef
+        ),
+        "a block-scoped `let` never enters the hoisting fallback"
+    );
+}
+
 #[test]
 fn flow_graph_is_arena_free_send_sync_static() {
     fn assert_arena_free<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}

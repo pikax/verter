@@ -42,6 +42,7 @@ mod hashing_tests;
 const HASH_SALT: &[u8] = b"verter-flow-slice-hash:v1";
 const HASH_SEP: u8 = 0;
 
+#[cfg(feature = "test-support")]
 thread_local! {
     /// Per-thread count of [`compute_flow_slice_hash`] executions — the
     /// behavioral half of the hash-then-lower guard. The opaque
@@ -51,12 +52,16 @@ thread_local! {
     /// compute performs no hash computation of its own; the guard binds
     /// that half to this counter. Thread-local (cache-runtime computes
     /// run on the demanding thread), observability only: never key
-    /// material, never a fact, never exported hash bytes.
+    /// material, never a fact, never exported hash bytes. Compiled only
+    /// under the `test-support` feature (a consumer DEV-dependency edge —
+    /// `#[cfg(test)]` cannot serve a cross-crate consumer), so production
+    /// builds carry neither the TLS nor the increment.
     static COMPUTE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The number of [`compute_flow_slice_hash`] executions performed on the
 /// CALLING thread. Guard observability only — see the thread-local's doc.
+#[cfg(feature = "test-support")]
 #[must_use]
 pub fn compute_flow_slice_hash_thread_invocations() -> u64 {
     COMPUTE_INVOCATIONS.with(std::cell::Cell::get)
@@ -73,7 +78,8 @@ pub fn compute_flow_slice_hash_thread_invocations() -> u64 {
 /// keys content-addressed artifacts only). NOTE the type-state pins
 /// hash-BEFORE-lowered-KEY only; "the lowered compute performs no hash
 /// computation" is the separate behavioral half, held by the
-/// [`compute_flow_slice_hash_thread_invocations`] counter binding.
+/// `compute_flow_slice_hash_thread_invocations` counter binding (the
+/// `test-support`-feature-gated accessor consumer guard tests bind to).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
 pub struct FlowSliceHash(Hash16);
 
@@ -95,6 +101,7 @@ pub fn compute_flow_slice_hash(
     graph: &FunctionFlowGraph,
     skeleton: &FunctionBodySkeleton,
 ) -> FlowSliceHash {
+    #[cfg(feature = "test-support")]
     COMPUTE_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
     let mut buf: Vec<u8> = Vec::with_capacity(256);
     buf.extend_from_slice(HASH_SALT);

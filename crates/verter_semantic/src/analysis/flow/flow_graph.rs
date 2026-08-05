@@ -281,10 +281,12 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
     // same-named OUTER binding therefore gets NO dependence edge, so an
     // irrelevant outer initializer can never enter a demand slice through
     // name-keyed fan-out. Only when the enclosing chain carries NO
-    // declaration does the resolution fall back to EVERY same-name
-    // binding — the conservative arm for genuinely ambiguous hoisting
-    // (`var` / nested function declarations living in non-enclosing
-    // regions still hoist to function scope).
+    // declaration does the resolution fall back to same-name bindings of
+    // the HOISTING kinds only — `var` and nested function declarations
+    // living in non-enclosing regions still hoist to function scope;
+    // block-scoped kinds (`let` / `const` / class / catch-param) never
+    // do, so a kind-blind fallback would value-select a lexically
+    // unreachable sibling-block hub and drag its writes into the slice.
     let bindings_of_name_in_scope = |name: super::FlowNameId, region: SkeletonRegionId| {
         let mut current = Some(region);
         while let Some(enclosing) = current {
@@ -303,7 +305,14 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             .bindings
             .iter()
             .enumerate()
-            .filter(|(_, binding)| binding.name == name)
+            .filter(|(_, binding)| {
+                binding.name == name
+                    && matches!(
+                        binding.kind,
+                        super::SkeletonBindingKind::Var
+                            | super::SkeletonBindingKind::NestedFunction
+                    )
+            })
             .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
             .collect()
     };
@@ -438,6 +447,19 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 FlowEdgeClass::EvalEffect,
             )) {
                 edges.push((effect_from, binding_node(binding), FlowEdgeKind::EvalEffect));
+            }
+            // The REVERSE effect edge: a slice that selects the slot's hub
+            // must select the write site's evaluation, because the demand
+            // planner's effect frontier walks OUT-edges only — with the
+            // `site → hub` direction alone, a standalone preceding write
+            // (`x = "s"; return x`) is never reached, and its effect
+            // obligation silently drops out of the lowered slice.
+            if seen.insert((
+                binding_node(binding).0,
+                effect_from.0,
+                FlowEdgeClass::EvalEffect,
+            )) {
+                edges.push((binding_node(binding), effect_from, FlowEdgeKind::EvalEffect));
             }
         }
     }

@@ -206,6 +206,15 @@ toml = "1.1"
 # unifies feature requirements per-target — for tests/examples/benches
 # the union includes `test-support`; for production it does not.
 verter_scheduler = { path = "../verter_scheduler", features = ["test-support"] }
+# Activates the `test-support` feature on `verter_semantic` for
+# `cargo test --package verter_session` (and example/bench) builds only —
+# the flow-slice hash invocation counter
+# (`compute_flow_slice_hash_thread_invocations`) that the hash-then-lower
+# behavioral guard (`hash_then_lower_round_trip_serves_lowered_slice_ir`)
+# binds to. The regular dependency above does NOT enable the feature, so
+# production builds compile `compute_flow_slice_hash` without the counter
+# TLS or its increment. Same idiom as the `verter_scheduler` edge above.
+verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 # Self-edge that activates `verter_session`'s OWN `test-support` feature for its
 # test / example / bench targets ONLY (the integration binary `tests/cases/**`
 # among them). Cargo unifies feature requirements per-target: for the test
