@@ -73,15 +73,25 @@ impl SemanticGraphStore {
     /// step, exempting every family the group needs to stay resident from
     /// victim selection.
     ///
-    /// This is the entry the batched SCC member publish uses. A component
-    /// is only coherent whole: its members are warm-readable only while
-    /// the root candidate they were fenced on is still resident, and a
-    /// member published beside an evicted sibling is the same torn
-    /// component the root-witness fence forbids. Recording the whole
+    /// This is the entry the batched SCC member publish uses, and the
+    /// invariant it serves is PUBLICATION ATOMICITY: a member must never
+    /// be published onto a root the same batch evicted. That is exactly
+    /// the torn component the root-witness fence forbids, arriving through
+    /// the budget instead of through an invalidation. Recording the whole
     /// group in one call — with the root and every member family exempt —
     /// removes the per-member admission that could otherwise select the
     /// group's own root (or an earlier member of the same group) as its
-    /// FIFO victim. See
+    /// FIFO victim.
+    ///
+    /// It is NOT perpetual co-residency. Members carry the root's EXACT
+    /// validity carrier (`read_set_signature`, `self_root_canonicals`,
+    /// `validated_at_generation`), so once published they validate
+    /// independently of the root's slot; a LATER, unrelated budget step
+    /// may evict the root while every member stays warm-readable, and that
+    /// is sound — a valid entry evicted from a memory-bound FIFO only
+    /// forces a recompute, never an incorrect result. The exemption bounds
+    /// what THIS publish may select, not how long the component stays
+    /// resident afterwards. See
     /// [`crate::bounded_query_retention::GlobalRetentionBudget::record_admissions_exempt`]
     /// for the substrate contract, including the caller's obligation to
     /// refuse a group larger than the budget cap.

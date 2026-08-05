@@ -579,6 +579,57 @@ impl FunctionBodySkeleton {
         self.hoisting_bindings_of_name(name)
     }
 
+    /// The TYPE-SPACE twin of [`Self::bindings_of_name_in_scope`]:
+    /// whether this frame declares `name` in TYPE space anywhere on the
+    /// region chain enclosing `region`.
+    ///
+    /// The two spaces are resolved SEPARATELY, not by filtering the value
+    /// lookup's answer. `bindings_of_name_in_scope` stops at the nearest
+    /// region binding the name in ANY space, so filtering its result by
+    /// kind reports "not type-bound" the moment a value-only binding
+    /// (`const` / `let` / `var` / a parameter / a nested function
+    /// declaration) shadows a type-declaring OUTER binding of the same
+    /// frame — `class Info {}` at the frame root with `const Info = 1` in
+    /// an inner block still owns `Info` in type space at that inner
+    /// block. TypeScript's `resolveName` with a Type meaning SKIPS a scope
+    /// whose symbol carries no type meaning and continues outward, so this
+    /// walk filters by kind at EVERY hop instead of at the first hit only.
+    ///
+    /// `class` and `enum` declare a type alongside their value;
+    /// `namespace` declares a namespace-qualified type space; `import X =
+    /// …` re-declares whatever spaces its target occupies. Everything else
+    /// declares a VALUE only and leaves an outer same-name type completely
+    /// visible. (`namespace` and `import =` are illegal inside a function
+    /// body — TS1235 / TS1232 — but the skeleton still records the
+    /// recovered binding, and it genuinely occupies type space when it
+    /// does.)
+    ///
+    /// There is no hoisting union here: no hoisting kind (`var`, a nested
+    /// function declaration) declares a type, so the function-scope
+    /// hoisting fallback that [`Self::bindings_of_name_in_scope`] applies
+    /// can contribute nothing to type space.
+    #[must_use]
+    pub fn declares_type_space_in_scope(&self, name: FlowNameId, region: SkeletonRegionId) -> bool {
+        let mut current = Some(region);
+        while let Some(enclosing) = current {
+            if self.bindings.iter().any(|binding| {
+                binding.name == name
+                    && binding.region == enclosing
+                    && matches!(
+                        binding.kind,
+                        SkeletonBindingKind::Class
+                            | SkeletonBindingKind::Enum
+                            | SkeletonBindingKind::Namespace
+                            | SkeletonBindingKind::ImportEquals
+                    )
+            }) {
+                return true;
+            }
+            current = self.regions[enclosing.index()].parent;
+        }
+        false
+    }
+
     /// Every same-name binding that reaches FUNCTION scope, wherever in
     /// the frame it is written.
     ///

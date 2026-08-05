@@ -739,34 +739,6 @@ enum NameBinding {
     Unmodeled,
 }
 
-/// Whether a binding of this kind declares a name in TYPE space.
-///
-/// `class` and `enum` declare a type alongside their value; `namespace`
-/// declares a namespace-qualified type space; `import X = …` re-declares
-/// whatever spaces its target occupies, so it is treated as
-/// type-declaring. Everything else — `const` / `let` / `var`, a
-/// parameter, a `catch` parameter, a hoisted nested function declaration
-/// — declares a VALUE only, and leaves an outer same-name type
-/// completely visible.
-///
-/// (`namespace` and `import =` are illegal inside a function body —
-/// TS1235 / TS1232 — but the skeleton still records the recovered
-/// binding, and it genuinely occupies type space when it does.)
-fn kind_declares_type_space(kind: SkeletonBindingKind) -> bool {
-    match kind {
-        SkeletonBindingKind::Class
-        | SkeletonBindingKind::Enum
-        | SkeletonBindingKind::Namespace
-        | SkeletonBindingKind::ImportEquals => true,
-        SkeletonBindingKind::Param
-        | SkeletonBindingKind::Const
-        | SkeletonBindingKind::Let
-        | SkeletonBindingKind::Var
-        | SkeletonBindingKind::NestedFunction
-        | SkeletonBindingKind::CatchParam => false,
-    }
-}
-
 /// A name an enclosing frame binds, as the ENCLOSING frame's lexical
 /// authority classified it at the nested function value's own position.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -890,21 +862,19 @@ impl Lowerer<'_> {
     /// Whether this frame binds `name` in TYPE space at `span`.
     ///
     /// The TYPE-space twin of [`Self::resolve_name`], over the SAME
-    /// [`FunctionBodySkeleton`] authority but filtered to the kinds that
-    /// actually declare a type ([`kind_declares_type_space`]). A local
-    /// binding that declares a VALUE only is TRANSPARENT here: `const
-    /// Info = 1` leaves `x as Info` naming the outer type alias, so the
-    /// lookup falls through to the enclosing frames' captured type-space
-    /// names exactly as a completely unbound name does.
+    /// [`FunctionBodySkeleton`] authority through its type-space entry
+    /// ([`FunctionBodySkeleton::declares_type_space_in_scope`]) — a
+    /// SEPARATE region-chain walk, not a kind filter over the value
+    /// lookup's answer. A local binding that declares a VALUE only is
+    /// TRANSPARENT here at every hop: `const Info = 1` leaves `x as Info`
+    /// naming whatever encloses it — an outer `class Info {}` of the same
+    /// frame, or failing that the module type alias — so the lookup falls
+    /// through to the enclosing frames' captured type-space names exactly
+    /// as a completely unbound name does.
     fn type_space_name_is_frame_bound(&self, name: &str, span: oxc_span::Span) -> bool {
         if let Some(name_id) = self.skeleton.name_id(name) {
             let region = self.skeleton.innermost_region_containing(span.into());
-            if self
-                .skeleton
-                .bindings_of_name_in_scope(name_id, region)
-                .iter()
-                .any(|id| kind_declares_type_space(self.skeleton.binding(*id).kind))
-            {
+            if self.skeleton.declares_type_space_in_scope(name_id, region) {
                 return true;
             }
         }
@@ -996,21 +966,23 @@ impl Lowerer<'_> {
                 continue;
             }
             let text = self.skeleton.name(binding.name);
+            // The TYPE-space bit is resolved SEPARATELY from the value
+            // classification below, and BEFORE the value lookup's
+            // empty-set bail: the two spaces disagree on the same region
+            // chain (a `const` is a value capture that shadows no type; a
+            // `class` is both), so neither space may gate the other's
+            // answer.
+            if self
+                .skeleton
+                .declares_type_space_in_scope(binding.name, region)
+            {
+                type_space_names.insert(Arc::from(text));
+            }
             let resolved = self
                 .skeleton
                 .bindings_of_name_in_scope(binding.name, region);
             if resolved.is_empty() {
                 continue;
-            }
-            // The TYPE-space bit is carried separately from the value
-            // classification below: the two spaces disagree on the same
-            // binding set (a `const` is a value capture that shadows no
-            // type; a `class` is both).
-            if resolved
-                .iter()
-                .any(|id| kind_declares_type_space(self.skeleton.binding(*id).kind))
-            {
-                type_space_names.insert(Arc::from(text));
             }
             let captured = match self.classify_bindings(text, &resolved) {
                 NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured => {

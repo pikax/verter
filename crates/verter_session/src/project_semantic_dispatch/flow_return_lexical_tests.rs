@@ -389,6 +389,18 @@ export function bEnum(x: unknown) {
   return x as Info;
 }
 
+// The type-space lookup must keep walking OUTWARD past a value-only
+// region: the nearest region binding `Info` binds it in VALUE space only,
+// but an OUTER region of the SAME frame declares the class. A lookup that
+// stops at the nearest any-space region reads the module alias.
+export function bClassOuterRegion(x: unknown) {
+  class Info {}
+  {
+    const Info = 1;
+    return x as Info;
+  }
+}
+
 export function capConst() {
   const Info = 1;
   return (x: unknown) => x as Info;
@@ -401,6 +413,14 @@ export function capParam(Info: number) {
 export function capClass() {
   class Info {}
   return (x: unknown) => x as Info;
+}
+
+export function capClassOuterRegion() {
+  class Info {}
+  {
+    const Info = 1;
+    return (x: unknown) => x as Info;
+  }
 }
 "#;
 
@@ -1050,9 +1070,11 @@ fn flow_return_degraded_component_member_is_order_independent_and_never_warms() 
 /// ```text
 /// bCtrlNoLocal(x: unknown): Info      bClass(x: unknown): {}
 /// bCtrlOtherLocal(x: unknown): Res    bEnum(x: unknown): Info   // TS4060: private name
-/// bConst / bLet / bVar: Info          capConst(): (x: unknown) => Info
-/// bParam(Info: number, …): Info       capParam(Info: number): (x: unknown) => Info
-/// bFn(x: unknown): Info               capClass(): (x: unknown) => {}
+/// bConst / bLet / bVar: Info          bClassOuterRegion(x: unknown): {}
+/// bParam(Info: number, …): Info       capConst(): (x: unknown) => Info
+/// bFn(x: unknown): Info               capParam(Info: number): (x: unknown) => Info
+///                                     capClass(): (x: unknown) => {}
+///                                     capClassOuterRegion(): (x: unknown) => {}
 /// ```
 ///
 /// `bClass` / `bEnum` / `capClass` print the LOCAL declaration's type
@@ -1061,11 +1083,22 @@ fn flow_return_degraded_component_member_is_order_independent_and_never_warms() 
 /// Every other row is the module alias, which the owner-scope leaf
 /// lowering resolves correctly and must be allowed to publish.
 ///
+/// The `…OuterRegion` rows pin the SECOND half of the rule: the type-space
+/// lookup must keep walking OUTWARD past a region that binds the name in
+/// VALUE space only. `class Info {}` at the frame root with `const Info =
+/// 1` in an inner block still owns `Info` in type space at that inner
+/// block — `resolveName` with a Type meaning skips a scope whose symbol
+/// carries no type meaning and continues outward. A lookup that stops at
+/// the nearest ANY-space region sees only the `const`, reports "not
+/// frame-bound", and publishes the module alias clean and warm.
+///
 /// Mutation recipe: routing `names.type_names` back through
 /// `resolve_name` (the value inventory) flips every value-space row to
 /// `Error(Miss)`; dropping the type-space filter entirely (treating no
 /// local as type-declaring) flips `bClass` / `bEnum` / `capClass` to a
-/// warm wrong answer.
+/// warm wrong answer; filtering the nearest ANY-space region's binding set
+/// by kind instead of walking the region chain in type space flips
+/// `bClassOuterRegion` / `capClassOuterRegion` to a warm wrong answer.
 #[test]
 fn flow_return_type_space_names_are_not_classified_against_the_value_inventory() {
     let host = make_r5_host();
@@ -1093,7 +1126,9 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 
     // TYPE-declaring local kinds: the frame owns the name in type space,
     // so the owner-scope answer is the wrong one and must fail closed.
-    for name in ["bClass", "bEnum"] {
+    // `bClassOuterRegion` declares the class in an OUTER region of the
+    // same frame, behind a value-only `const` in the reading region.
+    for name in ["bClass", "bEnum", "bClassOuterRegion"] {
         assert_fails_closed(&host, name);
     }
 
@@ -1118,4 +1153,5 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
         );
     }
     assert_fails_closed(&host, "capClass");
+    assert_fails_closed(&host, "capClassOuterRegion");
 }
