@@ -5,6 +5,13 @@ use std::sync::Arc;
 use crate::compile::{
     CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
 };
+use crate::parser::types::ParsedSfc;
+
+/// One standalone compile plus the exact parse that produced it.
+pub struct StandaloneCompileOutput {
+    pub parsed: ParsedSfc,
+    pub result: VerterCompileResult,
+}
 
 /// Bytes owned by a standalone request, disjoint from registered host sources.
 #[derive(Debug, Clone)]
@@ -43,6 +50,26 @@ impl StandaloneCompiler {
             macro_semantics,
             &allocator,
         )
+    }
+
+    /// Compile copied standalone Vue source and retain its exact parse for
+    /// output-source-space qualification without a second carrier parse.
+    pub fn compile_source_with_parsed(
+        &self,
+        source: &StandaloneSourceBytes,
+        options: &CodegenOptions,
+        verter_options: &VerterCompileOptions,
+        macro_semantics: &VueMacroSemanticInput,
+    ) -> StandaloneCompileOutput {
+        let allocator = oxc_allocator::Allocator::new();
+        let (parsed, result) = crate::compile::compile_with_parsed(
+            source.as_str(),
+            options,
+            verter_options,
+            macro_semantics,
+            &allocator,
+        );
+        StandaloneCompileOutput { parsed, result }
     }
 }
 

@@ -1594,7 +1594,8 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     }
 }
 
-/// Build preprocessor requests for blocks that use non-native languages.
+/// Build preprocessor requests for required preprocessing and for optional
+/// bundler-supplied compiled CSS from native style dialects.
 ///
 /// A non-native language is any `lang` that the Rust compiler cannot handle natively:
 /// - Template: anything other than HTML (or no `lang`)
@@ -1615,7 +1616,11 @@ fn build_preprocessor_requests(
         };
         let content_class = crate::block_content::role_class(role);
         let lang = crate::block_content::role_lang(inventory, role, syntax);
-        if crate::block_content::block_content_is_native(inventory, role, syntax, &lang) {
+        let optional_native_style_output = matches!(role, SectionRole::Style { .. })
+            && matches!(lang.as_str(), "scss" | "sass" | "less" | "stylus");
+        if crate::block_content::block_content_is_native(inventory, role, syntax, &lang)
+            && !optional_native_style_output
+        {
             continue;
         }
         let Some(block_ref) = inventory.block_ref(*id) else {
@@ -3467,10 +3472,14 @@ watch(count, (value, oldValue) => {
     /// SCSS is a native block-content dialect; the bundler may still transform
     /// it later, but analysis/selection does not require a caller result.
     #[test]
-    fn no_preprocessor_request_for_native_scss_style() {
+    fn native_scss_style_offers_optional_supplied_output_request() {
         let source = "<template><div>hello</div></template>\n<style lang=\"scss\">\n.a { .b { color: red } }\n</style>";
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
-        assert!(snap.preprocessor_requests.is_empty());
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        assert_eq!(
+            snap.preprocessor_requests[0].content_class,
+            BlockContentClass::Style
+        );
     }
 
     /// SCSS style blocks scan to full CSS facts (classes with exact
@@ -3750,8 +3759,8 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(
             snap.preprocessor_requests.len(),
-            2,
-            "SCSS is native; only template and script need supplied output"
+            3,
+            "native SCSS also offers optional bundler-supplied compiled CSS"
         );
 
         // Verify each type is present
@@ -3762,7 +3771,7 @@ watch(count, (value, oldValue) => {
             .collect();
         assert!(types.contains(&BlockContentClass::Template));
         assert!(types.contains(&BlockContentClass::Script));
-        assert!(!types.contains(&BlockContentClass::Style));
+        assert!(types.contains(&BlockContentClass::Style));
     }
 
     #[test]

@@ -190,6 +190,9 @@ pub struct CodegenOptions {
     /// When true, skip source map generation and base64 encoding.
     /// Returns empty strings for `source_map` and `code_with_source_map`.
     pub skip_source_map: bool,
+    /// Emit typed IDE chunk boundaries for multi-source composition. Internal
+    /// carrier adapters enable this only while compiling isolated units.
+    pub ide_chunk_boundaries: bool,
 
     // -- Vue compiler parity options --
     /// Custom interpolation delimiters. Default: `("{{", "}}")`.
@@ -366,6 +369,25 @@ pub struct VerterCompileOptions {
     /// request-projected style bytes. `None` keeps direct compiler callers on
     /// the registered carrier's raw-style derivation.
     pub style_v_bind_usage_complete: Option<bool>,
+    /// Official-style `bindingMetadata` transferred from the script unit into
+    /// a separately compiled template unit.
+    pub template_binding_metadata: Option<TemplateBindingMetadata>,
+    /// Parser-derived identifiers from a separately parsed template unit,
+    /// consumed by script import elision.
+    pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
+    /// Emit an inline-script shell with a typed generated-template hole.
+    pub runtime_template_hole: bool,
+    /// Lower a standalone template as the setup-returned inline chunk.
+    pub runtime_inline_template_chunk: bool,
+}
+
+/// Owned script semantics needed by a separately compiled template unit.
+#[derive(Debug, Clone, Default)]
+pub struct TemplateBindingMetadata {
+    pub bindings: rustc_hash::FxHashMap<String, crate::template::code_gen::binding::BindingType>,
+    pub has_script: bool,
+    pub const_props: Option<rustc_hash::FxHashSet<String>>,
+    pub ref_bindable_imports: rustc_hash::FxHashSet<String>,
 }
 
 // ── Result types ───────────────────────────────────────────────────
@@ -404,6 +426,9 @@ pub struct VerterCompileResult {
     /// The highest-priority reason the requested mode was constrained,
     /// or `None` when no reason fired.
     pub downgrade_reason: Option<verter_audit::payloads::tags::DowngradeReasonTag>,
+    /// Script semantics available for official-style separate template
+    /// compilation. This is compiler metadata, not generated code.
+    pub template_binding_metadata: TemplateBindingMetadata,
 }
 
 /// Generated output for the `<script>` or `<script setup>` block.
@@ -413,6 +438,8 @@ pub struct VerterScriptBlock {
     pub source_map: String,
     pub setup: bool,
     pub attrs: Vec<(String, String)>,
+    pub generated_template_hole: Option<std::ops::Range<u32>>,
+    pub runtime_imports: Vec<&'static str>,
 }
 
 /// Generated output for the `<template>` block (VDOM, Vapor, or SSR render function).
@@ -467,6 +494,12 @@ pub struct DestructuredBlockMeta {
 }
 
 /// Generated IDE block for type checking (TSX or JSX).
+#[derive(Debug, Clone)]
+pub struct GeneratedCodeChunk {
+    pub code: String,
+    pub source_map: String,
+}
+
 pub struct VerterTsxBlock {
     /// The generated TSX/JSX code.
     pub code: String,
@@ -479,4 +512,10 @@ pub struct VerterTsxBlock {
     /// Structured metadata for the destructured block region, if present.
     /// Enables direct diagnostic-to-SFC mapping without parsing offset comments.
     pub destructured_block: Option<DestructuredBlockMeta>,
+    /// Generated-code splice point immediately before the deferred wrapper
+    /// close. Present only when `ide_chunk_boundaries` was requested.
+    pub generated_template_hole: Option<std::ops::Range<u32>>,
+    /// Independently lowered template chunk, before it is composed into an IDE
+    /// shell. Present only when `ide_chunk_boundaries` was requested.
+    pub generated_template_chunk: Option<GeneratedCodeChunk>,
 }

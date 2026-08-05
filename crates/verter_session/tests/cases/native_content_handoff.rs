@@ -95,15 +95,11 @@ fn native_external_style_reads_registered_vfs_content_and_parses_its_dialect() {
         style.content_availability,
         BlockContentAvailability::NativeAvailable
     );
-    assert!(
-        style.css.is_none(),
-        "external CSS facts must fail closed until their source space is described; got class spans {:?}",
-        style.css.as_ref().map(|css| css
-            .classes
-            .iter()
-            .map(|class| (class.name.as_str(), class.span))
-            .collect::<Vec<_>>())
-    );
+    let css = style.css.as_ref().expect("qualified external style facts");
+    assert!(css
+        .classes
+        .iter()
+        .any(|class| class.name == "external-card"));
     assert_eq!(
         style.source_space_token.as_deref(),
         Some(content.source_space_token.as_str())
@@ -138,10 +134,10 @@ fn external_style_dialect_is_inferred_from_resolved_specifier_extension() {
         BlockContentAvailability::NativeAvailable
     );
     let analysis = host.get_analysis(&owner.canonical_id).unwrap();
-    assert!(
-        analysis.styles[0].css.is_none(),
-        "external style analysis must not publish block-local spans as carrier-absolute"
-    );
+    assert!(analysis.styles[0].css.as_ref().is_some_and(|css| css
+        .classes
+        .iter()
+        .any(|class| class.name == "extension-dialect")));
 }
 
 #[test]
@@ -386,7 +382,51 @@ fn supplied_validated_precedence_exposes_exactly_one_live_source() {
 }
 
 #[test]
-fn supplied_template_runtime_compile_is_typed_unavailable() {
+fn validated_supplied_output_wins_over_native_source_bytes() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert(
+        &host,
+        "/workspace/theme.scss",
+        ".native-only { color: red }",
+        FileLanguage::script_ts(),
+    );
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/App.vue".to_string(),
+            source: Arc::from("<style src=\"./theme.scss\" lang=\"scss\"></style>"),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let request = update
+        .preprocessor_requests
+        .first()
+        .expect("native bytes remain eligible for validated supplied output");
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: update.canonical_id.clone(),
+            compile_profile: CompileProfile::default(),
+            overrides: vec![supplied_entry(request, ".supplied-wins { color: blue }")],
+        })
+        .unwrap();
+
+    let selected = host
+        .get_block_content(query(&update.canonical_id, &request.block_token))
+        .unwrap();
+    assert_eq!(
+        selected.availability,
+        BlockContentAvailability::SuppliedAvailable
+    );
+    assert_eq!(
+        selected.content.as_deref(),
+        Some(".supplied-wins { color: blue }")
+    );
+    assert!(!selected.content.as_deref().unwrap().contains("native-only"));
+}
+
+#[test]
+fn supplied_template_runtime_compile_lowers_validated_bytes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let update = host
         .upsert(UpsertRequest {
@@ -406,30 +446,20 @@ fn supplied_template_runtime_compile_is_typed_unavailable() {
         })
         .unwrap();
 
-    let error = host
+    let output = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some(update.canonical_id),
             node_kind: Some(VirtualNodeKind::Template),
             compile_profile: CompileProfile::default(),
         })
-        .expect_err("validated supplied template lowering belongs to multi-unit lowering");
-    match error {
-        HostError::CompileError(failure) => assert!(
-            failure
-                .diagnostics
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"),
-            "expected typed runtime-unavailable diagnostic, got {:?}",
-            failure.diagnostics.diagnostics
-        ),
-        other => panic!("expected typed compile refusal, got {other:?}"),
-    }
+        .expect("validated supplied template lowering");
+    assert!(output.code.contains("supplied-only"));
+    assert!(!output.code.contains("authored-only"));
 }
 
 #[test]
-fn external_template_ide_compile_is_typed_unavailable() {
+fn external_template_ide_compile_contains_selected_bytes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     upsert(
         &host,
@@ -447,25 +477,13 @@ fn external_template_ide_compile_is_typed_unavailable() {
         })
         .unwrap();
 
-    let error = host
+    let _ = host
         .ensure_ide_compiled(&update.canonical_id, &CompileProfile::default())
-        .expect_err("IDE lowering must not omit selected template bytes");
-    match error {
-        HostError::CompileError(failure) => assert!(
-            failure
-                .diagnostics
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"),
-            "expected typed IDE-unavailable diagnostic, got {:?}",
-            failure.diagnostics.diagnostics
-        ),
-        other => panic!("expected typed compile refusal, got {other:?}"),
-    }
+        .expect("IDE lowering includes selected template bytes");
 }
 
 #[test]
-fn supplied_style_analysis_fails_closed_without_a_source_space_descriptor() {
+fn supplied_style_analysis_publishes_spans_in_its_declared_source_space() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let update = host
         .upsert(UpsertRequest {
@@ -491,15 +509,17 @@ fn supplied_style_analysis_fails_closed_without_a_source_space_descriptor() {
         style.content_availability,
         BlockContentAvailability::SuppliedAvailable
     );
-    assert!(
-        style.css.is_none(),
-        "supplied CSS facts must fail closed until their source space is described; got class spans {:?}",
-        style.css.as_ref().map(|css| css
-            .classes
-            .iter()
-            .map(|class| (class.name.as_str(), class.span))
-            .collect::<Vec<_>>())
+    let css = style.css.as_ref().expect("qualified supplied CSS analysis");
+    let class = css
+        .classes
+        .iter()
+        .find(|class| class.name == "supplied-only")
+        .expect("supplied class");
+    assert_eq!(
+        class.span.start, 1,
+        "span is block-local in the declared space"
     );
+    assert!(style.source_space_token.is_some());
 }
 
 #[test]

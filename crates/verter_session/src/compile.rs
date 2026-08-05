@@ -174,22 +174,37 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
 
     use verter_compiler::framework_common::{
-        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeScriptBlock, RuntimeStyleBlock,
-        RuntimeTemplateBlock,
+        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
+        RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
     };
 
+    fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
+        RuntimeOutputDescriptor::generated(
+            code,
+            None,
+            &[("test:space", "test:artifact")],
+            SourceMapFidelity::Approximate,
+        )
+    }
+
     fn basic_compiled_result() -> RuntimeCompileOutput {
+        let script_code = "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n";
+        let template_code = "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}";
         RuntimeCompileOutput {
             script: Some(RuntimeScriptBlock {
-                code: "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n".to_string(),
+                code: script_code.to_string(),
                 source_map: String::new(),
                 setup: true,
+                output_descriptor: test_output_descriptor(script_code),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
             }),
             template: Some(RuntimeTemplateBlock {
-                code: "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}".to_string(),
+                code: template_code.to_string(),
                 source_map: String::new(),
                 imports: vec!["_openBlock".to_string(), "_createElementBlock".to_string()],
                 ssr_imports: vec![],
+                output_descriptor: test_output_descriptor(template_code),
             }),
             ..RuntimeCompileOutput::default()
         }
@@ -410,6 +425,7 @@ mod tests {
                     lang: None,
                     scope_hash: None,
                     has_global: false,
+                    output_descriptor: test_output_descriptor(".a{}"),
                 },
                 RuntimeStyleBlock {
                     code: ".b{}".to_string(),
@@ -417,6 +433,7 @@ mod tests {
                     lang: Some("scss".to_string()),
                     scope_hash: None,
                     has_global: false,
+                    output_descriptor: test_output_descriptor(".b{}"),
                 },
             ],
             ..RuntimeCompileOutput::default()

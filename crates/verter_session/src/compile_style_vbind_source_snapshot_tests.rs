@@ -231,10 +231,10 @@ fn supplied_style_vbind_vars_are_hydrated_for_the_compile_profile() {
     assert!(hydrated.usage_complete);
     assert_eq!(hydrated.analyses.len(), 1);
     assert_eq!(hydrated.v_bind_vars, ["suppliedOnly"]);
-    assert!(
-        hydrated.analyses[0].v_binds.is_empty() && hydrated.analyses[0].css.is_none(),
-        "compiler-only usage roots must not publish foreign-space spans"
-    );
+    assert_eq!(hydrated.analyses[0].v_binds.len(), 1);
+    assert!(hydrated.analyses[0].css.is_some());
+    assert!(hydrated.analyses[0].source_space_token.is_some());
+    assert_eq!(hydrated.analyses[0].v_binds[0].start, 20);
 
     let cold = compile(&host);
     assert!(!cold.cache_hit);

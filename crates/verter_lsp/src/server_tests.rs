@@ -20033,7 +20033,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_carrier_provider_file_admits_external_content_but_defers_ide_lowering() {
+async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_output() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -20078,8 +20078,8 @@ async fn sync_pending_carrier_provider_file_admits_external_content_but_defers_i
             version: 1,
             text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
         });
-    // The registered VFS read admits external bytes for classification and
-    // analysis. Multi-unit IDE lowering remains fail-closed below.
+    // The registered VFS read admits external bytes for classification,
+    // analysis, and the composed IDE surface below.
     let external_source = host
         .get_source(&format!("{workspace_id}/src/partials/panel.html"))
         .expect("registered external source should be admitted from the VFS");
@@ -20149,19 +20149,33 @@ async fn sync_pending_carrier_provider_file_admits_external_content_but_defers_i
     assert_eq!(synced, SyncOutcome::FullyReconciled);
 
     let profile = documents.tsx_profile.read().clone();
-    assert!(
-        host.get_ide(&app_id, &profile).is_none(),
-        "external-content deferral must not publish an IDE success"
+    let ide = host
+        .get_ide(&app_id, &profile)
+        .expect("admitted external template must publish a composed IDE surface");
+    assert!(ide.code.contains("props.msg"));
+    let source_map: serde_json::Value = serde_json::from_str(
+        ide.source_map
+            .as_deref()
+            .expect("composed IDE surface must publish its map"),
+    )
+    .expect("composed IDE map must be valid JSON");
+    let sources = source_map["sources"]
+        .as_array()
+        .expect("composed IDE map must declare source spaces");
+    assert_eq!(
+        sources.len(),
+        2,
+        "carrier script and external template must remain distinct map sources"
     );
 
     let calls = provider.file_sync_calls();
     assert!(
-        !calls.iter().any(|call| matches!(
+        calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".tsx")
+            MockCall::OpenFile { path, content } | MockCall::UpdateFile { path, content }
+                if path.ends_with(".tsx") && content.contains("props.msg")
         )),
-        "deferred external content must not push a TSX success"
+        "composed external content must be pushed through the TSX provider surface"
     );
 }
 

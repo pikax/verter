@@ -784,23 +784,15 @@ fn missing_template_src_retries_successfully_after_dependency_arrives() {
 
     upsert_non_sfc(&host, "/src/resolved.html", "<div>resolved</div>");
 
-    let error = host
+    let output = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect_err("external content remains deferred after dependency registration");
-    assert!(
-        matches!(
-            &error,
-            HostError::CompileError(ref failure)
-                if failure.diagnostics.diagnostics.iter().any(|diagnostic|
-                    diagnostic.code == "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE")
-        ),
-        "unexpected external-content refusal: {error:?}"
-    );
+        .expect("external content lowers after dependency registration");
+    assert!(output.code.contains("resolved"));
 }
 
 #[test]

@@ -2585,18 +2585,11 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
         "macro type blockers should not be preloaded before compilation",
     );
 
-    let error = host
-        .ensure_compiled("/workspace/src/App.vue", &CompileProfile::default())
-        .expect_err("external template lowering must remain typed unavailable");
-    assert!(matches!(
-        error,
-        HostError::CompileError(ref failure)
-            if failure.diagnostics.diagnostics.iter().any(|diagnostic|
-                diagnostic.code == "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE")
-    ));
+    host.ensure_compiled("/workspace/src/App.vue", &CompileProfile::default())
+        .expect("external template and macro blockers lower after hydration");
     assert!(
-        !host.compile_slot_is_warm("/workspace/src/App.vue", &CompileProfile::default()),
-        "a typed-unavailable lowering must not publish a compile slot",
+        host.compile_slot_is_warm("/workspace/src/App.vue", &CompileProfile::default()),
+        "successful lowering publishes a compile slot",
     );
 
     assert!(

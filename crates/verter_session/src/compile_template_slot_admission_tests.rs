@@ -124,7 +124,7 @@ fn non_default_parse_profile_compile_never_populates_the_default_template_slot()
 /// this slot, and the owner's node generation does not move, so the
 /// rail could never reject the stale entry.
 #[test]
-fn external_src_compile_never_populates_the_template_slot() {
+fn external_src_compile_uses_the_session_slot_not_the_template_slot() {
     let host = make_host();
     upsert(&host, EXTERNAL_SRC_SOURCE);
     host.set_exact_resolutions(
@@ -139,15 +139,9 @@ fn external_src_compile_never_populates_the_template_slot() {
     );
 
     let profile = CompileProfile::default();
-    let error = compile_with(&host, profile.clone())
-        .expect_err("external content must fail closed before compilation");
-    assert!(matches!(
-        error,
-        crate::types::HostError::CompileError(ref failure)
-            if failure.diagnostics.diagnostics.iter().any(|diagnostic|
-                diagnostic.code == "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE")
-    ));
-    assert!(!session_slot_present(&host, &profile));
+    let output = compile_with(&host, profile.clone()).expect("external content lowering");
+    assert!(output.code.contains("hello"));
+    assert!(session_slot_present(&host, &profile));
     assert!(template_slot(&host).is_none());
 }
 

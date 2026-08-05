@@ -454,7 +454,7 @@ pub fn process_script_setup<'alloc>(
 
     // Overwrite open tag with wrapper
     ctx.out
-        .overwrite(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
+        .overwrite_or_root_prefix(setup.tag_open.start, setup.tag_open.end, &wrapper_start);
 
     // Build wrapper closing
     let returned = if !options.inline_template {
@@ -481,7 +481,7 @@ pub fn process_script_setup<'alloc>(
     // Handle close tag
     if let Some(tag_close) = &setup.tag_close {
         ctx.out
-            .overwrite(tag_close.start, tag_close.end, &wrapper_end);
+            .overwrite_or_root_suffix(tag_close.start, tag_close.end, &wrapper_end);
 
         // Set inline inject position
         if options.inline_template {
@@ -566,7 +566,7 @@ pub fn process_script_only<'alloc>(
 
     if let Some(tag_close) = &script.tag_close {
         ctx.out
-            .overwrite(tag_close.start, tag_close.end, &close_text);
+            .overwrite_or_root_suffix(tag_close.start, tag_close.end, &close_text);
     }
 }
 
