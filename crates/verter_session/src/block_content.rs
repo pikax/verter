@@ -1159,10 +1159,16 @@ impl VerterHost {
                     | BlockContentAvailability::SuppliedAvailable
             ) {
                 if let Some(content) = snapshot.content.as_deref() {
-                    let usage =
-                        verter_compiler::compile::style_usage::extract_style_v_bind_usage([
-                            content,
-                        ]);
+                    let usage_lang = if snapshot.availability
+                        == BlockContentAvailability::SuppliedAvailable
+                        && snapshot.content_class == BlockContentClass::Style
+                    {
+                        "css"
+                    } else {
+                        snapshot.lang.as_str()
+                    };
+                    let usage = verter_compiler::compile::style_usage::
+                        extract_style_v_bind_usage_for_languages([(content, usage_lang)]);
                     usage_complete &= usage.complete;
                     v_bind_vars.extend(usage.used);
                 } else {

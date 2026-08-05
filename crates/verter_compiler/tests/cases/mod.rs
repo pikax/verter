@@ -4,6 +4,7 @@ mod indexed_prop_lookup;
 mod no_post_codegen_string_surgery;
 mod no_session_dependency;
 mod repro_member_access_ide_codegen;
+mod style_planner;
 mod svelte_bind_contract_freshness;
 mod svelte_client_authored_value_routing_guard;
 mod svelte_client_emit_topology;

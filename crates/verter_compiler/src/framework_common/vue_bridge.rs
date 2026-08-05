@@ -14,6 +14,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use verter_css_syntax::CssDialect;
 use verter_language::{
     CarrierParse, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
     FrameworkParseCommon, JsModuleKind, LanguageId, ScriptSourceType,
@@ -39,6 +40,10 @@ use crate::framework_common::carrier_compiler::{
 use crate::framework_common::ctx::{receive_vue_carrier_token, CarrierCompilerCtx};
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
+};
+use crate::style_planner::{
+    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
+    StyleRewriteOutcome,
 };
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -798,6 +803,18 @@ impl CarrierCompiler for VueCarrierCompiler {
         if opts.block_content.template.is_some() {
             carrier_view.template_ast = None;
         }
+        for (style, selected) in carrier_view
+            .style_nodes
+            .iter_mut()
+            .zip(opts.block_content.styles.iter())
+        {
+            if selected.is_some() {
+                // The registered block-content projection owns these bytes.
+                // Preserve the parser-owned slot and attributes, but do not
+                // let the carrier-authored dialect enter either rewrite stage.
+                style.content = None;
+            }
+        }
         let selected_template = opts.block_content.template.as_ref().map(|input| {
             let parsed_template = parse_template_block(
                 &input.code,
@@ -1038,21 +1055,121 @@ impl CarrierCompiler for VueCarrierCompiler {
             }
         }
 
-        for (slot, selected) in opts
+        let style_scope = bundle
+            .scope_id
+            .strip_prefix("data-v-")
+            .unwrap_or(&bundle.scope_id)
+            .to_string();
+        for ((slot, selected), node) in opts
             .block_content
             .styles
             .iter()
             .zip(bundle.styles.iter_mut())
+            .zip(parsed.style_nodes())
         {
             if let Some(input) = slot {
-                selected.code = input.code.to_string();
-                selected.source_map = input.source_map.as_deref().map(str::to_string);
-                selected.lang = Some(input.lang.clone());
-                selected.output_descriptor = RuntimeOutputDescriptor::identity(
-                    &selected.code,
+                let selected_dialect = match input.lang.as_str() {
+                    "css" => CssDialect::Css,
+                    "scss" => CssDialect::Scss,
+                    "sass" => CssDialect::Sass,
+                    "less" => CssDialect::Less,
+                    "stylus" | "styl" => CssDialect::Stylus,
+                    _ => {
+                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        });
+                    }
+                };
+                let authored_dialect = match node.lang {
+                    None | Some(crate::parser::types::StyleLang::Css) => Some(CssDialect::Css),
+                    Some(crate::parser::types::StyleLang::Scss) => Some(CssDialect::Scss),
+                    Some(crate::parser::types::StyleLang::Sass) => Some(CssDialect::Sass),
+                    Some(crate::parser::types::StyleLang::Less) => Some(CssDialect::Less),
+                    Some(crate::parser::types::StyleLang::Stylus) => Some(CssDialect::Stylus),
+                    Some(crate::parser::types::StyleLang::Unknown) => None,
+                };
+                let supplied_preprocessor_output = selected_dialect == CssDialect::Css
+                    && authored_dialect != Some(CssDialect::Css);
+                if authored_dialect.is_none() && !supplied_preprocessor_output {
+                    return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
+                        adapter_id: self.adapter_id(),
+                    });
+                }
+                let mut current = input.code.to_string();
+                let mut current_map = if opts.source_map {
+                    input.source_map.as_deref().map(str::to_string)
+                } else {
+                    None
+                };
+                let mut descriptor = RuntimeOutputDescriptor::identity(
+                    &current,
                     &input.source_space_token,
                     &input.content_artifact_token,
                 );
+
+                if !supplied_preprocessor_output {
+                    let authored = AuthoredStyleInput::new(
+                        &current,
+                        selected_dialect,
+                        &input.source_space_token,
+                        &input.source_space_token,
+                        &input.content_artifact_token,
+                    );
+                    match transform_vue_v_bind(authored, &style_scope).map_err(|_| {
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        }
+                    })? {
+                        StyleRewriteOutcome::Unchanged { .. } => {}
+                        StyleRewriteOutcome::Rewritten {
+                            code,
+                            source_map,
+                            output_descriptor,
+                            ..
+                        } => {
+                            current = code;
+                            current_map = opts.source_map.then_some(source_map);
+                            descriptor = *output_descriptor;
+                        }
+                    }
+                }
+
+                if node.scoped && selected_dialect == CssDialect::Css {
+                    let plain = PlainCssInput::try_new(
+                        &current,
+                        selected_dialect,
+                        &input.source_space_token,
+                        &input.source_space_token,
+                        &input.content_artifact_token,
+                    )
+                    .map_err(|_| {
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        }
+                    })?;
+                    match transform_vue_scoped_css(plain, &style_scope).map_err(|_| {
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        }
+                    })? {
+                        StyleRewriteOutcome::Unchanged { .. } => {}
+                        StyleRewriteOutcome::Rewritten {
+                            code,
+                            source_map,
+                            output_descriptor,
+                            ..
+                        } => {
+                            current = code;
+                            current_map = opts.source_map.then_some(source_map);
+                            descriptor = *output_descriptor;
+                        }
+                    }
+                }
+
+                selected.code = current;
+                selected.source_map = current_map;
+                selected.lang = Some(input.lang.clone());
+                selected.output_descriptor = descriptor;
             }
         }
         for (slot, selected) in opts
@@ -1821,6 +1938,50 @@ mod tests {
                 .declared_space_tokens
                 .len(),
             2
+        );
+    }
+
+    /// @ai-generated - Supplied plain CSS is stage-two input and keeps its external source space.
+    #[test]
+    fn supplied_external_style_is_scoped_in_its_own_source_space() {
+        let source =
+            "<template><div class=\"x\"/></template><style scoped src=\"./theme.css\"></style>";
+        let compiler = VueCarrierCompiler::default();
+        let alloc = oxc_allocator::Allocator::new();
+        let output = compiler
+            .compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("ExternalStyle.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    source_map: true,
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![Some(RuntimeBlockContentInput {
+                            code: Arc::from(".x { color: red; }"),
+                            source_map: None,
+                            lang: "css".to_string(),
+                            content_artifact_token: "artifact:theme-css".to_string(),
+                            source_space_token: "space:theme-css".to_string(),
+                        })],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("supplied external style compiles");
+        let style = &output.styles[0];
+
+        assert!(style.code.contains(".x[data-v-scope123]"), "{}", style.code);
+        assert_eq!(style.lang.as_deref(), Some("css"));
+        assert_eq!(
+            style.output_descriptor.source_map.declared_space_tokens,
+            vec!["space:theme-css"]
+        );
+        assert_ne!(
+            style.output_descriptor.source_space.token,
+            "space:theme-css"
         );
     }
 

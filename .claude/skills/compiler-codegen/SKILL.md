@@ -16,7 +16,7 @@ Vue SFC Source
     |
 [Parser]     builds arena-based template AST + extracts script/style blocks (parser/)
     |
-[Style]      v-bind() scan + CSS processing (style/ + css/)
+[Style]      typed Vue/Svelte rewrite planning over StyleSyntaxIr
     |
 [Script]     macro expansion, binding extraction, component wrapper (script/)
     |
@@ -66,13 +66,11 @@ ide/                      # IDE codegen: TSX or JSX+JSDoc (for LSP/TSGO type che
     +-- mod.rs            # walk_element/walk_node, cached directive removal, ref conversion
     +-- directives.rs     # v-if -> ternary, v-for -> .map(), v-show -> style
     +-- props.rs          # :prop -> prop={}, @event -> onEvent={}, v-bind spread
-style/
-+-- mod.rs                # generate_style() entry point
-+-- v_bind.rs             # v-bind() scanning in CSS
+style_planner.rs          # Vue authored-v-bind and plain-CSS scoping stages
 css/
-+-- mod.rs                # process_style() -- CSS pipeline entry point
-+-- prepass.rs            # Vue syntax -> valid CSS markers (v-bind, :deep, :slotted)
-+-- scoped.rs             # Scoped CSS: insert [data-v-xxx] selectors
++-- mod.rs                # legacy processStyle/CSS-modules compatibility surface
++-- prepass.rs            # retained until the NAPI/provider cutover
++-- scoped.rs             # retained until the NAPI/provider cutover
 +-- modules.rs            # CSS Modules: hash class names
 +-- walk.rs               # String-level CSS selector walking
 +-- types.rs              # ProcessStyleOptions, ProcessStyleResult
@@ -395,34 +393,26 @@ The user's body STAYS inside the `___VERTER___TemplateBindingFN` wrapper in both
 
 Guard: `crates/verter_compiler/tests/cases/ide_script_recovery_guard.rs` (scans `ide/script/setup.rs` for the deleted dual-recovery identifiers and the synthesize-then-reparse anti-pattern), plus `crates/verter_compiler/tests/cases/repro_member_access_ide_codegen.rs` (recovery shapes + clean-path preservation) and the negative-metadata tests in `script_recover.rs`.
 
-## Style Preprocessing in Bundler Mode
+## Style Rewrite Stages
 
-Style blocks with `lang="scss"`, `lang="sass"`, or `lang="less"` require preprocessing to CSS. The pipeline differs between Vite and non-Vite bundlers:
+Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are deliberately split:
 
-**Vite mode** (Vite-owned preprocessing, matching `@vitejs/plugin-vue`):
+1. `transform_vue_v_bind(AuthoredStyleInput)` runs on authored CSS, SCSS, indented Sass, Less, or Stylus and returns the same dialect. It never preprocesses or evaluates.
+2. `transform_vue_scoped_css(PlainCssInput)` runs only on plain CSS after preprocessing. `PlainCssInput::try_new` typed-refuses every non-CSS dialect before planning.
+3. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused.
 
-1. During main `.vue` `transform()`, the plugin parses the SFC with `compiler.parse()` and caches raw style block content in `styleBlockCache`. Style preprocessing is **skipped** in `applyPreprocessorRequests()`.
-2. `load()` returns raw style source (e.g. SCSS with `$variables`) from `styleBlockCache`.
-3. Style URLs preserve the original lang (`lang.scss`, not `lang.css`) since `meta.style_langs` is never overwritten.
-4. Vite's CSS pipeline preprocesses SCSS/SASS/Less/Stylus automatically between `load()` and `transform()`.
-5. `transform()` always runs `compiler.compileStyleAsync()` for Vue-specific post-processing: scoped CSS attribute selectors (`[data-v-...]`) and CSS `v-bind()` rewriting. Runs even for unscoped plain CSS blocks (CSS `v-bind()` still needs rewriting).
+Only complete trusted nodes publish edits. Rewrite uncertainty fails closed; style-liveness uncertainty fails open. Every emitted edit and its source map comes from the same `CodeTransform`. Supplied or external inputs retain their host-minted source-space/artifact identity in `RuntimeOutputDescriptor`; carrier-absolute positions are never fabricated.
 
-**Non-Vite mode** (preprocessor fallback):
-Style preprocessing goes through `preprocessBlock()` -> `preprocessStyle()` which calls Vite's `preprocessCSS()` in-process (if Vite config is available). The compiled CSS is returned to the Rust host through the sealed `applyBlockOverrides()` handoff: callers echo the host-issued artifact token and revision/artifact/basis/source-space stamps and provide verified code/map hashes. After admission, the host projects the validated content into compiler-owned block inputs and the `transform()` hook uses Rust `processStyle()` for CSS scoping. There is no public style-index override API or LSP RPC.
+The sealed `applyBlockOverrides()` handoff remains the input channel for caller-preprocessed content. External/supplied semantic analysis continues to publish `css: None` until its source-space-aware analysis consumer lands; compiler rewrite code must not route around that gate.
 
-**Compiler resolution**: `vue/compiler-sfc` is resolved once per plugin instance from the project root in `configResolved()` via `createRequire(join(root, "package.json"))("vue/compiler-sfc")`, stored in the `compiler` variable and used for both SFC parsing (`compiler.parse()`) and style post-processing (`compiler.compileStyleAsync()`).
-
-**Key files**: `packages/unplugin/src/index.ts` (`styleBlockCache`, `compileStyleAsync` in transform, style load from cache), `packages/unplugin/src/core/preprocessor.ts` (non-Vite style preprocessing via `preprocessStyle()`), `crates/verter_session/src/block_content.rs` (sealed override admission), `crates/verter_session/src/host_resolve/virtual_file_pipeline.rs` (validated compiler-input projection), `crates/verter_session/src/id.rs` (`render_ids` -- URL generation).
-
-## CSS Processing Pipeline
+## Vue Style Planner
 
 ```
-Style block content
-    | style/v_bind.rs     -- scan v-bind() expressions
-    | css/prepass.rs       -- replace Vue syntax with CSS markers
-    | lightningcss         -- parse + normalize CSS
-    | css/modules.rs       -- hash class names (CSS Modules)
-    | css/scoped.rs        -- insert [data-v-xxx] attribute selectors
+authored dialect bytes
+    | StyleSyntaxIr -> trusted v-bind plan -> CodeTransform
+    | caller-owned preprocessing (when needed)
+plain CSS bytes
+    | StyleSyntaxIr -> trusted scoped/pseudo/keyframe plan -> CodeTransform
 ```
 
 ## CompileTarget (Selective Pipeline)
@@ -431,7 +421,7 @@ Style block content
 
 | Flag            | Controls                                             | Used By           |
 | --------------- | ---------------------------------------------------- | ----------------- |
-| `STYLE`         | Style codegen (CSS scoping, modules, v-bind)         | Bundler           |
+| `STYLE`         | Typed framework style rewrite planning              | Bundler           |
 | `SCRIPT`        | Script codegen (macro expansion, binding extraction) | Bundler, Analysis |
 | `TEMPLATE`      | Template VDOM/Vapor render function codegen          | Bundler           |
 | `TSX`           | TSX template codegen for type checking               | LSP/IDE           |
@@ -476,11 +466,8 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/ide/template/directives.rs` | IDE: v-if -> ternary, v-for -> .map(), v-show -> style |
 | `crates/verter_compiler/src/ide/template/props.rs` | IDE: :prop -> prop={}, @event -> onEvent={} |
 | `crates/verter_compiler/src/ide/template/emit.rs` | IDE typed prefixed-expression emit substrate (`EmitOp`, `emit_jsx_binding_value`) |
-| `crates/verter_compiler/src/style/mod.rs` | generate_style() entry point |
-| `crates/verter_compiler/src/style/v_bind.rs` | v-bind() scanning in CSS |
-| `crates/verter_compiler/src/css/mod.rs` | process_style() -- CSS pipeline entry point |
-| `crates/verter_compiler/src/css/prepass.rs` | Vue syntax -> valid CSS markers |
-| `crates/verter_compiler/src/css/scoped.rs` | Scoped CSS: insert [data-v-xxx] selectors |
+| `crates/verter_compiler/src/style_planner.rs` | Typed Vue stage-1/stage-2 planners over shared style IR |
+| `crates/verter_compiler/src/css/mod.rs` | Legacy NAPI/CSS-modules compatibility owner pending provider cutover |
 | `crates/verter_compiler/src/css/modules.rs` | CSS Modules: hash class names |
 | `crates/verter_compiler/src/code_transform/code_transform.rs` | Chunk-based deferred mutation engine |
 | `crates/verter_compiler/src/code_transform/chunk.rs` | Chunk types (Original, Overwritten, Inserted, InsertedMapped) |

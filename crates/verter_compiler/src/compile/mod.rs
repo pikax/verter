@@ -42,7 +42,6 @@ use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
 use crate::code_transform::{CodeTransform, SourceMapOptions};
-use crate::css::{process_style, types::ProcessStyleOptions};
 use crate::diagnostics::{
     CompilerErrorCode, Diagnostic, DiagnosticSeverity, SyntaxPluginContext, SyntaxPluginOptions,
 };
@@ -51,7 +50,10 @@ use crate::parser::types::{ParsedSfc, RootNodeScript, StyleLang};
 use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
-use crate::style::generate_style;
+use crate::style_planner::{
+    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
+    StyleRewriteOutcome,
+};
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
 use crate::template::oxc::types::OxcParsedAst;
@@ -59,10 +61,22 @@ use crate::tokenizer::byte::{
     tokenize, tokenize_sfc, tokenize_sfc_with_delimiters, tokenize_with_delimiters,
 };
 use crate::tsc;
+use verter_css_syntax::CssDialect;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
 use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
+
+fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
+    match lang {
+        None | Some(StyleLang::Css) => Some(CssDialect::Css),
+        Some(StyleLang::Scss) => Some(CssDialect::Scss),
+        Some(StyleLang::Sass) => Some(CssDialect::Sass),
+        Some(StyleLang::Less) => Some(CssDialect::Less),
+        Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
+        Some(StyleLang::Unknown) => None,
+    }
+}
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -485,50 +499,80 @@ fn compile_inner(
     if options.target.needs_style() {
         for style in parsed.style_nodes() {
             let style_start = Instant::now();
-            let style_result = generate_style(style, input, allocator, scope_id_str);
-            all_v_bind_vars.extend(style_result.v_bind_vars);
-
-            // Apply v-bind overwrites to the style content
             let style_code = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
-                let style_alloc = Allocator::new();
-                let mut style_ct = CodeTransform::new(style_source, &style_alloc);
+                let dialect = style_dialect(style.lang);
+                let source_name = options.filename.as_deref().unwrap_or("<style>");
+                let mut rewritten = style_source.to_string();
 
-                // Apply v-bind overwrites (need to shift positions relative to content start)
-                for (start, end, replacement) in &style_result.out.overwrites {
-                    let rel_start = start - content.start;
-                    let rel_end = end - content.start;
-                    let replacement = style_alloc.alloc_str(replacement);
-                    style_ct.overwrite(rel_start, rel_end, replacement);
-                }
-                let modified_css = style_ct.build_string();
+                if let Some(dialect) = dialect {
+                    match transform_vue_v_bind(
+                        AuthoredStyleInput::new(
+                            style_source,
+                            dialect,
+                            source_name,
+                            "standalone:carrier",
+                            "standalone:carrier-bytes",
+                        ),
+                        scope_id_str,
+                    ) {
+                        Ok(StyleRewriteOutcome::Unchanged { facts }) => {
+                            all_v_bind_vars.extend(facts.v_bind_vars);
+                        }
+                        Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                            rewritten = code;
+                            all_v_bind_vars.extend(facts.v_bind_vars);
+                        }
+                        Err(error) => all_diagnostics.push(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            code: CompilerErrorCode::XCssParseError,
+                            plugin: "style-planner",
+                            message: error.to_string(),
+                            span: error.span.map(|span| {
+                                crate::common::Span::new(
+                                    content.start + span.start,
+                                    content.start + span.end,
+                                )
+                            }),
+                        }),
+                    }
 
-                // Run CSS processing (scoped, modules)
-                if matches!(style.lang, None | Some(StyleLang::Css)) {
-                    let process_opts = ProcessStyleOptions {
-                        scope_id: scope_id_str,
-                        scoped: style.scoped,
-                        is_module: style.module,
-                        module_name: None,
-                        filename: options.filename.as_deref(),
-                        sourcemap: false,
-                    };
-                    match process_style(&modified_css, &process_opts) {
-                        Ok(result) => result.code.into_owned(),
-                        Err(e) => {
-                            all_diagnostics.push(Diagnostic {
+                    if style.scoped && dialect == CssDialect::Css {
+                        let plain = PlainCssInput::try_new(
+                            &rewritten,
+                            CssDialect::Css,
+                            source_name,
+                            "standalone:carrier",
+                            "standalone:carrier-bytes",
+                        )
+                        .expect("plain CSS stage is statically selected");
+                        match transform_vue_scoped_css(plain, scope_id_str) {
+                            Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
+                            Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
+                            Err(error) => all_diagnostics.push(Diagnostic {
                                 severity: DiagnosticSeverity::Error,
                                 code: CompilerErrorCode::XCssParseError,
-                                plugin: "style",
-                                message: e.to_string(),
-                                span: None,
-                            });
-                            modified_css
+                                plugin: "style-planner",
+                                message: error.to_string(),
+                                span: error.span.map(|span| {
+                                    crate::common::Span::new(
+                                        content.start + span.start,
+                                        content.start + span.end,
+                                    )
+                                }),
+                            }),
                         }
                     }
                 } else {
-                    modified_css
+                    all_diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        code: CompilerErrorCode::XCssParseError,
+                        plugin: "style-planner",
+                        message: "unsupported authored style dialect".to_string(),
+                        span: Some(*content),
+                    });
                 }
+                rewritten
             } else {
                 String::new()
             };
@@ -1299,13 +1343,20 @@ fn compile_inner(
                 complete,
             }
         } else {
-            style_usage::extract_style_v_bind_usage(
-                parsed
-                    .style_nodes()
-                    .iter()
-                    .filter_map(|s| s.content.as_ref())
-                    .map(|c| &input[c.start as usize..c.end as usize]),
-            )
+            let mut usage = style_usage::extract_style_v_bind_usage_for_dialects(
+                parsed.style_nodes().iter().filter_map(|style| {
+                    let content = style.content.as_ref()?;
+                    Some((
+                        &input[content.start as usize..content.end as usize],
+                        style_dialect(style.lang)?,
+                    ))
+                }),
+            );
+            usage.complete &= parsed
+                .style_nodes()
+                .iter()
+                .all(|style| style_dialect(style.lang).is_some());
+            usage
         };
 
         let tsx_script_opts = ide::IdeScriptOptions {
