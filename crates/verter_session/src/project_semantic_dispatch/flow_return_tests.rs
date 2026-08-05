@@ -181,6 +181,102 @@ export function subHoistedVarBlock() {
   }
   return y;
 }
+
+export function subBranchVarAny(flag: boolean) {
+  if (flag) var x: any = 1;
+  else var x: any = "s";
+  return x;
+}
+
+export function subBranchVarOneArm(flag: boolean) {
+  if (flag) {
+    var w = 1;
+  }
+  return w;
+}
+
+export function subNestedBlockVar() {
+  {
+    {
+      var y = 1;
+    }
+  }
+  return y;
+}
+
+export function subEmptyIfThenVar(flag: boolean) {
+  if (flag) {
+  }
+  var y = 1;
+  return y;
+}
+
+export function subRedeclaredVar() {
+  var y = 1;
+  var y = 2;
+  return y;
+}
+
+export function subVarShadowedByBlockLet() {
+  var y = 1;
+  {
+    let y = "s";
+  }
+  return y;
+}
+
+export function subVarAnnotatedNoInit() {
+  {
+    var y: number | undefined;
+  }
+  return y;
+}
+
+export function subLetAnnotatedNoInit() {
+  let y: number | undefined;
+  return y;
+}
+
+export function subAnnotatedConstLiteral() {
+  const y: string = "s";
+  return y;
+}
+
+export function subAnnotatedConstLiteralPinned() {
+  const y: "s" = "s";
+  return y;
+}
+
+export function subRedeclareParamVar(x: string | number) {
+  var x: string | number = "s";
+  return x;
+}
+
+export function subRedeclareParamVarNested(x: string | number) {
+  {
+    var x: string | number = "s";
+  }
+  return x;
+}
+
+export function subForwardVarOverParam(x: string) {
+  return x;
+  var x = "s";
+}
+
+export function subLoopBodyVar(flag: boolean) {
+  while (flag) {
+    var v = 1;
+  }
+  return v;
+}
+
+export function subLoopBodyLet(flag: boolean) {
+  while (flag) {
+    let v = 1;
+  }
+  return 1;
+}
 "#;
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
@@ -2609,5 +2705,210 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
         );
         let warm = flow_result_value(fresh, key.clone());
         assert_eq!(warm, dispatched);
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Function-scoped (`var`) reaching definitions: conditional-definition
+// fail-closed, declarator annotations, parameter redeclaration, and the
+// loop-body `var`.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Assert one function's flow return is CLEAN (no degradation), projects
+/// to `expected`, and admits exactly one warm candidate.
+fn assert_clean_warm(
+    host: &Arc<VerterHost>,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    expected: &verter_type_expr::TypeExpr,
+) {
+    let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    let result = flow_result_value(dispatch, key.clone());
+    assert_eq!(result.degradation, None, "{name} must stay clean");
+    let projected = host
+        .project_node_to_type_expr_for_test(result.return_type)
+        .unwrap_or_else(|| panic!("{name} must project"));
+    assert_eq!(&projected, expected, "{name} return type");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        1,
+        "{name} must admit warm"
+    );
+}
+
+/// Assert one function's flow return is a DEGRADED success carrying
+/// `reason` — a usable value, ReturnOnly, zero warm candidates.
+fn assert_degraded_return_only(
+    host: &Arc<VerterHost>,
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    reason: crate::semantic_query::FlowReturnDegradation,
+) {
+    let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+    let result = flow_result_value(dispatch, key.clone());
+    assert_eq!(result.degradation, Some(reason), "{name} must degrade");
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name} degraded success is ReturnOnly: zero memo entries"
+    );
+    assert!(
+        host.project_node_to_type_expr_for_test(result.return_type)
+            .is_some(),
+        "{name} degraded success still carries a usable value"
+    );
+}
+
+/// A `var` whose reaching definition was recorded inside an `if` arm is
+/// observed AFTER the arms rejoin, where the substrate has no branch-join
+/// algebra over the function-scoped layer: the last-evaluated arm's value
+/// would publish as the reaching definition. That is a wrong answer
+/// published clean + warm (`if (flag) var x: any = 1; else var x: any =
+/// "s"; return x` published `string` where the oracle is `any`), so the
+/// observation fails closed as a degraded success instead.
+///
+/// The one-armed form is the accepted cost: `if (flag) { var w = 1 }
+/// return w` returns a coincidentally-correct `number` today, and tsc
+/// REJECTS that program outright (TS2454, used before assigned) — fail
+/// closed is the contract.
+#[test]
+fn flow_return_conditionally_defined_var_degrades_at_observation() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert_degraded_return_only(
+            &host,
+            dispatch,
+            "subBranchVarAny",
+            crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        );
+        assert_degraded_return_only(
+            &host,
+            dispatch,
+            "subBranchVarOneArm",
+            crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        );
+    });
+}
+
+/// The conditional-definition rail is CONDITIONAL-DEPTH keyed, not
+/// nesting keyed: a plain block executes unconditionally, so every one of
+/// these `var` bindings keeps its reaching definition and stays clean +
+/// warm. A blanket "any nested `var` degrades" rule breaks all of them.
+#[test]
+fn flow_return_unconditional_var_definitions_stay_clean_and_warm() {
+    let host = make_host();
+    let number = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number);
+    with_dispatch(&host, |dispatch| {
+        // `{ var y = 1 } return y`
+        assert_clean_warm(&host, dispatch, "subHoistedVarBlock", &number);
+        // `{ { var y = 1 } } return y`
+        assert_clean_warm(&host, dispatch, "subNestedBlockVar", &number);
+        // `if (flag) { } var y = 1; return y`
+        assert_clean_warm(&host, dispatch, "subEmptyIfThenVar", &number);
+        // `var y = 1; var y = 2; return y`
+        assert_clean_warm(&host, dispatch, "subRedeclaredVar", &number);
+        // `var y = 1; { let y = "s"; } return y`
+        assert_clean_warm(&host, dispatch, "subVarShadowedByBlockLet", &number);
+    });
+}
+
+/// A declarator's authored TS annotation is the binding's DECLARED type.
+/// An initializer-less declarator seeds from it (`var y: number |
+/// undefined;` is `number | undefined`, not the unbound implicit `any`),
+/// and an annotated `const` publishes the annotation instead of its
+/// initializer's pinned literal (`const y: string = "s"` is `string`, not
+/// `"s"`) — the annotation SUPPLIES the type rather than merely
+/// suppressing widening. A literal annotation still pins (`const y: "s" =
+/// "s"` stays `"s"`).
+#[test]
+fn flow_return_declarator_annotation_supplies_the_binding_type() {
+    let host = make_host();
+    let number_or_undefined = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+    ]);
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subVarAnnotatedNoInit",
+            &number_or_undefined,
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subLetAnnotatedNoInit",
+            &number_or_undefined,
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subAnnotatedConstLiteral",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subAnnotatedConstLiteralPinned",
+            &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                "s".to_string(),
+            )),
+        );
+    });
+}
+
+/// A hoisted `var` that REDECLARES a parameter name rebinds that name for
+/// the whole function: the declarator's reaching definition wins over the
+/// parameter's declared type (`function f(x: string | number) { var x:
+/// string | number = "s"; return x }` is `string`). A read the declarator
+/// never reached still resolves to the PARAMETER, never a fabricated
+/// `any`.
+#[test]
+fn flow_return_hoisted_var_redeclaring_a_parameter_wins_over_the_parameter() {
+    let host = make_host();
+    let string = verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String);
+    with_dispatch(&host, |dispatch| {
+        assert_clean_warm(&host, dispatch, "subRedeclareParamVar", &string);
+        assert_clean_warm(&host, dispatch, "subRedeclareParamVarNested", &string);
+        // `return x; var x = "s"` — the declarator is unreachable, so the
+        // read resolves to the parameter.
+        assert_clean_warm(&host, dispatch, "subForwardVarOverParam", &string);
+    });
+}
+
+/// A return-free loop is fall-through TRANSPARENT only while it binds
+/// nothing that outlives it. A `var` declared in its body is
+/// function-scoped and its reaching definition depends on the loop's
+/// iteration count, which the substrate does not model: `while (flag) {
+/// var v = 1 } return v` published a clean, warm `any` where the oracle is
+/// `number`. It now fails closed through the existing typed loop rail,
+/// exactly like `switch` / `try`. A loop binding only block-scoped names
+/// stays transparent.
+#[test]
+fn flow_return_return_free_loop_declaring_a_var_fails_closed() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        assert!(
+            flow_is_miss(
+                dispatch,
+                flow_key(
+                    dispatch,
+                    "subLoopBodyVar",
+                    FunctionPartIdentity::DeclarationBody,
+                    0
+                )
+            ),
+            "a return-free loop declaring a `var` must fail closed"
+        );
+        assert_clean_warm(
+            &host,
+            dispatch,
+            "subLoopBodyLet",
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        );
     });
 }

@@ -324,6 +324,7 @@ fn local_reaching_definition_is_binding_and_local() {
         name,
         kind,
         init,
+        declared,
         widening_literal,
     } = &node.body.statements[0]
     else {
@@ -331,6 +332,10 @@ fn local_reaching_definition_is_binding_and_local() {
     };
     assert_eq!(name.as_ref(), "x");
     assert_eq!(*kind, SliceBindingKind::Const);
+    assert!(
+        declared.is_none(),
+        "an unannotated declarator carries no declared type"
+    );
     assert!(
         matches!(
             init,
@@ -347,6 +352,7 @@ fn local_reaching_definition_is_binding_and_local() {
         SliceStatement::Return {
             argument: Some(SliceExpr::Local {
                 name: Arc::from("x"),
+                param: None,
             }),
         },
     );

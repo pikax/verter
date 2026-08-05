@@ -1321,6 +1321,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             degraded_locals: rustc_hash::FxHashSet::default(),
             var_degraded_locals: rustc_hash::FxHashSet::default(),
+            var_conditional_locals: rustc_hash::FxHashSet::default(),
+            conditional_arm_nesting: 0,
         };
         let holds;
         let degradation;
@@ -1537,6 +1539,33 @@ struct FlowEvaluator<'d, 'b> {
     /// The `var`-layer failed-initializer membership (same rule,
     /// function scope).
     var_degraded_locals: rustc_hash::FxHashSet<String>,
+    /// The `var`-layer CONDITIONAL-definition membership: names whose
+    /// surviving reaching definition was recorded while
+    /// [`Self::conditional_arm_nesting`] was non-zero. The function-scoped
+    /// layer survives the arm restore by design, but no branch-join
+    /// algebra folds the arms, so observing such a binding fails closed.
+    var_conditional_locals: rustc_hash::FxHashSet<String>,
+    /// How many `if` arms enclose the statement being evaluated. A plain
+    /// block NEVER increments it — a block executes unconditionally, so a
+    /// `var` it declares has exactly one reaching definition.
+    conditional_arm_nesting: u32,
+}
+
+/// One resolved local read: the bound node with its LAYER-scoped
+/// membership flags (the flags always come from the same layer as the
+/// value, so a block restore can never split a binding from its flags).
+#[derive(Clone, Copy)]
+struct LocalRead {
+    /// The bound reaching definition.
+    node: SemanticNodeId,
+    /// The binding's initializer failed with a typed flow failure.
+    degraded: bool,
+    /// The binding carries a WIDENING literal.
+    widening: bool,
+    /// The binding's surviving reaching definition was recorded inside a
+    /// conditional arm (the function-scoped layer only — a lexical
+    /// conditional binding never escapes its arm).
+    conditional: bool,
 }
 
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
@@ -1553,7 +1582,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// failed initializer (the modeled `any`), `widening` the
     /// widening-literal membership — both ride the SAME layer as the
     /// value, so a block restore can never split a binding from its own
-    /// flags.
+    /// flags. A function-scoped binding recorded under non-zero
+    /// conditional-arm nesting additionally enters the
+    /// conditional-definition set; an unconditional rebind of the same
+    /// name clears it.
     fn bind_local(
         &mut self,
         name: &str,
@@ -1563,6 +1595,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         degraded: bool,
     ) {
         let function_scoped = kind == crate::flow_slice_content::SliceBindingKind::Var;
+        if function_scoped {
+            if self.conditional_arm_nesting > 0 {
+                self.var_conditional_locals.insert(name.to_string());
+            } else {
+                self.var_conditional_locals.remove(name);
+            }
+        }
         let (locals, widening_set, degraded_set) = if function_scoped {
             (
                 &mut self.var_locals,
@@ -1591,23 +1630,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// Resolve a local read across the two scope layers: the lexical
     /// layer shadows the function-scoped `var` layer while its block is
-    /// live. Returns the bound node with its LAYER-scoped `(degraded,
-    /// widening)` membership — the flags always come from the same layer
-    /// as the value.
-    fn lookup_local(&self, name: &str) -> Option<(SemanticNodeId, bool, bool)> {
+    /// live. Returns the bound node with its LAYER-scoped membership —
+    /// the flags always come from the same layer as the value (the
+    /// conditional-definition flag is function-scope-only: a lexical
+    /// conditional binding never escapes its arm).
+    fn lookup_local(&self, name: &str) -> Option<LocalRead> {
         if let Some(node) = self.locals.get(name) {
-            return Some((
-                *node,
-                self.degraded_locals.contains(name),
-                self.widening_locals.contains(name),
-            ));
+            return Some(LocalRead {
+                node: *node,
+                degraded: self.degraded_locals.contains(name),
+                widening: self.widening_locals.contains(name),
+                conditional: false,
+            });
         }
-        self.var_locals.get(name).map(|node| {
-            (
-                *node,
-                self.var_degraded_locals.contains(name),
-                self.var_widening_locals.contains(name),
-            )
+        self.var_locals.get(name).map(|node| LocalRead {
+            node: *node,
+            degraded: self.var_degraded_locals.contains(name),
+            widening: self.var_widening_locals.contains(name),
+            conditional: self.var_conditional_locals.contains(name),
         })
     }
 
@@ -1658,12 +1698,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         expr: &crate::flow_slice_content::SliceExpr,
         node: SemanticNodeId,
     ) -> SemanticNodeId {
-        let crate::flow_slice_content::SliceExpr::Local { name } = expr else {
+        let crate::flow_slice_content::SliceExpr::Local { name, .. } = expr else {
             return node;
         };
         let widening = self
             .lookup_local(name.as_ref())
-            .is_some_and(|(_, _, widening)| widening);
+            .is_some_and(|read| read.widening);
         if !widening {
             return node;
         }
@@ -1678,6 +1718,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             _ => return node,
         };
         graph.intern_node(SemanticNodeData::Primitive(widened))
+    }
+
+    /// Lower one body-position `TypeExpr` (a fully lowered expression
+    /// leaf or a declarator's authored annotation) under the function's
+    /// OWN binder environment — a body type referencing a root binder
+    /// keeps the binder, never an outer same-name resolution.
+    fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        self.dispatch.shallow_lower_type_expr_with_context(
+            ty,
+            &self.binder_env.env,
+            &self.binder_env.scope,
+            &self.binder_env.name_resolution,
+            self.binder_env.scope_payload.as_ref(),
+            &self.binder_env.shadowing,
+            &mut substitutions,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
     }
 
     /// Evaluate one region, returning its contributor nodes and whether
@@ -1730,14 +1788,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 } => {
                     // Bindings are block-scoped: each `if` arm evaluates
                     // under its own local scope (the reaching definitions
-                    // of a `const` inside an arm never escape it).
+                    // of a `const` inside an arm never escape it). The
+                    // function-scoped `var` layer DOES survive the
+                    // restore, so the arms raise the conditional-arm
+                    // nesting: a `var` bound here has no single reaching
+                    // definition at the join, and observing it afterwards
+                    // fails closed.
                     let saved = self.locals.clone();
                     let saved_degraded = self.degraded_locals.clone();
                     let saved_widening = self.widening_locals.clone();
+                    self.conditional_arm_nesting += 1;
                     let (consequent_result, _) = self.eval_region(consequent);
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
-                        Err(failure) => return (Err(failure), region.can_fall_through),
+                        Err(failure) => {
+                            self.conditional_arm_nesting -= 1;
+                            return (Err(failure), region.can_fall_through);
+                        }
                     };
                     contributors.extend(consequent_contributors);
                     self.locals = saved.clone();
@@ -1747,10 +1814,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let (alternate_result, _) = self.eval_region(alternate);
                         let alternate_contributors = match alternate_result {
                             Ok(contributors) => contributors,
-                            Err(failure) => return (Err(failure), region.can_fall_through),
+                            Err(failure) => {
+                                self.conditional_arm_nesting -= 1;
+                                return (Err(failure), region.can_fall_through);
+                            }
                         };
                         contributors.extend(alternate_contributors);
                     }
+                    self.conditional_arm_nesting -= 1;
                     self.locals = saved;
                     self.degraded_locals = saved_degraded;
                     self.widening_locals = saved_widening;
@@ -1775,8 +1846,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     name,
                     kind,
                     init,
+                    declared,
                     widening_literal,
                 } => {
+                    // An authored annotation is the binding's DECLARED
+                    // type, seeded HERE (in source order), never at
+                    // region entry — a forward reference stays unbound.
+                    // It supplies the value outright when the declarator
+                    // has no initializer (`var y: number | undefined;`
+                    // is `number | undefined`, not the unbound implicit
+                    // `any`) and for an annotated `const`, whose
+                    // initializer would otherwise publish its pinned
+                    // literal (`const y: string = "s"` is `string`).
+                    // `let` / `var` initializers already widened at
+                    // lowering, which is what assignment narrowing into
+                    // the declared type produces for them.
+                    let declared_supplies = declared.is_some()
+                        && (init.is_none()
+                            || *kind == crate::flow_slice_content::SliceBindingKind::Const);
+                    if let (true, Some(declared)) = (declared_supplies, declared.as_ref()) {
+                        let node = self.lower_body_type(declared);
+                        self.bind_local(name, *kind, node, false, false);
+                        continue;
+                    }
                     // A binding OUTSIDE the slice's value-selected slot
                     // set never even LOWERS — the content producer elides
                     // the whole declaration, so nothing here can observe
@@ -1907,6 +1999,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 degradation: None,
                 degraded_locals: rustc_hash::FxHashSet::default(),
                 var_degraded_locals: rustc_hash::FxHashSet::default(),
+                var_conditional_locals: rustc_hash::FxHashSet::default(),
+                conditional_arm_nesting: 0,
             };
             let outcome = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
@@ -1947,46 +2041,49 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
         let graph = self.dispatch.graph();
         match expr {
-            crate::flow_slice_content::SliceExpr::Type(ty) => {
-                // A fully lowered leaf: lowers under the function's OWN
-                // binder environment (a body leaf referencing a root
-                // binder keeps the binder, never an outer same-name
-                // resolution).
-                let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                Ok(Some(self.dispatch.shallow_lower_type_expr_with_context(
-                    ty,
-                    &self.binder_env.env,
-                    &self.binder_env.scope,
-                    &self.binder_env.name_resolution,
-                    self.binder_env.scope_payload.as_ref(),
-                    &self.binder_env.shadowing,
-                    &mut substitutions,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )))
-            }
+            crate::flow_slice_content::SliceExpr::Type(ty) => Ok(Some(self.lower_body_type(ty))),
             crate::flow_slice_content::SliceExpr::Param { ordinal } => self
                 .params
                 .get(*ordinal as usize)
                 .copied()
                 .map(Some)
                 .ok_or(FlowReturnFailure::Unresolved),
-            crate::flow_slice_content::SliceExpr::Local { name } => {
+            crate::flow_slice_content::SliceExpr::Local { name, param } => {
                 // Observing a binding whose initializer FAILED is the
                 // `FailedBindingInitializer` degradation: the value is a
                 // modeled `any`, not the initializer's real type. A plain
                 // unbound local (a not-yet-assigned hoisted `var` / TDZ
-                // forward reference) stays the undegraded implicit-`any`.
+                // forward reference) stays the undegraded implicit-`any`,
+                // EXCEPT when the binding redeclares a parameter — then
+                // the parameter is still the reaching value.
                 match self.lookup_local(name.as_ref()) {
-                    Some((node, degraded, _)) => {
-                        if degraded {
+                    Some(read) => {
+                        if read.degraded {
                             self.record_degradation(
                                 crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
                             );
                         }
-                        Ok(Some(node))
+                        // Observing a function-scoped binding whose
+                        // surviving reaching definition was recorded
+                        // inside a conditional arm is the
+                        // `ConditionalVarDefinition` degradation: the
+                        // value is the last-evaluated arm's, not the
+                        // join of every arm (and of the never-assigned
+                        // path). An unobserved conditional `var`
+                        // degrades nothing.
+                        if read.conditional {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+                            );
+                        }
+                        Ok(Some(read.node))
                     }
                     None => Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+                        param
+                            .and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                            .unwrap_or_else(|| {
+                                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                            }),
                     )),
                 }
             }
@@ -2194,10 +2291,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // call); calling a binding whose value is neither
                 // callable nor `any` is the `NonCallableBinding`
                 // DEGRADATION — a modeled `any`, not the real semantics.
-                let node = match param {
-                    Some(ordinal) => self.params.get(*ordinal as usize).copied(),
-                    None => self.lookup_local(name.as_ref()).map(|(node, _, _)| node),
-                };
+                // The binding's own reaching definition wins; the
+                // parameter ordinal is the FALLBACK a `var` redeclaring
+                // a parameter name resolves to before its declarator
+                // runs (mirrors the `Local` read).
+                let node = self
+                    .lookup_local(name.as_ref())
+                    .map(|read| read.node)
+                    .or_else(|| {
+                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                    });
                 let Some(node) = node else {
                     return Ok(Some(
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),

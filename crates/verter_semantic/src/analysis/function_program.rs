@@ -1192,11 +1192,16 @@ fn build_entry(
 /// the walk meets a `return` of the current function; nested function
 /// bodies are never entered). For consumers that lower a body outside the
 /// index (e.g. a nested function value's body in the flow IR).
+#[derive(Default)]
 pub struct StatementListInventory {
     /// The control-region skeleton.
     pub control: Vec<FunctionControlRegion>,
     /// The hoisted nested function declaration names bound in this frame.
     pub nested_function_names: Vec<Arc<str>>,
+    /// The function-scoped (`var` / `using`) declarator names bound in
+    /// this frame — the bindings that OUTLIVE the statement list that
+    /// declares them.
+    pub var_names: Vec<Arc<str>>,
 }
 
 /// Inventory one statement list with the SAME single walk the index uses.
@@ -1205,14 +1210,19 @@ pub fn inventory_statement_list(statements: &[Statement<'_>]) -> StatementListIn
     for stmt in statements {
         inventory.visit_statement(stmt);
     }
+    let mut nested_function_names = Vec::new();
+    let mut var_names = Vec::new();
+    for binding in inventory.bindings {
+        match binding.kind {
+            FunctionBindingKind::NestedFunction => nested_function_names.push(binding.name),
+            FunctionBindingKind::Var => var_names.push(binding.name),
+            _ => {}
+        }
+    }
     StatementListInventory {
         control: inventory.control,
-        nested_function_names: inventory
-            .bindings
-            .into_iter()
-            .filter(|binding| binding.kind == FunctionBindingKind::NestedFunction)
-            .map(|binding| binding.name)
-            .collect(),
+        nested_function_names,
+        var_names,
     }
 }
 

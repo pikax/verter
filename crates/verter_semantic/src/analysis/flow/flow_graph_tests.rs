@@ -429,6 +429,73 @@ fn flow_graph_fallback_binds_hoisting_kinds_only() {
     );
 }
 
+/// The function-scope frame is the parameters PLUS every hoisting-kind
+/// binding of the name, wherever it is written: a `var` REDECLARES a
+/// same-named parameter (they share one slot), so a root-region read
+/// reaches BOTH the parameter and a `var` declared in a non-enclosing
+/// block. Resolving to the parameter alone left the block declarator
+/// unselected, so its value never entered the slice and the parameter's
+/// declared type published as the reaching definition.
+#[test]
+fn flow_graph_root_read_unions_parameter_with_hoisted_var_redeclaration() {
+    let skeleton = skeleton_of("function fx(x: string | number) { { var x = \"s\"; } return x; }");
+    let graph = build_function_flow_graph(&skeleton);
+    let x_name = skeleton.name_id("x").expect("x interned");
+    let bindings: Vec<SkeletonBindingId> = skeleton.bindings_named(x_name).collect();
+    assert_eq!(bindings.len(), 2, "the parameter and the `var` both bind x");
+    let read_site = skeleton.return_sites[0].argument.expect("argument");
+    for binding in bindings {
+        assert!(
+            has_edge_class(
+                &graph,
+                graph.expr_site_node(read_site),
+                graph.binding_node(binding),
+                FlowEdgeClass::ValueDef
+            ),
+            "the root read binds {:?} — a `var` redeclaring a parameter \
+             shares the parameter's function-scope slot",
+            skeleton.binding(binding).kind
+        );
+    }
+    // The block-scoped shadowing rail is untouched: an inner `let` of a
+    // DIFFERENT name in a sibling block still resolves exactly.
+    let shadowed = skeleton_of("function fy(y: number) { { const y = 1; return y; } }");
+    let shadow_graph = build_function_flow_graph(&shadowed);
+    let y_name = shadowed.name_id("y").expect("y interned");
+    let inner = shadowed
+        .bindings_named(y_name)
+        .find(|binding| {
+            shadowed.binding(*binding).kind == crate::analysis::flow::SkeletonBindingKind::Const
+        })
+        .expect("the inner const binds");
+    let param = shadowed
+        .bindings_named(y_name)
+        .find(|binding| {
+            shadowed.binding(*binding).kind == crate::analysis::flow::SkeletonBindingKind::Param
+        })
+        .expect("the parameter binds");
+    let inner_read = shadowed.return_sites[0].argument.expect("argument");
+    assert!(
+        has_edge_class(
+            &shadow_graph,
+            shadow_graph.expr_site_node(inner_read),
+            shadow_graph.binding_node(inner),
+            FlowEdgeClass::ValueDef
+        ),
+        "the block read binds its own `const`"
+    );
+    assert!(
+        !has_edge_class(
+            &shadow_graph,
+            shadow_graph.expr_site_node(inner_read),
+            shadow_graph.binding_node(param),
+            FlowEdgeClass::ValueDef
+        ),
+        "a block-scoped declaration still shadows the parameter exactly — \
+         the union applies to the FUNCTION-scope frame only"
+    );
+}
+
 #[test]
 fn flow_graph_is_arena_free_send_sync_static() {
     fn assert_arena_free<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}

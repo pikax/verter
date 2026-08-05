@@ -177,6 +177,13 @@ pub enum SliceStatement {
         kind: SliceBindingKind,
         /// The lowered initializer, when present.
         init: Option<SliceExpr>,
+        /// The authored TS annotation lowered through the same shallow
+        /// pass a [`SliceExpr::Type`] leaf carries, when the declarator
+        /// annotates one. The annotation is the binding's DECLARED type:
+        /// an initializer-less declarator seeds from it, and an
+        /// annotated `const` publishes it instead of its initializer's
+        /// pinned literal.
+        declared: Option<TypeExpr>,
         /// Whether the binding carries a WIDENING literal type: an
         /// unannotated `const` whose initializer is a bare literal
         /// expression with no const assertion (`const b = 1`). Reads of
@@ -227,6 +234,11 @@ pub enum SliceExpr {
     Local {
         /// The binding name.
         name: Arc<str>,
+        /// The ordinal of a parameter this binding REDECLARES (a hoisted
+        /// `var` of the same name). The evaluator falls back to it when
+        /// the declarator's reaching definition is not bound yet — a
+        /// redeclaring `var` never erases the parameter's value.
+        param: Option<u32>,
     },
     /// An object-literal return evaluated STRUCTURALLY: every member value
     /// is a flow expression (parameter / local references substitute). Only
@@ -400,7 +412,8 @@ pub(crate) fn build_flow_slice_content(
         selection: Some(selection),
         params: &params,
         self_name: self_name.as_deref(),
-        scopes: vec![hoisted_vars],
+        scopes: vec![hoisted_vars.clone()],
+        hoisted_vars: &hoisted_vars,
         fn_shadows: &fn_shadows,
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
@@ -459,6 +472,16 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
         Expression::TemplateLiteral(template) => template.expressions.is_empty(),
         _ => false,
     }
+}
+
+/// Whether `statement` declares a function-scoped (`var`) binding, read
+/// from the SAME single inventory walk the index uses (nested function
+/// bodies are never entered, so a `var` inside a nested function value
+/// belongs to that frame, not this one).
+fn declares_var(statement: &Statement<'_>) -> bool {
+    !inventory_statement_list(std::slice::from_ref(statement))
+        .var_names
+        .is_empty()
 }
 
 /// Lower the formal parameters: binding name, optional/rest flags, and the
@@ -559,6 +582,12 @@ struct Lowerer<'a> {
     params: &'a [SliceParam],
     self_name: Option<&'a str>,
     scopes: Vec<Vec<Arc<str>>>,
+    /// The function's hoisted `var` names (from the index's whole-function
+    /// binding inventory). A `var` REDECLARING a parameter name rebinds
+    /// that name for the whole function, so these resolve as locals ahead
+    /// of the parameter list — with the parameter kept as the evaluator's
+    /// not-yet-bound fallback.
+    hoisted_vars: &'a [Arc<str>],
     /// The function's hoisted nested function declaration names (from the
     /// index's whole-function binding inventory at the root; from the SAME
     /// single inventory walk over a nested function value's own body).
@@ -602,6 +631,15 @@ impl Lowerer<'_> {
             .iter()
             .rev()
             .any(|frame| frame.iter().any(|candidate| candidate.as_ref() == name))
+    }
+
+    /// Whether a hoisted `var` of this function binds `name`. Such a
+    /// declarator REDECLARES a same-named parameter for the whole
+    /// function, so the local layer resolves first.
+    fn is_hoisted_var(&self, name: &str) -> bool {
+        self.hoisted_vars
+            .iter()
+            .any(|candidate| candidate.as_ref() == name)
     }
 
     /// Whether the statement's control region contains a `return` of the
@@ -717,19 +755,27 @@ impl Lowerer<'_> {
                             .init
                             .as_ref()
                             .map(|expr| self.lower_expr(expr, ExprMode::BindingInit(kind)));
+                        // The authored annotation is the binding's
+                        // DECLARED type — it SUPPLIES a value, it does
+                        // not merely suppress the initializer's
+                        // widening.
+                        let declared = declarator.type_annotation.as_ref().map(|annotation| {
+                            lower_ts_type(&annotation.type_annotation, self.source)
+                        });
                         // A WIDENING literal binding: an unannotated
                         // `const` initialized from a bare literal with no
                         // const assertion. `let` / `var` initializers
                         // already widened at `BindingInit` lowering, and
-                        // an annotation or `as const` pins the literal.
+                        // an annotated `const` takes its declared type.
                         let widening_literal = kind == SliceBindingKind::Const
-                            && declarator.type_annotation.is_none()
+                            && declared.is_none()
                             && declarator.init.as_ref().is_some_and(expr_is_bare_literal);
                         let name: Arc<str> = Arc::from(id.name.as_str());
                         out.push(SliceStatement::Binding {
                             name: Arc::clone(&name),
                             kind,
                             init,
+                            declared,
                             widening_literal,
                         });
                         if let Some(frame) = self.scopes.last_mut() {
@@ -751,7 +797,14 @@ impl Lowerer<'_> {
                 | Statement::ForOfStatement(_)
                 | Statement::ForStatement(_)
                 | Statement::WhileStatement(_) => {
-                    if self.control_has_return(statement) {
+                    // A return-free loop is fall-through TRANSPARENT only
+                    // while it binds nothing that outlives it. A `var` it
+                    // declares is FUNCTION-scoped, so its reaching
+                    // definition escapes the loop and depends on the
+                    // iteration count — which the region evaluation does
+                    // not model. Fail closed through the same typed loop
+                    // rail a return-bearing loop takes.
+                    if self.control_has_return(statement) || declares_var(statement) {
                         out.push(SliceStatement::Unsupported(SliceUnsupported::Loop));
                         hit_unsupported = true;
                         can_fall_through = false;
@@ -846,12 +899,25 @@ impl Lowerer<'_> {
         match expr {
             Expression::Identifier(identifier) => {
                 let name = identifier.name.as_str();
+                // A hoisted `var` REDECLARING a parameter name rebinds
+                // that name for the whole function: its declarator's
+                // reaching definition wins from the declaration onward,
+                // and the parameter rides along as the evaluator's
+                // not-yet-bound fallback. A plain parameter with no
+                // same-name `var` is unaffected.
+                if self.is_hoisted_var(name) {
+                    return SliceExpr::Local {
+                        name: Arc::from(name),
+                        param: self.param_ordinal(name),
+                    };
+                }
                 if let Some(ordinal) = self.param_ordinal(name) {
                     return SliceExpr::Param { ordinal };
                 }
                 if self.is_local_in_scope(name) {
                     return SliceExpr::Local {
                         name: Arc::from(name),
+                        param: None,
                     };
                 }
                 self.lower_leaf(expr, mode)
@@ -1014,7 +1080,17 @@ impl Lowerer<'_> {
                     {
                         return SliceExpr::LocalFunctionShadow;
                     }
-                    // 2. A parameter SHADOWS the declaration: the call goes
+                    // 2. A hoisted `var` REDECLARING a parameter name
+                    //    rebinds that name for the whole function: the
+                    //    declarator's reaching definition wins, with the
+                    //    parameter as the not-yet-bound fallback.
+                    if self.is_hoisted_var(name) {
+                        return SliceExpr::CallOnBinding {
+                            param: self.param_ordinal(name),
+                            name: Arc::from(name),
+                        };
+                    }
+                    // 3. A parameter SHADOWS the declaration: the call goes
                     //    through the binding's signature, never a flow
                     //    obligation edge.
                     if let Some(ordinal) = self.param_ordinal(name) {
@@ -1023,7 +1099,7 @@ impl Lowerer<'_> {
                             name: Arc::from(name),
                         };
                     }
-                    // 3. An in-scope local (pre-declared or already bound)
+                    // 4. An in-scope local (pre-declared or already bound)
                     //    shadows the declaration the same way.
                     if self.is_local_in_scope(name) {
                         return SliceExpr::CallOnBinding {
@@ -1031,12 +1107,12 @@ impl Lowerer<'_> {
                             name: Arc::from(name),
                         };
                     }
-                    // 4. A bare-identifier call to the function itself — a
+                    // 5. A bare-identifier call to the function itself — a
                     //    direct same-slot recursion hold.
                     if Some(name) == self.self_name {
                         return SliceExpr::DirectSelfCall;
                     }
-                    // 5. A bare-identifier callee the function index
+                    // 6. A bare-identifier callee the function index
                     //    resolves EXACTLY (same-file served function
                     //    position, the trailing implementation of its
                     //    overload group) is a Flow obligation edge — the
@@ -1079,27 +1155,24 @@ impl Lowerer<'_> {
             FunctionNode::Arrow(_) => None,
         };
         // A nested function value has no index entry of its own — its
-        // control skeleton AND its hoisted nested-declaration shadow set
-        // come from the SAME single inventory walk over its own body, so
-        // the one lexical binding authority applies inside nested values
-        // exactly as at the root.
-        let (control, nested_fn_shadows): (Arc<[FunctionControlRegion]>, Vec<Arc<str>>) =
-            match node.body() {
-                Some(body) => {
-                    let inventory = inventory_statement_list(&body.statements);
-                    (
-                        Arc::from(inventory.control),
-                        inventory.nested_function_names,
-                    )
-                }
-                None => (Arc::from(Vec::new()), Vec::new()),
-            };
+        // control skeleton, its hoisted nested-declaration shadow set,
+        // and its hoisted `var` names come from the SAME single inventory
+        // walk over its own body, so the one lexical binding authority
+        // applies inside nested values exactly as at the root.
+        let inventory = node
+            .body()
+            .map(|body| inventory_statement_list(&body.statements))
+            .unwrap_or_default();
+        let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
+        let nested_fn_shadows = inventory.nested_function_names;
+        let nested_hoisted_vars = inventory.var_names;
         let mut nested = Lowerer {
             source: self.source,
             selection: None,
             params: &params,
             self_name: self_name.as_deref(),
             scopes: vec![nested_scopes],
+            hoisted_vars: &nested_hoisted_vars,
             fn_shadows: &nested_fn_shadows,
             control,
             direct_calls: self.direct_calls,

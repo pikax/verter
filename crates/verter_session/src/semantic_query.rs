@@ -1585,6 +1585,15 @@ pub enum FlowReturnDegradation {
     /// evaluated value may miss the assignment's narrowing, so the
     /// result fails closed as a degraded success.
     UnappliedWriteEffect,
+    /// A function-scoped (`var`) binding whose reaching definition was
+    /// recorded inside a conditional arm was OBSERVED after the arms
+    /// rejoin. The function-scoped layer survives the arm restore by
+    /// design (`var` hoists), but the substrate carries no branch-join
+    /// algebra over it, so the surviving value is the last-evaluated
+    /// arm's rather than the join of every arm (and of the
+    /// never-assigned path). The observation fails closed as a degraded
+    /// success; an unobserved conditional `var` degrades nothing.
+    ConditionalVarDefinition,
 }
 
 /// A typed `FlowReturn` failure — carried through `ReturnOnly` (never

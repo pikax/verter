@@ -287,20 +287,7 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
     // block-scoped kinds (`let` / `const` / class / catch-param) never
     // do, so a kind-blind fallback would value-select a lexically
     // unreachable sibling-block hub and drag its writes into the slice.
-    let bindings_of_name_in_scope = |name: super::FlowNameId, region: SkeletonRegionId| {
-        let mut current = Some(region);
-        while let Some(enclosing) = current {
-            let mut hits: Vec<SkeletonBindingId> = Vec::new();
-            for (index, binding) in skeleton.bindings.iter().enumerate() {
-                if binding.name == name && binding.region == enclosing {
-                    hits.push(SkeletonBindingId::from_index(index as u32));
-                }
-            }
-            if !hits.is_empty() {
-                return hits;
-            }
-            current = skeleton.regions[enclosing.index()].parent;
-        }
+    let hoisting_bindings_of_name = |name: super::FlowNameId| -> Vec<SkeletonBindingId> {
         skeleton
             .bindings
             .iter()
@@ -315,6 +302,36 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
             })
             .map(|(index, _)| SkeletonBindingId::from_index(index as u32))
             .collect()
+    };
+    let bindings_of_name_in_scope = |name: super::FlowNameId, region: SkeletonRegionId| {
+        let mut current = Some(region);
+        while let Some(enclosing) = current {
+            let mut hits: Vec<SkeletonBindingId> = Vec::new();
+            for (index, binding) in skeleton.bindings.iter().enumerate() {
+                if binding.name == name && binding.region == enclosing {
+                    hits.push(SkeletonBindingId::from_index(index as u32));
+                }
+            }
+            if !hits.is_empty() {
+                // The FUNCTION-scope frame is the parameters PLUS every
+                // hoisting-kind binding of the name, wherever it is
+                // written: a `var` redeclaring a parameter shares the
+                // parameter's slot, so a root-region resolution unions
+                // both (`function f(x) { { var x = "s"; } return x }`
+                // must reach the block declarator). Inner block-scoped
+                // frames stay exact — shadowing is preserved.
+                if skeleton.regions[enclosing.index()].parent.is_none() {
+                    for hoisted in hoisting_bindings_of_name(name) {
+                        if !hits.contains(&hoisted) {
+                            hits.push(hoisted);
+                        }
+                    }
+                }
+                return hits;
+            }
+            current = skeleton.regions[enclosing.index()].parent;
+        }
+        hoisting_bindings_of_name(name)
     };
 
     let mut edges: Vec<(FlowNodeId, FlowNodeId, FlowEdgeKind)> = Vec::new();
