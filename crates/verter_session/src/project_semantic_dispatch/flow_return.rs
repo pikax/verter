@@ -2845,18 +2845,61 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     return self.call_return_of_callee_node(callee_node);
                 }
-                let source = prepared.and_then(|prepared| {
-                    let ordinal = match &target.part {
-                        verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
-                            target.overload_ordinal as usize
-                        }
-                        _ => 0,
-                    };
+                let ordinal = match &target.part {
+                    verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
+                        target.overload_ordinal as usize
+                    }
+                    _ => 0,
+                };
+                let source = prepared.as_ref().and_then(|prepared| {
                     prepared
                         .signatures
                         .get(ordinal)
                         .map(|signature| signature.return_source.clone())
                 });
+                // The callee's OWN type-parameter clause. Whatever the
+                // callee answers with — its body-derived flow return or
+                // its DECLARED carrier — is expressed IN those binders, so
+                // handing it back verbatim publishes the CALLEE's generic
+                // parameter as THIS frame's value. Under the file-scoped
+                // name-keyed binder identity that node is shared with
+                // every same-named clause in the file, so an enclosing
+                // `class Holder<T>` would then substitute the caller's
+                // `Holder<number>` into a value that has nothing to do
+                // with it — cleanly and warm.
+                //
+                // Instantiating those parameters at `unknown` is the same
+                // sb15 rule the sibling callee-TYPE path applies
+                // (`call_return_of_callee_node`), so BOTH routes to one
+                // callee answer alike. Call-site instantiation proper —
+                // explicit type arguments AND argument inference — is
+                // U6.CALL_RESOLVE's; this is the interim HONEST answer,
+                // exact for the one shape TS itself cannot infer
+                // (`bare<T>(): T` called with no arguments IS `unknown`).
+                //
+                // The clause is read from the per-file FUNCTION PROGRAM
+                // INDEX, keyed by the target's exact program identity
+                // (part + overload ordinal), NOT from the prepared value
+                // declaration: a direct-call target is a served position
+                // of THIS file by construction, while the value registry
+                // does not carry every one of them — a namespace-scoped
+                // function has no prepared declaration, and reading the
+                // clause from there would silently leave exactly those
+                // callees leaking their binder.
+                let callee_type_params: Arc<[Arc<str>]> = self
+                    .dispatch
+                    .ctx
+                    .ensure_indexed_ready_serve(self.canonical)
+                    .and_then(|serve| {
+                        serve
+                            .indexed
+                            .shallow_state
+                            .decl_bodies()
+                            .function_program_index()
+                            .get(target)
+                            .map(|entry| Arc::clone(&entry.type_parameter_names))
+                    })
+                    .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice()));
                 // A target the value registry does not carry as a
                 // prepared declaration (a namespace-scoped function) is
                 // only reachable through the body-derived demand.
@@ -2909,7 +2952,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 {
                                     self.holds.push(key);
                                 }
-                                Ok(Some(result.return_type))
+                                Ok(Some(self.dispatch.instantiate_named_params_at_unknown(
+                                    callee_type_params.iter().map(Arc::as_ref),
+                                    result.return_type,
+                                    /* include_unbound_heads */ true,
+                                )))
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds.push(*key);
@@ -2930,7 +2977,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .execute_function_return_source(source, self.canonical)
                     {
                         super::flow_return::FunctionReturnNode::Declared(hot) => {
-                            Ok(Some(hot.node()))
+                            Ok(Some(self.dispatch.instantiate_named_params_at_unknown(
+                                callee_type_params.iter().map(Arc::as_ref),
+                                hot.node(),
+                                /* include_unbound_heads */ true,
+                            )))
                         }
                         super::flow_return::FunctionReturnNode::DeclaredMiss => {
                             Err(FlowReturnFailure::Unresolved)

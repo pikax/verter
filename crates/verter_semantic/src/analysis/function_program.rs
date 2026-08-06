@@ -253,6 +253,18 @@ pub struct FunctionProgramEntry {
     pub control: Arc<[FunctionControlRegion]>,
     /// Exact direct local call targets.
     pub direct_calls: Arc<[FunctionDirectCall]>,
+    /// This function's OWN type-parameter names, in declaration order.
+    ///
+    /// A shallow syntactic FACT, not a lowering: the names are what a
+    /// CALLER needs to instantiate the callee's clause, and the caller
+    /// cannot read them off the callee's declared or body-derived return
+    /// (a parameter that never bound interns as a deferred name
+    /// reference, indistinguishable from an unrelated free name). The
+    /// value registry does not carry every served position — a
+    /// namespace-scoped function has no prepared declaration at all — so
+    /// this index is the one authority that answers for EVERY position it
+    /// serves.
+    pub type_parameter_names: Arc<[Arc<str>]>,
     /// The whole-function stable hash (structural content only — the
     /// parser / language / parse-env identity folds in at the artifact
     /// boundary).
@@ -1164,6 +1176,17 @@ fn build_entry(
     });
     bindings.dedup_by(|left, right| left.name == right.name && left.kind == right.kind);
 
+    let type_parameter_names: Vec<Arc<str>> = node
+        .type_parameters()
+        .map(|declaration| {
+            declaration
+                .params
+                .iter()
+                .map(|param| Arc::from(param.name.name.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let hash = crate::analysis::function_program_hash::hash_function_body(
         source,
         statements,
@@ -1183,6 +1206,7 @@ fn build_entry(
         effects: Arc::from(effects.into_boxed_slice()),
         control: Arc::from(control.into_boxed_slice()),
         direct_calls: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameter_names: Arc::from(type_parameter_names.into_boxed_slice()),
         flow_body_stable_hash: hash,
     }
 }

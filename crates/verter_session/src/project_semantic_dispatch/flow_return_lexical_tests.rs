@@ -1035,6 +1035,89 @@ export function ctrlNoLocal<CN>() {
     return null as unknown as CN;
   }
 }
+
+// ── A GENERIC callee at a direct-call site ────────────────────────────
+export function gcDeclT<GD>(x: GD): GD {
+  return x;
+}
+
+export function gcFlowT<GF>(x: GF) {
+  return x;
+}
+
+export function gcBareT<GB>(): GB {
+  return null as unknown as GB;
+}
+
+export function gcPlain() {
+  return "plain";
+}
+
+export const gcAliasT: <GA>(x: GA) => GA = function <GX>(x: GX) {
+  return x;
+};
+
+export function gcDeclExplicit() {
+  return gcDeclT<string>("a");
+}
+
+export function gcDeclInferred() {
+  return gcDeclT("a");
+}
+
+export function gcFlowExplicit() {
+  return gcFlowT<string>("a");
+}
+
+export function gcFlowInferred() {
+  return gcFlowT("a");
+}
+
+export function gcBareExplicit() {
+  return gcBareT<string>();
+}
+
+export function gcBareInferred() {
+  return gcBareT();
+}
+
+export function gcViaAnnotated() {
+  return gcAliasT<string>("a");
+}
+
+export function gcNonGeneric() {
+  return gcPlain();
+}
+
+// The callee's clause is spelled with the SAME name as the enclosing
+// class's, which is what makes the leak substitutable.
+export function gcSameName<GH>(x: GH) {
+  return x;
+}
+
+export class GcHolder<GH> {
+  viaCall() {
+    return gcSameName<string>("a");
+  }
+  ownT(): GH {
+    return null as unknown as GH;
+  }
+}
+
+namespace GcNs {
+  export function nsT<GN>(x: GN): GN {
+    return x;
+  }
+  export function nsPlain() {
+    return "ns";
+  }
+  export function nsCall() {
+    return nsT<string>("a");
+  }
+  export function nsPlainCall() {
+    return nsPlain();
+  }
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -2082,6 +2165,7 @@ enum NodeShape {
     TypeParam(String),
     DeclRef(String),
     BareRef(String),
+    Primitive(PrimitiveKind),
     Opaque,
     Other(String),
 }
@@ -2102,6 +2186,7 @@ fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> N
         return NodeShape::BareRef(name.to_string());
     }
     match data.as_ref() {
+        SemanticNodeData::Primitive(kind) => NodeShape::Primitive(*kind),
         SemanticNodeData::TypeParam { display_name, .. } => {
             NodeShape::TypeParam(display_name.to_string())
         }
@@ -2756,4 +2841,155 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
     // CONTROL — a BODY LOCAL stays invisible in the root parameter list,
     // so the module const is still the answer.
     assert_clean_warm(&host, "paramBodyLocalInvisible", string_lit("moduleLoc"));
+}
+
+/// A GENERIC callee at a direct-call site must never publish the
+/// CALLEE's OWN type parameter as this frame's value.
+///
+/// The direct-call rail hands back whatever the callee answers with —
+/// its body-derived flow return, or its DECLARED return carrier when it
+/// annotates one. For a generic callee BOTH of those are expressed in
+/// the callee's own binders, so returning them verbatim publishes
+/// `TypeParam(GD)` / `TypeParam(GF)` / `TypeParam(GB)` as the caller's
+/// whole-function return — cleanly, and warm.
+///
+/// That is not merely imprecise, it is unsound, because the binder
+/// identity is file-scoped and name-keyed: `GcHolder<GH>`'s own clause
+/// and a same-named callee parameter intern to ONE `SemanticNodeId`, so
+/// a leaked callee binder is substitutable by an unrelated enclosing
+/// instantiation. `new GcHolder<number>().viaCall()` would answer
+/// `number` for a member whose value has nothing to do with `GH`.
+///
+/// The rule applied instead is sb15 — the callee's own type parameters
+/// instantiate at `unknown` — which is exactly what the sibling
+/// callee-TYPE path (`call_return_of_callee_node`) already applies, so
+/// every route to one callee answers alike: the flow-derived return, the
+/// DECLARED return, and the annotated-alias value type. Call-site
+/// instantiation proper (explicit type arguments AND argument inference)
+/// is `U6.CALL_RESOLVE`'s; this is the interim HONEST answer, and it is
+/// EXACT for the one shape TypeScript itself cannot infer.
+///
+/// Oracle (tsgo checker, `--strict --declaration`):
+///
+/// ```text
+/// gcDeclExplicit(): string     gcDeclInferred(): string
+/// gcFlowExplicit(): string     gcFlowInferred(): string
+/// gcBareExplicit(): string     gcBareInferred(): unknown   ← exact
+/// gcViaAnnotated(): string     gcNonGeneric():   string
+/// new GcHolder<number>().viaCall(): string
+/// new GcHolder<number>().ownT():   number
+/// ```
+///
+/// The seven `unknown` rows are the recorded interim: TypeScript
+/// instantiates from the call's explicit type arguments and its argument
+/// inference, and neither is modeled here. `gcBareInferred` is the row
+/// where sb15 IS the checker's answer.
+///
+/// Mutation recipes:
+///
+/// - Returning `result.return_type` (the flow branch) or `hot.node()`
+///   (the declared branch) verbatim flips `gcFlow*` / `gcDecl*` /
+///   `gcBare*` to a warm binder and collapses `viaCall` onto `ownT`'s
+///   node. Dropping only the DECLARED branch's instantiation leaves
+///   `gcFlow*` green and flips `gcDecl*` / `gcBare*`; dropping only the
+///   FLOW branch's leaves `gcDecl*` / `gcBare*` green and flips
+///   `gcFlow*`, `GcNs.nsCall`, and the `viaCall` identity row.
+/// - Reading the callee's clause off its PREPARED value declaration
+///   instead of the function program index leaves every file-scope row
+///   green and flips `GcNs.nsCall` alone: a namespace-scoped function has
+///   no prepared declaration, so the clause reads EMPTY and nothing is
+///   instantiated.
+/// - Dropping the deferred-head arm from the name-driven binder
+///   collection (`include_unbound_heads`) leaves `gcFlow*` green and
+///   flips `gcDecl*` / `gcBare*`: a DECLARED return `: GD` lowers in the
+///   callee's file owner scope, where its own clause is not in scope, so
+///   it interns as an unbound `BareRef("GD")` rather than a resolved
+///   binder.
+///
+/// The three CONTROLS stay green under every one of those:
+/// `gcNonGeneric` / `GcNs.nsPlainCall` have no binder to leak, and
+/// `ownT` is the caller's OWN clause, which must survive.
+#[test]
+fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
+    let host = make_r5_host();
+
+    // Every generic-callee route — flow-derived return, DECLARED return,
+    // a bare-`T` return with nothing to infer from, and the annotated
+    // alias value type — instantiates the callee's clause at `unknown`.
+    for name in [
+        "gcDeclExplicit",
+        "gcDeclInferred",
+        "gcFlowExplicit",
+        "gcFlowInferred",
+        "gcBareExplicit",
+        "gcBareInferred",
+        "gcViaAnnotated",
+        "GcNs.nsCall",
+    ] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name} must instantiate the callee's own type parameter, \
+                     never publish the callee's binder"
+                );
+            },
+        );
+    }
+
+    // CONTROLS — a NON-generic direct callee is untouched: the rule fires
+    // on the callee's declared clause, not on "any direct call". The
+    // namespace pair is the one that pins the CLAUSE AUTHORITY: a
+    // namespace-scoped function has no prepared value declaration at all,
+    // so reading the clause off the value registry leaves `GcNs.nsCall`
+    // leaking `TypeParam(GN)` while every file-scope row is already green.
+    for name in ["gcNonGeneric", "GcNs.nsPlainCall"] {
+        assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::String));
+    }
+
+    // The MEMBER-ALIASING row. `GcHolder::viaCall` calls a generic
+    // callee whose parameter is NOT `GH`; `GcHolder::ownT` returns the
+    // class's own `GH`. Before the fix both published the SAME
+    // `SemanticNodeId` — the file-scoped name-keyed binder — so the
+    // class instantiation substituted into a value it does not own.
+    let via_call = r5_node(
+        &host,
+        "GcHolder",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "GcHolder::viaCall must not publish a binder"
+            );
+            node
+        },
+    );
+    let own_t = r5_node(
+        &host,
+        "GcHolder",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                type_param("GH"),
+                "GcHolder::ownT is the class's OWN clause and must survive"
+            );
+            node
+        },
+    );
+    assert_ne!(
+        via_call, own_t,
+        "a call's published value must never BE the enclosing class's own \
+         type-parameter node: an enclosing `GcHolder<number>` would then \
+         substitute into it"
+    );
 }

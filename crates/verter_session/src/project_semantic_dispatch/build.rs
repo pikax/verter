@@ -2151,6 +2151,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result,
                 param.name.as_str(),
                 /* root_is_own_signature */ false,
+                /* include_unbound_heads */ false,
             ) {
                 result = self.substitute_semantic_type_param(result, binder, arg);
             }
@@ -5780,24 +5781,54 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let type_parameters = Arc::clone(type_parameters);
         drop(data);
-        if type_parameters.is_empty() {
-            return extracted;
-        }
-        let unknown = self.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Unknown,
-        ));
+        self.instantiate_named_params_at_unknown(
+            type_parameters.iter().map(|decl| decl.name.as_ref()),
+            extracted,
+            /* include_unbound_heads */ false,
+        )
+    }
+
+    /// The sb15 rule addressed by type-parameter NAME rather than by an
+    /// owning `Signature` node.
+    ///
+    /// [`Self::instantiate_free_signature_params_at_unknown`] reads the
+    /// declared parameter names off a signature node and is the entry for
+    /// every caller that HAS one. A caller that holds only a signature's
+    /// RETURN — the flow-return rail, whose callee answers with a bare
+    /// return node and never composes a signature — needs the same rule
+    /// against the callee's separately-inventoried clause, so both share
+    /// this body instead of the flow rail growing a second, drifting copy.
+    ///
+    /// Same semantics either way: each named parameter's binder
+    /// occurrences in `extracted` are collected SHADOWING-AWARE (a nested
+    /// signature re-declaring the name owns its whole subtree) and
+    /// substituted through the shared binder-identity substitution. An
+    /// empty name list returns `extracted` unchanged.
+    pub(super) fn instantiate_named_params_at_unknown<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+        extracted: SemanticNodeId,
+        include_unbound_heads: bool,
+    ) -> SemanticNodeId {
+        let mut unknown: Option<SemanticNodeId> = None;
         let mut result = extracted;
-        for decl in type_parameters.iter() {
+        for name in names {
             // Shadowing-aware per-name collection: `extracted` is NOT the
             // owning signature, so a function node ANYWHERE in it (its root
-            // included) that re-declares `decl.name` owns every same-name
+            // included) that re-declares `name` owns every same-name
             // binder in its subtree — those occurrences are the nested
             // binder's, never the free outer parameter being instantiated.
             for binder in self.collect_type_param_nodes_by_name(
                 result,
-                decl.name.as_ref(),
+                name,
                 /* root_is_own_signature */ false,
+                include_unbound_heads,
             ) {
+                let unknown = *unknown.get_or_insert_with(|| {
+                    self.graph().intern_node(SemanticNodeData::Primitive(
+                        crate::semantic_query::PrimitiveKind::Unknown,
+                    ))
+                });
                 result = self.substitute_semantic_type_param(result, binder, unknown);
             }
         }
@@ -5847,6 +5878,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result,
                 decl.name.as_ref(),
                 /* root_is_own_signature */ true,
+                /* include_unbound_heads */ false,
             ) {
                 result = self.substitute_semantic_type_param(result, binder, arg);
             }
@@ -5919,6 +5951,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         root: SemanticNodeId,
         name: &str,
         root_is_own_signature: bool,
+        include_unbound_heads: bool,
     ) -> Vec<SemanticNodeId> {
         use crate::semantic_query::IndexKey;
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
@@ -6062,9 +6095,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // visited guards bound the walk; carrier args are finite interned
                 // nodes (no infinite recursion via `apply_typeof_instantiation_args`,
                 // which calls this fn).
-                SemanticNodeData::BareRef(_)
-                | SemanticNodeData::TypeOf(_)
-                | SemanticNodeData::ImportType(_) => {
+                SemanticNodeData::BareRef(_) => {
+                    // A DEFERRED head spelling the searched parameter, under
+                    // `include_unbound_heads`. A declaration's own type
+                    // parameter is not in scope where its DECLARED return
+                    // locator lowers (file owner scope), so `f<T>(): T`
+                    // interns its return as an unbound `BareRef("T")` rather
+                    // than a resolved binder — the same parameter, one
+                    // resolution state earlier, and a caller instantiating
+                    // the clause must claim both spellings or the deferred
+                    // one escapes as a dangling name. The shadow stops above
+                    // apply unchanged: a nested signature (or mapper) that
+                    // re-declares the name is never descended into, so only
+                    // occurrences the searched clause actually binds are
+                    // claimed.
+                    if include_unbound_heads
+                        && data
+                            .bare_ref_head()
+                            .is_some_and(|(head, _)| head.as_ref() == name)
+                    {
+                        found.push(node);
+                    }
+                    stack.extend(data.carrier_type_args().iter().copied());
+                }
+                SemanticNodeData::TypeOf(_) | SemanticNodeData::ImportType(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());
                 }
                 _ => {}
@@ -9703,7 +9757,7 @@ mod carrier_type_param_descent_tests {
 
         for kind in 0u8..3 {
             let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(carrier, "X", false);
+            let found = dispatch.collect_type_param_nodes_by_name(carrier, "X", false, false);
             assert!(
                 found.contains(&binder),
                 "a `TypeParam` named X inside a carrier's type_args (kind {kind}) must be \
@@ -9716,7 +9770,7 @@ mod carrier_type_param_descent_tests {
         // X binder (proving the descent honours the name, not a blanket collect).
         for kind in 0u8..3 {
             let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(carrier, "Y", false);
+            let found = dispatch.collect_type_param_nodes_by_name(carrier, "Y", false, false);
             assert!(
                 !found.contains(&binder),
                 "searching name Y must NOT collect the X binder reached through a carrier arg \
