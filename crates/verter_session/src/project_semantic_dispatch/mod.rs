@@ -105,6 +105,8 @@ pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
 pub(crate) mod flow_return_callee;
 #[cfg(test)]
+pub(crate) mod flow_return_coverage_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
