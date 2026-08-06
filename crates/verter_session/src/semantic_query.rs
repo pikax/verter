@@ -7958,6 +7958,51 @@ impl FunctionParam {
     }
 }
 
+/// Which SPELLINGS of one type-parameter name a clause instantiation
+/// claims.
+///
+/// One clause parameter can reach a consumer under three resolution
+/// states, and which of them are legitimately "the parameter" depends on
+/// where the node being instantiated was LOWERED:
+///
+/// - the BOUND `TypeParam` binder — always the parameter;
+/// - a DEFERRED `BareRef` head — the same parameter one resolution state
+///   earlier, which a declaration's own DECLARED return produces because
+///   its clause is not in scope in file owner scope;
+/// - a RESOLVED `DeclRef` — the same misresolution, in a file that ALSO
+///   declares a type of that name. Legitimate to claim ONLY for a node
+///   lowered where the clause was out of scope; in a node evaluated
+///   where the clause was BOUND, a resolved same-named declaration is a
+///   different symbol entirely, and claiming it by name destroys a
+///   correct answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseSpelling {
+    /// Bound `TypeParam` binders only.
+    Bound,
+    /// …plus a DEFERRED `BareRef` head spelling the parameter.
+    WithDeferredHeads,
+    /// …plus a RESOLVED `DeclRef` the owner-scope lowering misresolved.
+    WithOwnerScopeResolution,
+}
+
+impl ClauseSpelling {
+    /// Whether a DEFERRED (unresolved) head spelling the parameter is
+    /// claimed.
+    #[must_use]
+    pub fn claims_deferred_heads(self) -> bool {
+        matches!(
+            self,
+            Self::WithDeferredHeads | Self::WithOwnerScopeResolution
+        )
+    }
+
+    /// Whether a RESOLVED same-named declaration is claimed.
+    #[must_use]
+    pub fn claims_owner_scope_resolution(self) -> bool {
+        matches!(self, Self::WithOwnerScopeResolution)
+    }
+}
+
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {

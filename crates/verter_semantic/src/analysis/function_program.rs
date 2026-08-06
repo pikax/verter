@@ -231,17 +231,43 @@ pub struct FunctionDirectCall {
 
 /// One parameter of an indexed function's OWN type-parameter clause.
 ///
-/// Purely syntactic: a name plus whether the parameter authored a
-/// DEFAULT. The default's TYPE is deliberately absent — this index is a
-/// shallow declaration fact, never a body lowering — so a caller that
-/// needs the default's meaning demands it through the shared lazy body
-/// service, and pays for it only on the clauses that have one.
+/// Purely syntactic: a name, whether the parameter authored a DEFAULT,
+/// and the smallest formal-parameter ordinal whose authored type
+/// annotation names it. The default's TYPE is deliberately absent —
+/// this index is a shallow declaration fact, never a body lowering — so
+/// a caller that needs the default's meaning demands it through the
+/// shared lazy body service, and pays for it only on the clauses that
+/// have one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionProgramTypeParam {
     /// The type-parameter name.
     pub name: Arc<str>,
     /// Whether the parameter authored a default (`<T = D>`).
     pub has_default: bool,
+    /// The SMALLEST formal-parameter ordinal whose authored type
+    /// annotation references this name, or `None` when no parameter
+    /// type mentions it at all.
+    ///
+    /// This is the caller's inference oracle, and the ONLY fact a
+    /// caller needs to apply TypeScript's actual default rule: a
+    /// declared default resolves the parameter only when inference
+    /// produced NO candidate, and inference can produce a candidate
+    /// only from an argument the call actually supplies at an ordinal
+    /// whose parameter type names the parameter. `f<T = number>(x:
+    /// string)` therefore takes its default even at an
+    /// argument-bearing call, and `f<T = number>(a: string, b?: T)`
+    /// takes it at `f("a")`.
+    ///
+    /// A REST parameter occupies its own ordinal and covers every
+    /// later one, so the same `ordinal < argument_count` test holds:
+    /// `f<T = number>(...xs: T[])` has occurrence ordinal 0, which no
+    /// zero-argument call supplies.
+    ///
+    /// Shadowing-aware: a nested function / constructor type inside a
+    /// parameter annotation that RE-DECLARES the name owns its own
+    /// subtree, so `f<T = number>(cb: <T>(y: T) => T)` records `None`
+    /// for the outer `T` — which is what the checker answers.
+    pub first_parameter_occurrence: Option<u32>,
 }
 
 /// One served function position: identity, body locator, structural
@@ -288,6 +314,24 @@ pub struct FunctionProgramEntry {
     /// parser / language / parse-env identity folds in at the artifact
     /// boundary).
     pub flow_body_stable_hash: Hash16,
+    /// The EXACT byte hash of the function's own source text.
+    ///
+    /// [`Self::flow_body_stable_hash`] is an AST fold that
+    /// alpha-normalizes binding and reference identifiers and sees no
+    /// whitespace, which is exactly what makes it a good SHARING key —
+    /// and exactly what makes it unusable on its own as the key of an
+    /// artifact carrying SOURCE POSITIONS. Two contents that fold alike
+    /// (`const aa = 1` vs `const aaaa = 1`) place every position inside
+    /// the body differently, including positions measured relative to
+    /// the function's own start.
+    ///
+    /// This is the axis that makes such an artifact genuinely
+    /// content-addressed. It is deliberately per-FUNCTION rather than
+    /// per-file: an edit to a sibling function changes neither this hash
+    /// nor any anchor-relative position, so the untouched function's
+    /// artifacts stay warm — which is the whole point of not keying on
+    /// the file's content hash.
+    pub flow_body_exact_hash: Hash16,
 }
 
 /// The per-file function program index.
@@ -1154,6 +1198,131 @@ fn formal_params(params: &oxc_ast::ast::FormalParameters<'_>) -> Arc<[FunctionPa
 }
 
 // ---------------------------------------------------------------------------
+// Type-parameter occurrence in the formal parameter list
+// ---------------------------------------------------------------------------
+
+/// For each type name referenced from a formal parameter's authored
+/// annotation, the SMALLEST parameter ordinal that references it.
+///
+/// A caller's inference oracle: TypeScript infers a type argument only
+/// from an argument the call actually supplies at a parameter position
+/// whose type names the parameter, and falls back to the declared
+/// default only when inference produced NO candidate. That is a purely
+/// SYNTACTIC question about the callee's parameter list, so it is a
+/// shallow index fact rather than a lowering.
+#[derive(Debug, Default)]
+struct TypeParamOccurrences {
+    /// `(referenced name, smallest parameter ordinal)`.
+    first: rustc_hash::FxHashMap<String, u32>,
+}
+
+impl TypeParamOccurrences {
+    fn of(node: &FunctionNode<'_>) -> Self {
+        let params = match node {
+            FunctionNode::Function(func) => &func.params,
+            FunctionNode::Arrow(arrow) => &arrow.params,
+        };
+        let mut out = Self::default();
+        for (ordinal, param) in params.items.iter().enumerate() {
+            if let Some(annotation) = param.type_annotation.as_ref() {
+                out.collect(&annotation.type_annotation, ordinal as u32);
+            }
+        }
+        if let Some(rest) = params.rest.as_ref() {
+            if let Some(annotation) = rest.type_annotation.as_ref() {
+                out.collect(&annotation.type_annotation, params.items.len() as u32);
+            }
+        }
+        out
+    }
+
+    fn collect(&mut self, ty: &oxc_ast::ast::TSType<'_>, ordinal: u32) {
+        let mut visitor = ReferencedTypeNames {
+            found: Vec::new(),
+            shadowed: Vec::new(),
+        };
+        visitor.visit_ts_type(ty);
+        for name in visitor.found {
+            self.first
+                .entry(name)
+                .and_modify(|existing| *existing = (*existing).min(ordinal))
+                .or_insert(ordinal);
+        }
+    }
+
+    fn first_ordinal(&self, name: &str) -> Option<u32> {
+        self.first.get(name).copied()
+    }
+}
+
+/// The HEAD names of every type reference inside one authored type
+/// annotation, skipping any subtree a nested type-parameter clause
+/// re-declares (a nested signature owns its own binders, so an outer
+/// clause parameter is not referenced there).
+struct ReferencedTypeNames {
+    found: Vec<String>,
+    /// The stack of names nested clauses currently shadow.
+    shadowed: Vec<Vec<String>>,
+}
+
+impl ReferencedTypeNames {
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.shadowed
+            .iter()
+            .any(|frame| frame.iter().any(|shadow| shadow == name))
+    }
+
+    fn with_clause<R>(
+        &mut self,
+        declaration: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let names: Vec<String> = declaration
+            .map(|declaration| {
+                declaration
+                    .params
+                    .iter()
+                    .map(|param| param.name.name.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.shadowed.push(names);
+        let out = body(self);
+        self.shadowed.pop();
+        out
+    }
+}
+
+impl<'a> Visit<'a> for ReferencedTypeNames {
+    fn visit_ts_type_reference(&mut self, reference: &oxc_ast::ast::TSTypeReference<'a>) {
+        if let oxc_ast::ast::TSTypeName::IdentifierReference(id) = &reference.type_name {
+            if !self.is_shadowed(id.name.as_str()) {
+                self.found.push(id.name.as_str().to_string());
+            }
+        }
+        walk::walk_ts_type_reference(self, reference);
+    }
+
+    fn visit_ts_function_type(&mut self, function: &oxc_ast::ast::TSFunctionType<'a>) {
+        self.with_clause(function.type_parameters.as_deref(), |visitor| {
+            walk::walk_ts_function_type(visitor, function);
+        });
+    }
+
+    fn visit_ts_constructor_type(&mut self, constructor: &oxc_ast::ast::TSConstructorType<'a>) {
+        self.with_clause(constructor.type_parameters.as_deref(), |visitor| {
+            walk::walk_ts_constructor_type(visitor, constructor);
+        });
+    }
+
+    fn visit_ts_method_signature(&mut self, signature: &oxc_ast::ast::TSMethodSignature<'a>) {
+        self.with_clause(signature.type_parameters.as_deref(), |visitor| {
+            walk::walk_ts_method_signature(visitor, signature);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry build: inventory + stable hash
 // ---------------------------------------------------------------------------
 
@@ -1195,26 +1364,38 @@ fn build_entry(
     });
     bindings.dedup_by(|left, right| left.name == right.name && left.kind == right.kind);
 
+    let parameter_occurrences = TypeParamOccurrences::of(&node);
     let type_parameters: Vec<FunctionProgramTypeParam> = node
         .type_parameters()
         .map(|declaration| {
             declaration
                 .params
                 .iter()
-                .map(|param| FunctionProgramTypeParam {
-                    name: Arc::from(param.name.name.as_str()),
-                    has_default: param.default.is_some(),
+                .map(|param| {
+                    let name = param.name.name.as_str();
+                    FunctionProgramTypeParam {
+                        name: Arc::from(name),
+                        has_default: param.default.is_some(),
+                        first_parameter_occurrence: parameter_occurrences.first_ordinal(name),
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
 
+    let function_span = node.span();
     let hash = crate::analysis::function_program_hash::hash_function_body(
         source,
         statements,
         &params,
         function_start,
         node,
+    );
+    let exact_hash = crate::analysis::types::hash_16(
+        source
+            .get(function_span.start as usize..function_span.end as usize)
+            .unwrap_or_default()
+            .as_bytes(),
     );
 
     FunctionProgramEntry {
@@ -1230,6 +1411,7 @@ fn build_entry(
         direct_calls: Arc::from(Vec::new().into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
         flow_body_stable_hash: hash,
+        flow_body_exact_hash: exact_hash,
     }
 }
 
@@ -1466,6 +1648,15 @@ pub enum FunctionNode<'a> {
 }
 
 impl<'a> FunctionNode<'a> {
+    /// The function's own source span.
+    #[must_use]
+    pub fn span(&self) -> oxc_span::Span {
+        match self {
+            Self::Function(func) => func.span,
+            Self::Arrow(arrow) => arrow.span,
+        }
+    }
+
     /// The formal parameters.
     #[must_use]
     pub fn params(&self) -> &'a oxc_ast::ast::FormalParameters<'a> {

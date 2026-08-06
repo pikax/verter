@@ -15,12 +15,25 @@
 //! Both nodes are CONTENT-ADDRESSED memory-side [`ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
 //! body-sensitive / cosmetic-insensitive `flow_body_stable_hash`, the
-//! parse-env hash, the parser version, and the demand identity, so key
-//! identity IS validity and no fact rail is required — the entries'
-//! signatures stay EMPTY, and no slice identity ever enters
-//! `ReadSetSignature.facts` (slice hashes and selected IDs are never a
-//! warm-validity oracle). Their PERSISTENT registration is deferred
-//! work gated on U4; nothing here builds a persistence tier.
+//! EXACT per-function byte hash, the parse-env hash, the parser version,
+//! and the demand identity, so key identity IS validity and no fact rail
+//! is required — the entries' signatures stay EMPTY, and no slice
+//! identity ever enters `ReadSetSignature.facts` (slice hashes and
+//! selected IDs are never a warm-validity oracle). Their PERSISTENT
+//! registration is deferred work gated on U4; nothing here builds a
+//! persistence tier.
+//!
+//! "Key identity IS validity" is a CLAIM about the artifacts, and it
+//! holds only because two things are true together: the key carries the
+//! exact per-function byte hash, and the artifacts carry no absolute
+//! source position (every span in the skeleton, and therefore in the
+//! lowered slice IR, is relative to the function's own start). Drop
+//! either one and one key admits contents whose positions differ, at
+//! which point the key stops being an oracle and reuse serves a plan
+//! that no longer addresses its own code. The stable hash alone cannot
+//! carry the claim: it alpha-normalizes identifiers and folds the AST
+//! rather than the text, so it is blind to a local rename that shifts
+//! every position inside the body.
 //!
 //! Budget non-admission: an over-budget plan returns the typed
 //! [`FlowSliceBudgetExceeded`] through `CacheAdmission::ReturnOnly`
@@ -67,7 +80,8 @@ pub(crate) mod tests;
 /// on: the canonical, the five-axis served-function identity, the
 /// body-sensitive `flow_body_stable_hash` (NOT `parse_stable_hash` —
 /// `return {{ b: 1 }}` vs `return {{ b: 2 }}` key distinct slices), the
-/// parse-env hash, and the parser version.
+/// EXACT per-function byte hash, the parse-env hash, and the parser
+/// version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
@@ -76,6 +90,24 @@ pub(crate) struct FlowSliceFunctionKey {
     pub function: FunctionProgramKey,
     /// The whole-function body-sensitive / cosmetic-insensitive hash.
     pub flow_body_stable_hash: Hash16,
+    /// The EXACT byte hash of the function's own source text.
+    ///
+    /// The artifacts this key addresses carry SOURCE POSITIONS, and the
+    /// stable hash above cannot address those: it alpha-normalizes
+    /// binding / reference identifiers and folds the AST rather than the
+    /// text, so `const aa = 1` and `const aaaa = 1` share it while
+    /// placing every position inside the body differently. Reuse across
+    /// that boundary hands a plan positions that no longer address the
+    /// code they were computed from.
+    ///
+    /// This is NOT a file-offset axis, and deliberately so: it covers
+    /// the function's OWN bytes only, so an edit anywhere else in the
+    /// file — a leading blank line, a sibling function's body — leaves
+    /// it (and every anchor-relative position in the artifacts) intact,
+    /// and the untouched function stays warm. The two halves are what
+    /// make these artifacts genuinely content-addressed; either alone
+    /// leaves one direction unsound.
+    pub flow_body_exact_hash: Hash16,
     /// Parse-domain env hash.
     pub parse_env_hash: Hash16,
     /// Parser version.
@@ -152,7 +184,9 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
         let index = decl_bodies.function_program_index();
         let entry = index.get(&key.function)?;
-        if entry.flow_body_stable_hash != key.flow_body_stable_hash {
+        if entry.flow_body_stable_hash != key.flow_body_stable_hash
+            || entry.flow_body_exact_hash != key.flow_body_exact_hash
+        {
             // The live content version is not the pinned one: the
             // content-addressed key can only be served by its own
             // version.

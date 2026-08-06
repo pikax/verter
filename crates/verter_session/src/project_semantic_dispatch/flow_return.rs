@@ -25,7 +25,8 @@ use super::dispatch_txn::{
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
 use super::flow_return_callee::{
-    CallValue, CalleeClause, CalleeClauseParam, HeldCallee, SignatureCall,
+    CallValue, CalleeClause, CalleeClauseLookup, CalleeClauseParam, ClauseParamInference,
+    ClauseParamOutcome, HeldCallee, ReturnOrigin, SignatureCall,
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -391,13 +392,95 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let key = self.flow_return_key_with_demand(&identity, demand);
         match self.execute_flow_return(key) {
             FlowReturnStep::Complete(result) if result.degradation.is_none() => {
-                Some(result.return_type)
+                // `ReturnType<…>` is a signature UTILITY, not a call: it
+                // has no call site to be argument-free at, so every free
+                // clause parameter instantiates at `unknown` and a
+                // declared default never applies (`ReturnType<typeof
+                // id>` over `id<T = number>(x: T)` is `{ … unknown … }`,
+                // not `number`). That is precisely the policy the
+                // WHOLE-return route applies through
+                // `instantiate_free_signature_params_at_unknown`; this
+                // route is the same utility over the same callee one
+                // path segment longer, so it applies the same policy —
+                // returning the flow return's raw member position would
+                // publish the CALLEE's own binder as the consumer's
+                // value, and the two routes would disagree about one
+                // callee.
+                //
+                // The clause NAMES come from the shallow function-program
+                // fact rather than from composing the callee's signature,
+                // so the member demand stays as narrow as it was: a
+                // whole-signature composition here would materialise
+                // exactly the sibling members this rail exists to leave
+                // cold.
+                Some(self.instantiate_callee_clause_at_unknown(&identity, result.return_type))
             }
             // Degraded success / typed failure / in-flight hold: the
             // generic unwrap route decides (it already owns these
             // shapes for every other consumer).
             _ => None,
         }
+    }
+
+    /// Instantiate the served callee's OWN type-parameter clause at
+    /// `unknown` over a value taken from its body-derived return — the
+    /// signature-UTILITY policy, applied without composing a signature.
+    ///
+    /// A callee whose clause cannot be read instantiates nothing, which
+    /// is correct here for the one reason it is not correct at a CALL
+    /// site: the value is already a body-derived flow return of a
+    /// position this file serves, so a clause miss can only mean the
+    /// callee declares none.
+    fn instantiate_callee_clause_at_unknown(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(names) = self.served_callee_clause_names(identity) else {
+            return node;
+        };
+        if names.is_empty() {
+            return node;
+        }
+        // A body-derived return is evaluated with the callee's clause
+        // BOUND, so its parameters spell as binders (and, for a
+        // still-deferred head, as a bare name) — never as a resolved
+        // same-named file-scope declaration, which would be a different
+        // symbol.
+        self.instantiate_named_params_at_unknown(
+            names.iter().map(std::convert::AsRef::as_ref),
+            node,
+            crate::semantic_query::ClauseSpelling::WithDeferredHeads,
+        )
+    }
+
+    /// The type-parameter NAMES of a served function position, from the
+    /// shallow per-file function-program index.
+    fn served_callee_clause_names(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    ) -> Option<Vec<Arc<str>>> {
+        let canonical = identity.anchor.canonical_id.as_ref();
+        let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
+        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
+        let key = verter_semantic::analysis::function_program::FunctionProgramKey {
+            declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+                owner: identity.anchor.owner,
+                name: Arc::clone(&identity.anchor.symbol),
+                space: verter_semantic::facts::SymbolSpace::Value,
+            },
+            part: identity.function_part.clone(),
+            overload_ordinal: identity.overload_ordinal,
+        };
+        let index = decl_bodies.function_program_index();
+        let entry = index.get(&key)?;
+        Some(
+            entry
+                .type_parameters
+                .iter()
+                .map(|param| Arc::clone(&param.name))
+                .collect(),
+        )
     }
 
     /// The whole-function `FlowReturn` authority. Every whole-function
@@ -1307,6 +1390,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash: entry.flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
             parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
         };
@@ -1639,7 +1723,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // the aggregate's freshness depend on which contributor
             // happened to come first and publish `number` for
             // `if (c) return 1; return 1 as const` while publishing `1`
-            // for its reverse (tsc 7.0.2: `1` for both).
+            // for its reverse (tsgo 7.0.0-dev.20260526.1: `1` for both).
             //
             // Freshness deliberately does NOT enter the dedup identity:
             // these two arms ARE the same type, and separating them would
@@ -2606,63 +2690,80 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// one authority that answers for every position it serves, the
     /// value registry included, a namespace-scoped function included.
     ///
+    /// Three outcomes, not two: a clause that was READ and found empty
+    /// is [`CalleeClause::non_generic`] — a statement about the callee —
+    /// while a clause that could not be read at all is
+    /// [`CalleeClauseLookup::Unavailable`], which degrades. Collapsing
+    /// the second into the first is how a serve miss becomes "the callee
+    /// is not generic": the callee's return is handed back verbatim,
+    /// binders and all, with no degradation and full warm admission —
+    /// the exact leak this module exists to make inexpressible.
+    ///
     /// A DEFAULT is a body lowering, not a shallow fact, so it is
-    /// demanded separately and ONLY for the parameters the index already
-    /// flagged as authoring one: an ordinary generic callee never pays
-    /// for it. A clause whose defaults cannot be recovered (a locator
-    /// miss) degrades to bare names — `unknown` for every parameter,
-    /// which is the conservative direction: it never publishes the
-    /// callee's binder, it only loses the exactness a default would have
-    /// added.
+    /// demanded separately and ONLY for the parameters the index flagged
+    /// as authoring one AND whose call site actually leaves inference
+    /// with nothing to produce: an ordinary generic callee never pays
+    /// for it, and neither does a defaulted parameter the call infers.
+    /// A default that IS needed and cannot be recovered is
+    /// `Unavailable`, never a fabricated `unknown` — an `unknown` there
+    /// is indistinguishable from the honest interim and would be warm
+    /// admitted.
     fn direct_callee_clause(
         &mut self,
         target: &verter_semantic::analysis::function_program::FunctionProgramKey,
-    ) -> CalleeClause {
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> CalleeClauseLookup {
         let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
-            return CalleeClause::empty();
+            return CalleeClauseLookup::Unavailable;
         };
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
         let Some(entry) = decl_bodies.function_program_index().get(target).cloned() else {
-            return CalleeClause::empty();
+            return CalleeClauseLookup::Unavailable;
         };
         if entry.type_parameters.is_empty() {
-            return CalleeClause::empty();
+            return CalleeClauseLookup::non_generic();
         }
-        if !entry.type_parameters.iter().any(|param| param.has_default) {
-            return CalleeClause::new(
-                entry
-                    .type_parameters
-                    .iter()
-                    .map(|param| CalleeClauseParam::bare(Arc::clone(&param.name))),
-            );
+        // The lowered clause is demanded lazily and at most once, and
+        // only when some parameter's default is actually needed.
+        let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
+        let mut params = Vec::with_capacity(entry.type_parameters.len());
+        for (ordinal, param) in entry.type_parameters.iter().enumerate() {
+            if !param.has_default {
+                params.push(CalleeClauseParam::bare(Arc::clone(&param.name)));
+                continue;
+            }
+            let inference = ClauseParamInference::at_call(site, param.first_parameter_occurrence);
+            let outcome =
+                CalleeClauseParam::with_default(Arc::clone(&param.name), site, inference, || {
+                    let clause = lowered
+                        .get_or_insert_with(|| decl_bodies.function_type_param_clause(&entry));
+                    // Matched by ORDINAL, with the name as a
+                    // cross-check: the shallow index and the lowered
+                    // clause both walk the SAME authored clause in
+                    // declaration order, so the ordinal is the identity
+                    // and the name is not (a duplicate spelling would
+                    // silently take the first slot's default). A
+                    // disagreement means the two views are not the same
+                    // clause, which is a miss, not a best guess.
+                    let slice = clause.as_ref()?.get(ordinal)?;
+                    if slice.name != param.name {
+                        return None;
+                    }
+                    slice.default.as_ref().and_then(|gated| {
+                        self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                            self.canonical,
+                            target.declaration.owner,
+                            gated.ty(),
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    })
+                });
+            match outcome {
+                ClauseParamOutcome::Param(param) => params.push(param),
+                ClauseParamOutcome::DefaultUnavailable => return CalleeClauseLookup::Unavailable,
+            }
         }
-        // At least one parameter authored a default: demand the lowered
-        // clause and lower each default in the CALLEE's owner scope (a
-        // direct-call target is same-file by construction, and a
-        // root-signature clause carries no frame gate to satisfy).
-        let lowered = decl_bodies.function_type_param_clause(&entry);
-        CalleeClause::new(entry.type_parameters.iter().map(|param| {
-            let default = param
-                .has_default
-                .then(|| {
-                    lowered
-                        .as_ref()?
-                        .iter()
-                        .find(|slice| slice.name == param.name)?
-                        .default
-                        .as_ref()
-                        .and_then(|gated| {
-                            self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                                self.canonical,
-                                target.declaration.owner,
-                                gated.ty(),
-                                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                            )
-                        })
-                })
-                .flatten();
-            CalleeClauseParam::with_default(Arc::clone(&param.name), default)
-        }))
+        CalleeClauseLookup::Clause(CalleeClause::new(params))
     }
 
     /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
@@ -2680,20 +2781,54 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn call_return_of_callee_node(
         &mut self,
         callee_node: SemanticNodeId,
+        site: crate::flow_slice_content::SliceCallSite,
     ) -> Result<Option<CallValue>, FlowReturnFailure> {
         let resolved = self.dispatch.resolve_signature_source_carrier(
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         );
+        // An OVERLOADED callee is not answerable at a CALL site, whether
+        // or not the group has an implementation. TypeScript picks the
+        // FIRST signature whose parameters accept the arguments;
+        // `select_signature_function` deliberately selects the LAST
+        // (which is what the signature UTILITIES want — `ReturnType<typeof
+        // f>` over an overloaded `f` IS the last overload's return). For
+        // an AMBIENT group (`declare function f(…)` ×3) that hands back
+        // the last declaration's return as the call's value, cleanly and
+        // warm, with no visible signature the call would ever select.
+        //
+        // Picking the right overload needs argument-driven overload
+        // resolution (`U6.CALL_RESOLVE`); until then this is the
+        // `UnrepresentableCallee` degradation — a usable modeled `any`
+        // that is `ReturnOnly` by contract.
+        if self
+            .dispatch
+            .signature_bucket_arity(resolved, super::build::SignatureBucket::Call)
+            > 1
+        {
+            return self.degraded_unrepresentable_callee();
+        }
         let Some(function_node) = self
             .dispatch
             .select_signature_function(resolved, super::build::SignatureBucket::Call)
         else {
             return self.degraded_unrepresentable_callee();
         };
-        match CallValue::of_signature_node(self.dispatch, function_node) {
+        // A resolved callee VALUE TYPE was composed from a DECLARED
+        // signature, lowered in file owner scope where the callee's own
+        // clause is invisible — so every spelling of a clause parameter,
+        // the resolved same-named declaration included, is that
+        // parameter.
+        match CallValue::of_signature_node(
+            self.dispatch,
+            function_node,
+            site,
+            ReturnOrigin::OwnerScopeDeclared,
+        ) {
             SignatureCall::Value(value) => Ok(Some(value)),
-            SignatureCall::NotCallable => self.degraded_unrepresentable_callee(),
+            SignatureCall::NotCallable | SignatureCall::ClauseUnavailable => {
+                self.degraded_unrepresentable_callee()
+            }
             SignatureCall::ReturnMiss => Err(FlowReturnFailure::Unresolved),
         }
     }
@@ -2839,8 +2974,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // type-parameter clause, so no arm below can hand a callee's
             // return back to this frame untouched by accident — only by
             // asking for `own_frame_binder` by name.
-            crate::flow_slice_content::SliceExpr::Call(call) => {
-                Ok(self.eval_call(call)?.map(CallValue::into_node))
+            crate::flow_slice_content::SliceExpr::Call(call, site) => {
+                Ok(self.eval_call(call, *site)?.map(CallValue::into_node))
             }
             crate::flow_slice_content::SliceExpr::Any => Ok(Some(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
@@ -2873,6 +3008,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn eval_call(
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
+        site: crate::flow_slice_content::SliceCallSite,
     ) -> Result<Option<CallValue>, FlowReturnFailure> {
         let graph = self.dispatch.graph();
         match call {
@@ -2888,11 +3024,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     Some(signature) => signature,
                     None => return Ok(None),
                 };
-                match CallValue::of_signature_node(self.dispatch, signature) {
+                // A nested function value's signature is COMPOSED here:
+                // its return is the flow join of its own body, evaluated
+                // with its clause bound. A resolved same-named
+                // declaration inside it is therefore a foreign symbol.
+                match CallValue::of_signature_node(
+                    self.dispatch,
+                    signature,
+                    site,
+                    ReturnOrigin::ClauseScoped,
+                ) {
                     SignatureCall::Value(value) => Ok(Some(value)),
-                    SignatureCall::NotCallable | SignatureCall::ReturnMiss => {
-                        Err(FlowReturnFailure::Unresolved)
-                    }
+                    SignatureCall::NotCallable
+                    | SignatureCall::ReturnMiss
+                    | SignatureCall::ClauseUnavailable => Err(FlowReturnFailure::Unresolved),
                 }
             }
             crate::flow_slice_content::SliceCall::Direct(target) => {
@@ -2949,7 +3094,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     else {
                         return self.degraded_unrepresentable_callee();
                     };
-                    return self.call_return_of_callee_node(callee_node);
+                    return self.call_return_of_callee_node(callee_node, site);
                 }
                 let ordinal = match &target.part {
                     verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
@@ -2957,15 +3102,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     _ => 0,
                 };
-                // An OVERLOADED callee is not answerable here. The
-                // function-program index carries ONE entry per overload
-                // group, at the trailing IMPLEMENTATION, so this rail
-                // reaches exactly the signature the language HIDES: a
-                // multi-signature group surfaces its bodiless overloads
-                // and never its implementation, so `ovX("a")` — whose
-                // visible overloads return `OA` and `string` — would
-                // publish the implementation's `any`, cleanly and warm,
-                // with no visible signature that ever returns it.
+                // An OVERLOADED callee is not answerable here, and the
+                // predicate for that is the SIZE of the overload group
+                // alone.
+                //
+                // TypeScript resolves an overloaded call by ARGUMENTS,
+                // picking the FIRST signature that matches. This rail
+                // reaches ONE entry of the group and cannot pick: the
+                // function-program index carries a single entry per
+                // group, so for a BODIED group it lands on the trailing
+                // implementation — the one signature the language HIDES
+                // — and for an AMBIENT group (`declare function f(…)`
+                // ×3, no implementation at all) it lands on the LAST
+                // declaration while the language would pick the first.
+                // Gating on "the selected signature has an
+                // implementation body" therefore closed only the bodied
+                // half and left the ambient half publishing a
+                // confidently wrong answer, cleanly and warm.
                 //
                 // Picking the right overload needs argument-driven
                 // overload resolution, which is `U6.CALL_RESOLVE`'s. Until
@@ -2975,13 +3128,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // answer. A LONE signature is untouched, bodied or not:
                 // the rule is overload VISIBILITY, not "any function with
                 // a body".
-                if prepared.as_ref().is_some_and(|prepared| {
-                    prepared.signatures.len() > 1
-                        && prepared
-                            .signatures
-                            .get(ordinal)
-                            .is_some_and(|signature| signature.has_implementation_body)
-                }) {
+                if prepared
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.signatures.len() > 1)
+                {
                     return self.degraded_unrepresentable_callee();
                 }
                 let source = prepared.as_ref().and_then(|prepared| {
@@ -3021,7 +3171,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // function has no prepared declaration, and reading the
                 // clause from there would silently leave exactly those
                 // callees leaking their binder.
-                let callee_clause = self.direct_callee_clause(target);
+                let callee_clause = match self.direct_callee_clause(target, site) {
+                    CalleeClauseLookup::Clause(clause) => clause,
+                    // The callee's clause could not be READ. Handing its
+                    // return back with nothing instantiated is the leak;
+                    // this is the `UnrepresentableCallee` degradation the
+                    // rail already defines — usable, `ReturnOnly`, never
+                    // warm.
+                    CalleeClauseLookup::Unavailable => {
+                        return self.degraded_unrepresentable_callee()
+                    }
+                };
                 // A target the value registry does not carry as a
                 // prepared declaration (a namespace-scoped function) is
                 // only reachable through the body-derived demand.
@@ -3083,6 +3243,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.dispatch,
                                     &callee_clause,
                                     result.return_type,
+                                    ReturnOrigin::ClauseScoped,
                                 )))
                             }
                             FlowReturnStep::Hold(key) => {
@@ -3104,9 +3265,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .dispatch
                         .execute_function_return_source(source, self.canonical)
                     {
-                        super::flow_return::FunctionReturnNode::Declared(hot) => Ok(Some(
-                            CallValue::of_served_return(self.dispatch, &callee_clause, hot.node()),
-                        )),
+                        // The callee's DECLARED return locator, lowered in
+                        // file owner scope where its own clause is not in
+                        // scope: the resolved same-named declaration IS
+                        // the clause parameter, misresolved.
+                        super::flow_return::FunctionReturnNode::Declared(hot) => {
+                            Ok(Some(CallValue::of_served_return(
+                                self.dispatch,
+                                &callee_clause,
+                                hot.node(),
+                                ReturnOrigin::OwnerScopeDeclared,
+                            )))
+                        }
                         super::flow_return::FunctionReturnNode::DeclaredMiss => {
                             Err(FlowReturnFailure::Unresolved)
                         }
@@ -3154,9 +3324,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // binding is otherwise indistinguishable from any other
                 // callee: nothing about "the callee happens to be a local"
                 // makes its binders this frame's to publish.
-                match CallValue::of_signature_node(self.dispatch, node) {
+                // A binding's value is either a nested function value's
+                // COMPOSED signature (clause-scoped) or a lowered
+                // annotation. A function-TYPE annotation
+                // (`<T>(x: T) => T`) lowers with its clause in scope, so
+                // it spells its parameters as binders; a `typeof
+                // declaredFn` annotation — the one shape that could
+                // carry the owner-scope misresolution — does not reach a
+                // `Signature` node here at all (it resolves to a
+                // non-callable surface and degrades). The owner-scope
+                // spelling is therefore kept for safety rather than for
+                // a reachable shape, and no fixture in the suite
+                // distinguishes the two here.
+                match CallValue::of_signature_node(
+                    self.dispatch,
+                    node,
+                    site,
+                    ReturnOrigin::OwnerScopeDeclared,
+                ) {
                     SignatureCall::Value(value) => Ok(Some(value)),
-                    SignatureCall::ReturnMiss => Err(FlowReturnFailure::Unresolved),
+                    SignatureCall::ReturnMiss | SignatureCall::ClauseUnavailable => {
+                        Err(FlowReturnFailure::Unresolved)
+                    }
                     SignatureCall::NotCallable
                         if matches!(
                             graph.node_data(node).as_deref(),
@@ -3224,7 +3413,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ) else {
                     return self.degraded_unrepresentable_callee();
                 };
-                self.call_return_of_callee_node(callee_node)
+                self.call_return_of_callee_node(callee_node, site)
             }
         }
     }

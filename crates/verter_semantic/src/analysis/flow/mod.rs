@@ -519,6 +519,14 @@ pub struct SkeletonReturnSite {
 /// Built once per function content version from the retained parse
 /// snapshot; never rebuilt per query or demand. Stores NO lowered type —
 /// every leaf is an interned name, ordinal, span, or id.
+///
+/// **Every span here is RELATIVE to the function's own start**
+/// ([`FunctionBodySource::anchor`]), never an absolute file offset. The
+/// skeleton is content-addressed and reused across every file content
+/// its key admits, and an absolute offset is not a property of that
+/// content: a blank line above the function moves all of them while
+/// changing nothing the key can see. Consumers rebase a live position
+/// onto the same anchor before comparing.
 #[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
 pub struct FunctionBodySkeleton {
     /// The interned name table.
@@ -765,6 +773,21 @@ pub struct FunctionBodySource<'a, 'ast> {
     pub expression_body: bool,
     /// The body span.
     pub body_span: verter_span::Span,
+    /// The FUNCTION's own start offset — the anchor every span the
+    /// skeleton records is stored RELATIVE to.
+    ///
+    /// The skeleton is a CONTENT-ADDRESSED artifact: it is memoized per
+    /// function content version and reused for any file content its key
+    /// admits. Absolute source positions are not a property of that
+    /// content — a blank line ANYWHERE above the function moves every
+    /// one of them while changing nothing the key can see — so the
+    /// skeleton stores no absolute position at all. Consumers rebase
+    /// live positions onto the same anchor before asking the skeleton
+    /// anything.
+    ///
+    /// The anchor precedes the parameter list and a named function
+    /// expression's own name, so every recorded span is non-negative.
+    pub anchor: u32,
     /// A NAMED FUNCTION EXPRESSION's own name, which binds INSIDE its own
     /// body and nowhere else (`const g = function h() { … h … }`). It is
     /// part of this frame's lexical inventory, not the enclosing one, so
@@ -792,6 +815,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             statements: &body.statements,
             expression_body: false,
             body_span: body.span.into(),
+            anchor: function.span.start,
             self_binding: None,
         })
     }
@@ -815,6 +839,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
             statements: &arrow.body.statements,
             expression_body: arrow.expression,
             body_span: arrow.body.span.into(),
+            anchor: arrow.span.start,
             self_binding: None,
         }
     }
@@ -826,7 +851,7 @@ impl<'a, 'ast> FunctionBodySource<'a, 'ast> {
 /// own frames).
 #[must_use]
 pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> FunctionBodySkeleton {
-    let mut builder = SkeletonBuilder::new(source.body_span);
+    let mut builder = SkeletonBuilder::new(source.anchor, source.body_span);
     // A named function expression's own name is an immutable binding of
     // its own frame, in scope over the parameters and the whole body. It
     // is recorded as a nested-function-kind binding: a function-valued
@@ -870,6 +895,9 @@ struct SiteDraft {
 }
 
 struct SkeletonBuilder {
+    /// The function's own start offset; every recorded span is rebased
+    /// onto it at `finish`.
+    anchor: u32,
     names: Vec<Arc<str>>,
     name_lookup: FxHashMap<Arc<str>, FlowNameId>,
     regions: Vec<SkeletonRegion>,
@@ -882,7 +910,7 @@ struct SkeletonBuilder {
 }
 
 impl SkeletonBuilder {
-    fn new(body_span: verter_span::Span) -> Self {
+    fn new(anchor: u32, body_span: verter_span::Span) -> Self {
         let root = SkeletonRegion {
             kind: SkeletonRegionKind::FunctionBody,
             parent: None,
@@ -891,6 +919,7 @@ impl SkeletonBuilder {
             span: body_span,
         };
         Self {
+            anchor,
             names: Vec::new(),
             name_lookup: FxHashMap::default(),
             regions: vec![root],
@@ -1443,16 +1472,43 @@ impl SkeletonBuilder {
         }
     }
 
+    /// Rebase one absolute source span onto the skeleton's own anchor.
+    fn rebase(anchor: u32, span: verter_span::Span) -> verter_span::Span {
+        verter_span::Span::new(
+            span.start.saturating_sub(anchor),
+            span.end.saturating_sub(anchor),
+        )
+    }
+
     fn finish(self) -> FunctionBodySkeleton {
+        let anchor = self.anchor;
         FunctionBodySkeleton {
             names: Arc::from(self.names.into_boxed_slice()),
-            regions: Arc::from(self.regions.into_boxed_slice()),
-            bindings: Arc::from(self.bindings.into_boxed_slice()),
+            regions: Arc::from(
+                self.regions
+                    .into_iter()
+                    .map(|region| SkeletonRegion {
+                        span: Self::rebase(anchor, region.span),
+                        ..region
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            bindings: Arc::from(
+                self.bindings
+                    .into_iter()
+                    .map(|binding| SkeletonBinding {
+                        span: Self::rebase(anchor, binding.span),
+                        ..binding
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             expr_sites: Arc::from(
                 self.sites
                     .into_iter()
                     .map(|draft| SkeletonExprSite {
-                        span: draft.span,
+                        span: Self::rebase(anchor, draft.span),
                         region: draft.region,
                         parent: draft.parent,
                         shape: draft.shape,
@@ -1462,8 +1518,26 @@ impl SkeletonBuilder {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ),
-            return_sites: Arc::from(self.return_sites.into_boxed_slice()),
-            writes: Arc::from(self.writes.into_boxed_slice()),
+            return_sites: Arc::from(
+                self.return_sites
+                    .into_iter()
+                    .map(|site| SkeletonReturnSite {
+                        span: Self::rebase(anchor, site.span),
+                        ..site
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+            writes: Arc::from(
+                self.writes
+                    .into_iter()
+                    .map(|write| SkeletonWrite {
+                        span: Self::rebase(anchor, write.span),
+                        ..write
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
         }
     }
 }

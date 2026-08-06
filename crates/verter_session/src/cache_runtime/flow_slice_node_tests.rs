@@ -20,6 +20,7 @@ use verter_type_expr::TopLevelOwnerId;
 use super::*;
 use crate::cache_runtime::lookup;
 use crate::resolver_core::ResolverContext;
+use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -92,6 +93,7 @@ fn function_key(canonical: &str, name: &str, body_hash_tag: u8) -> FlowSliceFunc
             overload_ordinal: 0,
         },
         flow_body_stable_hash: [body_hash_tag; 16],
+        flow_body_exact_hash: [body_hash_tag; 16],
         parse_env_hash: [0u8; 16],
         parser_version: 1,
     }
@@ -490,6 +492,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash: entry.flow_body_exact_hash,
             parse_env_hash: env.parse_env_hash,
             parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
         },
@@ -819,4 +822,250 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     // The parse arena that produced this IR dropped inside `skeleton_of`;
     // reading the IR here is the runtime detach witness.
     assert!(!ir.exprs.is_empty(), "the detached IR carries owned data");
+}
+
+// ---------------------------------------------------------------------------
+// Content-addressing: a span-bearing artifact under a span-free key
+// ---------------------------------------------------------------------------
+
+/// Two functions, so an edit that moves the file can leave one of them
+/// structurally untouched while shifting its absolute source positions.
+const SHIFT_FIXTURE: &str = r#"export function shiftedFirst() {
+  const aa = 1;
+  return { m: aa };
+}
+
+export function shiftedSecond() {
+  const bb = "s";
+  return { m: bb };
+}
+"#;
+
+/// The SAME file with a leading blank line: no function's own text
+/// changes, every function's absolute source positions shift by one.
+fn shifted_source() -> String {
+    format!("\n{SHIFT_FIXTURE}")
+}
+
+/// The SAME file with `shiftedSecond`'s local ALPHA-RENAMED to a
+/// different-LENGTH name. `flow_body_stable_hash` alpha-normalizes
+/// binding/reference identifiers, so `shiftedSecond`'s structural hash
+/// is UNCHANGED — while every source position inside its body shifts,
+/// including positions measured RELATIVE to the function's own start.
+fn alpha_renamed_source() -> String {
+    SHIFT_FIXTURE.replace("bb", "bbbbbb")
+}
+
+/// Evaluate one function's whole flow return through the production
+/// dispatch, as a projected type.
+fn flow_return_of(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+    name: &str,
+    stage: &str,
+) -> verter_type_expr::TypeExpr {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let key = crate::semantic_query::FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+    };
+    match dispatch.execute(crate::semantic_query::SemanticQueryKey::FlowReturn(
+        Box::new(key),
+    )) {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
+            ..
+        }) => host
+            .project_node_to_type_expr_for_test(result.return_type)
+            .expect("a flow return value projects"),
+        other => panic!("[{stage}] {name} must produce a flow return value, got {other:?}"),
+    }
+}
+
+fn upsert_source(host: &Arc<VerterHost>, canonical: &str, source: &str) {
+    use crate::types::UpsertRequest;
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// The expected whole-return shape of `shiftedSecond`: `{ m: string }`.
+#[track_caller]
+fn assert_second_is_string(ty: &verter_type_expr::TypeExpr, label: &str) {
+    let verter_type_expr::TypeExpr::Object(object) = ty else {
+        panic!("{label}: expected an object return, got {ty:?}");
+    };
+    let member = object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property)
+                if property.key.as_string() == Some("m") =>
+            {
+                Some(property)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{label}: member `m` must be present in {ty:?}"));
+    assert_eq!(
+        member.ty,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "{label}: `m` reads a widening-literal local, so it publishes `string`"
+    );
+}
+
+/// The per-function flow bundle is CONTENT-addressed, so a reuse of it
+/// must be sound for every content the key admits.
+///
+/// The bundle (`FunctionBodySkeleton` + `FunctionFlowGraph`) is the
+/// substrate's source-position authority: the content lowering matches
+/// live OXC spans against the plan's selected spans to decide what
+/// lowers. `FlowSliceFunctionKey`'s only content axis is
+/// `flow_body_stable_hash`, which is an AST fold — it is blind to
+/// absolute file position (an edit ABOVE the function) AND, because it
+/// alpha-normalizes binding/reference identifiers, blind to a local
+/// rename that shifts every position INSIDE the function. So one key
+/// admits contents whose positions differ, and reuse hands the plan
+/// positions that no longer address the code they were computed from.
+///
+/// Both directions are exercised, because they need DIFFERENT halves of
+/// the fix and either one alone leaves the other broken:
+///
+/// - a leading blank line moves the whole file; the function's own bytes
+///   are untouched, so it is not distinguishable by any per-function
+///   content hash — only positions stored RELATIVE to the function's own
+///   anchor survive it;
+/// - an alpha-rename to a different-LENGTH name shifts positions INSIDE
+///   one function while leaving its structural hash identical — relative
+///   positions do NOT survive it, only an EXACT per-function content
+///   axis in the key does.
+///
+/// Discrimination is against a COLD host built directly on each edited
+/// content: the cold answer is what the substrate computes with no
+/// reuse at all, so an equal warm answer is reuse that was sound and an
+/// unequal one is reuse that was not.
+///
+/// Mutation recipes:
+///
+/// - dropping the relative-anchor rebase (storing absolute skeleton
+///   spans again) makes the LEADING-BLANK-LINE arm fail: the shifted
+///   file reuses `shiftedSecond`'s stale bundle and the demand selects
+///   nothing;
+/// - dropping `flow_body_exact_hash` from `FlowSliceFunctionKey` makes
+///   the ALPHA-RENAME arm fail the same way, and leaves the first arm
+///   green.
+#[test]
+fn flow_bundle_reuse_is_sound_for_every_content_its_key_admits() {
+    let canonical = "/ws/flow-shift.ts";
+
+    // ── Arm 1: an edit ABOVE the function (whole-file shift) ──────────
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&host, canonical, SHIFT_FIXTURE);
+    assert_second_is_string(
+        &flow_return_of(&host, canonical, "shiftedSecond", "base"),
+        "base",
+    );
+
+    upsert_source(&host, canonical, &shifted_source());
+    let warm_shifted = flow_return_of(&host, canonical, "shiftedSecond", "warm shifted");
+
+    let cold = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&cold, canonical, &shifted_source());
+    let cold_shifted = flow_return_of(&cold, canonical, "shiftedSecond", "cold shifted");
+    assert_second_is_string(&cold_shifted, "cold shifted");
+    assert_eq!(
+        warm_shifted, cold_shifted,
+        "a leading blank line changes no function's own text, so every function's \
+         bundle must still serve — and must serve the SAME answer a cold host \
+         computes on exactly this content"
+    );
+
+    // ── Arm 2: an ALPHA-RENAME inside the function ────────────────────
+    let renamed_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&renamed_host, canonical, SHIFT_FIXTURE);
+    assert_second_is_string(
+        &flow_return_of(
+            &renamed_host,
+            canonical,
+            "shiftedSecond",
+            "base (rename arm)",
+        ),
+        "base (rename arm)",
+    );
+
+    upsert_source(&renamed_host, canonical, &alpha_renamed_source());
+    let warm_renamed = flow_return_of(&renamed_host, canonical, "shiftedSecond", "warm renamed");
+
+    let cold_renamed_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_source(&cold_renamed_host, canonical, &alpha_renamed_source());
+    let cold_renamed = flow_return_of(
+        &cold_renamed_host,
+        canonical,
+        "shiftedSecond",
+        "cold renamed",
+    );
+    assert_second_is_string(&cold_renamed, "cold renamed");
+    assert_eq!(
+        warm_renamed, cold_renamed,
+        "an alpha-rename keeps `flow_body_stable_hash` identical while shifting \
+         every position inside the body, so the key must carry an EXACT content \
+         axis — relative positions alone do not survive it"
+    );
+}
+
+/// The fixture invariant the test above depends on: the two edits are
+/// exactly the two blind spots claimed, and neither is distinguishable
+/// by `flow_body_stable_hash`.
+#[test]
+fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
+    let canonical = "/ws/flow-shift-invariant.ts";
+    let hash_of = |source: &str| {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert_source(&host, canonical, source);
+        let ctx: &dyn ResolverContext = host.as_ref();
+        let serve = ctx
+            .ensure_indexed_ready_serve(canonical)
+            .expect("the fixture file is served");
+        let index = serve
+            .indexed
+            .shallow_state
+            .decl_bodies()
+            .function_program_index();
+        index
+            .entries
+            .iter()
+            .find(|entry| entry.key.declaration.name.as_ref() == "shiftedSecond")
+            .expect("shiftedSecond is a served function position")
+            .flow_body_stable_hash
+    };
+    let base = hash_of(SHIFT_FIXTURE);
+    assert_eq!(
+        base,
+        hash_of(&shifted_source()),
+        "a leading blank line must not change the structural body hash"
+    );
+    assert_eq!(
+        base,
+        hash_of(&alpha_renamed_source()),
+        "an alpha-rename must not change the structural body hash — this is what \
+         makes relative positions insufficient on their own"
+    );
 }

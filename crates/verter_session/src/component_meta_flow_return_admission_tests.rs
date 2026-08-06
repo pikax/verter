@@ -293,3 +293,75 @@ pub(crate) fn no_flow_slot_in_published_type_surface() {
         );
     }
 }
+
+/// The SFC whose callee is GENERIC: `ReturnType<typeof …>` is a signature
+/// UTILITY, so every free clause parameter instantiates at `unknown` —
+/// the whole-return route's policy, which the MEMBER route has to share
+/// or the two disagree about one callee.
+///
+/// `MG` carries a DECLARED DEFAULT (`number`) precisely so the three
+/// candidate behaviours are distinguishable at the published surface:
+/// the utility policy publishes `unknown`, a CALL-site policy would
+/// publish `number`, and NO policy publishes the callee's own binder
+/// `MG` — a file-scoped, name-keyed node an enclosing same-named clause
+/// then substitutes into a value that has nothing to do with it.
+const MYGENERIC_SFC: &str = r#"<script setup lang="ts">
+function myGeneric<MG = number>(x: MG) {
+  return { m: x };
+}
+defineProps<{ m: ReturnType<typeof myGeneric>['m'] }>();
+</script>
+<template><div /></template>
+"#;
+
+/// `ReturnType<typeof genericCallee>['m']` publishes the utility's
+/// `unknown`, never the callee's raw type-parameter binder.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read through
+/// a deliberate `const x: null = …` assignment error):
+///
+/// ```text
+/// ReturnType<typeof myGeneric>       : { m: unknown; }
+/// ReturnType<typeof myGeneric>['m']  : unknown
+/// ```
+///
+/// Mutation recipe: returning the member demand's flow return raw (the
+/// pre-fix `flow_return_member_projection`) republishes the UNREDUCED
+/// `ReturnType<typeof myGeneric>['m']` carrier — the raw binder the rail
+/// hands back is the callee's own `TypeParam("MG")` node, which the
+/// publication pipeline then refuses, so the consumer gets no answer at
+/// all where the checker has one. (The rail's raw hand-back is directly
+/// observable one layer down: the member route returns
+/// `TypeParam { decl_name: "MG" }` before this fix and
+/// `Primitive(Unknown)` after.)
+#[test]
+fn return_type_member_of_generic_callee_publishes_the_utility_policy() {
+    let host = build_host(&[("/workspace/src/MyGeneric.vue", MYGENERIC_SFC)]);
+
+    let (meta, resolution) = host
+        .get_component_meta_with_resolution("/workspace/src/MyGeneric.vue")
+        .expect("generic ReturnType-admission SFC must resolve");
+    assert!(!resolution.synthesis_should_suppress);
+
+    let m = meta
+        .props
+        .iter()
+        .find(|p| p.name == "m")
+        .expect("m prop present");
+    let m_type = crate::test_only::semantic_source_probe::shallow_type_expr(
+        &host,
+        "/workspace/src/MyGeneric.vue",
+        m.type_source
+            .present()
+            .expect("m prop must publish a typed source"),
+    )
+    .unwrap_or_else(|| panic!("m prop's published source must shell-materialize"));
+    assert_eq!(
+        m_type,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
+        "the MEMBER route must apply the signature-utility clause policy — a raw \
+         `Ref {{ name: \"MG\" }}` is the callee's own binder published as this \
+         consumer's value, and `number` would be the CALL-site policy the utility \
+         never gets"
+    );
+}

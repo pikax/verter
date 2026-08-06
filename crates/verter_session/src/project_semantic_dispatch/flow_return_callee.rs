@@ -22,7 +22,14 @@
 //!   a new call form must pick a constructor at its own arm;
 //! - a hold target's contribution to the SCC fixed point is reachable
 //!   only through [`HeldCallee::discharged`], so the equation's join
-//!   cannot route around the rule either.
+//!   cannot route around the rule either;
+//! - a clause is either [`CalleeClause::non_generic`] — a STATEMENT
+//!   about the callee, made only where the callee's clause was actually
+//!   read and found empty — or a list of parameters each of which came
+//!   through [`CalleeClauseParam`]'s constructors. There is no `Default`,
+//!   so "no clause" cannot be reached by omission, and a route that
+//!   FAILS to read the clause cannot produce one at all (it returns
+//!   [`CalleeClauseLookup::Unavailable`] and degrades).
 //!
 //! Exactly one hold is deliberately UNINSTANTIATED
 //! ([`HeldCallee::own_frame`]) — the direct self-call, whose "callee" IS
@@ -31,14 +38,117 @@
 //! same reason [`GatedType::root_signature`] is: the exemption has to be
 //! asked for.
 //!
+//! ## What a clause parameter instantiates TO
+//!
+//! TypeScript resolves a call's type arguments in exactly one order:
+//! explicit type arguments, else inference from the supplied arguments,
+//! else the declared default (`checker.ts::getInferredTypes` takes the
+//! default only when inference produced NO candidate). This substrate
+//! does not model the first two — that is `U6.CALL_RESOLVE` — and
+//! `unknown` is its recorded interim for both.
+//!
+//! The default is therefore NOT an unconditional answer: applying it
+//! whenever one is declared turns the honest interim into a confidently
+//! WRONG concrete type, warm-admitted. `zzMismA<ZA = string>(x: ZA)`
+//! called `zzMismA(1)` is `number`, not `string`. The rule shipped here
+//! is TypeScript's, expressed on the two facts the call carrier
+//! ([`SliceCallSite`]) exists to carry:
+//!
+//! - explicit type arguments present ⇒ `unknown` (the interim);
+//! - otherwise a parameter with an inference CANDIDATE — it occurs in a
+//!   parameter type at an ordinal the call actually supplies ⇒
+//!   `unknown` (the interim);
+//! - otherwise ⇒ its declared default when it has one, else `unknown`
+//!   (which is also the exact answer for the one shape TypeScript itself
+//!   cannot infer: `bare<T>(): T` called with no arguments IS
+//!   `unknown`).
+//!
 //! [`GatedType::root_signature`]: crate::flow_slice_content::GatedType::root_signature
 
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
+use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
-    FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
+    ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
 };
+
+/// Where the node a clause instantiates into was LOWERED, which decides
+/// which SPELLINGS of a clause parameter that node can contain.
+///
+/// One clause parameter can reach a caller under three spellings: the
+/// bound `TypeParam` binder, a DEFERRED `BareRef` head, and a RESOLVED
+/// `DeclRef`. The third only exists because a declaration's own clause
+/// is NOT in scope where its DECLARED return locator lowers (file owner
+/// scope): `first<Item>(xs: Item[]): Item` beside `interface Item {}`
+/// interns its declared return as the INTERFACE, and a caller that did
+/// not claim that spelling would publish an unrelated symbol.
+///
+/// The inverse is just as real. A BODY-DERIVED return is evaluated in
+/// the callee's own frame, where the clause IS bound, so every
+/// occurrence of a clause parameter there is already a `TypeParam` — and
+/// a resolved `DeclRef` reached through such an arm is, by construction,
+/// a DIFFERENT symbol that merely shares the name. Claiming it by name
+/// destroys an exactly-correct arm (`aye<QQ>` returning `bee(): QQ`
+/// answers `1 | QQ`, not `unknown`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReturnOrigin {
+    /// Lowered where the callee's own clause was NOT in scope — its
+    /// DECLARED return locator in file owner scope, or a resolved callee
+    /// VALUE TYPE composed from one. A same-named resolved declaration
+    /// there IS the clause parameter, misresolved.
+    OwnerScopeDeclared,
+    /// Evaluated where the clause WAS bound — a body-derived flow return
+    /// or a nested function value's composed signature. A same-named
+    /// resolved declaration there is a FOREIGN symbol.
+    ClauseScoped,
+}
+
+impl ReturnOrigin {
+    fn spelling(self) -> ClauseSpelling {
+        match self {
+            Self::OwnerScopeDeclared => ClauseSpelling::WithOwnerScopeResolution,
+            Self::ClauseScoped => ClauseSpelling::WithDeferredHeads,
+        }
+    }
+}
+
+/// Whether ARGUMENT INFERENCE could produce a candidate for one clause
+/// parameter at one call site.
+///
+/// The single question that decides whether a declared default applies.
+/// Two producers answer it from the two shapes a callee reaches this
+/// module in — a shallow function-program clause fact, and a resolved
+/// `Signature` node — but both answer it through
+/// [`Self::at_call`], so the RULE has one home even though the oracle
+/// does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClauseParamInference {
+    /// The call supplies an argument at a parameter position whose type
+    /// names this parameter: TypeScript infers there, so the declared
+    /// default is not the answer and `unknown` is the interim.
+    HasCandidate,
+    /// No supplied argument position names this parameter: inference
+    /// produces nothing, so the callee's own declaration resolves it.
+    NoCandidate,
+}
+
+impl ClauseParamInference {
+    /// The verdict for a parameter whose smallest occurrence in the
+    /// callee's parameter list is `first_parameter_occurrence`
+    /// (`None` = it occurs in no parameter type at all).
+    ///
+    /// A REST parameter occupies its own ordinal and covers every later
+    /// one, which the `supplies_parameter_ordinal` predicate already
+    /// models, and a SPREADING call is treated as supplying every
+    /// ordinal.
+    pub(super) fn at_call(site: SliceCallSite, first_parameter_occurrence: Option<u32>) -> Self {
+        match first_parameter_occurrence {
+            Some(ordinal) if site.supplies_parameter_ordinal(ordinal) => Self::HasCandidate,
+            _ => Self::NoCandidate,
+        }
+    }
+}
 
 /// One parameter of a CALLEE's own type-parameter clause, as a caller
 /// must apply it.
@@ -49,25 +159,64 @@ pub(super) struct CalleeClauseParam {
     /// binder, a deferred head, or a file-scope declaration the clause
     /// shadows.
     name: Arc<str>,
-    /// The parameter's DECLARED default, already lowered in the callee's
-    /// scope. Present ⇒ that is what an argument-free call instantiates
-    /// to; absent ⇒ `unknown`.
-    default: Option<SemanticNodeId>,
+    /// What this parameter instantiates to: its DECLARED default when
+    /// the call site leaves inference with nothing to produce, and
+    /// `None` (⇒ `unknown`) in every other case. The decision is made by
+    /// the constructors below and nowhere else.
+    substitution: Option<SemanticNodeId>,
 }
 
 impl CalleeClauseParam {
-    /// A clause parameter with no declared default.
+    /// A clause parameter with no declared default: `unknown`, always.
     pub(super) fn bare(name: Arc<str>) -> Self {
         Self {
             name,
-            default: None,
+            substitution: None,
         }
     }
 
-    /// A clause parameter carrying its declared default.
-    pub(super) fn with_default(name: Arc<str>, default: Option<SemanticNodeId>) -> Self {
-        Self { name, default }
+    /// A clause parameter carrying a DECLARED DEFAULT, resolved against
+    /// the call site — the ONE place TypeScript's default rule is
+    /// applied.
+    ///
+    /// `default` is lowered LAZILY and only when the rule actually needs
+    /// it, so a callee whose default the call site can never use never
+    /// pays to lower it. A `None` from the producer is a genuine
+    /// recovery failure at a point where the default WAS needed, so it
+    /// is reported through [`ClauseParamOutcome::DefaultUnavailable`]
+    /// rather than silently degrading to `unknown` — an `unknown` there
+    /// is indistinguishable from the honest interim and would be warm
+    /// admitted.
+    pub(super) fn with_default(
+        name: Arc<str>,
+        site: SliceCallSite,
+        inference: ClauseParamInference,
+        default: impl FnOnce() -> Option<SemanticNodeId>,
+    ) -> ClauseParamOutcome {
+        if site.has_explicit_type_arguments() || inference == ClauseParamInference::HasCandidate {
+            return ClauseParamOutcome::Param(Self {
+                name,
+                substitution: None,
+            });
+        }
+        match default() {
+            Some(default) => ClauseParamOutcome::Param(Self {
+                name,
+                substitution: Some(default),
+            }),
+            None => ClauseParamOutcome::DefaultUnavailable,
+        }
     }
+}
+
+/// The outcome of resolving one defaulted clause parameter.
+pub(super) enum ClauseParamOutcome {
+    /// The parameter, resolved.
+    Param(CalleeClauseParam),
+    /// The declared default was NEEDED by the call-site rule and could
+    /// not be recovered (a broken lease pin, a locator miss). Never a
+    /// fabricated `unknown`.
+    DefaultUnavailable,
 }
 
 /// A CALLEE's own type-parameter clause.
@@ -75,15 +224,22 @@ impl CalleeClauseParam {
 /// The clause is the caller's instantiation obligation: every parameter
 /// it declares must leave the callee's return before that return can be
 /// this frame's value.
-#[derive(Debug, Clone, Default)]
+///
+/// Deliberately NOT `Default`: an empty clause is a STATEMENT about the
+/// callee ([`Self::non_generic`]), not something a route can fall into.
+#[derive(Debug, Clone)]
 pub(super) struct CalleeClause {
     params: Arc<[CalleeClauseParam]>,
 }
 
 impl CalleeClause {
-    /// A non-generic callee: nothing to instantiate.
-    pub(super) fn empty() -> Self {
-        Self::default()
+    /// A NON-GENERIC callee: its clause was read and found empty, so
+    /// there is nothing to instantiate. The name is the point — a route
+    /// that could not read the clause must not reach this constructor.
+    pub(super) fn non_generic() -> Self {
+        Self {
+            params: Arc::from(Vec::new().into_boxed_slice()),
+        }
     }
 
     /// A clause from its ordered parameters.
@@ -98,14 +254,11 @@ impl CalleeClause {
     }
 
     /// Substitute every declared parameter out of `node`: each parameter
-    /// takes its declared DEFAULT when it has one, `unknown` otherwise.
+    /// takes the substitution its constructor decided, `unknown`
+    /// otherwise.
     ///
-    /// The default is the exact answer for an argument-free call
-    /// (`f<T = number>()` IS `number`); `unknown` is the recorded
-    /// interim for a parameter TypeScript would infer from arguments or
-    /// explicit type arguments, and the exact answer for the one shape
-    /// TypeScript itself cannot infer (`bare<T>(): T` called with no
-    /// arguments IS `unknown`).
+    /// `origin` selects which SPELLINGS of a clause parameter this node
+    /// can contain — see [`ReturnOrigin`].
     ///
     /// A default that itself names a sibling clause parameter is
     /// instantiated in turn — `<A, B = A>` answers `unknown` for both,
@@ -114,6 +267,7 @@ impl CalleeClause {
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
         node: SemanticNodeId,
+        origin: ReturnOrigin,
     ) -> SemanticNodeId {
         if self.is_empty() {
             return node;
@@ -123,11 +277,12 @@ impl CalleeClause {
                 (
                     param.name.as_ref(),
                     param
-                        .default
-                        .map(|default| self.instantiate_default(dispatch, default)),
+                        .substitution
+                        .map(|substitution| self.instantiate_default(dispatch, substitution)),
                 )
             }),
             node,
+            origin.spelling(),
         )
     }
 
@@ -135,6 +290,9 @@ impl CalleeClause {
     /// name sibling parameters. Those siblings are just as unbound at
     /// this call as the parameter being instantiated, so they collapse
     /// the same way — never escape as the callee's binders.
+    ///
+    /// The default itself lowered in the callee's OWNER scope, where the
+    /// clause is invisible, so every spelling is claimed here.
     fn instantiate_default(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
@@ -143,7 +301,32 @@ impl CalleeClause {
         dispatch.instantiate_clause_params_at_call(
             self.params.iter().map(|param| (param.name.as_ref(), None)),
             default,
+            ClauseSpelling::WithOwnerScopeResolution,
         )
+    }
+}
+
+/// The outcome of READING a callee's own clause.
+///
+/// A failure to read the clause is NOT an empty clause: handing the
+/// callee's return back with nothing instantiated is exactly the leak
+/// this module exists to make inexpressible, and it would be warm
+/// admitted with no degradation. The two states are therefore distinct
+/// types, and only the success arm carries a [`CalleeClause`].
+pub(super) enum CalleeClauseLookup {
+    /// The callee's clause, read from an authority that answers for it.
+    Clause(CalleeClause),
+    /// The clause could NOT be read (the file is not served at this
+    /// version, the position is not indexed, or a needed default could
+    /// not be recovered). The caller degrades; it cannot proceed with a
+    /// clause it does not have.
+    Unavailable,
+}
+
+impl CalleeClauseLookup {
+    /// The callee's clause was READ and found empty.
+    pub(super) fn non_generic() -> Self {
+        Self::Clause(CalleeClause::non_generic())
     }
 }
 
@@ -152,9 +335,9 @@ impl CalleeClause {
 /// The field is private and every constructor below decides what happens
 /// to the callee's own type-parameter clause, so "hand a callee's return
 /// back to its caller untouched" cannot be written at a call site — the
-/// no-op is reachable only by naming an EMPTY clause
-/// ([`CalleeClause::empty`]), which is a statement about the callee, not
-/// an omission.
+/// no-op is reachable only by naming a NON-GENERIC callee
+/// ([`CalleeClause::non_generic`]), which is a statement about the
+/// callee, not an omission.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CallValue(SemanticNodeId);
 
@@ -173,6 +356,9 @@ pub(super) enum SignatureCall {
     /// DEGRADED nested demand (an in-flight / failed callee), never a
     /// contributor.
     ReturnMiss,
+    /// The signature declares a defaulted clause parameter the call site
+    /// needs, and the default could not be recovered.
+    ClauseUnavailable,
 }
 
 impl CallValue {
@@ -183,9 +369,17 @@ impl CallValue {
     /// self-supplying: an IIFE's inline signature, a function-typed
     /// binding's signature, and a resolved callee value type all answer
     /// through this one constructor and therefore answer alike.
+    ///
+    /// The inference oracle is the signature's OWN parameter list: a
+    /// clause parameter has a candidate exactly when it occurs in the
+    /// type of a parameter the call supplies, which is the same question
+    /// the shallow function-program fact answers for the direct rail,
+    /// asked of the resolved shape instead of the authored one.
     pub(super) fn of_signature_node(
         dispatch: &ProjectSemanticDispatch<'_>,
         function_node: SemanticNodeId,
+        site: SliceCallSite,
+        origin: ReturnOrigin,
     ) -> SignatureCall {
         let graph = dispatch.graph();
         let Some(data) = graph.node_data(function_node) else {
@@ -194,25 +388,53 @@ impl CallValue {
         let SemanticNodeData::Signature {
             return_type,
             type_parameters,
+            params,
             ..
         } = &*data
         else {
             return SignatureCall::NotCallable;
         };
         let return_type = *return_type;
-        let clause = CalleeClause::new(
-            type_parameters
-                .iter()
-                .map(|decl| CalleeClauseParam::with_default(Arc::clone(&decl.name), decl.default)),
-        );
+        let type_parameters = Arc::clone(type_parameters);
+        let params = Arc::clone(params);
         drop(data);
+        let mut clause_params = Vec::with_capacity(type_parameters.len());
+        for decl in type_parameters.iter() {
+            let param = match decl.default {
+                None => CalleeClauseParam::bare(Arc::clone(&decl.name)),
+                Some(default) => {
+                    let inference = ClauseParamInference::at_call(
+                        site,
+                        dispatch.first_signature_param_occurrence(&params, decl.name.as_ref()),
+                    );
+                    match CalleeClauseParam::with_default(
+                        Arc::clone(&decl.name),
+                        site,
+                        inference,
+                        || Some(default),
+                    ) {
+                        ClauseParamOutcome::Param(param) => param,
+                        // A signature node carries its default as an
+                        // already-resolved node, so this arm is
+                        // unreachable today; it stays a typed outcome
+                        // rather than an `unwrap` so a future producer
+                        // that CAN fail degrades instead of fabricating.
+                        ClauseParamOutcome::DefaultUnavailable => {
+                            return SignatureCall::ClauseUnavailable
+                        }
+                    }
+                }
+            };
+            clause_params.push(param);
+        }
+        let clause = CalleeClause::new(clause_params);
         if matches!(
             graph.node_data(return_type).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::Miss))
         ) {
             return SignatureCall::ReturnMiss;
         }
-        SignatureCall::Value(Self(clause.instantiate(dispatch, return_type)))
+        SignatureCall::Value(Self(clause.instantiate(dispatch, return_type, origin)))
     }
 
     /// The call value of a callee SERVED as a flow position — the rail
@@ -222,8 +444,9 @@ impl CallValue {
         dispatch: &ProjectSemanticDispatch<'_>,
         clause: &CalleeClause,
         return_node: SemanticNodeId,
+        origin: ReturnOrigin,
     ) -> Self {
-        Self(clause.instantiate(dispatch, return_node))
+        Self(clause.instantiate(dispatch, return_node, origin))
     }
 
     /// A call with NO callee clause in play: the implicit-`any` call of
@@ -262,6 +485,10 @@ pub(super) struct HeldCallee {
 impl HeldCallee {
     /// A hold on ANOTHER served position — a foreign callee, whose
     /// clause the discharge must instantiate.
+    ///
+    /// Every hold is recorded on the flow (body-derived) rail, so the
+    /// discharge's origin is [`ReturnOrigin::ClauseScoped`] by
+    /// construction.
     pub(super) fn foreign(key: FlowReturnKey, clause: CalleeClause) -> Self {
         Self { key, clause }
     }
@@ -274,11 +501,11 @@ impl HeldCallee {
     /// not foreign, nothing aliases them, and instantiating them would
     /// erase a generic function's own parameter from its own recursive
     /// return (`f<T>(x: T): T` answering `T | unknown` instead of `T`).
-    /// The empty clause states exactly that, by name.
+    /// The non-generic clause states exactly that, by name.
     pub(super) fn own_frame(key: FlowReturnKey) -> Self {
         Self {
             key,
-            clause: CalleeClause::empty(),
+            clause: CalleeClause::non_generic(),
         }
     }
 
@@ -295,6 +522,11 @@ impl HeldCallee {
         dispatch: &ProjectSemanticDispatch<'_>,
         return_node: SemanticNodeId,
     ) -> CallValue {
-        CallValue::of_served_return(dispatch, &self.clause, return_node)
+        CallValue::of_served_return(
+            dispatch,
+            &self.clause,
+            return_node,
+            ReturnOrigin::ClauseScoped,
+        )
     }
 }

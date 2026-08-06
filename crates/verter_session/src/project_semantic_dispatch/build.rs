@@ -2151,7 +2151,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result,
                 param.name.as_str(),
                 /* root_is_own_signature */ false,
-                /* include_unbound_heads */ false,
+                crate::semantic_query::ClauseSpelling::Bound,
             ) {
                 result = self.substitute_semantic_type_param(result, binder, arg);
             }
@@ -5703,6 +5703,74 @@ impl<'a> ProjectSemanticDispatch<'a> {
         graph.intern_preserving_scope(node, twin)
     }
 
+    /// How many signatures the `bucket` group of a resolved callee
+    /// carries — the CALL-site overload-visibility oracle.
+    ///
+    /// [`Self::select_signature_function`] deliberately selects the LAST
+    /// signature of an overload group, which is what a signature UTILITY
+    /// wants (`ReturnType<typeof f>` over an overloaded `f` IS the last
+    /// overload's return). A CALL is the opposite: TypeScript picks the
+    /// FIRST signature whose parameters accept the arguments, which
+    /// needs argument-driven overload resolution
+    /// (`U6.CALL_RESOLVE`). Until then a call whose callee carries more
+    /// than one signature is not answerable, and this is how a call site
+    /// asks — WITHOUT changing what the utility selects.
+    pub(super) fn signature_bucket_arity(
+        &self,
+        node: SemanticNodeId,
+        bucket: SignatureBucket,
+    ) -> usize {
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        self.signature_bucket_arity_inner(node, bucket, &mut visited)
+    }
+
+    fn signature_bucket_arity_inner(
+        &self,
+        node: SemanticNodeId,
+        bucket: SignatureBucket,
+        visited: &mut FxHashSet<SemanticNodeId>,
+    ) -> usize {
+        if !visited.insert(node) {
+            return 0;
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return 0;
+        };
+        match &*data {
+            SemanticNodeData::Signature { kind, .. } => {
+                let matches_bucket = match bucket {
+                    SignatureBucket::Call => {
+                        matches!(kind, crate::semantic_query::SignatureKind::Call)
+                    }
+                    SignatureBucket::Construct => {
+                        matches!(kind, crate::semantic_query::SignatureKind::Construct)
+                    }
+                };
+                usize::from(matches_bucket)
+            }
+            SemanticNodeData::Alias(target) => {
+                let target = *target;
+                drop(data);
+                self.signature_bucket_arity_inner(target, bucket, visited)
+            }
+            SemanticNodeData::Object(surface) => {
+                let group = match bucket {
+                    SignatureBucket::Call => &surface.call_signatures,
+                    SignatureBucket::Construct => &surface.construct_signatures,
+                };
+                if group.len() > 1 {
+                    return group.len();
+                }
+                let Some(selected) = group.last().copied() else {
+                    return 0;
+                };
+                drop(data);
+                self.signature_bucket_arity_inner(selected, bucket, visited)
+            }
+            _ => 0,
+        }
+    }
+
     fn select_signature_function_inner(
         &self,
         node: SemanticNodeId,
@@ -5784,7 +5852,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.instantiate_named_params_at_unknown(
             type_parameters.iter().map(|decl| decl.name.as_ref()),
             extracted,
-            /* include_unbound_heads */ false,
+            crate::semantic_query::ClauseSpelling::Bound,
         )
     }
 
@@ -5808,12 +5876,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         names: impl IntoIterator<Item = &'n str>,
         extracted: SemanticNodeId,
-        include_unbound_heads: bool,
+        spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
         self.instantiate_clause_params(
             names.into_iter().map(|name| (name, None)),
             extracted,
-            include_unbound_heads,
+            spelling,
         )
     }
 
@@ -5830,16 +5898,48 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   does not: `ReturnType<typeof f>` is `unknown` there, which is
     ///   why the two entrances stay separate rather than sharing one
     ///   default policy;
-    /// - deferred heads are always claimed, because a callee's DECLARED
-    ///   return lowers in file owner scope where its own clause is not
-    ///   in scope — every route to one callee must therefore claim the
-    ///   same spellings, or two routes to the same callee disagree.
+    /// - the claimed SPELLINGS are chosen by the caller, because they
+    ///   depend on where the instantiated node was lowered rather than
+    ///   on the call: a DECLARED return lowers in file owner scope where
+    ///   the clause is invisible (so a resolved same-named declaration
+    ///   IS the parameter), while a body-derived return is evaluated
+    ///   with the clause bound (so a resolved same-named declaration is
+    ///   a foreign symbol). See
+    ///   [`ClauseSpelling`](crate::semantic_query::ClauseSpelling).
     pub(super) fn instantiate_clause_params_at_call<'n>(
         &self,
         params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
         extracted: SemanticNodeId,
+        spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
-        self.instantiate_clause_params(params, extracted, /* include_unbound_heads */ true)
+        self.instantiate_clause_params(params, extracted, spelling)
+    }
+
+    /// The smallest ordinal among `params` whose type mentions `name` —
+    /// the resolved-shape half of the call-site inference oracle
+    /// (`ClauseParamInference`), mirroring the authored-shape
+    /// `FunctionProgramTypeParam::first_parameter_occurrence`.
+    ///
+    /// Reuses the SAME shadowing-aware per-name collector the
+    /// instantiation itself uses, so "the parameter occurs here" means
+    /// exactly what "the parameter is claimed here" means — the two
+    /// cannot drift.
+    pub(super) fn first_signature_param_occurrence(
+        &self,
+        params: &[crate::semantic_query::FunctionParam],
+        name: &str,
+    ) -> Option<u32> {
+        params.iter().enumerate().find_map(|(ordinal, param)| {
+            (!self
+                .collect_type_param_nodes_by_name(
+                    param.ty,
+                    name,
+                    /* root_is_own_signature */ false,
+                    crate::semantic_query::ClauseSpelling::WithOwnerScopeResolution,
+                )
+                .is_empty())
+            .then_some(ordinal as u32)
+        })
     }
 
     /// The shared body: substitute each named clause parameter out of
@@ -5849,7 +5949,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
         extracted: SemanticNodeId,
-        include_unbound_heads: bool,
+        spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
         let mut unknown: Option<SemanticNodeId> = None;
         let mut result = extracted;
@@ -5860,10 +5960,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // binder in its subtree — those occurrences are the nested
             // binder's, never the free outer parameter being instantiated.
             for binder in self.collect_type_param_nodes_by_name(
-                result,
-                name,
-                /* root_is_own_signature */ false,
-                include_unbound_heads,
+                result, name, /* root_is_own_signature */ false, spelling,
             ) {
                 let substitution = match default {
                     Some(default) => default,
@@ -5922,7 +6019,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 result,
                 decl.name.as_ref(),
                 /* root_is_own_signature */ true,
-                /* include_unbound_heads */ false,
+                crate::semantic_query::ClauseSpelling::Bound,
             ) {
                 result = self.substitute_semantic_type_param(result, binder, arg);
             }
@@ -5995,7 +6092,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         root: SemanticNodeId,
         name: &str,
         root_is_own_signature: bool,
-        include_unbound_heads: bool,
+        spelling: crate::semantic_query::ClauseSpelling,
     ) -> Vec<SemanticNodeId> {
         use crate::semantic_query::IndexKey;
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
@@ -6141,7 +6238,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // which calls this fn).
                 SemanticNodeData::BareRef(_) => {
                     // A DEFERRED head spelling the searched parameter, under
-                    // `include_unbound_heads`. A declaration's own type
+                    // `WithDeferredHeads`. A declaration's own type
                     // parameter is not in scope where its DECLARED return
                     // locator lowers (file owner scope), so `f<T>(): T`
                     // interns its return as an unbound `BareRef("T")` rather
@@ -6153,7 +6250,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // re-declares the name is never descended into, so only
                     // occurrences the searched clause actually binds are
                     // claimed.
-                    if include_unbound_heads
+                    if spelling.claims_deferred_heads()
                         && data
                             .bare_ref_head()
                             .is_some_and(|(head, _)| head.as_ref() == name)
@@ -6164,9 +6261,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 SemanticNodeData::DeclRef { identity } => {
                     // A RESOLVED head spelling the searched parameter,
-                    // under `include_unbound_heads` — the third resolution
-                    // state of one clause parameter, alongside the bound
-                    // `TypeParam` and the deferred `BareRef`.
+                    // under `WithOwnerScopeResolution` — the third
+                    // resolution state of one clause parameter, alongside
+                    // the bound `TypeParam` and the deferred `BareRef`.
                     //
                     // A declaration's own clause is not in scope where its
                     // DECLARED return locator lowers (file owner scope), so
@@ -6183,11 +6280,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // value, cleanly and warm, and the name-keyed check
                     // that catches the unresolved spelling sees nothing.
                     //
+                    // This claim is NAME-scoped, and the name alone
+                    // cannot tell the misresolution apart from an
+                    // unrelated declaration that merely shares it — the
+                    // interface `QQ` is the same node whether `aye<QQ>`
+                    // exists or not. What discriminates is PROVENANCE:
+                    // only a node lowered where the clause was out of
+                    // scope can contain the misresolution at all, and a
+                    // node evaluated with the clause BOUND spells the
+                    // parameter `TypeParam` and nothing else. The caller
+                    // supplies that provenance as the spelling level, so
+                    // a body-derived arm never claims a foreign symbol.
+                    //
                     // The shadow stops above apply unchanged: a nested
                     // signature (or mapper) re-declaring the name is never
                     // descended into, so only occurrences the searched
                     // clause actually binds are claimed.
-                    if include_unbound_heads && identity.decl_name.as_ref() == name {
+                    if spelling.claims_owner_scope_resolution()
+                        && identity.decl_name.as_ref() == name
+                    {
                         found.push(node);
                     }
                 }
@@ -9830,7 +9941,12 @@ mod carrier_type_param_descent_tests {
 
         for kind in 0u8..3 {
             let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(carrier, "X", false, false);
+            let found = dispatch.collect_type_param_nodes_by_name(
+                carrier,
+                "X",
+                false,
+                crate::semantic_query::ClauseSpelling::Bound,
+            );
             assert!(
                 found.contains(&binder),
                 "a `TypeParam` named X inside a carrier's type_args (kind {kind}) must be \
@@ -9843,7 +9959,12 @@ mod carrier_type_param_descent_tests {
         // X binder (proving the descent honours the name, not a blanket collect).
         for kind in 0u8..3 {
             let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(carrier, "Y", false, false);
+            let found = dispatch.collect_type_param_nodes_by_name(
+                carrier,
+                "Y",
+                false,
+                crate::semantic_query::ClauseSpelling::Bound,
+            );
             assert!(
                 !found.contains(&binder),
                 "searching name Y must NOT collect the X binder reached through a carrier arg \

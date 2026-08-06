@@ -374,7 +374,12 @@ pub enum SliceExpr {
     /// evaluator's exhaustive match then forces that decision at the new
     /// arm rather than leaving "hand the callee's return back verbatim"
     /// available as the path of least resistance.
-    Call(SliceCall),
+    ///
+    /// The [`SliceCallSite`] rides on the variant rather than inside
+    /// [`SliceCall`] because it is what EVERY form needs and no form
+    /// owns: the callee's clause resolves against the CALL, not against
+    /// the way the callee was reached.
+    Call(SliceCall, SliceCallSite),
     /// An expression the leaf lowering cannot represent (its `any`
     /// fallback), including a call with an unrepresentable callee.
     Any,
@@ -405,6 +410,79 @@ pub enum SliceExpr {
 /// across `SliceExpr` would restore the per-arm drift this grouping
 /// exists to prevent (two of the arms below silently lost the rule while
 /// their siblings kept it).
+/// The CALL-SITE facts a callee's type-parameter clause resolves
+/// against.
+///
+/// TypeScript resolves a call's type arguments in one order: explicit
+/// type arguments, else inference from the supplied arguments, else the
+/// declared defaults. This substrate cannot yet do the first two
+/// (`U6.CALL_RESOLVE`), and `unknown` is its recorded interim for both.
+/// But "the default applies" is a statement about the other two having
+/// produced NOTHING, so it is not expressible without knowing whether
+/// they COULD have produced something — which is exactly what these
+/// bits say. The argument TYPES are deliberately absent: deciding what
+/// inference would produce is the work being deferred, and a substrate
+/// that guessed would publish a confident wrong answer instead of the
+/// honest interim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliceCallSite {
+    /// The number of arguments written before any spread element.
+    fixed_argument_count: u32,
+    /// Whether the call SPREADS (`f(...xs)`), which makes its arity
+    /// unbounded: every parameter ordinal must then be treated as
+    /// supplied, because assuming otherwise would take a declared
+    /// default at a position inference could reach.
+    spreads_arguments: bool,
+    /// Whether the call authored explicit type arguments (`f<string>()`).
+    /// Resolving them is `U6.CALL_RESOLVE`'s; until then their presence
+    /// means the DECLARED DEFAULT is definitely not the answer.
+    has_explicit_type_arguments: bool,
+}
+
+impl SliceCallSite {
+    /// The call-site facts of one authored call expression.
+    #[must_use]
+    pub fn new(
+        fixed_argument_count: u32,
+        spreads_arguments: bool,
+        has_explicit_type_arguments: bool,
+    ) -> Self {
+        Self {
+            fixed_argument_count,
+            spreads_arguments,
+            has_explicit_type_arguments,
+        }
+    }
+
+    /// Whether the call supplies an argument at `ordinal` — the ONLY
+    /// question inference asks of a call site here. A spreading call
+    /// answers yes for every ordinal.
+    #[must_use]
+    pub fn supplies_parameter_ordinal(self, ordinal: u32) -> bool {
+        self.spreads_arguments || ordinal < self.fixed_argument_count
+    }
+
+    /// Whether the call authored explicit type arguments.
+    #[must_use]
+    pub fn has_explicit_type_arguments(self) -> bool {
+        self.has_explicit_type_arguments
+    }
+}
+
+/// The [`SliceCallSite`] of one authored call expression.
+fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
+    let fixed = call
+        .arguments
+        .iter()
+        .take_while(|argument| !matches!(argument, oxc_ast::ast::Argument::SpreadElement(_)))
+        .count();
+    SliceCallSite::new(
+        fixed as u32,
+        fixed != call.arguments.len(),
+        call.type_arguments.is_some(),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceCall {
     /// A direct call on a nested function value (an IIFE) — the call's
@@ -806,7 +884,14 @@ pub(crate) fn build_flow_slice_content(
         &SignatureScope::Root,
     );
     let type_param_names = slice_type_param_names(&node);
-    let params = lower_params(node.params(), source, &SignatureScope::Root, skeleton);
+    let anchor = node_span(&node).start;
+    let params = lower_params(
+        node.params(),
+        source,
+        &SignatureScope::Root,
+        skeleton,
+        anchor,
+    );
     let type_parameters = lower_slice_type_params(&node, source, &SignatureScope::Root);
     let body = node.body()?;
     // The enclosing clause is deliberately NOT part of this frame's
@@ -828,6 +913,7 @@ pub(crate) fn build_flow_slice_content(
     let captures = CaptureScope::default();
     let mut lowerer = Lowerer {
         source,
+        anchor,
         selection: Some(selection),
         params: &params,
         type_param_names: &type_param_names,
@@ -897,7 +983,7 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
 ///
 /// A type ASSERTION is not on this list and must never be added: `1 as 1`
 /// PINS to `1` even though the asserted type is the literal's own
-/// (tsc 7.0.2: `(): 1`).
+/// (tsgo 7.0.0-dev.20260526.1: `(): 1`).
 fn unwrap_freshness_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => {
@@ -1001,13 +1087,31 @@ fn declares_var(statement: &Statement<'_>) -> bool {
 /// to the destructured element.
 fn signature_parameter_bindings(
     skeleton: &FunctionBodySkeleton,
+    anchor: u32,
 ) -> Vec<(Arc<str>, verter_span::Span)> {
     skeleton
         .bindings
         .iter()
         .filter(|binding| binding.kind == SkeletonBindingKind::Param)
-        .map(|binding| (Arc::from(skeleton.name(binding.name)), binding.span))
+        .map(|binding| {
+            (
+                Arc::from(skeleton.name(binding.name)),
+                // The skeleton is anchor-relative; the offsets these
+                // spans are compared against (a default initializer's
+                // start) are live and absolute.
+                verter_span::Span::new(binding.span.start + anchor, binding.span.end + anchor),
+            )
+        })
         .collect()
+}
+
+/// Rebase a LIVE source span onto a function's own anchor.
+fn rebase_span(anchor: u32, span: oxc_span::Span) -> verter_span::Span {
+    let span: verter_span::Span = span.into();
+    verter_span::Span::new(
+        span.start.saturating_sub(anchor),
+        span.end.saturating_sub(anchor),
+    )
 }
 
 /// The parameter names one signature answer references — the
@@ -1060,9 +1164,10 @@ fn lower_params(
     source: &str,
     scope: &SignatureScope<'_, '_>,
     skeleton: &FunctionBodySkeleton,
+    anchor: u32,
 ) -> Vec<SliceParam> {
     let binders = scope.param_binders();
-    let parameter_bindings = signature_parameter_bindings(skeleton);
+    let parameter_bindings = signature_parameter_bindings(skeleton, anchor);
     let mut out = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
     for param in &params.items {
         let name = match &param.pattern {
@@ -1260,6 +1365,14 @@ impl CaptureScope {
 /// name denotes.
 struct Lowerer<'a> {
     source: &'a str,
+    /// The function's own start offset — the anchor the frame's
+    /// [`FunctionBodySkeleton`] (and the plan derived from it) stores
+    /// every span relative to.
+    ///
+    /// Those artifacts are content-addressed and carry no absolute
+    /// source position, so a LIVE position is rebased onto this anchor
+    /// before it is compared against, or looked up in, either of them.
+    anchor: u32,
     /// The demand selection gating content lowering (`None` inside a
     /// nested function value — its whole body is one selected value).
     selection: Option<&'a FlowSliceSelection>,
@@ -1294,18 +1407,25 @@ struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
+    /// Rebase a LIVE source span onto this frame's anchor — the ONE
+    /// crossing between absolute file positions and the content-
+    /// addressed artifacts' anchor-relative ones.
+    fn rebase(&self, span: oxc_span::Span) -> verter_span::Span {
+        rebase_span(self.anchor, span)
+    }
+
     /// Whether a root content position is value-selected by the demand
     /// slice. Ungated (nested function value) frames select everything.
     fn value_span_selected(&self, span: oxc_span::Span) -> bool {
         self.selection
-            .is_none_or(|selection| selection.value_span(span.into()))
+            .is_none_or(|selection| selection.value_span(self.rebase(span)))
     }
 
     /// Whether a binding slot (identified by its binding-identifier
     /// span) is value-selected by the demand slice.
     fn slot_selected(&self, span: oxc_span::Span) -> bool {
         self.selection
-            .is_none_or(|selection| selection.value_slot_span(span.into()))
+            .is_none_or(|selection| selection.value_slot_span(self.rebase(span)))
     }
 
     fn param_ordinal(&self, name: &str) -> Option<u32> {
@@ -1325,7 +1445,7 @@ impl Lowerer<'_> {
         let Some(name_id) = self.skeleton.name_id(name) else {
             return self.captures.lookup(name);
         };
-        let region = self.skeleton.innermost_region_containing(span.into());
+        let region = self.skeleton.innermost_region_containing(self.rebase(span));
         let bindings = self.skeleton.bindings_of_name_in_scope(name_id, region);
         if bindings.is_empty() {
             return self.captures.lookup(name);
@@ -1394,7 +1514,7 @@ impl Lowerer<'_> {
             return meaning == NameMeaning::Namespace;
         }
         if let Some(name_id) = self.skeleton.name_id(name) {
-            let region = self.skeleton.innermost_region_containing(span.into());
+            let region = self.skeleton.innermost_region_containing(self.rebase(span));
             if self
                 .skeleton
                 .declares_meaning_in_scope(name_id, region, meaning)
@@ -1511,7 +1631,7 @@ impl Lowerer<'_> {
     fn capture_scope_for(&self, function_span: oxc_span::Span) -> CaptureScope {
         let region = self
             .skeleton
-            .innermost_region_containing(function_span.into());
+            .innermost_region_containing(self.rebase(function_span));
         let mut names = FxHashMap::default();
         for (name, binding) in self.captures.names.iter() {
             names.insert(Arc::clone(name), *binding);
@@ -2033,7 +2153,7 @@ impl Lowerer<'_> {
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
-                SliceExpr::Call(SliceCall::Nested(Box::new(function)))
+                SliceExpr::Call(SliceCall::Nested(Box::new(function)), call_site(call))
             }
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
@@ -2045,39 +2165,48 @@ impl Lowerer<'_> {
                         // every outer same-name callee; exact recovery of
                         // its own return is not implemented (fail closed).
                         NameBinding::NestedFunction => {
-                            return SliceExpr::Call(SliceCall::LocalFunctionShadow)
+                            return SliceExpr::Call(SliceCall::LocalFunctionShadow, call_site(call))
                         }
                         NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
                         // A parameter or local SHADOWS the file-level
                         // declaration: the call goes through the binding's
                         // signature, never a flow obligation edge.
                         NameBinding::Param(ordinal) => {
-                            return SliceExpr::Call(SliceCall::OnBinding {
-                                param: Some(ordinal),
-                                name: Arc::from(name),
-                                captured: false,
-                            })
+                            return SliceExpr::Call(
+                                SliceCall::OnBinding {
+                                    param: Some(ordinal),
+                                    name: Arc::from(name),
+                                    captured: false,
+                                },
+                                call_site(call),
+                            )
                         }
                         NameBinding::Local(param) => {
-                            return SliceExpr::Call(SliceCall::OnBinding {
-                                param,
-                                name: Arc::from(name),
-                                captured: false,
-                            })
+                            return SliceExpr::Call(
+                                SliceCall::OnBinding {
+                                    param,
+                                    name: Arc::from(name),
+                                    captured: false,
+                                },
+                                call_site(call),
+                            )
                         }
                         NameBinding::Captured => {
-                            return SliceExpr::Call(SliceCall::OnBinding {
-                                param: None,
-                                name: Arc::from(name),
-                                captured: true,
-                            })
+                            return SliceExpr::Call(
+                                SliceCall::OnBinding {
+                                    param: None,
+                                    name: Arc::from(name),
+                                    captured: true,
+                                },
+                                call_site(call),
+                            )
                         }
                         NameBinding::Free => {}
                     }
                     // A bare-identifier call to the function itself — a
                     // direct same-slot recursion hold.
                     if Some(name) == self.self_name {
-                        return SliceExpr::Call(SliceCall::DirectSelf);
+                        return SliceExpr::Call(SliceCall::DirectSelf, call_site(call));
                     }
                     // A bare-identifier callee the function index resolves
                     // EXACTLY (same-file served function position, the
@@ -2089,7 +2218,10 @@ impl Lowerer<'_> {
                         .iter()
                         .find(|direct| direct.span == call.span.into())
                     {
-                        return SliceExpr::Call(SliceCall::Direct(direct.target.clone()));
+                        return SliceExpr::Call(
+                            SliceCall::Direct(direct.target.clone()),
+                            call_site(call),
+                        );
                     }
                 }
                 // The SAME root-identifier gate the leaf path takes: a
@@ -2099,9 +2231,11 @@ impl Lowerer<'_> {
                 match self.leaf_type(expr, mode) {
                     LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
                     LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
-                    LeafLowering::Free(ty) => SliceExpr::Call(SliceCall::Symbolic(ty)),
+                    LeafLowering::Free(ty) => {
+                        SliceExpr::Call(SliceCall::Symbolic(ty), call_site(call))
+                    }
                     LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                        inner: Box::new(SliceExpr::Call(SliceCall::Symbolic(ty))),
+                        inner: Box::new(SliceExpr::Call(SliceCall::Symbolic(ty), call_site(call))),
                         shadowed,
                     },
                 }
@@ -2151,7 +2285,14 @@ impl Lowerer<'_> {
             // A bodiless nested position has no lexical frame to lower.
             return SliceExpr::UnmodeledBinding;
         };
-        let params = lower_params(node.params(), self.source, &scope, &nested_skeleton);
+        let nested_anchor = node_span(node).start;
+        let params = lower_params(
+            node.params(),
+            self.source,
+            &scope,
+            &nested_skeleton,
+            nested_anchor,
+        );
         let type_parameters = lower_slice_type_params(node, self.source, &scope);
         // A nested function value has no index entry of its own — its
         // control regions come from the SAME single inventory walk over
@@ -2165,6 +2306,7 @@ impl Lowerer<'_> {
         let captures = self.capture_scope_for(node_span(node));
         let mut nested = Lowerer {
             source: self.source,
+            anchor: nested_anchor,
             selection: None,
             params: &params,
             type_param_names: &type_param_names,

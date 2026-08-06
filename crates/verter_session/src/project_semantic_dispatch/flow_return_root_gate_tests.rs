@@ -1,7 +1,7 @@
 //! @ai-generated - The ROOT-IDENTIFIER GATE and its two lexical siblings.
 //!
 //! Every case is oracle-anchored against tsgo 7.0.0-dev.20260526.1 /
-//! `tsc 7.0.2` (`--strict --declaration`). Three invariant classes:
+//! `tsgo 7.0.0-dev.20260526.1` (`--strict --declaration`). Three invariant classes:
 //!
 //! 1. **The root-identifier gate.** The shared shallow-pass leaf
 //!    lowering has no frame — it resolves every name in FILE OWNER

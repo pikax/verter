@@ -1,7 +1,7 @@
 //! @ai-generated - Lexical-authority regression tests for the demand-sliced
 //! `FlowReturn` evaluator.
 //!
-//! Every case here is oracle-anchored against `tsc 7.0.2 --strict
+//! Every case here is oracle-anchored against `tsgo 7.0.0-dev.20260526.1 --strict
 //! --declaration`. They characterise ONE invariant class: the content
 //! lowering resolves every identifier through the SAME lexical authority
 //! the demand plan uses (the `FunctionBodySkeleton`), so a
@@ -1241,12 +1241,188 @@ export function rvDefaultedCall() {
   return rvDefaulted();
 }
 
-export function rvDefaultedFlow<GDN = number>(x: GDN) {
+// The DEFAULT (`string`) is deliberately DIFFERENT from what inference
+// would produce (`number`), so a row that took the default anyway is
+// distinguishable from one that inferred — the shipped fixture had them
+// coincide and passed for the wrong reason.
+export function rvDefaultedFlow<GDN = string>(x: GDN) {
   return x;
 }
 
 export function rvDefaultedFlowCall() {
   return rvDefaultedFlow(1);
+}
+
+// The BODY-DERIVED route's default row: argument-free, so nothing can be
+// inferred and the declared default is the exact answer.
+export function rvDefaultedFlowFree<GDW = number>() {
+  return null as unknown as GDW;
+}
+
+export function rvDefaultedFlowFreeCall() {
+  return rvDefaultedFlowFree();
+}
+
+// ── A DEFAULT the call site does NOT get to use ───────────────────────
+// TypeScript applies a type-parameter default ONLY when inference
+// produces no candidate. Every row here supplies an argument at an
+// ordinal whose parameter type names the parameter, so the checker
+// infers and the default never applies — the recorded interim is
+// `unknown`, never the default.
+export function zzMismA<ZA = string>(x: ZA) {
+  return x;
+}
+
+export function zzMismACall() {
+  return zzMismA(1);
+}
+
+export function zzMismB<ZB = string>(x: ZB): ZB {
+  return x;
+}
+
+export function zzMismBCall() {
+  return zzMismB(true);
+}
+
+export function zpExplicit<ZC = number>(): ZC {
+  return null as unknown as ZC;
+}
+
+export function zpExplicitCall() {
+  return zpExplicit<string>();
+}
+
+// The COMPLEMENT: an argument-bearing call whose clause parameter can
+// still get no candidate, so the checker DOES take the default.
+export function zpUnusedTP<ZE = number>(x: string): ZE {
+  return null as unknown as ZE;
+}
+
+export function zpUnusedTPCall() {
+  return zpUnusedTP("a");
+}
+
+export function zpNotSupplied<ZF = number>(a: string, b?: ZF): ZF {
+  return null as unknown as ZF;
+}
+
+export function zpNotSuppliedCall() {
+  return zpNotSupplied("a");
+}
+
+// ── A same-named FOREIGN declaration reached through a callee ─────────
+// `QQ` names BOTH a file-scope interface and `aye`'s clause parameter.
+// `bee`'s DECLARED return is the interface — a different symbol `aye`'s
+// clause never shadows — so the caller's clause instantiation must not
+// claim it.
+export interface QQ {
+  q: string;
+}
+
+export function bee(): QQ {
+  return null as unknown as QQ;
+}
+
+export function aye<QQ>(x: QQ, f: boolean) {
+  if (f) return bee();
+  return x;
+}
+
+export function callAye() {
+  return aye(1, true);
+}
+
+// The same shape with a GENERIC callee: `beeG` declares its own clause
+// (`RR`), so callee genericity is no longer held constant at
+// non-generic — the control the shipped suite lacked.
+export function beeG<RR>(x: RR): QQ {
+  return null as unknown as QQ;
+}
+
+export function ayeG<QQ>(x: QQ, f: boolean) {
+  if (f) return beeG(x);
+  return x;
+}
+
+export function callAyeG() {
+  return ayeG(1, true);
+}
+
+// A foreign same-named declaration NESTED inside a structural callee
+// return.
+export interface ZItem {
+  z: string;
+}
+
+export function zInner(): { v: ZItem } {
+  return null as unknown as { v: ZItem };
+}
+
+export function zOuter<ZItem>() {
+  return zInner();
+}
+
+export function zOuterCall() {
+  return zOuter();
+}
+
+// The IIFE route's version: the nested function value's signature is
+// COMPOSED from its own body, so the foreign interface reached through
+// it is a different symbol from the IIFE's own clause parameter.
+export declare const qqValue: QQ;
+
+export function iifeForeign() {
+  return (<QQ,>(f: boolean) => (f ? qqValue : null))(true);
+}
+
+// ── The OWNER-SCOPE routes' clause shadowing ──────────────────────────
+// `SymItem` names both a file-scope interface and a clause parameter of
+// a DECLARED function TYPE. Both routes below take their value from a
+// callee type lowered in FILE OWNER SCOPE, where the clause is
+// invisible — so the resolved head IS the clause parameter, and the
+// claim must reach it.
+export interface SymItem {
+  s: string;
+}
+
+export const symFn: <SymItem>(x: SymItem) => SymItem = (x) => x;
+
+export function symCall() {
+  return symFn("a");
+}
+
+export function bindDeclCall(fn: <SymItem>(x: SymItem) => SymItem) {
+  return fn("a");
+}
+
+// ── An AMBIENT overload group ─────────────────────────────────────────
+// No implementation, so "the trailing signature has a body" never fires
+// — yet picking the right overload still needs argument-driven overload
+// resolution, and the index's single entry is the LAST declaration while
+// the language picks the FIRST match.
+export declare function amb3(x: string): "A";
+export declare function amb3(x: number): "B";
+export declare function amb3(x: boolean): "C";
+
+export function amb3Call() {
+  return amb3("a");
+}
+
+// ── The `ReturnType<typeof …>` MEMBER route ───────────────────────────
+// A signature UTILITY, whose clause policy is `unknown` for every free
+// parameter — the whole-return route's policy, which the member route
+// has to share or the two disagree about one callee.
+export function mpFlow<MG = number>(x: MG) {
+  return { m: x };
+}
+
+export function mpWholeUse(x: { w: ReturnType<typeof mpFlow> }) {
+  return x;
+}
+
+export function mpMemberUse(x: ReturnType<typeof mpFlow>["m"]) {
+  return x;
 }
 "#;
 
@@ -1473,7 +1649,7 @@ fn flow_return_genuinely_free_name_still_resolves_through_the_file_scope() {
 /// never through a same-named file-scope declaration.
 ///
 /// A captured PARAMETER is always available (the evaluator seeds the
-/// nested frame with every enclosing parameter by name) — tsc 7.0.2:
+/// nested frame with every enclosing parameter by name) — tsgo 7.0.0-dev.20260526.1:
 /// `r5CaptureParam(n: number): () => number`. A captured LOCAL depends
 /// on the demand plan having selected a definition for it, and the
 /// planner does not walk nested function bodies, so it currently FAILS
@@ -1490,7 +1666,7 @@ fn flow_return_nested_function_captures_the_enclosing_binding_not_the_file_scope
 }
 
 /// A block-scoped `let` SHADOWS a same-named parameter: the local wins.
-/// tsc 7.0.2: `r5BlockLetShadowsParam(p: string): number`.
+/// tsgo 7.0.0-dev.20260526.1: `r5BlockLetShadowsParam(p: string): number`.
 ///
 /// Mutation recipe: testing the parameter list before the local scope
 /// publishes the parameter's `string`.
@@ -1512,7 +1688,7 @@ fn flow_return_block_local_shadows_a_same_named_parameter() {
 /// `TransparentLoop` and NEVER lowered its body, so every construct
 /// nested under a label bypassed all of them.
 ///
-/// tsc 7.0.2 (`--strict`): each of these is `number` (the loop / if /
+/// tsgo 7.0.0-dev.20260526.1 (`--strict`): each of these is `number` (the loop / if /
 /// switch shapes additionally report "used before being assigned"),
 /// which is exactly what each unlabeled twin already fails closed on.
 #[test]
@@ -1543,7 +1719,7 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
 /// `using` / `await using` declare BLOCK-scoped bindings (like `const`),
 /// not function-scoped `var`s. Classifying them as `var` makes a
 /// return-free loop containing one trip the "a `var` escapes the loop"
-/// fail-close. tsc 7.0.2: `r5UsingInLoop(f: boolean): number`.
+/// fail-close. tsgo 7.0.0-dev.20260526.1: `r5UsingInLoop(f: boolean): number`.
 #[test]
 fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
     let host = make_r5_host();
@@ -1559,7 +1735,7 @@ fn flow_return_using_declaration_is_block_scoped_not_a_hoisted_var() {
 /// whose initializer failed degrades. Before the fix the call site took
 /// the bound node WITHOUT the flags, so
 /// `r5CallOnConditionalVar` published the literal `1` clean and warm
-/// where tsc 7.0.2 says `1 | 2`.
+/// where tsgo 7.0.0-dev.20260526.1 says `1 | 2`.
 #[test]
 fn flow_return_call_on_binding_folds_the_read_membership_flags() {
     let host = make_r5_host();
@@ -1581,7 +1757,7 @@ fn flow_return_call_on_binding_folds_the_read_membership_flags() {
 
 /// `getTypeAtFlowAssignment`: an annotated declarator whose declared
 /// type is NOT a union takes the DECLARED type verbatim — never the
-/// initializer's literal, never the widened initializer. tsc 7.0.2:
+/// initializer's literal, never the widened initializer. tsgo 7.0.0-dev.20260526.1:
 /// `unknown`, `"s"`, `number`.
 #[test]
 fn flow_return_non_union_declared_type_supplies_the_binding_verbatim() {
@@ -1598,7 +1774,7 @@ fn flow_return_non_union_declared_type_supplies_the_binding_verbatim() {
 /// `getAssignmentReducedType`: an annotated declarator whose declared
 /// type IS a union takes the union of the DECLARED constituents the
 /// initializer is comparable to — made of declared constituents, never
-/// the initializer's own (fresh or widened) type. tsc 7.0.2: `string`,
+/// the initializer's own (fresh or widened) type. tsgo 7.0.0-dev.20260526.1: `string`,
 /// `string`, `1`, `{ a: number }`.
 #[test]
 fn flow_return_union_declared_type_reduces_to_the_comparable_constituents() {
@@ -1632,7 +1808,7 @@ fn flow_return_union_declared_type_reduces_to_the_comparable_constituents() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// An expression-bodied arrow's synthesized return is a RETURN position
-/// like any other: a single fresh literal widens. tsc 7.0.2:
+/// like any other: a single fresh literal widens. tsgo 7.0.0-dev.20260526.1:
 /// `r5ArrowBodyLiteral(): () => number`,
 /// `r5ArrowBodyConstAssert(): () => 1`,
 /// `r5ObjectMethodArrow(): { m: () => number }`.
@@ -1657,7 +1833,7 @@ fn flow_return_expression_bodied_arrow_widens_a_fresh_literal() {
 
 /// Literal widening at the return join is a SINGLE-contributor rule:
 /// tsc aggregates the return-expression types (deduplicated, plus the
-/// `undefined` arm), and only a lone contributor widens. tsc 7.0.2:
+/// `undefined` arm), and only a lone contributor widens. tsgo 7.0.0-dev.20260526.1:
 /// `r5MultiReturnLiterals(c): 0 | 1`,
 /// `r5MultiReturnSameLiteral(c): number` (deduplicated to one),
 /// `r5SingleReturnLiteral(): number`,
@@ -1692,7 +1868,7 @@ fn flow_return_multi_contributor_literal_join_does_not_widen() {
 
 /// Object-literal MEMBER widening is independent of the return join:
 /// a fresh member literal always widens, a const-asserted member never
-/// does. tsc 7.0.2: `{ b: number }` and `{ b: 1 }`.
+/// does. tsgo 7.0.0-dev.20260526.1: `{ b: number }` and `{ b: 1 }`.
 #[test]
 fn flow_return_object_member_literals_widen_independently_of_the_join() {
     let host = make_r5_host();
@@ -1717,7 +1893,7 @@ fn flow_return_object_member_literals_widen_independently_of_the_join() {
 /// literal's element type widens at lowering time, unconditionally —
 /// the decision is not aggregate-dependent and the interned node carries
 /// no freshness bit, so a join-side recursive widener could not tell
-/// `[1]` from `[1 as const]`. tsc 7.0.2:
+/// `[1]` from `[1 as const]`. tsgo 7.0.0-dev.20260526.1:
 /// `r5ArrayLiteralJoin(c): number[]` (TWO arms, still widened),
 /// `r5ArrayLiteralSingle(): number[]`,
 /// `r5ArrayConstElement(): 1[]`,
@@ -1758,7 +1934,7 @@ fn flow_return_array_element_widening_is_a_producer_rule_not_a_join_rule() {
 /// The transparent producer arms propagate the caller's top-level policy
 /// instead of hardcoding a widen. A return-position conditional is a
 /// union of TWO fresh literals — an aggregate of two, which tsc never
-/// widens. tsc 7.0.2: `r5ConditionalReturn(c): 1 | 2`,
+/// widens. tsgo 7.0.0-dev.20260526.1: `r5ConditionalReturn(c): 1 | 2`,
 /// `r5ParenLiteralReturn(): number` (one contributor, widened at the
 /// join).
 ///
@@ -1785,7 +1961,7 @@ fn flow_return_conditional_arms_propagate_the_top_level_literal_policy() {
 /// FRESHNESS is a syntactic classification of the return ARGUMENT, and
 /// `satisfies` is transparent to it: `1 satisfies number` is still the
 /// bare literal `1`, so the lone-contributor join widens it. An `as`
-/// assertion — even to the literal type itself — PINS. tsc 7.0.2:
+/// assertion — even to the literal type itself — PINS. tsgo 7.0.0-dev.20260526.1:
 /// `r5SatisfiesReturn(): number`, `r5AsLiteralReturn(): 1`.
 ///
 /// Mutation recipe: unwrapping `TSAsExpression` alongside
@@ -1802,7 +1978,7 @@ fn flow_return_satisfies_is_freshness_transparent_and_as_is_not() {
 /// node — that is why the second dedupes — but only the first is FRESH,
 /// so the aggregate is not all-fresh and must not widen. Folding after
 /// the dedup `continue` makes the answer depend on which contributor came
-/// first. tsc 7.0.2: `1` for BOTH orders.
+/// first. tsgo 7.0.0-dev.20260526.1: `1` for BOTH orders.
 ///
 /// Mutation recipe: folding `all_fresh` after the `continue` publishes
 /// `number` for `r5DedupFreshThenPinned` and `1` for its reverse — the
@@ -1819,7 +1995,7 @@ fn flow_return_freshness_folds_over_deduplicated_contributors_in_both_orders() {
 /// function value alike. The nested frame is seeded with the enclosing
 /// frame's widening-local set, so a capture that skipped the widen would
 /// publish a pinned literal from a set that has no other consumer.
-/// tsc 7.0.2: `r5CapturedWideningConst(): { a: number; b: () => number }`.
+/// tsgo 7.0.0-dev.20260526.1: `r5CapturedWideningConst(): { a: number; b: () => number }`.
 ///
 /// Mutation recipe: matching only the direct-read carrier republishes
 /// `b` as `() => 1`.
@@ -2325,6 +2501,76 @@ fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> N
         }
         SemanticNodeData::Opaque(_) => NodeShape::Opaque,
         other => NodeShape::Other(format!("{other:?}")),
+    }
+}
+
+/// The `object` of an `IndexedAccess` answer.
+#[track_caller]
+fn indexed_access_object(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::IndexedAccess { object, .. }) => *object,
+        other => panic!("expected an IndexedAccess answer, got {other:?}"),
+    }
+}
+
+/// Drive the shared PathWalker over `base` with one named segment, in
+/// the PUBLISHED / EXPANDED context every consumer of a projected member
+/// reaches this rail through.
+#[track_caller]
+fn project_member_path(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    base: SemanticNodeId,
+    key: &str,
+) -> SemanticNodeId {
+    let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
+        vec![crate::semantic_query::PathSegment::Member(
+            crate::semantic_query::PropertyKey::identifier(key),
+        )]
+        .into_boxed_slice(),
+    );
+    match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path,
+        context: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Expanded,
+        ),
+    }) {
+        QueryResult::Value(out) => out.value,
+        other => panic!("the path projection must resolve, got {other:?}"),
+    }
+}
+
+/// The arms of a `Union` answer.
+#[track_caller]
+fn union_members(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Vec<SemanticNodeId> {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Union(arms)) => arms.to_vec(),
+        other => panic!("expected a Union answer, got {other:?}"),
+    }
+}
+
+/// One named member of an `Object` answer.
+#[track_caller]
+fn object_member(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+    key: &str,
+) -> SemanticNodeId {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(view)) => {
+            view.positive_members()
+                .iter()
+                .find(|member| member.key.as_string() == Some(key))
+                .unwrap_or_else(|| panic!("member `{key}` must be present"))
+                .value
+        }
+        other => panic!("expected an Object answer, got {other:?}"),
     }
 }
 
@@ -3517,35 +3763,100 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
     );
 }
 
-/// A clause parameter carrying a DECLARED DEFAULT instantiates to that
-/// default, not to `unknown`.
+/// A clause parameter's DECLARED DEFAULT applies ONLY when inference
+/// could produce no candidate — never as an override of inference.
 ///
-/// `unknown` is the recorded interim for a parameter TypeScript resolves
-/// by ARGUMENT INFERENCE, which this substrate does not model. A
-/// DEFAULTED parameter is not that case: TypeScript resolves it without
-/// inference, from the declaration itself, so `unknown` there is not an
-/// interim — it is a wrong answer the callee's own declaration rules
-/// out.
+/// TypeScript's rule (`checker.ts::getInferredTypes`) is precise: a type
+/// argument is the inferred candidate when inference produced one, and
+/// the declared default ONLY when it produced none. Applying the default
+/// unconditionally turns the honest recorded interim (`unknown`, for a
+/// parameter this substrate cannot yet infer) into a confidently WRONG
+/// concrete type, warm-admitted — strictly worse than the interim it
+/// replaced.
 ///
-/// Both return routes are covered, because the default has to reach both:
-/// `rvDefaulted` annotates its return (the DECLARED carrier route) and
-/// `rvDefaultedFlow` does not (the body-derived flow route).
+/// The rule shipped here is TypeScript's, expressed on the two facts the
+/// call carrier now widened to carry (an argument count and an
+/// explicit-type-arguments flag):
 ///
-/// Oracle (tsgo checker, `--strict --declaration`):
+/// - explicit type arguments present ⇒ this substrate cannot resolve
+///   them yet ⇒ `unknown` (the recorded interim, unchanged);
+/// - otherwise, a parameter that occurs in a parameter type at an
+///   ordinal the call actually SUPPLIES ⇒ inference has a candidate ⇒
+///   `unknown` (the interim);
+/// - otherwise (no candidate is possible at all) ⇒ its declared default
+///   when it has one, else `unknown`.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read through
+/// deliberate `const x: null = …` assignment errors):
 ///
 /// ```text
-/// rvDefaultedCall():     number     rvDefaultedFlowCall(): number
-/// gcBareInferred():      unknown    ← no default, and the checker agrees
+/// zzMismACall():             number             ← default `string` LOSES to inference
+/// zzMismBCall():             boolean            ← default `string` LOSES to inference
+/// zpExplicitCall():          string             ← default `number` LOSES to the explicit argument
+/// rvDefaultedFlowCall():     number             ← default `string` LOSES to inference
+/// rvDefaultedCall():         number             ← argument-free: the default IS the answer
+/// rvDefaultedFlowFreeCall(): number             ← argument-free, body-derived route
+/// zpUnusedTPCall():          number             ← argument-BEARING, but `ZE` occurs in no parameter
+/// zpNotSuppliedCall():       number             ← `ZF` occurs only at an UNSUPPLIED ordinal
+/// gcBareInferred():          unknown            ← no default, and the checker agrees
 /// ```
 ///
-/// Mutation recipe: substituting `unknown` regardless of the declared
-/// default flips both `rvDefaulted*` rows to `unknown` and leaves every
-/// default-less row — including the exact `gcBareInferred` — green.
+/// The three mismatch rows are what makes this discriminating: their
+/// default (`string` / `number`) is DIFFERENT from what inference
+/// produces, so a row that took the default anyway is distinguishable
+/// from one that inferred. The shipped fixture had them coincide.
+///
+/// Mutation recipes:
+///
+/// - applying the default unconditionally (the pre-fix code) flips
+///   `zzMismACall` / `zzMismBCall` to `Primitive(String)` and
+///   `zpExplicitCall` / `rvDefaultedFlowCall` to the declared default,
+///   while leaving every argument-free row green;
+/// - substituting `unknown` regardless of the declared default flips the
+///   four "the default IS the answer" rows and leaves the mismatch rows
+///   green;
+/// - dropping the explicit-type-arguments bit flips only
+///   `zpExplicitCall`;
+/// - dropping the supplied-ordinal test (treating ANY occurrence in a
+///   parameter type as inferable) flips `zpUnusedTPCall` and
+///   `zpNotSuppliedCall` to `unknown`.
 #[test]
-fn flow_return_callee_clause_default_instantiates_to_the_default() {
+fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate() {
     let host = make_r5_host();
 
-    for name in ["rvDefaultedCall", "rvDefaultedFlowCall"] {
+    // Inference HAS a candidate: the interim `unknown`, never the
+    // declared default.
+    for name in [
+        "zzMismACall",
+        "zzMismBCall",
+        "zpExplicitCall",
+        "rvDefaultedFlowCall",
+    ] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name}'s call site produces an inference candidate, so the \
+                     declared default is NOT the answer — `unknown` is the interim, \
+                     and the default would be confidently wrong"
+                );
+            },
+        );
+    }
+
+    // Inference can produce NO candidate: the declared default is exact,
+    // on the declared-carrier route, the body-derived flow route, and
+    // both argument-bearing shapes whose parameter is still uninferable.
+    for name in [
+        "rvDefaultedCall",
+        "rvDefaultedFlowFreeCall",
+        "zpUnusedTPCall",
+        "zpNotSuppliedCall",
+    ] {
         r5_node(
             &host,
             name,
@@ -3554,8 +3865,8 @@ fn flow_return_callee_clause_default_instantiates_to_the_default() {
                 assert_eq!(
                     node_shape(dispatch, node),
                     NodeShape::Primitive(PrimitiveKind::Number),
-                    "{name}'s callee resolves its clause from its DECLARED default \
-                     without inference, so `unknown` is not an interim here"
+                    "{name}'s clause parameter can get no inference candidate, so \
+                     the callee's own declaration resolves it without inference"
                 );
             },
         );
@@ -3567,5 +3878,288 @@ fn flow_return_callee_clause_default_instantiates_to_the_default() {
         &host,
         "gcBareInferred",
         TypeExpr::Primitive(PrimitiveName::Unknown),
+    );
+}
+
+/// A caller instantiating a callee's clause never claims a FOREIGN
+/// declaration that merely SHARES the parameter's name.
+///
+/// The resolved-`DeclRef` claim exists for one provenance only: a
+/// declaration's own clause is NOT in scope where its DECLARED return
+/// locator lowers (file owner scope), so `f<Item>(): Item` interns its
+/// return as the file-scope `interface Item` — the wrong symbol, which
+/// the caller must claim. A BODY-DERIVED return is the opposite case: it
+/// is evaluated in the callee's own frame where the clause IS bound, so
+/// every occurrence of a clause parameter there is already a `TypeParam`
+/// binder, and a resolved `DeclRef` reached through such an arm is by
+/// construction a different symbol.
+///
+/// A NAME-scoped claim erases it — an exactly-correct arm destroyed and
+/// republished as `unknown`, cleanly and warm.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+///
+/// ```text
+/// callAye():   1 | QQ            ← arm 2 is `bee`'s declared return, the INTERFACE
+/// callAyeG():  1 | QQ            ← same, through a GENERIC callee
+/// zOuterCall(): { v: ZItem; }    ← the foreign name nested in a structural return
+/// ```
+///
+/// Mutation recipes:
+///
+/// - claiming resolved `DeclRef`s on the body-derived route (the
+///   pre-fix, name-only claim) republishes every row's foreign arm as
+///   `unknown`;
+/// - dropping the claim from the DECLARED-carrier route flips the two
+///   controls below (`shUseFirst` / `callsShDecl`), whose callees'
+///   declared returns genuinely misresolve to the file-scope interface.
+#[test]
+fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
+    let host = make_r5_host();
+
+    // The union's foreign arm SURVIVES; the callee's own binder arm is
+    // instantiated away.
+    for name in ["callAye", "callAyeG"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let arms = union_members(dispatch, node);
+                let shapes: Vec<NodeShape> =
+                    arms.iter().map(|arm| node_shape(dispatch, *arm)).collect();
+                assert!(
+                    shapes.contains(&decl_ref("QQ")),
+                    "{name}: the callee's DECLARED return is the file-scope \
+                     interface `QQ`, a symbol this caller's clause never shadows — \
+                     got {shapes:?}"
+                );
+            },
+        );
+    }
+
+    // The foreign name NESTED under a structural return.
+    r5_node(
+        &host,
+        "zOuterCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let member = object_member(dispatch, node, "v");
+            assert_eq!(
+                node_shape(dispatch, member),
+                decl_ref("ZItem"),
+                "the foreign interface nested in the callee's structural return \
+                 is not the caller's clause parameter"
+            );
+        },
+    );
+
+    // CONTROLS — the DECLARED-carrier route, where the claim is the
+    // whole point: `shFirst` / `shDecl` annotate returns that owner-scope
+    // lowering misresolves to the same-named file-scope interface.
+    for name in ["shUseFirst", "callsShDecl"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name}'s callee DECLARES its return, where its own clause is \
+                     out of scope — the resolved head IS the clause parameter"
+                );
+            },
+        );
+    }
+
+    // The IIFE route: a nested function value's signature is COMPOSED
+    // from its own body, so it is clause-scoped exactly like a
+    // body-derived flow return.
+    r5_node(
+        &host,
+        "iifeForeign",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                .iter()
+                .map(|arm| node_shape(dispatch, *arm))
+                .collect();
+            assert!(
+                shapes.contains(&decl_ref("QQ")),
+                "the IIFE's composed signature is clause-scoped: the foreign \
+                 interface reached through its body survives — got {shapes:?}"
+            );
+        },
+    );
+
+    // CONTROLS — the OWNER-SCOPE routes: a resolved callee VALUE TYPE
+    // (`symCall`, through the annotated-callee rail) and a function-typed
+    // BINDING (`bindDeclCall`, through the parameter rail). Both lower
+    // their callee's clause in file owner scope, where it is invisible,
+    // so the resolved same-named head IS the clause parameter and the
+    // claim must still reach it.
+    for name in ["symCall", "bindDeclCall"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name}'s callee type lowered in owner scope, where its own \
+                     clause is invisible — the resolved head IS the parameter"
+                );
+            },
+        );
+    }
+
+    // CONTROL — a non-generic callee declares no clause at all, so its
+    // resolved return reference survives untouched on either route.
+    r5_node(
+        &host,
+        "shUsePlainItem",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), decl_ref("ShItem"));
+        },
+    );
+}
+
+/// An AMBIENT overload group is no more answerable than a bodied one.
+///
+/// The per-file function-program index carries ONE entry per overload
+/// group, so the direct-call rail reaches exactly one declaration of a
+/// set the language resolves by ARGUMENTS. For a bodied group that entry
+/// is the hidden implementation; for an AMBIENT group there is no
+/// implementation at all and the entry is simply the LAST declaration —
+/// while TypeScript picks the FIRST matching one. Gating on "the
+/// selected signature has an implementation body" therefore closed only
+/// half the class: the ambient half published a confidently wrong
+/// literal, cleanly and warm.
+///
+/// The predicate for "not answerable without argument-driven overload
+/// resolution" is `signatures.len() > 1` ALONE.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+///
+/// ```text
+/// amb3Call():     "A"       ← the FIRST matching overload
+/// ovXCall():      string
+/// ovSingleCall(): string
+/// ```
+///
+/// Mutation recipe: restoring the `has_implementation_body` conjunct
+/// republishes `Literal(String("C"))` for `amb3Call` — the LAST
+/// declaration — with NO degradation and ONE warm candidate, and leaves
+/// every other row green.
+#[test]
+fn flow_return_ambient_overload_group_is_not_answerable_either() {
+    let host = make_r5_host();
+
+    assert_degraded(
+        &host,
+        "amb3Call",
+        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+    );
+
+    // CONTROL — the bodied group stays degraded (the half that already
+    // worked).
+    assert_degraded(
+        &host,
+        "ovXCall",
+        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+    );
+
+    // CONTROL — a LONE signature is untouched, bodied or not: the rule is
+    // overload VISIBILITY, not "any function with a body".
+    r5_node(
+        &host,
+        "ovSingleCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "a lone visible signature still instantiates its clause"
+            );
+        },
+    );
+}
+
+/// The `ReturnType<typeof f>` MEMBER route applies the same clause
+/// policy as its whole-return sibling.
+///
+/// `ReturnType<…>` is a signature UTILITY, not a call: it instantiates
+/// every free signature parameter at `unknown` and never consults a
+/// declared default (there is no call site to be argument-free). The
+/// whole-return route does exactly that; the member route — one path
+/// segment longer over the SAME carrier and the SAME callee — returned
+/// the flow return's raw member position, publishing the callee's own
+/// binder as the consumer's value.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`), over
+/// `mpFlow<MG = number>(x?: MG) { return { m: x }; }`:
+///
+/// ```text
+/// ReturnType<typeof mpFlow>        : { m: unknown; }
+/// ReturnType<typeof mpFlow>["m"]   : unknown
+/// ```
+///
+/// Note both are `unknown`, NOT the declared default `number`: the
+/// utility has no call site, so the "argument-free call takes the
+/// default" rule does not reach it. A member route that took the CALL
+/// policy would answer `number`, and one that took no policy answers the
+/// raw binder — three distinguishable states, and only `unknown` is the
+/// checker's.
+///
+/// Mutation recipes:
+///
+/// - removing the member route's clause instantiation republishes
+///   `TypeParam("MG")` — the callee's own binder as the consumer's
+///   value, which an enclosing same-named clause then substitutes;
+/// - giving the member route the CALL-site policy republishes
+///   `Primitive(Number)` (the declared default) and leaves the
+///   whole-return control at `unknown`, so the two routes disagree about
+///   one callee.
+#[test]
+fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
+    let host = make_r5_host();
+
+    // The MEMBER route: one pending named segment over the
+    // `ReturnType<typeof …>` carrier.
+    r5_node(
+        &host,
+        "mpMemberUse",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let carrier = indexed_access_object(dispatch, node);
+            let member = project_member_path(dispatch, carrier, "m");
+            assert_eq!(
+                node_shape(dispatch, member),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "the member route is the signature UTILITY's policy: every free \
+                 clause parameter is `unknown`, never the callee's raw binder \
+                 and never the declared default"
+            );
+        },
+    );
+
+    // CONTROL — the WHOLE-return route, the same carrier and the same
+    // callee reached at the TERMINAL hop instead of a pending one.
+    r5_node(
+        &host,
+        "mpWholeUse",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let whole = project_member_path(dispatch, node, "w");
+            let member = object_member(dispatch, whole, "m");
+            assert_eq!(
+                node_shape(dispatch, member),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "the whole-return route already applied the utility policy"
+            );
+        },
     );
 }

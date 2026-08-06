@@ -444,3 +444,87 @@ fn flow_body_hash_walks_nested_function_structure() {
         "a nested binding rename stays alpha-normalized"
     );
 }
+
+/// A clause parameter's `first_parameter_occurrence` is the caller's
+/// inference oracle: TypeScript takes a declared default ONLY when
+/// inference produced no candidate, and inference can produce one only
+/// from an argument supplied at a parameter position whose type names
+/// the parameter.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read
+/// through deliberate `const x: null = …` assignment errors), over
+/// calls whose default is DIFFERENT from what inference produces:
+///
+/// ```text
+/// occursFirst<T = string>(x: T)                  called (1)   : 1       ← INFERRED, not the `string` default
+/// occursSecond<T = number>(a: string, b?: T)     called ("a") : number  ← DEFAULT (ordinal 1 unsupplied)
+/// occursNowhere<T = number>(x: string)           called ("a") : number  ← DEFAULT (no occurrence at all)
+/// occursRest<T = number>(...xs: T[])             called ()    : number  ← DEFAULT (ordinal 0 unsupplied)
+/// occursRest<T = number>(...xs: T[])             called ("a") : "a"     ← INFERRED
+/// occursShadowed<T = number>(cb: <T>(y: T) => T) called (…)   : number  ← DEFAULT (the inner clause shadows)
+/// ```
+///
+/// (The literal rows read `1` / `"a"` rather than `number` / `string`
+/// because the probe binds them to a `const`; the rule under test is
+/// which SOURCE resolved the parameter, not how the result widened.)
+///
+/// Mutation recipes: dropping the shadow stack makes `occursShadowed`
+/// record ordinal 0 (the substrate would then answer the interim
+/// `unknown` where the checker answers the default); recording only the
+/// LAST occurrence rather than the smallest flips `occursTwice`;
+/// skipping the rest parameter makes `occursRest` record `None`, which
+/// would take the default at an argument-BEARING call the checker
+/// infers from.
+#[test]
+fn type_param_occurrence_records_the_smallest_supplying_parameter_ordinal() {
+    let index = index_of(
+        r#"
+export function occursFirst<T = string>(x: T): T { return x; }
+export function occursSecond<T = number>(a: string, b?: T): T { return b!; }
+export function occursNowhere<T = number>(x: string): T { return null as any; }
+export function occursRest<T = number>(...xs: T[]): T { return xs[0]; }
+export function occursShadowed<T = number>(cb: <T>(y: T) => T): T { return null as any; }
+export function occursTwice<T = number>(a: string, b: T, c: T): T { return b; }
+export function occursNested<T = number>(a: string, b: { k: T }): T { return b.k; }
+"#,
+    );
+    let occurrence = |name: &str| {
+        entry_of(&index, name)
+            .type_parameters
+            .iter()
+            .find(|param| param.name.as_ref() == "T")
+            .unwrap_or_else(|| panic!("{name} declares T"))
+            .first_parameter_occurrence
+    };
+
+    assert_eq!(occurrence("occursFirst"), Some(0));
+    assert_eq!(occurrence("occursSecond"), Some(1));
+    assert_eq!(
+        occurrence("occursNowhere"),
+        None,
+        "a parameter naming no formal parameter can never get an inference candidate, \
+         so its declared default applies even at an argument-BEARING call"
+    );
+    assert_eq!(
+        occurrence("occursRest"),
+        Some(0),
+        "a rest parameter occupies its own ordinal and covers every later one"
+    );
+    assert_eq!(
+        occurrence("occursShadowed"),
+        None,
+        "a nested clause re-declaring the name owns its own subtree — the OUTER T \
+         occurs in no parameter type, which is what the checker answers too"
+    );
+    assert_eq!(
+        occurrence("occursTwice"),
+        Some(1),
+        "the SMALLEST occurrence is the oracle: a call supplying only `a` reaches \
+         neither, a call supplying `a, b` reaches the first"
+    );
+    assert_eq!(
+        occurrence("occursNested"),
+        Some(1),
+        "occurrence is structural, not top-level: `{{ k: T }}` names T"
+    );
+}

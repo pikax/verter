@@ -600,7 +600,7 @@ fn flow_return_local_const_reaching_definition() {
             ),
         );
         // A WIDENING-literal `const` binding widens at the return join —
-        // TS7 oracle (`tsc 7.0.2 --declaration`):
+        // TS7 oracle (`tsgo 7.0.0-dev.20260526.1 --declaration`):
         // `function f(){ const x = 1; return x; }` declares `(): number`.
         // (`1 as const` / an annotated `const x: 1` stay pinned — see
         // `flow_return_member_demand_preserves_const_asserted_local`.)
@@ -2420,7 +2420,7 @@ fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding()
 
 /// `as const` preservation through the member demand: a const-asserted
 /// literal local read stays the pinned literal — TS7 oracle
-/// (`tsc 7.0.2 --declaration`): `const x = 1 as const; return { x }`
+/// (`tsgo 7.0.0-dev.20260526.1 --declaration`): `const x = 1 as const; return { x }`
 /// declares `{ x: 1 }`.
 #[test]
 fn flow_return_member_demand_preserves_const_asserted_local() {
@@ -2480,7 +2480,7 @@ fn flow_return_member_demand_with_bare_return_arm_is_typed_miss() {
 /// Bare-return-as-void keeps its OTHER half: a bare return ALONGSIDE a
 /// value return contributes `undefined` (never `void`, never dropped).
 /// The `undefined` arm is a CONTRIBUTOR, so the value return's fresh
-/// literal is no longer alone and stays pinned — tsc 7.0.2 on
+/// literal is no longer alone and stays pinned — tsgo 7.0.0-dev.20260526.1 on
 /// `subMixedBareValue` is `1 | undefined`, not `number | undefined`.
 #[test]
 fn flow_return_mixed_bare_and_value_returns_include_undefined_arm() {

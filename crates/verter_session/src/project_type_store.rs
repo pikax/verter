@@ -1434,9 +1434,14 @@ impl ProjectTypeStore {
     ///   references the canonical.
     pub fn evict_canonical(&self, canonical_id: &str) {
         self.indexed.remove(canonical_id);
-        // Flow-slice substrate: content-addressed (stale versions would
-        // only miss by key), evicted for memory hygiene exactly like the
-        // `FileArtifactStore` removal above.
+        // Flow-slice substrate: content-addressed, so a stale version
+        // misses by key — which holds because the key carries the EXACT
+        // per-function byte hash AND the artifacts store no absolute
+        // source position (see `flow_slice_node`). Eviction here is for
+        // memory hygiene exactly like the `FileArtifactStore` removal
+        // above, NOT the correctness rail: it fires on upsert only for
+        // artifact-only canonicals, so it never runs for an ordinary
+        // edited file and the key must be the oracle on its own.
         self.flow_slice.remove_canonical(canonical_id);
         self.analysis.invalidate_canonical(canonical_id);
         self.owner_import_surfaces.remove(canonical_id);
