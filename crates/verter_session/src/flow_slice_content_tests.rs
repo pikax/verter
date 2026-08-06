@@ -123,9 +123,9 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
         matches!(
             &consequent.statements[0],
             SliceStatement::Return {
-                argument: Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::Number(_)))),
+                argument: Some(SliceExpr::Type(leaf)),
                 widening_literal: true,
-            }
+            } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a return argument PRESERVES its fresh literal and flags it: tsc \
          widens only a lone contributor, so the return join owns the \
@@ -138,9 +138,9 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
         matches!(
             &alternate.statements[0],
             SliceStatement::Return {
-                argument: Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::String(_)))),
+                argument: Some(SliceExpr::Type(leaf)),
                 widening_literal: true,
-            }
+            } if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::String(_)))
         ),
         "the else arm likewise preserves its fresh literal"
     );
@@ -356,7 +356,7 @@ fn local_reaching_definition_is_binding_and_local() {
     assert!(
         matches!(
             init,
-            Some(SliceExpr::Type(TypeExpr::Literal(LiteralValue::Number(_))))
+            Some(SliceExpr::Type(leaf)) if matches!(leaf.ty(), TypeExpr::Literal(LiteralValue::Number(_)))
         ),
         "a const initializer keeps its literal: {init:?}"
     );
@@ -452,7 +452,7 @@ fn object_return_rides_spread_member() {
         "merge",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Type(TypeExpr::Object(object))),
+        argument: Some(SliceExpr::Type(leaf)),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -460,6 +460,9 @@ fn object_return_rides_spread_member() {
             "merge must return a lowered object: {:?}",
             node.body.statements
         );
+    };
+    let TypeExpr::Object(object) = leaf.ty() else {
+        panic!("merge must return a lowered object: {:?}", leaf.ty());
     };
     assert!(
         matches!(&object.properties[0], ObjectMember::Spread(_)),
@@ -509,7 +512,7 @@ fn object_return_spread_of_a_frame_binding_rides_the_gate_carrier() {
         "the frame-owned spread operand is the gated name"
     );
     assert!(
-        matches!(inner.as_ref(), SliceExpr::Type(TypeExpr::Object(_))),
+        matches!(inner.as_ref(), SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::Object(_))),
         "the wrapped answer is the whole-literal leaf: {inner:?}"
     );
 }

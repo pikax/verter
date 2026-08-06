@@ -1276,9 +1276,8 @@ impl DeclBodyMemo {
                 use verter_semantic::analysis::function_program::{
                     resolve_function_node, FunctionNode,
                 };
-                let (node, _self_name) =
-                    resolve_function_node(p.borrow_dependent(), &entry.locator)?;
-                let source = match &node {
+                let resolved = resolve_function_node(p.borrow_dependent(), &entry.locator)?;
+                let source = match &resolved.node {
                     FunctionNode::Function(func) => FunctionBodySource::from_function(func)?,
                     FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
                 };

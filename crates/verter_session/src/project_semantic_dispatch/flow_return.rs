@@ -1060,17 +1060,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // The evaluator
     // ──────────────────────────────────────────────────────────────────
 
-    /// The ONE binder environment for a function's OWN type parameters:
-    /// the binders intern as `TypeParam` nodes in the file scope and shadow
+    /// The ONE binder environment for one type-parameter clause: the
+    /// binders intern as `TypeParam` nodes in the file scope and shadow
     /// every outer same-name resolution. Shared by the root evaluation
     /// (parameters + body leaves) and every nested function value's
-    /// signature; an empty clause carries an empty `env`, which reproduces
-    /// the owner-scope lowering exactly.
+    /// signature; an empty clause with no `outer` carries an empty `env`,
+    /// which reproduces the owner-scope lowering exactly.
+    ///
+    /// The environment COMPOSES in two directions.
+    ///
+    /// Outward, `outer` is the environment of the ENCLOSING frame — the
+    /// class clause a member sits inside, or the frame a nested function
+    /// value was authored in. A binder of an enclosing clause is in scope
+    /// throughout everything it encloses, and the enclosed clause carries
+    /// only its own names, so without the seed an enclosing `<T>` reads
+    /// as a free name and binds an unrelated owner-scope `T`. The
+    /// enclosed clause overwrites a same-named outer binder, which is
+    /// exactly the shadowing rule.
+    ///
+    /// Inward, the clause binds its OWN siblings, so it interns in TWO
+    /// passes: every binder is interned bare first, then the constraints
+    /// and defaults lower under that environment. One pass in source
+    /// order would be wrong — TypeScript accepts a FORWARD sibling
+    /// reference in a constraint (`<U extends V, V>` type-checks and
+    /// still constrains through `V`), so the visible inventory is the
+    /// whole clause, never "the preceding siblings".
+    ///
+    /// The two passes are not a fixed point: a sibling reference in a
+    /// constraint sees the sibling's BARE binder, so
+    /// `<U extends V, V extends string>` gives `U` a constraint on `V`
+    /// without `V`'s own constraint attached. That matches how a
+    /// `TypeParam`'s constraint is treated everywhere else (declaration
+    /// -local meaning, never re-substituted at a call site) and is the
+    /// boundary of this scheme.
+    ///
+    /// Whether a BINDER or a same-named frame LOCAL wins is not decided
+    /// here — it is a lexical question, settled by the content half's
+    /// [`crate::flow_slice_content`] gate before an answer ever reaches
+    /// this environment. TS2300 constrains only one frame
+    /// (`function f<T>() { class T {} }`); across frames the two
+    /// genuinely coexist and the nearest wins, in both directions.
     fn flow_binder_env(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        outer: Option<&FlowBinderEnv>,
     ) -> FlowBinderEnv {
         let graph = self.graph();
         let whole_hash = self
@@ -1096,48 +1131,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
             std::sync::Arc<str>,
             verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
-        // The function's OWN type parameters are binders in scope for the
-        // parameter / return lowering (constraints / defaults lower under
-        // the OUTER env).
+        // Seed from the ENCLOSING environment, then let this clause
+        // shadow it.
         let mut env: rustc_hash::FxHashMap<String, SemanticNodeId> =
-            rustc_hash::FxHashMap::default();
-        let mut type_param_decls: Vec<crate::semantic_query::TypeParamDecl> =
-            Vec::with_capacity(type_parameters.len());
-        for tp in type_parameters.iter() {
-            let constraint = tp.constraint.as_ref().and_then(|c| {
-                self.lower_type_expr_in_owner_scope_with_context(
-                    canonical,
-                    owner,
-                    c.ty(),
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )
-            });
-            let default = tp.default.as_ref().and_then(|d| {
-                self.lower_type_expr_in_owner_scope_with_context(
-                    canonical,
-                    owner,
-                    d.ty(),
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )
-            });
-            let display_name: Arc<str> = Arc::clone(&tp.name);
-            let binder = graph.intern_node(SemanticNodeData::TypeParam {
-                decl: crate::semantic_query::DeclIdentity::from_scope(
-                    &scope,
-                    Arc::clone(&display_name),
-                ),
+            outer.map(|outer| outer.env.clone()).unwrap_or_default();
+        let intern_binder = |name: &Arc<str>,
+                             constraint: Option<SemanticNodeId>,
+                             default: Option<SemanticNodeId>| {
+            graph.intern_node(SemanticNodeData::TypeParam {
+                decl: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::clone(name)),
                 param_index: 0,
                 constraint,
                 default,
-                display_name: Arc::clone(&display_name),
-            });
-            env.insert(tp.name.to_string(), binder);
+                display_name: Arc::clone(name),
+            })
+        };
+        // PASS 1 — every binder of this clause, bare. Sibling references
+        // in a constraint / default resolve against these, in either
+        // direction.
+        for tp in type_parameters.iter() {
+            env.insert(tp.name.to_string(), intern_binder(&tp.name, None, None));
+        }
+        // PASS 2 — the constraints and defaults, lowered under the
+        // composed environment, then the final binders.
+        let mut type_param_decls: Vec<crate::semantic_query::TypeParamDecl> =
+            Vec::with_capacity(type_parameters.len());
+        let mut finalized: Vec<(String, SemanticNodeId)> =
+            Vec::with_capacity(type_parameters.len());
+        for tp in type_parameters.iter() {
+            let mut lower = |gated: &crate::flow_slice_content::GatedType| {
+                let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                self.shallow_lower_type_expr_with_context(
+                    gated.ty(),
+                    &env,
+                    &scope,
+                    &name_resolution,
+                    scope_payload.as_ref(),
+                    &shadowing,
+                    &mut substitutions,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+            };
+            let constraint = tp.constraint.as_ref().map(&mut lower);
+            let default = tp.default.as_ref().map(&mut lower);
+            let display_name: Arc<str> = Arc::clone(&tp.name);
+            finalized.push((
+                tp.name.to_string(),
+                intern_binder(&display_name, constraint, default),
+            ));
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
                 name: display_name,
                 constraint,
                 default,
             });
         }
+        env.extend(finalized);
         FlowBinderEnv {
             scope,
             scope_payload,
@@ -1398,16 +1446,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // root `<T extends string>(x: T)` keeps the binder `T`, never the
         // file-scope alias); an empty clause reproduces the owner-scope
         // lowering exactly. Parameters lower through it.
-        let binder_env = self.flow_binder_env(canonical, owner, &ir.type_parameters);
+        //
+        // The ENCLOSING declaration's clause seeds it: a class member's
+        // signature and body see `class C<T>`'s binders, which appear in
+        // no clause of the member itself.
+        let enclosing_binder_env = (!ir.enclosing_type_parameters.is_empty())
+            .then(|| self.flow_binder_env(canonical, owner, &ir.enclosing_type_parameters, None));
+        let binder_env = self.flow_binder_env(
+            canonical,
+            owner,
+            &ir.type_parameters,
+            enclosing_binder_env.as_ref(),
+        );
         // THE root-identifier gate at the SIGNATURE entrances. Every
         // signature answer the content half minted carries the frame
         // names it references; if the owner scope answers one of them,
         // evaluating it would publish an unrelated module-scope (or
         // cross-file imported) symbol's type for a frame-owned binding —
         // cleanly and warm. The ROOT function's own signature is minted
-        // UNGATED (its body-locals are not in scope there), so this only
-        // ever fires for a nested signature reached through the same
-        // slice content.
+        // ungated against the FRAME (its body-locals are not in scope
+        // there), so the frame half of this gate only ever fires for a
+        // nested signature reached through the same slice content; the
+        // PARAMETER-LIST half fires in either arm, because a signature's
+        // own parameters are not body-locals.
         if ir
             .type_parameters
             .iter()
@@ -2409,10 +2470,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
         // for the parameter / return lowering (a `<T>(x: T) => x` keeps
-        // `<T>`; constraints / defaults lower under the OUTER env).
-        let binder_env = self
-            .dispatch
-            .flow_binder_env(self.canonical, self.owner, type_parameters);
+        // `<T>`), COMPOSED over the enclosing frame's environment: the
+        // nested signature sits inside that frame, so every binder in
+        // scope there is in scope here too.
+        let binder_env = self.dispatch.flow_binder_env(
+            self.canonical,
+            self.owner,
+            type_parameters,
+            Some(self.binder_env),
+        );
         // The SAME signature gate the root evaluation takes. A nested
         // signature sits inside the enclosing frame's body, so its
         // annotations, its type-parameter constraints / defaults, and
@@ -2583,7 +2649,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
         let graph = self.dispatch.graph();
         match expr {
-            crate::flow_slice_content::SliceExpr::Type(ty) => Ok(Some(self.lower_body_type(ty))),
+            crate::flow_slice_content::SliceExpr::Type(leaf) => {
+                Ok(Some(self.lower_body_type(leaf.ty())))
+            }
             crate::flow_slice_content::SliceExpr::FrameShadowed { inner, shadowed } => {
                 // The root-identifier gate's decision point. The content
                 // half found that this leaf's answer names bindings the

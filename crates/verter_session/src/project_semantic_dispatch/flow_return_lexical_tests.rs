@@ -754,6 +754,195 @@ export function genuineCapture() {
   }
   return (x: unknown) => x as GC;
 }
+
+// ── Type-parameter binder COMPOSITION ─────────────────────────────────
+// Every binder name below has a MODULE-scope twin — the leak bait. A
+// `DeclRef` to the twin and a surviving `TypeParam` binder BOTH raise to
+// `Ref { name }`, so every row asserts the GRAPH NODE.
+export type OuterTP = "moduleOuterTP";
+export type SameClause = "moduleSameClause";
+export type DeepTP = "moduleDeepTP";
+export type ModuleAlias = "moduleAlias";
+
+export function bindNestedParam<OuterTP>() {
+  return (p: OuterTP) => p;
+}
+
+export function bindNestedRest<OuterTP>() {
+  return (...p: OuterTP[]) => p;
+}
+
+export function bindNestedConstraint<OuterTP>() {
+  return function <U extends OuterTP>(p: U) {
+    return p;
+  };
+}
+
+export function bindNestedDefault<OuterTP>() {
+  return function <U = OuterTP>(p?: U) {
+    return p;
+  };
+}
+
+export function bindNestedSameClause() {
+  return function <SameClause, U extends SameClause>(a: SameClause, p: U) {
+    return p;
+  };
+}
+
+export function bindRootSameClause<SameClause, U extends SameClause>(p: U) {
+  return p;
+}
+
+export function bindForwardSibling<U extends SameClause, SameClause>(
+  u: U,
+  v: SameClause,
+) {
+  return u;
+}
+
+export function bindDepthTwo<DeepTP>() {
+  return () => {
+    return (p: DeepTP) => p;
+  };
+}
+
+export function bindNestedBody<OuterTP>() {
+  return (x: unknown) => x as OuterTP;
+}
+
+export function bindNoTwin<FreshTP>() {
+  return (p: FreshTP) => p;
+}
+
+export function bindInferCheck<OuterTP>() {
+  return (x: unknown) => x as (OuterTP extends Array<infer U> ? U : never);
+}
+
+export function ctrlNestedConstraintModule() {
+  return function <U extends ModuleAlias>(p: U) {
+    return p;
+  };
+}
+
+export function ctrlNestedDefaultModule() {
+  return function <U = ModuleAlias>(p?: U) {
+    return p;
+  };
+}
+
+export function ctrlRootConstraintModule<U extends ModuleAlias>(p: U) {
+  return p;
+}
+
+// ── NEAREST WINS across frames, in BOTH directions ────────────────────
+// TS2300 forbids a binder and a same-named local only INSIDE one frame,
+// so across frames the two genuinely coexist and the nearer one wins.
+export type NestT = "moduleNestT";
+
+export function localClassShadowsOuterBinder<NestT>() {
+  return () => {
+    class NestT {
+      inner = 1;
+    }
+    return (x: unknown) => x as NestT;
+  };
+}
+
+export type BindT = "moduleBindT";
+export type BodyT = "moduleBodyT";
+
+export function binderShadowsOuterLocalClass() {
+  class BindT {
+    inner = 1;
+  }
+  return function <BindT>() {
+    return (p: BindT) => p;
+  };
+}
+
+export function binderShadowsOuterLocalClassInBody() {
+  class BodyT {
+    inner = 1;
+  }
+  return function <BodyT>() {
+    return (x: unknown) => x as BodyT;
+  };
+}
+
+export type SameT = "moduleSameT";
+
+export function localClassSameFrameShadowsOuterBinder<SameT>() {
+  return () => {
+    class SameT {
+      inner = 1;
+    }
+    return null as unknown as SameT;
+  };
+}
+
+// A CLASS binder and a member body's local are different scopes — no
+// TS2300 — and the member's local WINS, in the body and in a nested
+// function value inside it.
+export type CT = "moduleCT";
+
+export class ClassLocalShadow<CT> {
+  m(x: unknown) {
+    class CT {
+      inner = 1;
+    }
+    return x as CT;
+  }
+  n(x: unknown) {
+    class CT {
+      inner = 1;
+    }
+    return (y: unknown) => y as CT;
+  }
+}
+
+// ── The CLASS type-parameter clause ───────────────────────────────────
+export class ClassTP<OuterTP> {
+  m(x: OuterTP) {
+    return x;
+  }
+  n(x: unknown) {
+    return (p: OuterTP) => p;
+  }
+}
+
+// ── The PARAMETER-LIST inventory ──────────────────────────────────────
+export declare const pv: "modulePV";
+export declare const loc: "moduleLoc";
+
+export function paramTypeofRoot(pv: number, b: typeof pv) {
+  return b;
+}
+
+export function paramTypeofNested() {
+  return (pv: number, b: typeof pv) => b;
+}
+
+export function paramDefaultRoot(pv = 1, b = pv) {
+  return b;
+}
+
+export function paramDefaultNested() {
+  return (pv = 1, b = pv) => b;
+}
+
+export function paramTypeofCtrl(a: number, b: typeof pv) {
+  return b;
+}
+
+export function paramTypeofNoTwin(nt: number, b: typeof nt) {
+  return b;
+}
+
+export function paramBodyLocalInvisible(b: typeof loc) {
+  const loc = 1;
+  return b;
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -784,12 +973,20 @@ fn with_dispatch<R>(
 }
 
 fn r5_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+    r5_key_part(dispatch, name, FunctionPartIdentity::DeclarationBody)
+}
+
+fn r5_key_part(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    part: FunctionPartIdentity,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(R5_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from(name),
-            FunctionPartIdentity::DeclarationBody,
+            part,
             0,
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
@@ -1765,11 +1962,615 @@ fn flow_return_nested_signature_type_parameter_shadows_captured_type_space_name(
         "tpShadowParamAnnot",
     ] {
         let returned = nested_return(&host, name);
+        // The projected surface CANNOT discriminate here: a `DeclRef` to
+        // the module-scope `type T = "outerT"` bait raises to the SAME
+        // `Ref { name: "T" }` a surviving binder does. Only the binder
+        // node is the correct answer.
         assert!(
-            matches!(&returned, TypeExpr::Ref { name: n, .. } if n.as_ref() == "T")
-                || matches!(&returned, TypeExpr::TypeParameter(tp) if tp.name == "T"),
+            matches!(&returned, TypeExpr::TypeParameter(tp) if tp.name == "T"),
             "{name}: the nested binder `T` must survive, got {returned:?}"
         );
     }
     assert_fails_closed(&host, "genuineCapture");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Type-parameter binder COMPOSITION — asserted on the GRAPH NODE
+// ──────────────────────────────────────────────────────────────────────
+
+/// The discriminating GRAPH-NODE shape of one answer.
+///
+/// The PROJECTED surface cannot tell these apart: a surviving
+/// `TypeParam` binder, a `DeclRef` to a module-scope declaration of the
+/// same name, and a deferred `BareRef` ALL raise to
+/// `TypeExpr::Ref { name }`. Every binder row asserts here instead —
+/// asserting on the projection is exactly how a leak stays invisible.
+#[derive(Debug, PartialEq, Eq)]
+enum NodeShape {
+    TypeParam(String),
+    DeclRef(String),
+    BareRef(String),
+    Opaque,
+    Other(String),
+}
+
+fn type_param(name: &str) -> NodeShape {
+    NodeShape::TypeParam(name.to_string())
+}
+
+fn decl_ref(name: &str) -> NodeShape {
+    NodeShape::DeclRef(name.to_string())
+}
+
+fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> NodeShape {
+    let Some(data) = dispatch.graph().node_data(node) else {
+        return NodeShape::Other("<no node>".to_string());
+    };
+    if let Some((name, _)) = data.bare_ref_head() {
+        return NodeShape::BareRef(name.to_string());
+    }
+    match data.as_ref() {
+        SemanticNodeData::TypeParam { display_name, .. } => {
+            NodeShape::TypeParam(display_name.to_string())
+        }
+        SemanticNodeData::DeclRef { identity } => {
+            NodeShape::DeclRef(identity.decl_name.to_string())
+        }
+        SemanticNodeData::Opaque(_) => NodeShape::Opaque,
+        other => NodeShape::Other(format!("{other:?}")),
+    }
+}
+
+/// The `Array` element of an answer.
+#[track_caller]
+fn array_element(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> SemanticNodeId {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Array { element, .. }) => *element,
+        other => panic!("expected an Array answer, got {other:?}"),
+    }
+}
+
+/// The `Conditional` CHECK type of an answer.
+#[track_caller]
+fn conditional_check(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Conditional { check, .. }) => *check,
+        other => panic!("expected a Conditional answer, got {other:?}"),
+    }
+}
+
+/// One `Signature` answer, decomposed.
+struct SigParts {
+    params: Vec<SemanticNodeId>,
+    return_type: SemanticNodeId,
+    type_parameters: Vec<crate::semantic_query::TypeParamDecl>,
+}
+
+#[track_caller]
+fn signature_parts(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> SigParts {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Signature {
+            params,
+            return_type,
+            type_parameters,
+            ..
+        }) => SigParts {
+            params: params.iter().map(|param| param.ty).collect(),
+            return_type: *return_type,
+            type_parameters: type_parameters.to_vec(),
+        },
+        other => panic!("expected a Signature answer, got {other:?}"),
+    }
+}
+
+/// Evaluate one function under the CLEAN + WARM contract and hand its
+/// flow-return GRAPH NODE to `pick`.
+#[track_caller]
+fn r5_node<R>(
+    host: &Arc<VerterHost>,
+    name: &str,
+    part: FunctionPartIdentity,
+    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    with_dispatch(host, |dispatch| {
+        let key = r5_key_part(dispatch, name, part);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("{name} must produce a value");
+        };
+        assert_eq!(result.degradation, None, "{name} must evaluate clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "{name} must warm-admit exactly one candidate"
+        );
+        pick(dispatch, result.return_type)
+    })
+}
+
+/// A NESTED function value's signature is composed under the ENCLOSING
+/// frames' binder environment, not the file's owner scope.
+///
+/// Two independent halves have to hold at once. The CONTENT half must
+/// stop reporting an enclosing binder as a frame-shadowed captured type
+/// (a type parameter is a binder, never a scope lookup); the EVALUATOR
+/// half must actually carry the enclosing binders into the nested
+/// signature's environment. Fixing only the first turns a fail-closed
+/// into a warm WRONG answer naming the module twin.
+///
+/// Correcting an earlier record: "an enclosing frame's type parameters
+/// are captured into a nested frame, so a nested signature referring to
+/// an outer binder fails closed — never a wrong answer" was only half
+/// true. The nested BODY path did fail closed, because the capture scope
+/// recorded the enclosing binders as captured TYPE names. The nested
+/// SIGNATURE path never consulted that capture scope at all — it gates
+/// against the enclosing frame directly, where the enclosing clause was
+/// invisible — so `bindNestedParam` / `bindNestedRest` /
+/// `bindNestedConstraint` / `bindNestedDefault` each published the
+/// module twin's declaration cleanly and warm.
+///
+/// Oracle (tsgo checker on exactly these bodies):
+///
+/// ```text
+/// bindNestedParam<number>()      : (p: number) => number
+/// bindNestedRest<number>()       : (...p: number[]) => number[]
+/// bindNestedConstraint<{k:1}>()  : <U extends { k: 1; }>(p: U) => U
+/// bindNestedDefault<number>()    : <U = number>(p?: U) => U | undefined
+/// bindDepthTwo<number>()()       : (p: number) => number
+/// bindNestedBody<number>()       : (x: unknown) => number
+/// bindNoTwin<number>()           : (p: number) => number
+/// bindInferCheck<number[]>()     : (x: unknown) => number
+/// ctrlNestedConstraintModule()   : <U extends ModuleAlias>(p: U) => U
+/// ctrlNestedDefaultModule()      : <U = "moduleAlias">(p?: U) => U | undefined
+/// ```
+///
+/// Mutation recipes: dropping `type_param_names` from the
+/// `Lowerer::name_is_frame_bound` binder short-circuit flips every
+/// nested row to `DeclRef`; dropping the `outer` seed from the composed
+/// binder environment flips every nested row to `DeclRef` as well; both
+/// leave the two `ctrl*` module rows green, which is what makes them
+/// controls.
+#[test]
+fn flow_return_nested_signature_composes_the_enclosing_binder_environment() {
+    let host = make_r5_host();
+
+    // The enclosing clause's binder, referenced from the nested
+    // signature's parameter / rest / constraint / default positions.
+    r5_node(
+        &host,
+        "bindNestedParam",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            assert_eq!(node_shape(dispatch, sig.params[0]), type_param("OuterTP"));
+            assert_eq!(node_shape(dispatch, sig.return_type), type_param("OuterTP"));
+        },
+    );
+    r5_node(
+        &host,
+        "bindNestedRest",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let element = array_element(dispatch, sig.params[0]);
+            assert_eq!(node_shape(dispatch, element), type_param("OuterTP"));
+        },
+    );
+    r5_node(
+        &host,
+        "bindNestedConstraint",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let constraint = sig.type_parameters[0]
+                .constraint
+                .expect("the nested clause carries its constraint");
+            assert_eq!(node_shape(dispatch, constraint), type_param("OuterTP"));
+        },
+    );
+    r5_node(
+        &host,
+        "bindNestedDefault",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let default = sig.type_parameters[0]
+                .default
+                .expect("the nested clause carries its default");
+            assert_eq!(node_shape(dispatch, default), type_param("OuterTP"));
+        },
+    );
+
+    // DEPTH 2: the binder crosses two nested frames, in BOTH the
+    // parameter and the return position.
+    r5_node(
+        &host,
+        "bindDepthTwo",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let outer = signature_parts(dispatch, node);
+            let inner = signature_parts(dispatch, outer.return_type);
+            assert_eq!(node_shape(dispatch, inner.params[0]), type_param("DeepTP"));
+            assert_eq!(
+                node_shape(dispatch, inner.return_type),
+                type_param("DeepTP")
+            );
+        },
+    );
+
+    // A nested BODY leaf naming the enclosing binder.
+    r5_node(
+        &host,
+        "bindNestedBody",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            assert_eq!(node_shape(dispatch, sig.return_type), type_param("OuterTP"));
+        },
+    );
+
+    // NO module twin: the leak is latent there — a `BareRef` is just as
+    // wrong as a `DeclRef`, it simply has nothing to bind to yet.
+    r5_node(
+        &host,
+        "bindNoTwin",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            assert_eq!(node_shape(dispatch, sig.params[0]), type_param("FreshTP"));
+        },
+    );
+
+    // An `infer`-bearing conditional whose CHECK type is the enclosing
+    // binder.
+    r5_node(
+        &host,
+        "bindInferCheck",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let check = conditional_check(dispatch, sig.return_type);
+            assert_eq!(node_shape(dispatch, check), type_param("OuterTP"));
+        },
+    );
+
+    // CONTROLS — the MODULE alias is the checker's answer here, and a
+    // composed environment must not steal it.
+    r5_node(
+        &host,
+        "ctrlNestedConstraintModule",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let constraint = sig.type_parameters[0]
+                .constraint
+                .expect("the nested clause carries its constraint");
+            assert_eq!(node_shape(dispatch, constraint), decl_ref("ModuleAlias"));
+        },
+    );
+    r5_node(
+        &host,
+        "ctrlNestedDefaultModule",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let default = sig.type_parameters[0]
+                .default
+                .expect("the nested clause carries its default");
+            assert_eq!(node_shape(dispatch, default), decl_ref("ModuleAlias"));
+        },
+    );
+}
+
+/// A type-parameter clause binds its OWN siblings — including FORWARD
+/// ones — in both the ROOT and the NESTED arm.
+///
+/// The clause is interned in one pass and its constraints / defaults
+/// lower in a second under that environment, so the visible inventory is
+/// the WHOLE clause, never "the preceding siblings". TypeScript accepts
+/// a forward sibling reference in a constraint (`<U extends V, V>`) and
+/// still constrains through it, so a preceding-only inventory is wrong
+/// for exactly that shape.
+///
+/// Oracle (tsgo checker):
+///
+/// ```text
+/// bindNestedSameClause() : <SameClause, U extends SameClause>(a: SameClause, p: U) => U
+/// bindRootSameClause     : <SameClause, U extends SameClause>(p: U) => U
+/// bindForwardSibling     : <U extends SameClause, SameClause>(u: U, v: SameClause) => U
+/// ctrlRootConstraintModule : <U extends ModuleAlias>(p: U) => U
+/// ```
+///
+/// Mutation recipe: collapsing the two passes back into one owner-scope
+/// lowering flips all three same-clause rows to `DeclRef` and leaves the
+/// `ctrl*` row green.
+#[test]
+fn flow_return_type_parameter_clause_binds_its_own_siblings() {
+    let host = make_r5_host();
+
+    // NESTED clause, backward sibling.
+    r5_node(
+        &host,
+        "bindNestedSameClause",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            let constraint = sig.type_parameters[1]
+                .constraint
+                .expect("`U extends SameClause` carries its constraint");
+            assert_eq!(node_shape(dispatch, constraint), type_param("SameClause"));
+        },
+    );
+
+    // ROOT clause, backward sibling: the returned `U` binder carries it.
+    r5_node(
+        &host,
+        "bindRootSameClause",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), type_param("U"));
+            let constraint = match dispatch.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                    constraint.expect("`U extends SameClause` carries its constraint")
+                }
+                other => panic!("expected the `U` binder, got {other:?}"),
+            };
+            assert_eq!(node_shape(dispatch, constraint), type_param("SameClause"));
+        },
+    );
+
+    // ROOT clause, FORWARD sibling.
+    r5_node(
+        &host,
+        "bindForwardSibling",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), type_param("U"));
+            let constraint = match dispatch.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                    constraint.expect("`U extends SameClause` carries its constraint")
+                }
+                other => panic!("expected the `U` binder, got {other:?}"),
+            };
+            assert_eq!(node_shape(dispatch, constraint), type_param("SameClause"));
+        },
+    );
+
+    // CONTROL — a root constraint naming a MODULE type stays the module
+    // declaration.
+    r5_node(
+        &host,
+        "ctrlRootConstraintModule",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let constraint = match dispatch.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::TypeParam { constraint, .. }) => {
+                    constraint.expect("`U extends ModuleAlias` carries its constraint")
+                }
+                other => panic!("expected the `U` binder, got {other:?}"),
+            };
+            assert_eq!(node_shape(dispatch, constraint), decl_ref("ModuleAlias"));
+        },
+    );
+}
+
+/// Across FRAMES a type parameter and a same-named type-space local
+/// genuinely coexist, and the NEAREST one wins — in both directions.
+///
+/// TS2300 forbids the collision only INSIDE one frame
+/// (`function f<T>() { class T {} }` is a duplicate identifier), so the
+/// binder and scope inventories are NOT disjoint by construction: a
+/// `class T` in an intermediate frame shadows an enclosing `<T>` for
+/// everything it encloses, and a nearer `<T>` shadows an outer frame's
+/// `class T`. A binder inventory consulted as one flat union — before
+/// the frame's own lexical authority — gets the first direction wrong
+/// and publishes the enclosing binder cleanly and warm.
+///
+/// A CLASS binder is likewise NOT protected: `class C<T> { m() { class
+/// T {} … } }` is legal and the member's local wins, so an enclosing
+/// class clause has to sit BEHIND the member frame's own lexical
+/// authority rather than beside the function's own clause.
+///
+/// Oracle (tsgo checker):
+///
+/// ```text
+/// localClassShadowsOuterBinder<number>()()       : (x: unknown) => localClassShadowsOuterBinder.NestT
+/// localClassSameFrameShadowsOuterBinder<number>()() : sameFrameCheck-shaped local class
+/// binderShadowsOuterLocalClass()<number>()       : (x: unknown) => number
+/// new ClassLocalShadow<number>().m(0)            : ClassLocalShadow.CT
+/// new ClassLocalShadow<number>().n(0)            : (y: unknown) => ClassLocalShadow.CT
+/// ```
+///
+/// A local class is not a modellable answer, so every row whose answer
+/// is one fails CLOSED — never the module twin, and never the enclosing
+/// binder published cleanly and warm.
+///
+/// Mutation recipes: consulting the captured binder inventory BEFORE the
+/// frame's own skeleton flips `localClassSameFrameShadowsOuterBinder`
+/// and both `ClassLocalShadow` rows to a warm `TypeParam`; dropping the
+/// reciprocal inventory removal in `capture_scope_for` flips
+/// `localClassShadowsOuterBinder`; carrying the enclosing class clause
+/// as the member frame's OWN `type_param_names` flips both
+/// `ClassLocalShadow` rows.
+#[test]
+fn flow_return_nearest_declaration_wins_between_binders_and_frame_locals() {
+    let host = make_r5_host();
+
+    // A nearer frame-local class shadows the enclosing binder; the class
+    // is unmodellable, so these fail closed rather than publishing
+    // either the binder or the module twin.
+    for name in [
+        "localClassShadowsOuterBinder",
+        "localClassSameFrameShadowsOuterBinder",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+
+    // The same rule for a CLASS binder, in the member body and in a
+    // nested function value inside it.
+    for member_ordinal in [0u32, 1u32] {
+        with_dispatch(&host, |dispatch| {
+            let key = r5_key_part(
+                dispatch,
+                "ClassLocalShadow",
+                FunctionPartIdentity::Member {
+                    member_path: Arc::from(vec![member_ordinal].into_boxed_slice()),
+                },
+            );
+            assert!(
+                matches!(
+                    dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
+                    QueryResult::Error(QueryError::Miss)
+                ),
+                "ClassLocalShadow member {member_ordinal} must fail closed"
+            );
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "ClassLocalShadow member {member_ordinal} must admit nothing"
+            );
+        });
+    }
+
+    // A nearer binder shadows the enclosing frame's local class — from a
+    // nested SIGNATURE (the enclosing frame's own clause answers) and
+    // from a nested BODY one frame further down (the captured binder
+    // inventory answers).
+    for (name, binder) in [
+        ("binderShadowsOuterLocalClass", "BindT"),
+        ("binderShadowsOuterLocalClassInBody", "BodyT"),
+    ] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let outer = signature_parts(dispatch, node);
+                let inner = signature_parts(dispatch, outer.return_type);
+                assert_eq!(node_shape(dispatch, inner.return_type), type_param(binder));
+            },
+        );
+    }
+}
+
+/// A CLASS type-parameter clause binds inside every member body it
+/// encloses — the member's own signature and any nested function value
+/// in it.
+///
+/// A member slot never carries the class clause through the function's
+/// own type parameters, so without the enclosing-clause seed the class
+/// binder reads as a free name and resolves in owner scope.
+///
+/// Oracle (tsgo checker):
+///
+/// ```text
+/// new ClassTP<number>().m       : (x: number) => number
+/// new ClassTP<number>().n(0)    : (p: number) => number
+/// ```
+///
+/// Mutation recipe: dropping the class clause from the root binder
+/// environment's seed flips both rows to `DeclRef { OuterTP }` (the
+/// module alias) and leaves every function-clause row green.
+#[test]
+fn flow_return_class_type_parameter_clause_binds_in_its_members() {
+    let host = make_r5_host();
+
+    // The member's OWN signature.
+    r5_node(
+        &host,
+        "ClassTP",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), type_param("OuterTP"));
+        },
+    );
+
+    // A NESTED arrow inside the member.
+    r5_node(
+        &host,
+        "ClassTP",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            let sig = signature_parts(dispatch, node);
+            assert_eq!(node_shape(dispatch, sig.params[0]), type_param("OuterTP"));
+            assert_eq!(node_shape(dispatch, sig.return_type), type_param("OuterTP"));
+        },
+    );
+}
+
+/// A signature's OWN parameter list is a shadowing inventory of that
+/// signature — in the ROOT arm as much as the nested one.
+///
+/// The root rule "a function's own signature does not see its
+/// body-locals" is right about BODY LOCALS and says nothing about
+/// PARAMETERS: `typeof p` in an annotation, and a preceding parameter
+/// named in a default initializer, both bind the parameter. Resolving
+/// them positively needs intra-signature forward-reference resolution;
+/// until then they must fail CLOSED rather than publish the module
+/// twin's type warm.
+///
+/// Oracle (tsgo checker):
+///
+/// ```text
+/// paramTypeofRoot        : (pv: number, b: number) => number
+/// paramTypeofNested()    : (pv: number, b: typeof pv) => number
+/// paramDefaultRoot       : (pv?: number, b?: number) => number
+/// paramDefaultNested()   : (pv?: number, b?: number) => number
+/// paramTypeofCtrl        : (a: number, b: "modulePV") => "modulePV"
+/// paramTypeofNoTwin      : (nt: number, b: number) => number
+/// paramBodyLocalInvisible: (b: "moduleLoc") => "moduleLoc"
+/// ```
+///
+/// Mutation recipe: removing the inventory from the ROOT arm flips
+/// `paramTypeofRoot` / `paramDefaultRoot` to a warm `"modulePV"`;
+/// removing it from the NESTED arm flips the other two; both leave the
+/// three controls green.
+#[test]
+fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
+    let host = make_r5_host();
+
+    // A parameter named by a SIBLING annotation / default fails closed:
+    // the module twin is never the answer.
+    for name in [
+        "paramTypeofRoot",
+        "paramTypeofNested",
+        "paramDefaultRoot",
+        "paramDefaultNested",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+
+    // CONTROL — no parameter of that name: the module const IS the
+    // checker's answer, clean and warm.
+    assert_clean_warm(&host, "paramTypeofCtrl", string_lit("modulePV"));
+
+    // CONTROL — a shadowing parameter with NO module twin: nothing can
+    // be mis-bound, so the gate must not fire and the owner scope
+    // genuinely answers nothing.
+    r5_node(
+        &host,
+        "paramTypeofNoTwin",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
+        },
+    );
+
+    // CONTROL — a BODY LOCAL stays invisible in the root parameter list,
+    // so the module const is still the answer.
+    assert_clean_warm(&host, "paramBodyLocalInvisible", string_lit("moduleLoc"));
 }

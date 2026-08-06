@@ -118,6 +118,13 @@ pub struct SliceContent {
     /// the evaluator lowers parameters and body leaves under them, never
     /// under an outer same-name resolution).
     pub type_parameters: Arc<[SliceTypeParam]>,
+    /// The ENCLOSING declaration's type parameters — today exactly the
+    /// class clause a member body sits inside (`class C<T> { m(x: T) }`).
+    /// They bind throughout the member's signature and body but appear in
+    /// no clause of the member itself, so the evaluator seeds the root
+    /// binder environment from them before composing the function's own.
+    /// Empty for every other function position.
+    pub enclosing_type_parameters: Arc<[SliceTypeParam]>,
     /// The root region (the function body statement list). An
     /// expression-bodied arrow lowers to a single `return` of the
     /// expression.
@@ -233,6 +240,39 @@ pub enum SliceBindingKind {
     Var,
 }
 
+/// A leaf `TypeExpr` that has PASSED the frame gate.
+///
+/// The field and the constructor are MODULE-private, so a
+/// [`SliceExpr::Type`] cannot be minted anywhere else: every leaf
+/// answer reaches this carrier through [`Lowerer::lower_leaf`], which
+/// routes it through [`Lowerer::leaf_type`]'s gate verdict first. The
+/// only other channel is [`GatedLeaf::map_ty`], which rewrites the
+/// lowered type while PRESERVING the verdict that was already reached.
+///
+/// This is the same confinement [`GatedType`] applies to signature
+/// positions, at the body-leaf position: "produce a `TypeExpr` in slice
+/// content without deciding what the frame does to it" is inexpressible
+/// rather than merely discouraged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatedLeaf(TypeExpr);
+
+impl GatedLeaf {
+    /// The lowered leaf type.
+    #[must_use]
+    pub fn ty(&self) -> &TypeExpr {
+        &self.0
+    }
+
+    /// Rewrite the lowered type PRESERVING the gate verdict.
+    ///
+    /// The one caller widens a non-`as const` object-literal member's
+    /// value, which cannot introduce a name the gate has not already
+    /// seen — widening only ever replaces a literal with its primitive.
+    fn map_ty(self, f: impl FnOnce(TypeExpr) -> TypeExpr) -> Self {
+        Self(f(self.0))
+    }
+}
+
 /// One expression of the slice content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceExpr {
@@ -240,8 +280,8 @@ pub enum SliceExpr {
     /// as `ObjectMember::Spread` for later delegation to the object-spread
     /// projection), templates, `typeof` paths, `as` / `satisfies` /
     /// parenthesized results — the shared shallow-pass per-expression
-    /// lowering.
-    Type(TypeExpr),
+    /// lowering, through the frame gate.
+    Type(GatedLeaf),
     /// A leaf answer that names one or more bindings THIS FRAME owns —
     /// the root-identifier gate's carrier.
     ///
@@ -444,6 +484,28 @@ impl GatedType {
     pub fn shadowed(&self) -> &[FrameShadowedName] {
         &self.shadowed
     }
+
+    /// WIDEN an existing answer's frame verdict with more shadow
+    /// entries.
+    ///
+    /// NOT a mint and not a third constructor: the answer was already
+    /// produced by one of the two above, and this only records
+    /// additional frame-owned names it references — the signature's own
+    /// PARAMETER LIST inventory, and a default initializer's
+    /// reference-chain root. Private to this module, so the mint surface
+    /// stays exactly two entrances.
+    fn add_shadowed(&mut self, extra: impl IntoIterator<Item = FrameShadowedName>) {
+        let mut shadowed = self.shadowed.to_vec();
+        let before = shadowed.len();
+        for entry in extra {
+            if !shadowed.contains(&entry) {
+                shadowed.push(entry);
+            }
+        }
+        if shadowed.len() != before {
+            self.shadowed = Arc::from(shadowed.into_boxed_slice());
+        }
+    }
 }
 
 /// One type parameter of a function value.
@@ -538,21 +600,24 @@ fn slice_type_param_names(node: &FunctionNode<'_>) -> Vec<Arc<str>> {
         .unwrap_or_default()
 }
 
-/// Lower one function node's own type parameter clause (name, lowered
-/// constraint, lowered default) — shared by the root content and every
-/// nested function value.
+/// Lower one type parameter clause (name, lowered constraint, lowered
+/// default) — shared by the root content, every nested function value,
+/// and the enclosing class clause a member body sits inside.
 ///
-/// Constraints and defaults lower under the OUTER environment (that is
-/// what the evaluator's binder environment does with them), so the
-/// nested arm gates them with NO binders: a `<U extends T>` naming the
-/// same clause's `T` is not resolvable from the outer environment and
-/// fails closed rather than binding an unrelated owner-scope `T`.
-fn lower_slice_type_params(
-    node: &FunctionNode<'_>,
+/// A clause binds its OWN siblings, so constraints and defaults gate
+/// under the WHOLE clause, not "the preceding siblings": TypeScript
+/// accepts a forward sibling reference in a constraint
+/// (`<U extends V, V>` type-checks and still constrains through `V`), so
+/// a preceding-only inventory is wrong for exactly that shape. The
+/// evaluator's binder environment mirrors this — it interns the whole
+/// clause first, then lowers the constraints and defaults under it.
+fn lower_type_param_clause(
+    declaration: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
     source: &str,
     scope: &SignatureScope<'_, '_>,
 ) -> Vec<SliceTypeParam> {
-    node.type_parameters()
+    let binders = scope.param_binders();
+    declaration
         .map(|declaration| {
             declaration
                 .params
@@ -562,15 +627,24 @@ fn lower_slice_type_params(
                     constraint: param
                         .constraint
                         .as_ref()
-                        .map(|constraint| scope.gate(lower_ts_type(constraint, source), &[])),
+                        .map(|constraint| scope.gate(lower_ts_type(constraint, source), binders)),
                     default: param
                         .default
                         .as_ref()
-                        .map(|default| scope.gate(lower_ts_type(default, source), &[])),
+                        .map(|default| scope.gate(lower_ts_type(default, source), binders)),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One function node's own type parameter clause.
+fn lower_slice_type_params(
+    node: &FunctionNode<'_>,
+    source: &str,
+    scope: &SignatureScope<'_, '_>,
+) -> Vec<SliceTypeParam> {
+    lower_type_param_clause(node.type_parameters(), source, scope)
 }
 
 impl SignatureScope<'_, '_> {
@@ -598,29 +672,45 @@ impl SignatureScope<'_, '_> {
     /// in owner scope. The answer's own names are gated as usual, but
     /// the initializer's REFERENCE-CHAIN ROOT must be checked too: a
     /// widened or primitive answer (`p = C` ⇒ `string`) carries no name
-    /// at all while still having read THROUGH a frame binding, so the
-    /// answer-name half alone cannot see it.
+    /// at all while still having read THROUGH a binding the answer never
+    /// names, so the answer-name half alone cannot see it.
+    ///
+    /// Two inventories answer that question and BOTH arms consult both.
+    /// The enclosing FRAME's bindings apply only to a nested signature
+    /// (a root signature does not see its own body-locals). This
+    /// signature's PRECEDING PARAMETERS apply to either arm — they are
+    /// not `locals`, and TS2373 makes "preceding" exact.
     fn gate_param_default(
         &self,
         ty: TypeExpr,
         initializer: &Expression<'_>,
         binders: &[Arc<str>],
+        parameters: &[(Arc<str>, verter_span::Span)],
     ) -> GatedType {
-        let SignatureScope::Nested { gate, at, .. } = self else {
-            return GatedType::root_signature(ty);
-        };
-        let mut gated = gate.gate(ty, *at, binders);
-        if let Some(root) = chain_root_identifier(initializer) {
-            if !matches!(
-                gate.resolve_name(root.name.as_str(), root.span),
-                NameBinding::Free
-            ) {
-                let entry = FrameShadowedName::Value(Arc::from(root.name.as_str()));
-                if !gated.shadowed.contains(&entry) {
-                    let mut shadowed = gated.shadowed.to_vec();
-                    shadowed.push(entry);
-                    gated.shadowed = Arc::from(shadowed.into_boxed_slice());
+        let mut gated = match self {
+            SignatureScope::Root => GatedType::root_signature(ty),
+            SignatureScope::Nested { gate, at, .. } => {
+                let mut gated = gate.gate(ty, *at, binders);
+                if let Some(root) = chain_root_identifier(initializer) {
+                    if !matches!(
+                        gate.resolve_name(root.name.as_str(), root.span),
+                        NameBinding::Free
+                    ) {
+                        gated.add_shadowed([FrameShadowedName::Value(Arc::from(
+                            root.name.as_str(),
+                        ))]);
+                    }
                 }
+                gated
+            }
+        };
+        if let Some(root) = chain_root_identifier(initializer) {
+            let limit = initializer.span().start;
+            if parameters
+                .iter()
+                .any(|(name, span)| name.as_ref() == root.name.as_str() && span.end <= limit)
+            {
+                gated.add_shadowed([FrameShadowedName::Value(Arc::from(root.name.as_str()))]);
             }
         }
         gated
@@ -639,14 +729,43 @@ pub(crate) fn build_flow_slice_content(
     selection: &FlowSliceSelection,
     skeleton: &FunctionBodySkeleton,
 ) -> Option<SliceContent> {
-    let (node, self_name) = resolve_function_node(program, &entry.locator)?;
+    let resolved = resolve_function_node(program, &entry.locator)?;
+    let node = resolved.node;
+    let self_name = resolved.self_name;
     // The ROOT function's OWN signature resolves in the OUTER scope: its
     // body-local declarations are not in scope in its parameter list,
     // its type-parameter clause, or its parameter defaults.
+    //
+    // The ENCLOSING declaration's clause joins the function's own: a
+    // class member sits inside `class C<T>`, whose binders are in scope
+    // throughout the member's signature and body but never appear in the
+    // member's own clause. Without them the class binder reads as a free
+    // name and resolves in owner scope.
+    let enclosing_type_parameters = lower_type_param_clause(
+        resolved.enclosing_type_parameters,
+        source,
+        &SignatureScope::Root,
+    );
     let type_param_names = slice_type_param_names(&node);
-    let params = lower_params(node.params(), source, &SignatureScope::Root);
+    let params = lower_params(node.params(), source, &SignatureScope::Root, skeleton);
     let type_parameters = lower_slice_type_params(&node, source, &SignatureScope::Root);
     let body = node.body()?;
+    // The enclosing clause is deliberately NOT part of this frame's
+    // binder inventory. TS2300 protects a function's own clause from a
+    // same-named body-local, but a CLASS binder and a member body's
+    // local are different scopes: `class C<T> { m() { class T {} … } }`
+    // is legal and the method's local WINS — so the class clause could
+    // only ever enter behind this frame's own lexical authority, where
+    // it is indistinguishable from a name nothing claims. In TYPE
+    // meaning "a binder answers" and "nothing here answers" have the
+    // same verdict (the composed binder environment supplies the answer
+    // either way), and in NAMESPACE meaning recording it would be
+    // strictly WRONG: `resolveName` skips a type parameter for a
+    // qualified head, so `class C<QY> { m() { … as QY.Inner } }`
+    // resolves to a module `namespace QY` (checker-verified), which
+    // marking it frame-bound would fail closed on. The class clause
+    // therefore reaches the answer through the EVALUATOR's binder
+    // environment only.
     let captures = CaptureScope::default();
     let mut lowerer = Lowerer {
         source,
@@ -689,6 +808,7 @@ pub(crate) fn build_flow_slice_content(
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+        enclosing_type_parameters: Arc::from(enclosing_type_parameters.into_boxed_slice()),
         body: region,
         budget_failure,
     })
@@ -813,37 +933,110 @@ fn declares_var(statement: &Statement<'_>) -> bool {
         .is_empty()
 }
 
+/// The names THIS signature's parameter list binds, paired with their
+/// binding-identifier spans, read from the frame's own
+/// [`FunctionBodySkeleton`] — the SAME single lexical authority every
+/// other classification in this module routes through. A DESTRUCTURED
+/// element is inventoried exactly like a plain binding identifier: the
+/// checker resolves `typeof a` in `f({ a }: { a: number }, b: typeof a)`
+/// to the destructured element.
+fn signature_parameter_bindings(
+    skeleton: &FunctionBodySkeleton,
+) -> Vec<(Arc<str>, verter_span::Span)> {
+    skeleton
+        .bindings
+        .iter()
+        .filter(|binding| binding.kind == SkeletonBindingKind::Param)
+        .map(|binding| (Arc::from(skeleton.name(binding.name)), binding.span))
+        .collect()
+}
+
+/// The parameter names one signature answer references — the
+/// PARAMETER-LIST half of the frame gate.
+///
+/// `visible_before` is the byte offset a DEFAULT INITIALIZER starts at,
+/// or `None` for an ANNOTATION. An annotation sees the WHOLE parameter
+/// list (`f(a: number, p: X, b: typeof p)` binds the parameter `p`
+/// regardless of order); a default initializer sees only the PRECEDING
+/// parameters, because TS2373 rejects a forward reference outright and a
+/// later same-named parameter must not mask the outer declaration the
+/// initializer genuinely reads.
+fn parameter_list_shadowed(
+    ty: &TypeExpr,
+    parameters: &[(Arc<str>, verter_span::Span)],
+    visible_before: Option<u32>,
+) -> Vec<FrameShadowedName> {
+    let names = verter_type_expr::referenced_names(ty);
+    let mut out: Vec<FrameShadowedName> = Vec::new();
+    for root in &names.value_roots {
+        let bound = parameters.iter().any(|(name, span)| {
+            name.as_ref() == root.as_str() && visible_before.is_none_or(|limit| span.end <= limit)
+        });
+        if bound {
+            let entry = FrameShadowedName::Value(Arc::from(root.as_str()));
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
 /// Lower the formal parameters: binding name, optional/rest flags, and the
 /// parameter type — the authored TS annotation through `lower_ts_type`,
 /// else the default initializer's inferred type, else `any`.
+///
+/// A signature's OWN parameter list is a shadowing inventory of THAT
+/// signature, in the ROOT arm exactly as much as the nested one.
+/// `resolveName`'s root rule discards a hit in the function's own
+/// `locals`; a FORMAL PARAMETER is not in `locals`, so `typeof p` in a
+/// sibling annotation and a preceding parameter named in a default
+/// initializer both bind the PARAMETER — never an outer declaration of
+/// the same name. Resolving those positively needs intra-signature
+/// forward-reference resolution, so recording them here is what makes
+/// the answer fail CLOSED instead of publishing an unrelated
+/// module-scope symbol's type cleanly and warm.
 fn lower_params(
     params: &FormalParameters<'_>,
     source: &str,
     scope: &SignatureScope<'_, '_>,
+    skeleton: &FunctionBodySkeleton,
 ) -> Vec<SliceParam> {
     let binders = scope.param_binders();
+    let parameter_bindings = signature_parameter_bindings(skeleton);
     let mut out = Vec::with_capacity(params.items.len() + usize::from(params.rest.is_some()));
     for param in &params.items {
         let name = match &param.pattern {
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
         };
-        let ty = match (param.type_annotation.as_ref(), param.initializer.as_ref()) {
-            (Some(annotation), _) => {
-                scope.gate(lower_ts_type(&annotation.type_annotation, source), binders)
-            }
-            (None, Some(initializer)) => scope.gate_param_default(
-                infer_declaration_expression_type(
-                    initializer,
-                    source,
-                    TopLevelLiteralPolicy::Widen,
-                )
-                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
-                initializer,
-                binders,
-            ),
-            (None, None) => GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
-        };
+        let (mut ty, visible_before) =
+            match (param.type_annotation.as_ref(), param.initializer.as_ref()) {
+                (Some(annotation), _) => (
+                    scope.gate(lower_ts_type(&annotation.type_annotation, source), binders),
+                    None,
+                ),
+                (None, Some(initializer)) => (
+                    scope.gate_param_default(
+                        infer_declaration_expression_type(
+                            initializer,
+                            source,
+                            TopLevelLiteralPolicy::Widen,
+                        )
+                        .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
+                        initializer,
+                        binders,
+                        &parameter_bindings,
+                    ),
+                    Some(initializer.span().start),
+                ),
+                (None, None) => (
+                    GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
+                    None,
+                ),
+            };
+        let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, visible_before);
+        ty.add_shadowed(extra);
         // An optional (`?`) parameter is `T | undefined` inside the body; a
         // defaulted parameter always has a value. The union rides the
         // SAME gate verdict: adding `undefined` names nothing new.
@@ -867,12 +1060,14 @@ fn lower_params(
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
         };
-        let ty = match rest.type_annotation.as_ref() {
+        let mut ty = match rest.type_annotation.as_ref() {
             Some(annotation) => {
                 scope.gate(lower_ts_type(&annotation.type_annotation, source), binders)
             }
             None => GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
         };
+        let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, None);
+        ty.add_shadowed(extra);
         out.push(SliceParam {
             name,
             optional: false,
@@ -967,6 +1162,19 @@ struct CaptureScope {
     /// `namespace N` owns `N.B` but not `N`. Collapsing them makes one
     /// of the two answers wrong in every frame that captures either.
     namespace_names: FxHashSet<Arc<str>>,
+    /// The TYPE-PARAMETER names an ENCLOSING frame BINDS, accumulated
+    /// across every enclosing frame.
+    ///
+    /// A FOURTH inventory, deliberately not folded into `type_names`: a
+    /// type parameter is not a scope lookup at all in TYPE meaning — the
+    /// composed binder environment interns it, so a captured same-named
+    /// `class` does not shadow it and reporting it frame-bound is a
+    /// spurious fail-closed. In NAMESPACE meaning the binder still WINS
+    /// lexically but denotes no namespace, so `T.B` is unresolvable and
+    /// reporting it frame-bound IS the fail-closed answer. Recording a
+    /// binder as a `type_name` collapses those two opposite verdicts
+    /// into one.
+    binder_names: FxHashSet<Arc<str>>,
 }
 
 impl CaptureScope {
@@ -1079,13 +1287,32 @@ impl Lowerer<'_> {
     /// through to the enclosing frames' captured names exactly as a
     /// completely unbound name does.
     ///
-    /// `binders` are the type parameters the answer will be lowered
-    /// under. A name they carry is not a scope lookup at all in TYPE
-    /// meaning — the binder environment interns it — so a captured
-    /// same-named `class` does not shadow it. In NAMESPACE meaning the
-    /// binder still WINS lexically but denotes no namespace, so `T.B` is
-    /// unresolvable and reporting it frame-bound is the fail-closed
-    /// answer.
+    /// A TYPE PARAMETER is not a scope lookup at all in TYPE meaning —
+    /// the composed binder environment interns it — so a same-named
+    /// `class` does not shadow it and reporting it frame-bound is a
+    /// spurious fail-closed. In NAMESPACE meaning the binder still WINS
+    /// lexically but denotes no namespace, so `T.B` is unresolvable and
+    /// reporting it frame-bound IS the fail-closed answer.
+    ///
+    /// Three binder inventories feed that rule, and they are consulted
+    /// in NESTING ORDER rather than as one union, because the nearest
+    /// declaration wins and a binder and a local of the same name can
+    /// genuinely coexist across frames:
+    ///
+    /// 1. `binders` (the clause the answer is lowered under) and this
+    ///    frame's own clause. Nothing can be nearer, and a same-frame
+    ///    local of the same name is TS2300, so these short-circuit.
+    /// 2. This frame's own lexical declarations.
+    /// 3. The ENCLOSING frames', through [`CaptureScope`].
+    ///
+    /// TS2300 constrains only ONE frame: `function f<T>() { class T {} }`
+    /// is a duplicate identifier, but `function f<T>() { return () =>
+    /// { class T {}; … } }` is not — and there the nearer `class T`
+    /// shadows the binder for everything it encloses, while a nearer
+    /// `<T>` shadows an outer frame's `class T`. Both directions are
+    /// checker-verified. [`Lowerer::capture_scope_for`] keeps the
+    /// captured inventories disjoint per name, so step 3 needs no
+    /// nesting order of its own.
     fn name_is_frame_bound(
         &self,
         name: &str,
@@ -1093,7 +1320,12 @@ impl Lowerer<'_> {
         meaning: NameMeaning,
         binders: &[Arc<str>],
     ) -> bool {
-        if binders.iter().any(|binder| binder.as_ref() == name) {
+        if binders.iter().any(|binder| binder.as_ref() == name)
+            || self
+                .type_param_names
+                .iter()
+                .any(|binder| binder.as_ref() == name)
+        {
             return meaning == NameMeaning::Namespace;
         }
         if let Some(name_id) = self.skeleton.name_id(name) {
@@ -1104,6 +1336,9 @@ impl Lowerer<'_> {
             {
                 return true;
             }
+        }
+        if self.captures.binder_names.contains(name) {
+            return meaning == NameMeaning::Namespace;
         }
         match meaning {
             NameMeaning::Type => self.captures.type_names.contains(name),
@@ -1213,13 +1448,25 @@ impl Lowerer<'_> {
         }
         let mut type_names = self.captures.type_names.clone();
         let mut namespace_names = self.captures.namespace_names.clone();
-        // This frame's OWN type parameters are captured TYPE-meaning
-        // names of every nested frame: the nested value's binder
-        // environment carries only the NESTED clause, so an enclosing
-        // `<T>` referenced from inside would otherwise read as free and
-        // resolve in owner scope. They are never namespaces.
+        // This frame's OWN type parameters join every enclosing frame's
+        // as BINDERS of the nested frame — a separate inventory from the
+        // captured type-space names, because the nested frame's answer
+        // resolves them through the composed binder environment rather
+        // than through any scope lookup.
+        //
+        // NEAREST WINS, in BOTH directions, so this frame's own
+        // contribution REMOVES the name from the opposite inventory: a
+        // `<T>` here shadows an enclosing frame's `class T`, and a
+        // `class T` here shadows an enclosing frame's `<T>`. TS2300
+        // forbids the collision only INSIDE one frame, so the two
+        // inventories are not disjoint by construction across frames —
+        // they are kept disjoint per name here, which is what lets
+        // `name_is_frame_bound` consult them as one unordered step.
+        let mut binder_names = self.captures.binder_names.clone();
         for binder in self.type_param_names {
-            type_names.insert(Arc::clone(binder));
+            binder_names.insert(Arc::clone(binder));
+            type_names.remove(binder.as_ref());
+            namespace_names.remove(binder.as_ref());
         }
         let mut seen: FxHashSet<verter_semantic::analysis::flow::FlowNameId> = FxHashSet::default();
         for binding in self.skeleton.bindings.iter() {
@@ -1233,17 +1480,26 @@ impl Lowerer<'_> {
             // chain (a `const` is a value capture that shadows no type; a
             // `class` shadows the bare type but not a qualified head), so
             // no space may gate another's answer.
+            let mut declares_type_space = false;
             if self
                 .skeleton
                 .declares_meaning_in_scope(binding.name, region, NameMeaning::Type)
             {
                 type_names.insert(Arc::from(text));
+                declares_type_space = true;
             }
             if self
                 .skeleton
                 .declares_meaning_in_scope(binding.name, region, NameMeaning::Namespace)
             {
                 namespace_names.insert(Arc::from(text));
+                declares_type_space = true;
+            }
+            // This frame's own type-space declaration is NEARER than any
+            // enclosing frame's binder of the same name. (It can never be
+            // nearer than THIS frame's own binder — that is TS2300.)
+            if declares_type_space {
+                binder_names.remove(text);
             }
             let resolved = self
                 .skeleton
@@ -1264,6 +1520,7 @@ impl Lowerer<'_> {
             names,
             type_names,
             namespace_names,
+            binder_names,
         }
     }
 
@@ -1658,9 +1915,9 @@ impl Lowerer<'_> {
                         );
                     let value = self.lower_expr(&p.value, mode);
                     let value = match (widen_member, value) {
-                        (true, SliceExpr::Type(ty)) => SliceExpr::Type(
-                            verter_semantic::analysis::type_eval_build::widen_shallow_literal(ty),
-                        ),
+                        (true, SliceExpr::Type(leaf)) => SliceExpr::Type(leaf.map_ty(
+                            verter_semantic::analysis::type_eval_build::widen_shallow_literal,
+                        )),
                         (_, value) => value,
                     };
                     members.push(SliceObjectMember {
@@ -1797,21 +2054,13 @@ impl Lowerer<'_> {
             at: node_span(node),
             binders: &type_param_names,
         };
-        let params = lower_params(node.params(), self.source, &scope);
-        let type_parameters = lower_slice_type_params(node, self.source, &scope);
-        // A nested function value has no index entry of its own — its
-        // control regions come from the SAME single inventory walk over
-        // its own body, and its lexical authority is its own skeleton
-        // over the same positions.
-        let inventory = node
-            .body()
-            .map(|body| inventory_statement_list(&body.statements))
-            .unwrap_or_default();
-        let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
         // A named function EXPRESSION binds its own name inside its own
         // body: the nested skeleton carries it, so `function h() { … h … }`
         // resolves `h` to THIS frame rather than looking free and
-        // falling through to an enclosing (or module-scope) `h`.
+        // falling through to an enclosing (or module-scope) `h`. It is
+        // built BEFORE the signature lowers, because the nested
+        // signature's own PARAMETER LIST is a shadowing inventory of that
+        // signature and the skeleton is its authority.
         let nested_skeleton = match node {
             FunctionNode::Function(func) => FunctionBodySource::from_function_expression(func)
                 .map(|source| build_function_body_skeleton(&source)),
@@ -1823,6 +2072,17 @@ impl Lowerer<'_> {
             // A bodiless nested position has no lexical frame to lower.
             return SliceExpr::UnmodeledBinding;
         };
+        let params = lower_params(node.params(), self.source, &scope, &nested_skeleton);
+        let type_parameters = lower_slice_type_params(node, self.source, &scope);
+        // A nested function value has no index entry of its own — its
+        // control regions come from the SAME single inventory walk over
+        // its own body, and its lexical authority is its own skeleton
+        // over the same positions.
+        let inventory = node
+            .body()
+            .map(|body| inventory_statement_list(&body.statements))
+            .unwrap_or_default();
+        let control: Arc<[FunctionControlRegion]> = Arc::from(inventory.control);
         let captures = self.capture_scope_for(node_span(node));
         let mut nested = Lowerer {
             source: self.source,
@@ -1898,9 +2158,9 @@ impl Lowerer<'_> {
         match self.leaf_type(expr, mode) {
             LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
             LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
-            LeafLowering::Free(ty) => SliceExpr::Type(ty),
+            LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty)),
             LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                inner: Box::new(SliceExpr::Type(ty)),
+                inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
                 shadowed,
             },
         }

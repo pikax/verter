@@ -1508,6 +1508,23 @@ pub fn function_from_expression<'a>(expression: &'a Expression<'a>) -> Option<Fu
     }
 }
 
+/// One resolved function position: the node, its bare-identifier self
+/// name, and the type-parameter clause of the declaration ENCLOSING it.
+pub struct ResolvedFunctionNode<'a> {
+    /// The function node the locator addresses.
+    pub node: FunctionNode<'a>,
+    /// The function's bare-identifier SELF name, for direct-recursion
+    /// detection. `None` for class members and object-literal members.
+    pub self_name: Option<Arc<str>>,
+    /// The type-parameter clause of the enclosing DECLARATION, when the
+    /// function sits inside one that has binders of its own — today that
+    /// is exactly a class member (`class C<T> { m(x: T) {} }`), whose
+    /// binders are in scope throughout every member body. A namespace,
+    /// a variable declarator, and an object literal declare no type
+    /// parameters, so those descents carry `None`.
+    pub enclosing_type_parameters: Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+}
+
 /// Resolve one function's locator against the retained snapshot: the
 /// contributing top-level statement, then the ordinal descent. Also
 /// derives the function's bare-identifier SELF name for direct-recursion
@@ -1517,7 +1534,7 @@ pub fn function_from_expression<'a>(expression: &'a Expression<'a>) -> Option<Fu
 pub fn resolve_function_node<'a>(
     program: &'a oxc_ast::ast::Program<'a>,
     locator: &FunctionBodyLocator,
-) -> Option<(FunctionNode<'a>, Option<Arc<str>>)> {
+) -> Option<ResolvedFunctionNode<'a>> {
     use oxc_ast::ast::{ClassElement, TSModuleDeclarationBody};
     let mut statement = program
         .body
@@ -1544,7 +1561,11 @@ pub fn resolve_function_node<'a>(
                     return None;
                 };
                 let self_name = func.id.as_ref().map(|id| Arc::from(id.name.as_str()));
-                return Some((FunctionNode::Function(func), self_name));
+                return Some(ResolvedFunctionNode {
+                    node: FunctionNode::Function(func),
+                    self_name,
+                    enclosing_type_parameters: None,
+                });
             }
             FunctionDescentStep::VariableInitializer { declarator_ordinal } => {
                 let DeclRef::Variable(var_decl) = declaration_of(statement)? else {
@@ -1558,7 +1579,11 @@ pub fn resolve_function_node<'a>(
                 let init = declarator.init.as_ref()?;
                 match steps.next() {
                     None => {
-                        return Some((function_from_expression(init)?, self_name));
+                        return Some(ResolvedFunctionNode {
+                            node: function_from_expression(init)?,
+                            self_name,
+                            enclosing_type_parameters: None,
+                        });
                     }
                     Some(FunctionDescentStep::ObjectMember { member_ordinal }) => {
                         // Terminal step: the object-literal member inside
@@ -1574,7 +1599,11 @@ pub fn resolve_function_node<'a>(
                             return None;
                         };
                         // Object members have no bare-identifier self name.
-                        return Some((function_from_expression(&property.value)?, None));
+                        return Some(ResolvedFunctionNode {
+                            node: function_from_expression(&property.value)?,
+                            self_name: None,
+                            enclosing_type_parameters: None,
+                        });
                     }
                     Some(_) => return None,
                 }
@@ -1595,8 +1624,14 @@ pub fn resolve_function_node<'a>(
                     }
                     _ => return None,
                 };
-                // Class members have no bare-identifier self name.
-                return Some((node, None));
+                // Class members have no bare-identifier self name. The
+                // CLASS's own type-parameter clause binds throughout every
+                // member body, so it rides out with the node.
+                return Some(ResolvedFunctionNode {
+                    node,
+                    self_name: None,
+                    enclosing_type_parameters: class.type_parameters.as_deref(),
+                });
             }
             FunctionDescentStep::ExportDefaultObjectMember { member_ordinal } => {
                 // Terminal step: the object-literal method at
@@ -1613,7 +1648,11 @@ pub fn resolve_function_node<'a>(
                     return None;
                 };
                 // Object members have no bare-identifier self name.
-                return Some((function_from_expression(&property.value)?, None));
+                return Some(ResolvedFunctionNode {
+                    node: function_from_expression(&property.value)?,
+                    self_name: None,
+                    enclosing_type_parameters: None,
+                });
             }
             FunctionDescentStep::ObjectMember { .. } => {
                 // Only valid immediately after a VariableInitializer step
