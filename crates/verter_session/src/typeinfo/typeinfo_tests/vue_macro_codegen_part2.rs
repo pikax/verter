@@ -31,7 +31,7 @@ defineProps<Props>()
         filtered.completeness,
         crate::semantic_query::ResultCompleteness::Complete
     );
-    assert!(filtered.facts_cacheable);
+    assert!(filtered.facts_cacheable());
     let filtered_hash = filtered.origin_whole_hash.expect("first content hash");
     let filtered_runtime = filtered.runtime.as_ref().expect("runtime bundle");
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(filtered_props)) =
@@ -81,7 +81,7 @@ defineProps<Props>()
         unfiltered.completeness,
         crate::semantic_query::ResultCompleteness::Complete
     );
-    assert!(unfiltered.facts_cacheable);
+    assert!(unfiltered.facts_cacheable());
     let unfiltered_runtime = unfiltered.runtime.as_ref().expect("runtime bundle");
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(unfiltered_props)) =
         &unfiltered_runtime.entries[0].outcome
@@ -960,7 +960,7 @@ fn assert_cancelled_macro_output(
         .completeness
         .reasons()
         .contains(crate::semantic_query::PartialReasonSet::CANCELLED));
-    assert!(!output.facts_cacheable);
+    assert!(!output.facts_cacheable());
     let runtime = output.runtime.as_ref().expect("runtime bundle");
     assert!(!runtime.entries.is_empty());
     assert!(runtime.entries.iter().all(|entry| matches!(
@@ -1000,7 +1000,7 @@ fn cancelled_request_returns_typed_partial_and_uncancelled_retry_completes() {
         retry.completeness,
         crate::semantic_query::ResultCompleteness::Complete
     );
-    assert!(retry.facts_cacheable);
+    assert!(retry.facts_cacheable());
     assert!(matches!(
         retry.runtime.as_ref().expect("runtime bundle").entries[0].outcome,
         MacroRuntimeOutcome::Complete(_)
@@ -1082,7 +1082,7 @@ fn cancelled_winner_does_not_abort_live_sibling() {
         sibling_output.completeness,
         crate::semantic_query::ResultCompleteness::Complete
     );
-    assert!(sibling_output.facts_cacheable);
+    assert!(sibling_output.facts_cacheable());
     assert!(matches!(
         sibling_output
             .runtime

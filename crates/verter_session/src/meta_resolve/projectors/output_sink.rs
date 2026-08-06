@@ -1211,6 +1211,43 @@ fn materialize_output_source(
                     crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::UnknownMaterializing(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior { path }
                     }
+                    // A ROOT-level typed query failure. Previously EVERY
+                    // one of these collapsed into the raise's `Ok(None)` and
+                    // surfaced as `UnraisableSource` — indistinguishable from
+                    // a genuine absence. The typed error now decides, through
+                    // the single disposition authority.
+                    crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::QueryFailure(err) => {
+                        use crate::project_semantic_dispatch::query_error_disposition::{
+                            query_error_disposition, QueryErrorDisposition,
+                        };
+                        match query_error_disposition(&err) {
+                            // A publishable control carrier reaches the failure
+                            // arm ONLY when its carrier could not be interned —
+                            // i.e. the source genuinely has no live graph
+                            // representation. That is `UnraisableSource`.
+                            QueryErrorDisposition::RecursionCarrier
+                            | QueryErrorDisposition::ExpandableDecl
+                            // Optional absence never reaches here (it is
+                            // `Ok(None)`); if the raise contract ever changed,
+                            // absence is still the correct answer for it.
+                            | QueryErrorDisposition::OptionalAbsence => {
+                                crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+                            }
+                            // Every other disposition is a carrier whose shell
+                            // fold would render a completed `unknown`. Fail at
+                            // the ROOT position (empty path — that arm's
+                            // documented convention for a direct source-root
+                            // deref).
+                            QueryErrorDisposition::ControlCarrier
+                            | QueryErrorDisposition::UnsupportedSurface
+                            | QueryErrorDisposition::Partial
+                            | QueryErrorDisposition::Failure => {
+                                crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {
+                                    path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                                }
+                            }
+                        }
+                    }
                 })?
                 .ok_or(crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource)?;
             let sealed = cap

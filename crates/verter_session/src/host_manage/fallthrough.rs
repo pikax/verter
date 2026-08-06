@@ -1458,10 +1458,7 @@ impl VerterHost {
                     .cloned()
                     .collect();
                 crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
-                let mut derived_ref = self
-                    .derived_raw_cache()
-                    .entry(canonical_id.to_string())
-                    .or_default();
+                let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
                 derived_ref.value_mut().cached_fallthrough =
                     Some(crate::types::CachedFallthroughEntry {
                         fact_versions,

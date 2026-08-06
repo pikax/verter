@@ -3260,16 +3260,20 @@ pub struct MetaProvenance {
     pub dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64,
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
-    /// Request-scoped session-overlay prepared-decl bundle memo hits —
-    /// bumped when `prepared_decl_bundle_with_context` serves an
-    /// overlay-bearing bundle from the request's
-    /// `CanonicalCompletionOverlay` memo instead of re-running
-    /// `materialize_prepared_decl_bundle_via_ctx` (R17 keeps that bundle
-    /// out of the shared `prepared_decl_bundles` cache, so this memo is
-    /// its only reuse tier). The sibling of `bundle_cache_hits` for the
-    /// overlay path; the end-to-end wiring regression asserts it moves
-    /// under a real session-view component-meta request.
-    pub overlay_bundle_memo_hits: std::sync::atomic::AtomicU64,
+    /// Request-world prepared-decl bundle memo hits — bumped when a
+    /// bundle read is served from the request's `RequestBundleMemo`
+    /// instead of re-running its materialisation, in either world
+    /// (`Base` or `Overlay`).
+    ///
+    /// The sibling of `bundle_cache_hits`, and the ONLY observable for
+    /// the two classes the shared `prepared_decl_bundles` cache cannot
+    /// hold: an overlay-bearing bundle (R17) and a `RequestOnly` one
+    /// (a deterministic non-cacheable read in its basis). For a `Shared`
+    /// bundle the shared cache would already have served the later
+    /// touches, so this counter — not `bundle_cold_flight_runs` — is what
+    /// measures the memo there. The end-to-end wiring regression asserts
+    /// it moves under a real session-view component-meta request.
+    pub bundle_request_memo_hits: std::sync::atomic::AtomicU64,
     pub bundle_materializations: std::sync::atomic::AtomicU64,
     /// Cold bundle flight-body executions: the singleflight lane's cold
     /// run past the in-flight recheck (the deterministic mirror of
@@ -3483,7 +3487,7 @@ impl Default for MetaProvenance {
             dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64::new(0),
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
-            overlay_bundle_memo_hits: std::sync::atomic::AtomicU64::new(0),
+            bundle_request_memo_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_materializations: std::sync::atomic::AtomicU64::new(0),
             bundle_cold_flight_runs: std::sync::atomic::AtomicU64::new(0),
             dep_resolution_calls: std::sync::atomic::AtomicU64::new(0),
@@ -3633,8 +3637,8 @@ impl std::fmt::Debug for MetaProvenance {
             )
             .field("bundle_cache_hits", &self.bundle_cache_hits.load(Relaxed))
             .field(
-                "overlay_bundle_memo_hits",
-                &self.overlay_bundle_memo_hits.load(Relaxed),
+                "bundle_request_memo_hits",
+                &self.bundle_request_memo_hits.load(Relaxed),
             )
             .field(
                 "bundle_materializations",
@@ -3751,7 +3755,7 @@ impl MetaProvenance {
                 .indexed_ready_scheduler_snapshot_reuse
                 .load(Relaxed),
             bundle_cache_hits: self.bundle_cache_hits.load(Relaxed),
-            overlay_bundle_memo_hits: self.overlay_bundle_memo_hits.load(Relaxed),
+            bundle_request_memo_hits: self.bundle_request_memo_hits.load(Relaxed),
             bundle_materializations: self.bundle_materializations.load(Relaxed),
             bundle_cold_flight_runs: self.bundle_cold_flight_runs.load(Relaxed),
             dep_resolution_calls: self.dep_resolution_calls.load(Relaxed),
@@ -3851,7 +3855,7 @@ impl MetaProvenance {
         self.indexed_ready_scheduler_snapshot_reuse
             .store(0, Relaxed);
         self.bundle_cache_hits.store(0, Relaxed);
-        self.overlay_bundle_memo_hits.store(0, Relaxed);
+        self.bundle_request_memo_hits.store(0, Relaxed);
         self.bundle_materializations.store(0, Relaxed);
         self.bundle_cold_flight_runs.store(0, Relaxed);
         self.dep_resolution_calls.store(0, Relaxed);
@@ -3990,7 +3994,7 @@ pub struct MetaProvenanceSnapshot {
     pub dispatch_dep_signature_fact_tracer_emissions: u64,
     pub indexed_ready_scheduler_snapshot_reuse: u64,
     pub bundle_cache_hits: u64,
-    pub overlay_bundle_memo_hits: u64,
+    pub bundle_request_memo_hits: u64,
     pub bundle_materializations: u64,
     pub bundle_cold_flight_runs: u64,
     pub dep_resolution_calls: u64,

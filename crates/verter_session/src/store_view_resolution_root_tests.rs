@@ -324,6 +324,13 @@ fn the_resolution_fact_generation_moves_only_on_a_real_fact_advance() {
     let discovery = host
         .ws()
         .resolve_import_outcome(OTHER_OWNER, "./unseen-dep", CONTEXT);
+    assert!(
+        discovery.trace().recomputed() && !discovery.trace().reused(),
+        "precondition: it must be a COLD discovery — the recording arm is reached only \
+         through a first path observation, and a reused answer probes nothing. The \
+         witness itself no longer names those paths: an admitted resolution roots on its \
+         DECISION node, whose direct edges (workspace-internal) hold the observations"
+    );
     let discovery_witness = match discovery.into_publication() {
         ResolutionPublication::Admitted(admitted) => admitted.signature().clone(),
         ResolutionPublication::Refused(refusal) => panic!(
@@ -336,11 +343,6 @@ fn the_resolution_fact_generation_moves_only_on_a_real_fact_advance() {
         carries_resolution_facts(&discovery_witness),
         "precondition: the first-observation demand must record resolution \
          facts — otherwise it observed nothing and proves nothing"
-    );
-    assert!(
-        !discovery_witness.resolution_path_canonical_ids().is_empty(),
-        "precondition: it must have observed at least one PATH — the \
-         recording arm is reached only through a path observation"
     );
     let after_discovery = host.ws().resolution_fact_generation();
     assert_eq!(

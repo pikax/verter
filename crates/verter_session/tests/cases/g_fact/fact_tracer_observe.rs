@@ -51,7 +51,7 @@ fn fact(canonical: &str, lo_byte: u8) -> FactVersionRef {
 fn cold_compute_observes_each_dep() {
     let host = make_host();
 
-    let ((), set) = host.with_fact_tracer(|| {
+    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
         let cell = host
             .current_fact_tracer()
             .expect("tracer must be active inside scope");
@@ -80,7 +80,9 @@ fn cold_compute_observes_each_dep() {
             assert_eq!(names, vec!["/a.ts", "/b.ts", "/c.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("3 facts should not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("3 facts should not overflow")
+        }
     }
 }
 
@@ -120,7 +122,7 @@ fn observe_borrowed_signature_appends() {
 
     let borrowed = vec![fact("/x.ts", 10), fact("/y.ts", 11), fact("/z.ts", 12)];
 
-    let ((), set) = host.with_fact_tracer(|| {
+    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
         let cell = host
             .current_fact_tracer()
             .expect("tracer must be active inside scope");
@@ -145,7 +147,9 @@ fn observe_borrowed_signature_appends() {
             assert_eq!(names, vec!["/x.ts", "/y.ts", "/z.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("3 facts should not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("3 facts should not overflow")
+        }
     }
 }
 
@@ -166,7 +170,7 @@ fn signature_cap_overflow_returns_overflow() {
     // 1025 > 1024 → overflow.
     const N_OVERFLOW: usize = 1025;
 
-    let ((), set) = host.with_fact_tracer(|| {
+    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
         let cell = host
             .current_fact_tracer()
             .expect("tracer must be active inside scope");
@@ -188,7 +192,7 @@ fn signature_cap_overflow_returns_overflow() {
             panic!("{N_OVERFLOW} distinct facts must overflow")
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => {
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
             // Expected outcome: overflow sentinel.
         }
     }
@@ -209,7 +213,7 @@ fn finalise_sorts_and_dedups() {
     let f1 = fact("/aaa.ts", 1);
     let f2 = fact("/bbb.ts", 2);
 
-    let ((), set) = host.with_fact_tracer(|| {
+    let ((), set) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
         let cell = host.current_fact_tracer().unwrap();
         cell.observe(f1.clone());
         cell.observe(f1.clone());
@@ -246,7 +250,9 @@ fn finalise_sorts_and_dedups() {
             assert_eq!(names, vec!["/aaa.ts", "/bbb.ts"]);
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("2 unique facts must not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("2 unique facts must not overflow")
+        }
     }
 }
 
@@ -272,23 +278,25 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
     let inner_fact = fact("/inner.ts", 2);
 
     // inner_read is returned from the outer scope's closure.
-    let (inner_read, outer_set) = host.with_fact_tracer(|| {
-        // Observe into the outer scope via fan-out (writes to all
-        // active cells — just the outer cell at this point).
-        verter_session::for_tests::observe_fan_out_borrowed_for_tests(std::slice::from_ref(
-            &outer_fact,
-        ));
-
-        // Inner scope pushes a second cell onto the stack.
-        let ((), inner_set) = host.with_fact_tracer(|| {
-            // Fan-out from inside the inner scope delivers the observation
-            // to BOTH the inner cell and the outer cell.
+    let (inner_read, outer_set) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            // Observe into the outer scope via fan-out (writes to all
+            // active cells — just the outer cell at this point).
             verter_session::for_tests::observe_fan_out_borrowed_for_tests(std::slice::from_ref(
-                &inner_fact,
+                &outer_fact,
             ));
+
+            // Inner scope pushes a second cell onto the stack.
+            let ((), inner_set) =
+                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                    // Fan-out from inside the inner scope delivers the observation
+                    // to BOTH the inner cell and the outer cell.
+                    verter_session::for_tests::observe_fan_out_borrowed_for_tests(
+                        std::slice::from_ref(&inner_fact),
+                    );
+                });
+            inner_set
         });
-        inner_set
-    });
 
     // Inner set must contain the inner-scope observation.
     assert_eq!(inner_read.len(), 1, "inner set must have 1 fact");
@@ -300,7 +308,9 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("inner set should not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("inner set should not overflow")
+        }
     }
 
     // Outer set must contain BOTH the outer-scope and the inner-scope
@@ -322,16 +332,19 @@ fn nested_with_fact_tracer_scopes_capture_via_fan_out() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("outer set should not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("outer set should not overflow")
+        }
     }
 
     // After both scopes complete, a subsequent scope must work cleanly.
-    let ((), post_set) = host.with_fact_tracer(|| {
-        let cell = host
-            .current_fact_tracer()
-            .expect("subsequent scope must install cleanly after nesting");
-        cell.observe(fact("/post-nesting.ts", 99));
-    });
+    let ((), post_set) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let cell = host
+                .current_fact_tracer()
+                .expect("subsequent scope must install cleanly after nesting");
+            cell.observe(fact("/post-nesting.ts", 99));
+        });
     assert_eq!(post_set.len(), 1, "tracer must work normally after nesting");
 }
 
@@ -358,6 +371,8 @@ fn empty_tracer_is_empty_and_records_change_state() {
     match inner.finalise() {
         FactReadSetFinalise::Ok(arc) => assert_eq!(arc.len(), 1),
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("1 fact must not overflow"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("1 fact must not overflow")
+        }
     }
 }

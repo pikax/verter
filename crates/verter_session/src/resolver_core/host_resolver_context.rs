@@ -163,12 +163,10 @@ impl<'a> HostResolverContext<'a> {
 
     /// Borrow the request-scoped overlay.
     ///
-    /// Cooperative-admission lanes that inherit the context call this
-    /// to clone the `Arc` and seed a sibling wrapper that shares the
-    /// same per-request completion state. Currently unused — the
-    /// active lane-inheritance path lives in `SessionResolverContext`;
-    /// kept here for symmetry with the session variant.
-    #[allow(dead_code)]
+    /// Two consumers: cooperative-admission lanes that inherit the
+    /// context clone the `Arc` to seed a sibling wrapper sharing the same
+    /// per-request completion state, and the prepared-decl reads below
+    /// take the overlay's request-world bundle memo from it.
     pub(crate) fn overlay(&self) -> &Arc<CanonicalCompletionOverlay> {
         self.view.overlay()
     }
@@ -208,8 +206,21 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // `self.view.base()` argument made every prepared-decl bundle
         // warm-read pay the request-level snapshot cost without
         // observing canonicals promoted by mid-request `ensure_loaded`.
-        self.inner
-            .prepared_decl_bundle_with_store_view(&self.view, canonical_id)
+        self.inner.prepared_decl_bundle_with_store_view(
+            &self.view,
+            Some(self.overlay().bundle_memo()),
+            canonical_id,
+        )
+    }
+
+    /// This context IS request-bound: it owns the request's completion
+    /// overlay, and therefore the request-world bundle memo. Reporting
+    /// `None` here (the trait default) would silently strip base-path
+    /// reads of the only reuse tier that can hold a value the shared
+    /// cache is not allowed to hold.
+    #[inline]
+    fn request_completion_overlay(&self) -> Option<&CanonicalCompletionOverlay> {
+        Some(self.overlay())
     }
 
     #[inline]
@@ -225,6 +236,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // Overlay-aware view (same rationale as `prepared_decl_bundle`).
         self.inner.prepared_type_decl_in_with_store_view(
             &self.view,
+            Some(self.overlay().bundle_memo()),
             canonical_id,
             owner,
             symbol_name,
@@ -241,6 +253,7 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         // Overlay-aware view (same rationale as `prepared_decl_bundle`).
         self.inner.prepared_value_decl_in_with_store_view(
             &self.view,
+            Some(self.overlay().bundle_memo()),
             canonical_id,
             owner,
             symbol_name,
@@ -308,6 +321,11 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
     #[inline]
     fn store_view(&self) -> &dyn StoreView {
         &self.view
+    }
+
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        StoreView::aggregate_basis_seed(&self.view)
     }
 
     #[inline]

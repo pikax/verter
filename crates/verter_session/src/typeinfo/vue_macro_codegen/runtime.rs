@@ -666,20 +666,3 @@ pub(super) fn macro_index(index: usize) -> u32 {
 fn member_ordinal(index: usize) -> u32 {
     u32::try_from(index).expect("Vue macro member inventory exceeds the DTO identity space")
 }
-
-pub(super) fn fact_footprint(finalise: FactReadSetFinalise) -> (Vec<String>, bool) {
-    let (facts, cacheable) = match finalise {
-        FactReadSetFinalise::Ok(facts) => (Some(facts), true),
-        FactReadSetFinalise::NonCacheable(facts) => (Some(facts), false),
-        FactReadSetFinalise::Overflow => (None, false),
-    };
-    let mut canonicals = BTreeSet::new();
-    if let Some(facts) = facts {
-        for fact in facts.iter() {
-            if let Some(canonical) = fact.canonical_id() {
-                canonicals.insert(canonical.to_owned());
-            }
-        }
-    }
-    (canonicals.into_iter().collect(), cacheable)
-}

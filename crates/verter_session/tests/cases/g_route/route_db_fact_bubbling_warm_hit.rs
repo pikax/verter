@@ -147,6 +147,8 @@ fn warm_hit_advances_warm_counter_and_bubbles_route_facts() {
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("warm-hit tracer unexpectedly non-cacheable")
         }
-        FactReadSetFinalise::Overflow => panic!("warm-hit tracer overflowed"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("warm-hit tracer overflowed")
+        }
     }
 }

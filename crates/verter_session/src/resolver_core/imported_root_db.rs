@@ -185,16 +185,18 @@ impl ImportedRootDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        let tracer_host = ctx.host_for_fact_tracer_install();
-        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
-            self.get_or_resolve_returning_facts_in_scope(
-                provider_canonical,
-                imported_name,
-                view,
-                probe,
-                resolve,
-            )
-        })
+        crate::fact_signature_helpers::with_cacheability_scope(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            |probe| {
+                self.get_or_resolve_returning_facts_in_scope(
+                    provider_canonical,
+                    imported_name,
+                    view,
+                    probe,
+                    resolve,
+                )
+            },
+        )
         .0
     }
 

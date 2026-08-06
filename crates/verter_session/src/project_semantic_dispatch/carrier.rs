@@ -1047,12 +1047,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         crate::semantic_query::ResultCompleteness,
     ) {
         let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let host = self.ctx.host_for_fact_tracer_install();
         let observation =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            self.resolve_carrier_subject_node_inner(node, context)
-        });
+        let (resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+            || self.resolve_carrier_subject_node_inner(node, context),
+        );
         // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
         // non-cacheability AND its overflow into `observed.cache_suppress`, and
         // ONLY THEN re-fold the merged observation into the enclosing frame.
@@ -1065,9 +1065,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             observed.cache_suppress = true;
         }
+        // A `matches!` is NOT exhaustive, so a new refusal variant
+        // compiles clean here while silently skipping the suppression.
+        // Both size and stability refusals yield no fact list this
+        // carrier can be rooted on, so both suppress.
         if matches!(
             finalise,
             crate::resolver_core::FactReadSetFinalise::Overflow
+                | crate::resolver_core::FactReadSetFinalise::MutationUnstable
         ) {
             observed.cache_suppress = true;
         }

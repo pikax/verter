@@ -168,32 +168,7 @@ fn record_parsed_edges_byte_identical_is_no_op() {
     );
 }
 
-/// Invariant #3 — Pin the reverse-graph contract via a source grep so
-/// the architecture-guard test pair stays declaratively paired with
-/// this invariants suite. The dedicated guard
-/// `reverse_graph_not_wired_to_invalidation` in
-/// `architecture_guards.rs` enforces the contract on every commit; the
-/// assertion here proves the guard exists so removing it surfaces in
-/// this test file.
-#[test]
-fn reverse_graph_not_wired_to_invalidation() {
-    let guards = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("cases")
-            .join("architecture_guards.rs"),
-    )
-    .expect("read architecture_guards.rs");
-    assert!(
-        guards.contains("fn reverse_graph_not_wired_to_invalidation"),
-        "architecture_guards.rs must contain the \
-         `reverse_graph_not_wired_to_invalidation` guard — R22 \
-         requires source-level enforcement that the reverse graph is \
-         not wired to cache invalidation"
-    );
-}
-
-/// Invariant #4 — `evict_unreachable_artifacts` drops only the
+/// Invariant #3 — `evict_unreachable_artifacts` drops only the
 /// unreachable `(canonical, content_hash)` projection. Drives the
 /// `ProjectTypeStore.indexed` (`FileArtifactStore`) directly so the
 /// invariant is observable in a unit-test shape.
@@ -235,7 +210,7 @@ fn evict_unreachable_artifacts_removes_unreachable_files() {
     );
 }
 
-/// Invariant #5 — `affected_canonicals` returns the transitive
+/// Invariant #4 — `affected_canonicals` returns the transitive
 /// importer closure via the reverse graph in stable, sorted order.
 ///
 /// Topology under test:
@@ -285,7 +260,7 @@ fn affected_canonicals_reports_transitive_importers() {
     );
 }
 
-/// Invariant #5b — `affected_canonicals` terminates on cycles.
+/// Invariant #4b — `affected_canonicals` terminates on cycles.
 #[test]
 fn affected_canonicals_terminates_on_cycle() {
     let ws = MemoryWorkspace::new(MemoryOptions::default());

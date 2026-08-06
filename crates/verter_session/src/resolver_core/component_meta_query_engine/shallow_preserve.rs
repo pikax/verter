@@ -111,12 +111,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .map(|param| param.name.as_str())
             .collect();
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
-        let Some(member_node) = dispatch.raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        ) else {
+        let Some(member_node) = dispatch
+            .raise_authored_locator_to_hot(
+                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .at_optional_boundary()
+        else {
             return true;
         };
         node_references_type_param_names(self.ctx, member_node.node(), &param_names, 0)
@@ -253,12 +256,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .collect();
                     let dispatch =
                         crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
-                    let member_node = dispatch.raise_authored_locator_to_hot(
-                        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                            crate::semantic_query::ProjectionMode::Navigate,
-                        ),
-                    )?;
+                    let member_node = dispatch
+                        .raise_authored_locator_to_hot(
+                            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                                member.ty.clone(),
+                            ),
+                            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
+                        )
+                        .at_optional_boundary()?;
                     if node_references_type_param_names(
                         self.ctx,
                         member_node.node(),
@@ -320,7 +327,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         crate::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ) {
+                                ).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
                                             &dispatch,
@@ -424,12 +431,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )?;
         let member = prepared.member_index.get(field_name.as_ref())?;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
-        dispatch.raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        )
+        dispatch
+            .raise_authored_locator_to_hot(
+                &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .at_optional_boundary()
     }
 
     /// Whether any node under `node` is a builtin utility application over an
@@ -724,7 +733,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                     crate::semantic_query::ProjectionMode::Navigate,
                                 ),
-                            )
+                            ).at_optional_boundary()
                         })
                         .is_some_and(|body_node| {
                             self.node_has_imported_generic_route(

@@ -223,8 +223,10 @@ mod file_source_env_observation_tests {
             "the planted key env must differ from the live env so the assertions \
              below discriminate live sourcing from a key copy"
         );
-        let (returned, read_set) =
-            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, Some(&key)));
+        let (returned, read_set) = host
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                observe_file_source_env_from_artifact_key(&host, Some(&key))
+            });
         let expected = FactVersionRef::FileSourceEnv {
             canonical_id: "/dep.ts".to_string(),
             parse_env_hash: live_parse_env,
@@ -242,7 +244,9 @@ mod file_source_env_observation_tests {
             FactReadSetFinalise::NonCacheable(_) => {
                 panic!("the observed source-env fact is cacheable")
             }
-            FactReadSetFinalise::Overflow => panic!("one fact cannot overflow the signature cap"),
+            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+                panic!("one fact overflows nothing and no domain moves in this fixture")
+            }
         };
         assert_eq!(
             facts.as_ref(),
@@ -258,8 +262,10 @@ mod file_source_env_observation_tests {
     #[test]
     fn observe_file_source_env_without_exact_key_returns_none_and_records_nothing() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let (returned, read_set) =
-            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, None));
+        let (returned, read_set) = host
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                observe_file_source_env_from_artifact_key(&host, None)
+            });
         assert!(
             returned.is_none(),
             "an unobservable source-env identity must surface as None, never a default"
@@ -302,7 +308,10 @@ mod tracer_cacheability_tests {
 
         // The raw 3-tuple entry: overflow lands in `finalise`, and the
         // non-cacheable-read bit stays FALSE (no fenced serve / lease miss ran).
-        let (value, finalise) = install_fact_tracer(&host, || 7u32);
+        let (value, finalise) = install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || 7u32,
+        );
         let non_cacheable_read_observed = matches!(&finalise, FactReadSetFinalise::NonCacheable(_));
         assert_eq!(value, 7, "the traced value flows to the caller verbatim");
         assert!(
@@ -316,7 +325,10 @@ mod tracer_cacheability_tests {
         );
 
         // The cacheability entry folds the overflow in — one verdict, two conditions.
-        let (value, non_cacheable) = install_fact_tracer_cacheability(&host, || 7u32);
+        let (value, non_cacheable) = install_fact_tracer_cacheability(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || 7u32,
+        );
         assert_eq!(value, 7, "the traced value flows to the caller verbatim");
         assert!(
             non_cacheable,
@@ -336,7 +348,10 @@ mod tracer_cacheability_tests {
     #[test]
     fn cacheability_verdict_is_false_for_an_ordinary_compute() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let (value, non_cacheable) = install_fact_tracer_cacheability(&host, || 7u32);
+        let (value, non_cacheable) = install_fact_tracer_cacheability(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || 7u32,
+        );
         assert_eq!(value, 7);
         assert!(
             !non_cacheable,
@@ -375,24 +390,32 @@ mod tracer_cacheability_tests {
         // The signature-CONSUMING boundary (it finalises and roots its entry on the
         // finalised set) with TWO nested cacheability scopes inside it — the shape
         // the producer rewiring creates.
-        let (_v, finalise) = install_fact_tracer(&host, || {
-            let (inner, inner_non_cacheable) = install_fact_tracer_cacheability(&host, || {
-                let (deepest, deepest_non_cacheable) =
-                    install_fact_tracer_cacheability(&host, || 1u32);
-                assert!(
+        let (_v, finalise) = install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                let (inner, inner_non_cacheable) = install_fact_tracer_cacheability(
+                    &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+                    || {
+                        let (deepest, deepest_non_cacheable) = install_fact_tracer_cacheability(
+                            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+                            || 1u32,
+                        );
+                        assert!(
                     deepest_non_cacheable,
                     "fixture invariant: the innermost cacheability scope must OVERFLOW (else \
                      the counter assertion is vacuous)",
                 );
-                deepest
-            });
-            assert!(
-                inner_non_cacheable,
-                "fixture invariant: the enclosing cacheability scope must ALSO overflow (the \
+                        deepest
+                    },
+                );
+                assert!(
+                    inner_non_cacheable,
+                    "fixture invariant: the enclosing cacheability scope must ALSO overflow (the \
                  inner scope's observations fan outward into it)",
-            );
-            inner
-        });
+                );
+                inner
+            },
+        );
         assert!(
             matches!(finalise, FactReadSetFinalise::Overflow),
             "fixture invariant: the outermost signature-consuming tracer must overflow too",

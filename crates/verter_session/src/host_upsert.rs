@@ -790,10 +790,7 @@ impl VerterHost {
         // source-derived; clearing them on whole-hash / semantic / slice
         // changes flushes stale derived projections.
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical_id.clone())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.clone());
             let derived = derived_ref.value_mut();
             let mut drained_derived = false;
             if whole_hash_changed {

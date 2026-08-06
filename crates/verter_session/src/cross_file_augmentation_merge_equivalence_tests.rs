@@ -502,9 +502,10 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 
     // Cold resolve of the augmented base decl under a fact tracer: the
     // parent fold must record the contributor source-env observation.
-    let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-    });
+    let (resolved, read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        });
     let node = resolved.expect("augmented Foo must resolve");
     match node_data(&host, node).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
@@ -642,9 +643,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 
     // Recording half: the cold production resolve records ONE
     // FileSourceEnv observation for the folded contributor.
-    let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-    });
+    let (resolved, read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        });
     resolved.expect("augmented Foo must resolve");
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
         panic!("the traced resolve must seal a fact signature (no overflow)");
@@ -770,9 +772,10 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
          declare module './types' { interface Foo { fromWest: boolean } }\n",
     );
 
-    let (resolved, read_set) = host.with_fact_tracer(|| {
-        host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-    });
+    let (resolved, read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        });
     let node = resolved.expect("the doubly-augmented Foo must resolve");
 
     // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
@@ -1415,24 +1418,30 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             crate::for_tests::augmentation_force_source_env_unobservable_for_tests(host, true)
         });
         let view = host.resolver_store_view_read().into_owned_view();
-        let (read, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&ctx);
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(
-                    Arc::from("/types.ts"),
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Foo"),
-                ),
-                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-                dispatch.instantiate_context_for(
-                    "/types.ts",
-                    ProjectionReductionContext::published(ProjectionMode::Expanded),
-                ),
-            ));
-            dispatch.execute_read(key)
-        });
+        let (read, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+            || {
+                let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&ctx);
+                let key =
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        dispatch.type_slot_for(
+                            Arc::from("/types.ts"),
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            Arc::from("Foo"),
+                        ),
+                        Arc::from(
+                            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                        ),
+                        dispatch.instantiate_context_for(
+                            "/types.ts",
+                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                        ),
+                    ));
+                dispatch.execute_read(key)
+            },
+        );
         let outer_non_cacheable = matches!(
             finalise,
             crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
@@ -1602,5 +1611,329 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         "a CLEAN augmentation fold (live lease) must NOT set cache_suppress on the \
          `/use.ts::U` Instantiate build — the `true` above is caused by the broken \
          lease, not an inherently non-cacheable key"
+    );
+}
+
+// Plant-verified mutation recipe for the three negative-observation fixtures
+// below. Both mutations were applied to the landed tree, confirmed present /
+// unique / new in the source before the run, and reverted by inverse edit.
+//
+//   (A) In `ProjectSemanticDispatch::collect_augmentation_contributions`, move
+//       the `if augmenter_set.entries.is_empty() { return None }` guard ABOVE
+//       the augmenter-set shape observation.
+//       ⇒ `no_augmenter_resolve_still_records_the_augmenter_set_shape_fact` and
+//         `augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidates_it`
+//         FAIL; the non-contributing fixture stays GREEN (it exercises the other
+//         arm, which is exactly what its arm proof asserts).
+//
+//   (B) Move the whole shape observation back BELOW the
+//       `if contributor_nodes.is_empty()` block — the ordering this change
+//       replaced. ⇒ all THREE fixtures FAIL.
+//
+// A change that reddens these by removing the observation has reintroduced the
+// stale serve; invert nothing here without re-running both plants.
+
+/// NEGATIVE augmenter-set observation, empty-set arm: a stitch that finds NO
+/// augmenter for its target must STILL record the augmenter-set shape fact.
+///
+/// The collector consults the augmentation index for every decl-body
+/// resolution, so "there is no augmenter for `./types`" is a genuine READ of
+/// the index and the result it produces is cacheable. Without the shape fact
+/// on the read-set that cached "no augmentation" surface has nothing keyed on
+/// the augmenter set, so an augmenter appearing later cannot reject it —
+/// `augmenter_appearing_after_a_warm_no_augmentation_result_invalidates_it`
+/// below is the behavioural half of the same defect.
+///
+/// Discriminating: the empty-set arm returns before the observation on the
+/// pre-change tree, so the `RouteSurface` search finds nothing and the first
+/// assertion fails. The `expected_hash` assertion is INDEPENDENT — it recomputes
+/// the empty-set fingerprint from `compute_augmenter_set_fingerprint(&[])`
+/// rather than reading back whatever the fact carried — and the anti-vacuity
+/// control proves the recorded value is the EMPTY-set fingerprint and not the
+/// one-augmenter fingerprint the augmented fixture would produce.
+#[test]
+fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
+    use crate::file_artifact_store::{
+        compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry, FileArtifactKey,
+    };
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+
+    let host = make_host();
+    // NO augmenter anywhere in the workspace — the augmentation index for
+    // `/types.ts` populates to the EMPTY set.
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Foo { base: string }\n",
+    );
+
+    let (resolved, read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        });
+    let node = resolved.expect("the un-augmented Foo must resolve");
+    let projected = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("the un-augmented Foo must project");
+    assert_eq!(
+        object_member_surface(&projected),
+        vec![("base".to_string(), "Primitive(String)".to_string())],
+        "the un-augmented fixture must surface exactly the base member"
+    );
+
+    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+        panic!("the traced resolve must seal a fact signature (no overflow)");
+    };
+
+    let expected_key =
+        crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+            &AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/types.ts")),
+        );
+    let recorded = signature
+        .iter()
+        .find_map(|fact| match fact {
+            FactVersionRef::RouteSurface(route) if route.key == expected_key => Some(route),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "a stitch that found NO augmenter for `/types.ts` must STILL observe the \
+                 augmenter-set shape fact — without it the cacheable no-augmentation result \
+                 has nothing keyed on the augmenter set and cannot be rejected when an \
+                 augmenter appears"
+            )
+        });
+
+    // INDEPENDENT expectation: the empty-set fingerprint recomputed from the
+    // shared fingerprint function, not read back off the fact.
+    let empty_fingerprint = compute_augmenter_set_fingerprint(&[]);
+    assert_eq!(
+        recorded.expected_hash, empty_fingerprint,
+        "the negative observation must carry the EMPTY augmenter-set fingerprint"
+    );
+
+    // ANTI-VACUITY: the empty-set fingerprint is genuinely distinct from the
+    // fingerprint a one-augmenter set would produce, so the assertion above is
+    // not satisfied by an all-zero / constant hash.
+    let one_augmenter = [AugmenterEntry {
+        artifact_key: FileArtifactKey::base(Arc::from("/aug.ts"), [0u8; 16]),
+        parse_stable_hash: [7u8; 16],
+    }];
+    assert_ne!(
+        empty_fingerprint,
+        compute_augmenter_set_fingerprint(&one_augmenter),
+        "the empty-set fingerprint must differ from a one-augmenter set's — otherwise the \
+         recorded negative observation could never discriminate an augmenter appearing"
+    );
+}
+
+/// The augmenter set the stitch for `/types.ts` would see right now — used by
+/// the two behavioural fixtures below to PROVE which of the collector's two
+/// negative early returns they exercise (empty set vs non-empty set with no
+/// contributor for the requested declaration). Without this the two fixtures
+/// could silently both land on the empty-set arm and the non-contributing arm
+/// would go uncovered.
+fn live_augmenter_canonicals_for_types(host: &VerterHost) -> Vec<String> {
+    use crate::file_artifact_store::{
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+    };
+
+    let env = host.host_view_env_hashes();
+    let key = AugmentationTargetKey {
+        project_identity: host.host_view_project_identity(),
+        resolve_env_hash: env.resolve_env_hash,
+        lib_env_hash: env.lib_env_hash,
+        population: AugmentationPopulation::Base,
+        target: AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/types.ts")),
+    };
+    host.project_type_store()
+        .indexed()
+        .ensure_augmentation_index_populated(
+            &key,
+            |augmenter, specifier| match host
+                .resolve_type_dependency_canonical(augmenter, specifier)
+            {
+                verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                    admitted.into_result().map(Arc::from)
+                }
+                verter_workspace::ResolutionPublication::Refused(_) => None,
+            },
+            None,
+        )
+        .entries
+        .iter()
+        .map(|entry| entry.canonical().as_ref().to_owned())
+        .collect()
+}
+
+/// BEHAVIOURAL half of the EMPTY-SET arm: an augmenter that enters the program
+/// AFTER a warm "no augmentation" result must invalidate it.
+///
+/// The augmenter is brought into the program explicitly (`ensure_indexed_ready`)
+/// because augmentation discovery is demand-driven per R29 — only files that
+/// have entered `FileArtifactStore` contribute, and it is the artifact publish,
+/// not the source upsert, that retires the augmentation-index rows the new
+/// augmenter could touch. That retirement is what the recorded shape fact then
+/// validates against; the fact is the rail, the publish is the trigger, and the
+/// defect is that the pre-change tree records no fact for this arm at all.
+///
+/// Discriminating: on the pre-change tree the cold resolve's read-set carries
+/// only `/types.ts`'s own facts (the empty-set arm returns before the shape
+/// observation), and `/types.ts` is never touched here — so the warm merged
+/// surface validates and serves the stale `{base}` this asserts against.
+#[test]
+fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidates_it() {
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Foo { base: string }\n",
+    );
+
+    // ARM PROOF: the augmenter set is EMPTY, so the cold resolve below takes
+    // the collector's FIRST negative early return.
+    assert!(
+        live_augmenter_canonicals_for_types(&host).is_empty(),
+        "this fixture must exercise the EMPTY-SET arm — the augmenter set must be empty \
+         at cold-resolve time"
+    );
+
+    // Warm the NO-AUGMENTATION result.
+    let cold = host
+        .resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        .expect("the un-augmented Foo must resolve");
+    assert_eq!(
+        object_member_surface(
+            &host
+                .project_node_to_type_expr_for_test(cold)
+                .expect("un-augmented Foo projects")
+        ),
+        vec![("base".to_string(), "Primitive(String)".to_string())],
+        "the pre-augmentation surface must be exactly {{base}}"
+    );
+
+    // The augmenter ENTERS THE PROGRAM. `/types.ts` itself is never touched.
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Foo } from './types'\n\
+         declare module './types' { interface Foo { fromAug: number } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+    assert_eq!(
+        live_augmenter_canonicals_for_types(&host),
+        vec!["/aug.ts".to_string()],
+        "the augmenter must be discoverable once it has entered the program"
+    );
+
+    let warm = host
+        .resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
+        .expect("the augmented Foo must resolve");
+    let surface = object_member_surface(
+        &host
+            .project_node_to_type_expr_for_test(warm)
+            .expect("augmented Foo projects"),
+    );
+    assert_eq!(
+        surface,
+        vec![
+            ("base".to_string(), "Primitive(String)".to_string()),
+            ("fromAug".to_string(), "Primitive(Number)".to_string()),
+        ],
+        "an augmenter entering the program AFTER a warm no-augmentation result must \
+         invalidate it — serving {{base}} here is the stale surface a missing negative \
+         augmenter-set observation on the empty-set arm produces; got {surface:?}"
+    );
+}
+
+/// BEHAVIOURAL half of the NON-CONTRIBUTING arm: an augmenter set that is
+/// NON-empty but supplies no contributor for the requested declaration takes
+/// the collector's SECOND early return, which on the pre-change tree also
+/// precedes the shape observation.
+///
+/// The augmenter set is keyed by TARGET MODULE, not by declaration: `/aug.ts`
+/// augments `./types`, so `Bar`'s stitch finds a non-empty set and then finds
+/// no `Bar` contributor in it. When `/aug.ts` later GAINS a `Bar` declaration
+/// the set's fingerprint moves (it folds each augmenter's `parse_stable_hash`),
+/// which is exactly the observation the warm `Bar` result needs to be rejected.
+///
+/// Discriminating against an empty-set-only fix: the arm proof below asserts the
+/// set is NON-EMPTY at cold-resolve time, so a change that observed the shape
+/// fact solely on the empty-set path would still serve the stale `{b}` here.
+#[test]
+fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result() {
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Foo { base: string }\n\
+         export interface Bar { b: string }\n",
+    );
+    // A NON-EMPTY augmenter set for `./types` that contributes to `Foo` only.
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Foo } from './types'\n\
+         declare module './types' { interface Foo { fromAug: number } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+
+    // ARM PROOF: the augmenter set is NON-EMPTY, yet supplies no `Bar` — so the
+    // cold `Bar` resolve below takes the collector's SECOND negative early
+    // return, not the empty-set one.
+    assert_eq!(
+        live_augmenter_canonicals_for_types(&host),
+        vec!["/aug.ts".to_string()],
+        "this fixture must exercise the NON-CONTRIBUTING arm — the augmenter set must be \
+         non-empty at cold-resolve time"
+    );
+
+    // Warm the NON-CONTRIBUTING `Bar` result.
+    let cold = host
+        .resolve_named_symbol("/types.ts", "Bar", Some(ProjectionMode::Expanded))
+        .expect("Bar must resolve");
+    assert_eq!(
+        object_member_surface(
+            &host
+                .project_node_to_type_expr_for_test(cold)
+                .expect("Bar projects")
+        ),
+        vec![("b".to_string(), "Primitive(String)".to_string())],
+        "the pre-augmentation `Bar` surface must be exactly {{b}}"
+    );
+
+    // The EXISTING augmenter GAINS a `Bar` arm. `/types.ts` is never touched.
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Foo } from './types'\n\
+         declare module './types' {\n\
+           interface Foo { fromAug: number }\n\
+           interface Bar { fromAugBar: boolean }\n\
+         }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the edited augmenter must re-index");
+
+    let warm = host
+        .resolve_named_symbol("/types.ts", "Bar", Some(ProjectionMode::Expanded))
+        .expect("the augmented Bar must resolve");
+    let surface = object_member_surface(
+        &host
+            .project_node_to_type_expr_for_test(warm)
+            .expect("augmented Bar projects"),
+    );
+    assert_eq!(
+        surface,
+        vec![
+            ("b".to_string(), "Primitive(String)".to_string()),
+            ("fromAugBar".to_string(), "Primitive(Boolean)".to_string()),
+        ],
+        "an augmenter that GAINS a declaration must invalidate the warm non-contributing \
+         result for that declaration — serving {{b}} here is the stale surface the missing \
+         negative augmenter-set observation on the non-contributing arm produces; \
+         got {surface:?}"
     );
 }

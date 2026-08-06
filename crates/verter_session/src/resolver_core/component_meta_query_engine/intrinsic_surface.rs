@@ -120,17 +120,19 @@ impl ComponentMetaQueryEngine<'_> {
     ) -> Option<ExpandedObjectShape> {
         let ctx = self.ctx;
         let dispatch = ProjectSemanticDispatch::new(ctx);
-        let raised = dispatch.raise_semantic_type_source_to_hot(
-            tag_source,
-            SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
-                ),
-                interior_failures: None,
-            },
-        )?;
+        let raised = dispatch
+            .raise_semantic_type_source_to_hot(
+                tag_source,
+                SourceRaiseContext {
+                    scope_canonical_id,
+                    scope_owner,
+                    context: ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                    interior_failures: None,
+                },
+            )
+            .at_optional_boundary()?;
         let view = dispatch.resolve_typeinfo_surface_view(
             raised.node(),
             ProjectionReductionContext::macro_object_surface(

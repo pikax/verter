@@ -350,6 +350,32 @@ pub trait WorkspaceRead: Send + Sync {
         0
     }
 
+    /// Monotonic authority for strict structural self-root validation.
+    ///
+    /// This is distinct from content and resolution generations because the
+    /// strict artifact-only lane also consults live trackedness inputs such as
+    /// `file_exists` and the session's derived-state presence. `None` means
+    /// this workspace cannot vouch for a terminal strict-self-root witness.
+    fn strict_self_root_generation(&self) -> Option<u64> {
+        None
+    }
+
+    /// Stable process-unique identity of the authority that owns
+    /// [`Self::strict_self_root_generation`]. A workspace replacement must
+    /// not alias the prior workspace merely because both counters started at
+    /// the same value.
+    fn strict_self_root_authority_id(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether any writer is currently changing an input to strict
+    /// self-root validation. A generation alone cannot represent overlapping
+    /// writers without an aliasing window, so witnesses fail closed while
+    /// this is true.
+    fn strict_self_root_transition_active(&self) -> bool {
+        true
+    }
+
     /// Monotonic count of resolution FACT VERSIONS minted by this
     /// workspace's resolution world.
     ///
@@ -603,6 +629,13 @@ pub trait WorkspaceRead: Send + Sync {
 /// `set_exact_resolutions`, `configure_resolver`) are reachable only via
 /// host wrappers that run the cache-cascade discipline.
 pub trait WorkspaceAccess: WorkspaceRead {
+    /// Open and close a strict-self-root authority write bracket. Backends
+    /// that expose a generation override these together with the active-
+    /// writer read above.
+    fn begin_strict_self_root_transition(&self) {}
+
+    fn end_strict_self_root_transition(&self) {}
+
     // ── Reverse-graph authority methods (R6: NO DEFAULTS) ──
     //
     // Every WorkspaceAccess impl MUST explicitly implement these. A future
@@ -653,6 +686,36 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// with `probe_extensions()` and sorts longest-first at set-time (F4).
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>);
 
+    /// Monotonic generation of the SOURCE-ENV compaction domain — the
+    /// counter behind every `FileSourceEnv` observation
+    /// (`parse_env_hash` / `parser_version` / `file_language_id`).
+    ///
+    /// Deliberately NOT folded into
+    /// [`WorkspaceRead::content_generation`]: the production paths that
+    /// move those dimensions — `publish_snapshot`, `rebuild_and_publish`
+    /// (both reached through `configure_projects` / `configure_resolver`)
+    /// and `WorkspaceChange::ConfigChanged` — do not bump the content
+    /// generation, so a source-env fact standing behind a content stamp
+    /// would survive a parse-env or file-language change.
+    ///
+    /// `None` means this workspace tracks NO source-env generation, and
+    /// is the honest answer for a workspace with no producer: it disarms
+    /// the domain rather than handing out a constant a consumer could
+    /// mistake for a live one. A stamp that never advances is a witness
+    /// nothing can invalidate, so "no producer" must be representable
+    /// and must not be spelled `0`.
+    ///
+    /// It lives on `WorkspaceAccess` rather than [`WorkspaceRead`]
+    /// because only the host-level session seam reads it; the
+    /// resolution-time readers (transaction, overlay snapshot, frozen
+    /// snapshot) have no source-env concern, and putting it on the read
+    /// trait would force the frozen reader to choose between reporting a
+    /// captured value and a live one for a dimension it does not
+    /// revalidate.
+    fn source_env_generation(&self) -> Option<u64> {
+        None
+    }
+
     /// Reset VFS provenance counters.
     fn reset_vfs_provenance(&self) {}
 
@@ -661,6 +724,30 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Sets an overlay so the VFS resolver can find open/in-memory files that
     /// may not yet exist on disk. Called by the host during `upsert()`.
     /// Default: no-op (MemoryWorkspace manages its own snapshot).
+    /// Publish one owner's `OwnerResolutionSet` node — the single
+    /// bounded, owner-scoped resolution root — and return the fact ref a
+    /// consumer observes.
+    ///
+    /// The node records the owner's CHILD DECISIONS, never their leaves,
+    /// so an owner witness is one fact per resolved specifier rather than
+    /// the union of everything those specifiers transitively reach.
+    ///
+    /// `None` when this workspace publishes no resolution world, or when
+    /// the owner has no published decision for the node to stand for. A
+    /// consumer holding `None` roots nothing owner-scoped, which is
+    /// fail-closed.
+    ///
+    /// **One publisher.** The owner import surface is the single
+    /// authority for this node; the session-side call site is a private
+    /// function in the module that owns that surface, so no other module
+    /// can reach it.
+    fn publish_owner_resolution_set(
+        &self,
+        _owner_canonical: &str,
+    ) -> Option<crate::fact_cache::FactVersionRef> {
+        None
+    }
+
     fn notify_upsert(&self, _canonical_id: &str, _source: Arc<str>) {}
 
     /// Notify the workspace that an editor buffer was closed.

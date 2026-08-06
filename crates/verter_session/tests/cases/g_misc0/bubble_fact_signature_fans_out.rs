@@ -57,7 +57,9 @@ fn bubble_fact_signature_reaches_all_three_levels() {
                 );
             }
             FactReadSetFinalise::NonCacheable(_) => panic!("{level} unexpectedly non-cacheable"),
-            FactReadSetFinalise::Overflow => panic!("{level} overflowed"),
+            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+                panic!("{level} overflowed")
+            }
         }
     }
 }
@@ -83,6 +85,8 @@ fn observe_fan_out_borrowed_with_multiple_facts() {
             }
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("overflowed on tiny signature"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("overflowed on tiny signature")
+        }
     }
 }

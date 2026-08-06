@@ -21,6 +21,7 @@
 //! R26: "Adding a new `FactKey` extends the per-domain `*FactRef`
 //! enum but does NOT widen the trait".
 
+use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
 use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;
 use verter_session::resolver_core::{
@@ -76,7 +77,11 @@ impl StoreView for TestView {
             ),
             FactVersionRef::FileWholeHash { .. }
             | FactVersionRef::DerivedFactHash { .. }
-            | FactVersionRef::ProjectGeneration { .. } => false,
+            | FactVersionRef::ProjectGeneration { .. }
+            // A lifted domain's terminal aggregate: whole-project, not
+            // per-domain-method, and this view observes none.
+            | FactVersionRef::DomainGeneration(_)
+            | FactVersionRef::StrictSelfRootWorld(_) => false,
         }
     }
 
@@ -123,7 +128,12 @@ fn resolve_imports_fact() -> FactVersionRef {
 fn route_surface_fact() -> FactVersionRef {
     FactVersionRef::RouteSurface(RouteSurfaceFactRef {
         canonical_id: "/a.ts".into(),
-        key: FactKey::EffectiveExportSet,
+        key: FactKey::ModuleAugmentationIndexShape {
+            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+            external_specifier: Some(InternedSpecifier::from("vue")),
+            resolved_relative_canonical: None,
+            wildcard_pattern: None,
+        },
         lane: FactLane::Semantic,
         expected_hash: [3u8; 16],
     })

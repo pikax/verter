@@ -97,6 +97,7 @@ pub(crate) mod locator_view;
 mod locator_view_worklist;
 pub(crate) mod lower;
 pub(crate) mod output_materialization;
+pub(crate) mod query_error_disposition;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
@@ -1768,26 +1769,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if !self.key_subject_is_carrier(&key) {
             return (key, CarrierNormalizationPrelude::none());
         }
-        let host = self.ctx.host_for_fact_tracer_install();
         let ((normalized, partial_reasons), finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(host, || {
-                let normalized = self.normalize_carrier_subject_key(key);
-                let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
-                // Test-only: force a fenced (ReturnOnly) serve observation onto
-                // the prelude tracer so the suppress wiring is exercisable
-                // without a superseded-artifact fixture. Zero-cost when unset.
-                #[cfg(test)]
-                if host
-                    .test_force
-                    .carrier_normalization_force_fence_for_tests
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+            crate::fact_signature_helpers::install_fact_tracer(
+                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+                || {
+                    let normalized = self.normalize_carrier_subject_key(key);
+                    let partial_reasons = self.carrier_normalization_partial_reasons(&normalized);
+                    // Test-only: force a fenced (ReturnOnly) serve observation onto
+                    // the prelude tracer so the suppress wiring is exercisable
+                    // without a superseded-artifact fixture. Zero-cost when unset.
+                    #[cfg(test)]
+                    if self
+                        .ctx
+                        .host_for_fact_tracer_install()
+                        .test_force
+                        .carrier_normalization_force_fence_for_tests
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                         crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
                     );
-                }
-                (normalized, partial_reasons)
-            });
+                    }
+                    (normalized, partial_reasons)
+                },
+            );
         let prelude = match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => CarrierNormalizationPrelude {
                 facts: Some(facts),
@@ -1805,14 +1810,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     partial_reasons,
                 }
             }
-            crate::resolver_core::FactReadSetFinalise::Overflow => CarrierNormalizationPrelude {
-                // An overflowed prelude yields no bounded fact list — the rewrite
-                // cannot be soundly rooted, so suppress caching (the value still
-                // flows; the memo refuses).
-                facts: None,
-                cache_suppress: true,
-                partial_reasons,
-            },
+            // An overflowed OR mutation-unstable prelude yields no fact
+            // list the rewrite can be soundly rooted on, so both suppress
+            // caching (the value still flows; the memo refuses).
+            crate::resolver_core::FactReadSetFinalise::Overflow
+            | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+                CarrierNormalizationPrelude {
+                    facts: None,
+                    cache_suppress: true,
+                    partial_reasons,
+                }
+            }
         };
         (normalized, prelude)
     }
@@ -2276,6 +2284,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let host = self.ctx.host_for_fact_tracer_install();
         let provenance = Arc::clone(&host.provenance);
         let carrier_prelude_for_build = carrier_prelude.clone();
+        let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let traced_build = move || -> crate::project_semantic_dispatch::walk::QueryBuildOutput<
             SemanticQueryValue,
         > {
@@ -2290,7 +2299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
             let (mut output, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-                host,
+                &basis_source,
                 || {
                     // Test-only fact-injection hook. When the
                     // `dispatch_test_inject_parse_fact` slot is non-None,
@@ -2350,7 +2359,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             provenance
                 .memo_entry_fact_tracer_installs
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            finalise_traced_build_output(output, finalise, &provenance, &carrier_prelude_for_build)
+            finalise_traced_build_output(
+                self.ctx,
+                output,
+                finalise,
+                &provenance,
+                &carrier_prelude_for_build,
+            )
         };
         let cache_read =
             graph.execute_cooperative_value(self.ctx, key.clone(), sentinel, traced_build);
@@ -2544,6 +2559,7 @@ impl CarrierNormalizationPrelude {
 
 #[inline(never)]
 fn finalise_traced_build_output<T>(
+    ctx: &dyn crate::resolver_core::ResolverContext,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: crate::resolver_core::FactReadSetFinalise,
     provenance: &crate::types::MetaProvenance,
@@ -2569,15 +2585,6 @@ fn finalise_traced_build_output<T>(
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(traced_facts)
         | crate::resolver_core::FactReadSetFinalise::NonCacheable(traced_facts) => {
-            // Record the self-root canonicals (deduplicated) for the
-            // strict warm-read validator on the published `MemoEntry`.
-            let mut self_root_canonicals: Vec<Arc<str>> =
-                Vec::with_capacity(output.observed_self_roots.len());
-            for (canonical, _) in output.observed_self_roots.iter() {
-                if !self_root_canonicals.iter().any(|c| c == canonical) {
-                    self_root_canonicals.push(Arc::clone(canonical));
-                }
-            }
             // Fold the build's `dep_signature` fence into the traced
             // fact set BEFORE building the carrier. The published
             // `ReadSetSignature` is the SOLE cache-validity rail
@@ -2620,11 +2627,16 @@ fn finalise_traced_build_output<T>(
                     }
                     merged
                 };
-            match crate::semantic_query_memo::semantic_graph_read_set_signature(
-                &output.observed_self_roots,
-                &merged_facts,
-            ) {
-                Some(carrier) => {
+            let completed = crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
+                crate::semantic_query_memo::semantic_graph_read_set_signature(
+                    view,
+                    &output.observed_self_roots,
+                    &merged_facts,
+                )
+            });
+            match completed {
+                Ok((facts, self_root_canonicals)) => {
+                    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(facts);
                     // §18.2 fact-rooted admission: a sound self-version-rooted
                     // carrier is the FIRST gate (a torn / unrootable self-root
                     // already routed to the `None` arm below, and an overflowed
@@ -2638,7 +2650,7 @@ fn finalise_traced_build_output<T>(
                     match crate::semantic_query::admit::admit_decision(output.taint, &carrier) {
                         crate::semantic_query::admit::Admission::Warm => {
                             output.graph_carrier = Some(Box::new(carrier));
-                            output.self_root_canonicals = Arc::from(self_root_canonicals);
+                            output.self_root_canonicals = self_root_canonicals;
                         }
                         crate::semantic_query::admit::Admission::ReturnOnly => {
                             // Non-admission: the value flows to the caller but
@@ -2652,7 +2664,7 @@ fn finalise_traced_build_output<T>(
                         }
                     }
                 }
-                None => {
+                Err(reason) => {
                     // Non-cacheable: refuse memo admission (the value
                     // still flows back to the caller). The build's
                     // traced cross-file dep facts are nonetheless
@@ -2673,11 +2685,17 @@ fn finalise_traced_build_output<T>(
                     // carrier too so joiners observe the same
                     // project-generation gate.
                     output.cache_suppress = true;
-                    output.graph_carrier = Some(Box::new(
-                        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                            merged_facts.into_boxed_slice(),
-                        )),
-                    ));
+                    if reason == crate::cache_runtime::NonAdmissionReason::SignatureOverflow {
+                        provenance
+                            .memo_entry_overflow_refusals
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        output.graph_carrier = Some(Box::new(
+                            crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+                                merged_facts.into_boxed_slice(),
+                            )),
+                        ));
+                    }
                 }
             }
         }
@@ -2689,6 +2707,11 @@ fn finalise_traced_build_output<T>(
             // carrier can be broadcast — the joiner inherits the
             // non-cacheability through the `cache_suppress` flag the
             // cooperative-admission path propagates to joiners.
+            output.cache_suppress = true;
+        }
+        // Same suppression, and deliberately NOT counted as an overflow:
+        // the refusal is about a domain that moved, not about size.
+        crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
             output.cache_suppress = true;
         }
     }

@@ -174,12 +174,14 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
             let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
                 query_engine.ctx,
             );
-            dispatch.raise_authored_locator_to_hot(
-                &locator,
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            )
+            dispatch
+                .raise_authored_locator_to_hot(
+                    &locator,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                )
+                .at_optional_boundary()
         })
         .is_some_and(|hot| {
             crate::resolver_core::component_meta_query_engine::component_meta_registry_node_has_explicit_object_surface(

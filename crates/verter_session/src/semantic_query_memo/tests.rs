@@ -18,7 +18,16 @@ fn production_relation_admission_is_semantic_store_owned() {
         .map(|offset| owner_start + offset)
         .expect("the owner-controlled relation funnel must precede the test seed seam");
     let owner_body = &store_source[owner_start..owner_end];
-    assert!(owner_body.contains("host.with_fact_tracer"));
+    assert!(
+        owner_body.contains(".with_fact_tracer("),
+        "the owner funnel must open the tracer scope itself — the spelling is the basis-source \
+         form, so a revert to a host-only tracer with no compaction basis also fails here"
+    );
+    assert!(
+        owner_body.contains("FactTracerBasisSource::from_ctx(ctx)"),
+        "and it must seed that scope from the REQUEST-BOUND context it was handed: an unbound \
+         source silently disarms movement detection for every relation compute"
+    );
     assert!(owner_body.contains("self.insert_relation_owned("));
     assert!(
         !producer_source.contains("graph.insert_relation("),
@@ -5981,23 +5990,26 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
         let host = ctx_host();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            let cache_read = joiner_store.execute_cooperative(
-                &host,
-                joiner_key,
-                || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                || {
-                    // This build MUST NOT run on the joiner.
-                    let id = joiner_store
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-                    (
-                        QueryResult::Value(id),
-                        Arc::from(Vec::new().into_boxed_slice()),
-                    )
-                },
-            );
-            let _value = cache_read.value;
-        });
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                let cache_read = joiner_store.execute_cooperative(
+                    &host,
+                    joiner_key,
+                    || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    || {
+                        // This build MUST NOT run on the joiner.
+                        let id = joiner_store
+                            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                        (
+                            QueryResult::Value(id),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                        )
+                    },
+                );
+                let _value = cache_read.value;
+            },
+        );
         finalise
     });
 
@@ -6032,7 +6044,9 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("joiner outer tracer refused")
+        }
     }
 }
 
@@ -6188,8 +6202,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
         let host: &crate::VerterHost = joiner_host.as_ref();
         // Outer tracer scope spans the whole dispatch so the
         // joiner-bubble target is the cell the joiner returns into.
-        let (joiner_suppress, finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(host, || {
+        let (joiner_suppress, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+            || {
                 let cache_read = joiner_store.execute_cooperative(
                     host,
                     joiner_key,
@@ -6205,7 +6220,8 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     },
                 );
                 cache_read.cache_suppress
-            });
+            },
+        );
         (joiner_suppress, finalise)
     });
 
@@ -6253,7 +6269,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
             );
         }
         FactReadSetFinalise::NonCacheable(_) => panic!("joiner tracer unexpectedly non-cacheable"),
-        FactReadSetFinalise::Overflow => panic!("joiner outer tracer overflowed"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("joiner outer tracer refused")
+        }
     }
 
     // The suppressed winner's value is non-cacheable: the memo entry

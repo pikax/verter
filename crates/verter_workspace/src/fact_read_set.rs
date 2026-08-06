@@ -78,9 +78,185 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::fact_cache::FactVersionRef;
+use crate::fact_cache::{
+    compaction_domain, AggregateGenerations, AggregatePopulation, CompactionDomain,
+    DomainGenerationFact, FactVersionRef, ViewPopulation,
+};
+use crate::resolution_currency::ResolutionPopulation;
 
 pub const FACT_SIGNATURE_CAP: usize = 1_024;
+
+/// Per-domain precision threshold: a compaction domain stays PRECISE while
+/// its deduplicated bucket holds at most this many facts, and lifts to its
+/// terminal aggregate at the first fact beyond it.
+///
+/// Deliberately the same number as [`FACT_SIGNATURE_CAP`], and read with
+/// the same `>` comparison, so "the size at which a single-domain
+/// observation set used to be refused" and "the size at which that domain
+/// now compacts" are the same boundary rather than two that can drift.
+pub const FACT_DOMAIN_PRECISE_MAX: usize = FACT_SIGNATURE_CAP;
+
+/// The population `fact`'s bucket is keyed by, and that an aggregate
+/// minted for that bucket speaks for. `None` when nothing in scope can
+/// name one — such a bucket never mints.
+///
+/// Exhaustive over [`CompactionDomain`] on purpose: this is the whole
+/// translation, and a new domain must state where its population comes
+/// from before it compiles. The three answers are not interchangeable.
+///
+/// * **[`CompactionDomain::Resolution`] answers from the BUCKET.** Its
+///   precise facts carry a population in their own keys, so its buckets
+///   partition themselves and a base and a session bucket can coexist in
+///   one signature.
+/// * **[`CompactionDomain::WorkspaceShape`] is GLOBAL.**
+///   `ProjectGeneration` moves only on a project-shape change, which no
+///   per-canonical overlay shadows, so its aggregate is base-scoped even
+///   inside an overlay-bearing scope — which is what lets a session scope
+///   and a base scope share one workspace-shape witness rather than each
+///   minting a private copy.
+/// * **The remaining four answer from the VIEW.** Their facts carry no
+///   population, so the only honest source is the view that validated
+///   them. A session overlay re-roots whole hashes and parse facts while
+///   leaving the workspace content generation untouched, so an
+///   overlay-derived aggregate labelled `Base` would satisfy a base read
+///   and stale-serve overlay content. Absent a supplied view population
+///   the answer is `None` and the bucket stays precise — never a
+///   fallback, because a fallback is exactly the stale-serve.
+fn aggregate_population(
+    fact: &FactVersionRef,
+    basis: &AggregateGenerations,
+) -> Option<AggregatePopulation> {
+    // An aggregate already names its own population, and must bucket with
+    // exactly the precise facts it replaced.
+    if let FactVersionRef::DomainGeneration(aggregate) = fact {
+        return Some(aggregate.population);
+    }
+    match compaction_domain(fact) {
+        CompactionDomain::Resolution => {
+            resolution_population_of(fact).map(AggregatePopulation::Resolution)
+        }
+        CompactionDomain::WorkspaceShape => Some(AggregatePopulation::View(ViewPopulation::Base)),
+        CompactionDomain::Content
+        | CompactionDomain::SourceEnv
+        | CompactionDomain::SemanticImports
+        | CompactionDomain::RouteSurface => basis.view_population.map(AggregatePopulation::View),
+    }
+}
+
+/// The population carried by a precise RESOLUTION-domain fact's own key.
+///
+/// `None` is unreachable for a fact [`compaction_domain`] classified as
+/// [`CompactionDomain::Resolution`] — that classification is exactly the
+/// `ResolveImports(Resolution(_))` arm. It is expressed as an `Option`
+/// rather than a panic so a future reshaping of the variant degrades to
+/// "this bucket does not mint" instead of aborting a compute.
+fn resolution_population_of(fact: &FactVersionRef) -> Option<ResolutionPopulation> {
+    match fact {
+        FactVersionRef::ResolveImports(inner) => {
+            inner.resolution_fact().map(|fact| fact.key.population())
+        }
+        _ => None,
+    }
+}
+
+/// Lift every over-threshold domain in a CANONICAL (sorted, deduplicated)
+/// observation set to that domain's terminal aggregate, leaving every
+/// other domain precise.
+///
+/// Three properties this must preserve, and the reasons:
+///
+/// * **Domain-wise, never whole-signature.** One domain outgrowing its
+///   bucket must not cost the precision of the others, or a single wide
+///   resolution surface would coarsen an entry's content dependency and
+///   destroy warm reuse across unrelated edits.
+/// * **One aggregate per represented population.** A bucket that mixes
+///   populations lifts to one aggregate per population, never to a single
+///   aggregate that silently speaks for both.
+/// * **No producer, no compaction.** A domain whose generation is absent
+///   from `basis` stays precise. Minting an aggregate with no live
+///   producer would create a witness nothing can ever invalidate.
+/// * **No population, no compaction.** A bucket whose population nothing
+///   in scope can name stays precise too, for the mirror-image reason: an
+///   aggregate that cannot say *for whom* the domain held is a witness
+///   the wrong view can satisfy. See [`aggregate_population`].
+///
+/// A domain lifts for one of two reasons, and BOTH must hold the "no
+/// regrow" property:
+///
+/// * its precise bucket outgrew [`FACT_DOMAIN_PRECISE_MAX`] and the basis
+///   can name a generation for it, or
+/// * an aggregate for it is ALREADY present — absorbed from a reused warm
+///   candidate that lifted it earlier. Its precise facts collapse into
+///   that aggregate no matter how few they are: the aggregate makes the
+///   strictly stronger claim ("the whole domain held as of this
+///   generation"), so keeping precise siblings beside it would let the
+///   bucket regrow one reuse at a time and re-approach the bound the
+///   lifting existed to remove.
+///
+/// Returns `true` when at least one domain was lifted.
+fn compact_domains(facts: &mut Vec<FactVersionRef>, basis: &AggregateGenerations) -> bool {
+    /// A bucket whose population is `None` is a real bucket — its facts
+    /// still group and still survive together — it simply can never mint.
+    type BucketKey = (CompactionDomain, Option<AggregatePopulation>);
+    let mut precise: rustc_hash::FxHashMap<BucketKey, usize> = rustc_hash::FxHashMap::default();
+    let mut already_lifted: rustc_hash::FxHashSet<BucketKey> = rustc_hash::FxHashSet::default();
+    for fact in facts.iter() {
+        if matches!(fact, FactVersionRef::StrictSelfRootWorld(_)) {
+            continue;
+        }
+        let key = (compaction_domain(fact), aggregate_population(fact, basis));
+        if matches!(fact, FactVersionRef::DomainGeneration(_)) {
+            already_lifted.insert(key);
+        } else {
+            *precise.entry(key).or_insert(0) += 1;
+        }
+    }
+    // Mint a fresh aggregate only where the threshold was crossed AND the
+    // basis can name a generation AND the bucket has a population. No
+    // producer, no aggregate; no population, no aggregate.
+    let mint: rustc_hash::FxHashSet<(CompactionDomain, AggregatePopulation)> = precise
+        .iter()
+        .filter(|(_, count)| **count > FACT_DOMAIN_PRECISE_MAX)
+        .filter(|(key, _)| !already_lifted.contains(*key))
+        .filter_map(|((domain, population), _)| Some((*domain, (*population)?)))
+        .filter(|(domain, _)| basis.stamp_for(*domain).is_some())
+        .collect();
+    if mint.is_empty() && already_lifted.is_empty() {
+        return false;
+    }
+    let lifted: rustc_hash::FxHashSet<BucketKey> = mint
+        .iter()
+        .map(|(domain, population)| (*domain, Some(*population)))
+        .chain(already_lifted)
+        .collect();
+    let mut kept: Vec<FactVersionRef> = Vec::with_capacity(facts.len());
+    for fact in facts.drain(..) {
+        if matches!(fact, FactVersionRef::StrictSelfRootWorld(_)) {
+            kept.push(fact);
+            continue;
+        }
+        let key = (compaction_domain(&fact), aggregate_population(&fact, basis));
+        // Existing aggregates survive; precise facts in a lifted bucket do
+        // not.
+        if matches!(fact, FactVersionRef::DomainGeneration(_)) || !lifted.contains(&key) {
+            kept.push(fact);
+        }
+    }
+    for (domain, population) in mint {
+        let stamp = basis
+            .stamp_for(domain)
+            .expect("filtered above: only domains with a live stamp mint an aggregate");
+        kept.push(FactVersionRef::DomainGeneration(DomainGenerationFact {
+            domain,
+            population,
+            stamp,
+        }));
+    }
+    kept.sort_unstable_by(compare_fact_refs);
+    kept.dedup();
+    *facts = kept;
+    true
+}
 
 /// Inline capacity for the observation accumulator. Empirically most
 /// computes observe between 4 and 12 facts. The inline capacity is
@@ -140,6 +316,15 @@ pub struct FactReadSet {
     /// the state allocation-free while preserving the distinction that a
     /// boolean erased. `Transitive` monotonically dominates `LocalOnly`.
     non_cacheable_propagation: Option<NonCacheablePropagation>,
+    /// Live generation of each compaction domain, supplied by whoever
+    /// installed this tracer. A domain absent from the basis never
+    /// compacts — see [`compact_domains`].
+    aggregate_basis: AggregateGenerations,
+    /// TRUE once a domain THIS scope compacts against was observed to
+    /// have advanced since its basis was installed. Sticky — a scope
+    /// cannot become stable again, and cannot exempt itself from a
+    /// generation it moved.
+    mutation_unstable: bool,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -168,8 +353,74 @@ impl FactReadSet {
             observations: SmallVec::new(),
             canonical_runs: Vec::new(),
             non_cacheable_propagation: None,
+            aggregate_basis: AggregateGenerations::default(),
+            mutation_unstable: false,
             _not_send_sync: PhantomData,
         }
+    }
+
+    /// Supply the live per-domain generations — and the view population —
+    /// this scope compacts against.
+    ///
+    /// Monotonic in coverage: a later call may only ADD domains, never
+    /// retract one, so a nested installer cannot silently disable an
+    /// enclosing scope's compaction. Re-supplying a domain overwrites its
+    /// generation, which is what a re-read of a live counter must do.
+    ///
+    /// `view_population` merges by the same rule, so a scope that was
+    /// installed without one can still be given one. Supplying a
+    /// DIFFERENT one to a scope that already has facts is not meaningful —
+    /// a scope validates against one view — and preventing it belongs to
+    /// basis installation rather than here; nothing in the tree does it
+    /// today (the sole production supplier calls this once on a fresh
+    /// tracer).
+    pub fn set_aggregate_basis(&mut self, basis: AggregateGenerations) {
+        let current = &mut self.aggregate_basis;
+        current.content = basis.content.or(current.content);
+        current.source_env = basis.source_env.or(current.source_env);
+        current.semantic_imports = basis.semantic_imports.or(current.semantic_imports);
+        current.resolution = basis.resolution.or(current.resolution);
+        current.route_surface = basis.route_surface.or(current.route_surface);
+        current.workspace_shape = basis.workspace_shape.or(current.workspace_shape);
+        current.view_population = basis.view_population.or(current.view_population);
+    }
+
+    /// The basis this scope compacts against, for a caller that needs to
+    /// know whether re-reading the live generations is worth anything.
+    #[must_use]
+    pub fn aggregate_basis(&self) -> &AggregateGenerations {
+        &self.aggregate_basis
+    }
+
+    /// Re-read the live per-domain generations and record MUTATION
+    /// INSTABILITY if any domain this scope compacts against has moved
+    /// since its basis was installed.
+    ///
+    /// Called at every ADMISSION BOUNDARY, not only at finalisation. A
+    /// cacheability scope can authorise writes from inside its own
+    /// closure, so an exit-only check runs after the write it was meant
+    /// to gate.
+    ///
+    /// There is no "this trace caused the bump, so ignore it" exception,
+    /// and one must not be added. A trace cannot exempt itself from a
+    /// generation it moved: its own observations were made on both sides
+    /// of the mutation, and nothing in the finalised set records which.
+    ///
+    /// Sticky, and terminal: an unstable scope never becomes stable
+    /// again and is never retried automatically.
+    pub fn note_basis_recheck(&mut self, live: &AggregateGenerations) {
+        if self.mutation_unstable {
+            return;
+        }
+        self.mutation_unstable = self.aggregate_basis.any_named_domain_moved(live);
+    }
+
+    /// TRUE when a domain this scope compacts against was observed to
+    /// have advanced since its basis was installed.
+    #[inline]
+    #[must_use]
+    pub fn mutation_unstable(&self) -> bool {
+        self.mutation_unstable
     }
 
     /// Record that a NON-CACHEABLE read (fenced serve, broken decl-body
@@ -283,14 +534,22 @@ impl FactReadSet {
     fn canonicalise(&mut self) {
         self.observations.sort_unstable_by(compare_fact_refs);
         self.observations.dedup();
-        if self.canonical_runs.is_empty() {
-            return;
+        if !self.canonical_runs.is_empty() {
+            let mut merged: Vec<FactVersionRef> = self.observations.as_slice().to_vec();
+            for run in std::mem::take(&mut self.canonical_runs) {
+                merged = merge_canonical_runs(&merged, &run);
+            }
+            self.observations = SmallVec::from_vec(merged);
         }
-        let mut merged: Vec<FactVersionRef> = self.observations.as_slice().to_vec();
-        for run in std::mem::take(&mut self.canonical_runs) {
-            merged = merge_canonical_runs(&merged, &run);
-        }
-        self.observations = SmallVec::from_vec(merged);
+        // Domain-wise lifting runs LAST, on the deduplicated set: the
+        // threshold is a property of the DISTINCT facts a domain
+        // contributed, not of how many times they were observed. Running
+        // it here — inside the one canonicaliser — is what makes every
+        // finalised signature, from every entry point, compact
+        // identically.
+        let mut canonical = std::mem::take(&mut self.observations).into_vec();
+        compact_domains(&mut canonical, &self.aggregate_basis);
+        self.observations = SmallVec::from_vec(canonical);
     }
 
     /// Whether sealing this tracer WOULD report
@@ -333,6 +592,14 @@ impl FactReadSet {
     /// the appropriate audit event.
     #[must_use]
     pub fn finalise(mut self) -> FactReadSetFinalise {
+        // STABILITY is settled before CARDINALITY, and stays a separate
+        // outcome. An unstable attempt must never be reported as a size
+        // failure: it would be refused under a rail that is about the
+        // number of facts, and the caller could not tell a genuinely
+        // wide compute from a racing one.
+        if self.mutation_unstable {
+            return FactReadSetFinalise::MutationUnstable;
+        }
         // Canonicalise so two tracers that observed the same set of facts
         // in different orders produce byte-identical signatures: sort +
         // dedup the local observations under the derived total order, then
@@ -379,6 +646,17 @@ pub enum FactReadSetFinalise {
     /// refuse admission. No partial signature is returned — the
     /// tracer is consumed regardless of outcome.
     Overflow,
+    /// A compaction domain this scope was COMPACTING advanced between
+    /// its basis being installed and this finalisation, so the terminal
+    /// aggregate would claim the domain held as of a generation these
+    /// observations do not come from.
+    ///
+    /// Terminal on the first unstable attempt — no automatic retry — and
+    /// deliberately NOT foldable into [`Self::Overflow`]. Degrading a
+    /// stability failure into a cardinality one refuses the attempt for
+    /// the wrong reason, under exactly the size rail this substrate
+    /// exists to remove.
+    MutationUnstable,
 }
 
 /// Interior-mutability wrapper allowing `&self` callers to record
@@ -443,6 +721,36 @@ impl FactReadSetCell {
     #[inline]
     pub fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
         self.0.borrow_mut().note_non_cacheable_read(propagation);
+    }
+
+    /// Supply this scope's per-domain compaction basis through `&self`.
+    /// See [`FactReadSet::set_aggregate_basis`].
+    #[inline]
+    pub fn set_aggregate_basis(&self, basis: AggregateGenerations) {
+        self.0.borrow_mut().set_aggregate_basis(basis);
+    }
+
+    /// `true` when this scope's basis names at least one domain, i.e.
+    /// when a live re-read could tell it anything. The short-circuit that
+    /// keeps movement detection free for a scope that compacts nothing.
+    #[inline]
+    #[must_use]
+    pub fn has_aggregate_basis(&self) -> bool {
+        self.0.borrow().aggregate_basis().names_any_domain()
+    }
+
+    /// Re-read the live generations and record instability through
+    /// `&self`. See [`FactReadSet::note_basis_recheck`].
+    #[inline]
+    pub fn note_basis_recheck(&self, live: &AggregateGenerations) {
+        self.0.borrow_mut().note_basis_recheck(live);
+    }
+
+    /// Whether a domain this scope compacts against has moved.
+    #[inline]
+    #[must_use]
+    pub fn mutation_unstable(&self) -> bool {
+        self.0.borrow().mutation_unstable()
     }
 
     /// Whether a non-cacheable read was consumed in this scope.

@@ -20,8 +20,10 @@
 //!
 //! ## What this file owns
 //!
-//! - [`CanonicalCompletionOverlay`]: the request-scoped append-only
-//!   side maps that record additive loads observed mid-request.
+//! - [`CanonicalCompletionOverlay`]: request-scoped shadowing side maps
+//!   that record additive loads observed mid-request. Their key sets only
+//!   grow, but an effective value may be replaced; one bracketed revision
+//!   identifies each stable shadowing state.
 //!   Constructed once, shared across cooperative-admission lanes via
 //!   `Arc`, dropped at request end.
 //!
@@ -35,12 +37,14 @@
 //!
 //! ## Identity / epoch contract
 //!
-//! The overlay does NOT participate in
+//! The completion overlay does NOT participate in
 //! [`crate::resolver_core::StoreView::compat_token`]: the wrapper
 //! reports the base's compat token unchanged. Two concurrent requests
 //! with the same base epoch must still coalesce on singleflight lanes,
-//! and the additive loads the overlay records are a per-request
-//! optimisation that does not change project-wide identity.
+//! while fact signatures distinguish completion states through their
+//! [`verter_workspace::ViewPopulation`]. This separation is deliberate:
+//! the compat token is the frozen base/session lane identity, whereas the
+//! completion population may advance inside one request.
 //!
 //! [`CanonicalCompletionOverlay::complete_canonical`] is **epoch-
 //! guarded**: if the host's
@@ -60,19 +64,28 @@
 //! - **`validated_at_generation`**: unaffected. The
 //!   `ProjectGeneration` fact validator routes through the base
 //!   view's project-generation snapshot; completion never alters it.
-//! - **Family memo gating + FIFO prune**: unaffected. The overlay
+//! - **Family memo gating + FIFO prune**: the overlay
 //!   changes validation visibility for facts already observed; it
 //!   does not change what `traced_facts`, `dispatch_dep_signature`,
-//!   `canonical_ids()`, or FIFO prune register.
+//!   `canonical_ids()`, or FIFO prune register. Consequently the generic
+//!   FIFO still cannot prefer durable Base/Session candidates over a
+//!   request-completion candidate; the population is visible only inside
+//!   `fact_dep_signature`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
+use verter_workspace::{CompletionOverlayState, OverlayId};
 
 use crate::file_artifact_store::FileFacts;
+use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::reuse::ReuseClass;
 use crate::resolver_core::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, ResolverHash16,
     RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
@@ -80,8 +93,10 @@ use crate::resolver_core::{
 use crate::resolver_store::HostStoreView;
 use crate::types::Hash16;
 
-/// Per-request append-only side maps recording additive loads that the
-/// request-entry [`HostStoreView`] does not track.
+/// Per-request shadowing side maps recording additive loads that the
+/// request-entry [`HostStoreView`] does not track. Keys are retained for
+/// the request lifetime, while equal replacement is a no-op and changed
+/// replacement advances [`Self::revision`].
 ///
 /// Overlay shape (post-iter3 bug audit):
 /// - `whole_hashes`
@@ -115,6 +130,10 @@ use crate::types::Hash16;
 /// [`CanonicalCompletionOverlay::complete_canonical`] (one short
 /// critical section per first-cold canonical).
 pub(crate) struct CanonicalCompletionOverlay {
+    /// Process-unique identity plus a bracketed revision of the exact
+    /// shadowing state. The memo map below is deliberately excluded.
+    overlay_id: OverlayId,
+    revision: BracketedGeneration,
     whole_hashes: RwLock<FxHashMap<String, Hash16>>,
     /// Per-canonical derived hashes bundled by `DerivedFactKind` so a
     /// read can locate the entry with a `&str` lookup (no per-read
@@ -124,21 +143,20 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// Per-map monotonic "non-empty" flags (read-path
     /// hygiene). Set to `true` (Release) when the corresponding map
     /// receives its first insert; never flip back to `false` within a
-    /// request (the overlay is append-only). Readers `load(Acquire)`
+    /// request (the maps never become empty again). Readers `load(Acquire)`
     /// and skip the `RwLock::read` + map lookup when the flag is
     /// `false` — a hot-path optimisation for the very common case of an
     /// empty overlay (validations that fire before any
     /// `complete_canonical` has run for the request).
     ///
-    /// **Strict ordering:** the writer
-    /// sets the flag under the same write lock as the corresponding
-    /// map insert (see [`Self::write_completion_entry`]). The lock is
-    /// released only AFTER the flag has been stored. This pairs with
-    /// the reader's `load(Acquire)` to guarantee that if a reader
-    /// observes `_nonempty == false`, the writer has not yet inserted
-    /// into the underlying map (otherwise the writer would also have
-    /// stored `true` before releasing the lock). A reader can
-    /// therefore safely return `None` on the fast path without
+    /// **Strict ordering:** after acquiring the map's write lock, the
+    /// writer sets the flag BEFORE inserting (see the `write_*` helpers).
+    /// A reader that still observes `false` therefore precedes the insert;
+    /// a reader that observes `true` takes the read lock and cannot inspect
+    /// the map until the insertion completes. Setting the flag after the
+    /// insert would leave a false-negative window even if both operations
+    /// occurred under the same lock, because the false fast path skips that
+    /// lock entirely. A reader can therefore safely return `None` without
     /// falling into a stale base-view validation; reordering the
     /// store before the lock release would have left a window in
     /// which the map was populated but the flag still read `false`,
@@ -149,61 +167,160 @@ pub(crate) struct CanonicalCompletionOverlay {
     whole_hashes_nonempty: AtomicBool,
     derived_hashes_nonempty: AtomicBool,
     file_facts_nonempty: AtomicBool,
-    /// Request-scoped, SUCCESS-ONLY memo of session-overlay prepared-decl
-    /// bundles, keyed per raw overlay owner by `(overlay content hash,
-    /// store-view compat token)`.
-    ///
-    /// R17 forbids admitting an overlay-bearing bundle to the host's
-    /// shared `prepared_decl_bundles` cache (the shared slot is keyed by
-    /// canonical alone and would alias the base bundle), so pre-memo the
-    /// session-tier resolver re-ran
-    /// `materialize_prepared_decl_bundle_via_ctx` — including the full
-    /// per-import re-export-chain walk
-    /// (`build_prepared_import_canonicalization`) — on EVERY bundle touch.
-    /// This memo is the request-scoped home for that value: it lives and
-    /// dies with this overlay (one top-level request), never writes to any
-    /// host/shared/store-level cache, and is NOT a request-local mirror of
-    /// host state — the value it holds is exactly the one R17 keeps OUT of
-    /// host state.
-    ///
-    /// Key semantics:
-    /// - the overlay content hash pins entries to the session view's
-    ///   frozen overlay bytes (the view is request-bound; its overlay maps
-    ///   never change within the request);
-    /// - the [`StoreViewCompatToken`] pins entries to ONE
-    ///   externally-coherent base-world snapshot — the SAME complete
-    ///   validity oracle singleflight lanes coalesce on (external
-    ///   supersession dimensions folded, the request's own additive
-    ///   artifact/load generations excluded). A `run_stable_request` retry
-    ///   attempt re-snapshots the base view while SHARING this overlay, so
-    ///   without the token a bundle whose import canonicalization walked
-    ///   the superseded world could serve the fresh attempt; with it the
-    ///   fresh attempt misses and re-materialises. The token also folds
-    ///   the session-overlay identity (`with_session_overlay` recomputes
-    ///   it from the overlay fingerprint), so two different session views
-    ///   can never collide on a memo entry even if an overlay object were
-    ///   ever shared between them.
-    ///
-    /// Success-only admission is enforced at the single producer call site
-    /// (`prepared_decl_bundle_with_context`): a materialisation whose
-    /// cacheability scope observed a NON-CACHEABLE read (fenced overlay
-    /// serve, unrootable route, broken decl-body lease) is served to its
-    /// caller but never inserted, preserving per-call re-materialisation —
-    /// and the per-call non-cacheable fan-out into enclosing tracer
-    /// scopes — for exactly the class where that fan-out is load-bearing.
-    overlay_bundle_memo: RwLock<FxHashMap<String, OverlayBundleMemoEntry>>,
-    overlay_bundle_memo_nonempty: AtomicBool,
+    /// Request-scoped memo of prepared-decl bundles — the ONE
+    /// request-world memo covering the base, session-overlay and
+    /// `RequestOnly` worlds. See [`RequestBundleMemo`].
+    bundle_memo: RequestBundleMemo,
+    #[cfg(test)]
+    verify_write_protocol: AtomicBool,
 }
 
-/// Per-owner memo slot: the overlay content hash + view compat token the
-/// bundle was materialised under, and the bundle itself. One slot per
-/// raw overlay owner — a request observes ONE overlay content per owner
-/// (the view is frozen) and ONE compat token per attempt, so a
-/// hash/token move simply replaces the superseded entry.
-struct OverlayBundleMemoEntry {
-    overlay_hash: Hash16,
+/// Which world a memoised prepared-decl bundle was materialised for.
+///
+/// Base and session-overlay bundles for the SAME canonical are different
+/// values — the overlay one is built from the session's frozen bytes, the
+/// base one from the store-current artifact — so they occupy DISTINCT
+/// namespaces. Collapsing them would serve a base consumer the session's
+/// edit (and vice versa) inside the same request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BundleMemoWorld {
+    /// The base (non-overlaid) bundle.
+    Base,
+    /// The bundle built from the session view's overlay content, keyed by
+    /// that overlay's content hash so a request that re-snapshots under
+    /// different overlay bytes cannot reuse the previous one.
+    Overlay(Hash16),
+}
+
+/// Per-`(canonical, world)` memo slot.
+struct BundleMemoEntry {
+    /// The store-view compat token the bundle was materialised under —
+    /// the SAME complete external-coherence oracle singleflight lanes
+    /// coalesce on. A stability-retry attempt re-snapshots the base view,
+    /// so without the token a bundle whose import canonicalization walked
+    /// the superseded world could serve the fresh attempt.
     token: StoreViewCompatToken,
+    /// How far the memoised value may travel. `RequestOnly` entries
+    /// replay their refusal on EVERY hit.
+    reuse: ReuseClass,
     bundle: Arc<PreparedDeclBundle>,
+}
+
+/// The ONE request-world prepared-decl bundle memo.
+///
+/// ## What it is for
+///
+/// A prepared-decl bundle that cannot be SHARED still costs a full cold
+/// materialisation — including the per-import re-export-chain walk — on
+/// every touch. Two classes hit this:
+///
+/// * an overlay-bearing bundle, which R17 keeps out of the shared
+///   `prepared_decl_bundles` cache because that slot is keyed by
+///   canonical alone and would alias the base bundle;
+/// * a `RequestOnly` bundle, whose materialisation consumed a
+///   deterministic non-cacheable read (a FENCED serve, an unrootable
+///   import-route witness), so the shared admission gate declines it.
+///
+/// Both are COMPLETE and deterministic under the request's immutable
+/// view. This memo is the request-scoped home for exactly those values:
+/// it lives and dies with one `CanonicalCompletionOverlay` (one top-level
+/// request), never writes to any host / shared / persistent cache, and is
+/// NOT a request-local mirror of host state — the values it holds are
+/// precisely the ones host state must not hold.
+///
+/// ## Identity
+///
+/// The key is `(canonical, world)` and the entry carries the
+/// [`StoreViewCompatToken`]; a token mismatch is a MISS that replaces the
+/// superseded entry. The token folds the external-supersession
+/// dimensions AND the session-overlay identity, so it supplies the
+/// store-view validation token, the resolution-world identity, the
+/// population and the session/overlay identity in one comparison, while
+/// [`BundleMemoWorld`] supplies the base/overlay namespace split.
+///
+/// ## Admission is structural, not by convention
+///
+/// [`Self::insert`] itself refuses anything that is not
+/// [`ReuseClass::is_request_reusable`] — a cancelled, partial,
+/// lease-missed, mutation-unstable or overflow-refused materialisation
+/// cannot be memoised even by a caller that asks. That keeps the rule at
+/// ONE place instead of at every producer.
+#[derive(Default)]
+pub(crate) struct RequestBundleMemo {
+    entries: RwLock<FxHashMap<(String, BundleMemoWorld), BundleMemoEntry>>,
+    /// Monotonic "non-empty" flag with the same flag-after-insert
+    /// ordering discipline as `write_completion_entry`: readers skip the
+    /// lock entirely while the request has memoised nothing.
+    nonempty: AtomicBool,
+}
+
+impl RequestBundleMemo {
+    /// Read the memoised bundle for `(canonical, world)` if this request
+    /// already materialised it under exactly this view identity.
+    ///
+    /// Returns the bundle together with its [`ReuseClass`]; the caller
+    /// must [`ReuseClass::replay_refusal`] before returning the value, or
+    /// the reuse launders the taint the cold return carried.
+    pub(crate) fn get(
+        &self,
+        canonical: &str,
+        world: BundleMemoWorld,
+        token: StoreViewCompatToken,
+    ) -> Option<(Arc<PreparedDeclBundle>, ReuseClass)> {
+        if !self.nonempty.load(Ordering::Acquire) {
+            return None;
+        }
+        let entries = self.entries.read();
+        // One owned key per miss is the price of a tuple key; the
+        // `nonempty` fast path keeps it off the empty-memo hot path.
+        let entry = entries.get(&(canonical.to_owned(), world))?;
+        (entry.token == token).then(|| (Arc::clone(&entry.bundle), entry.reuse))
+    }
+
+    /// Memoise a request-reusable bundle for the rest of this request.
+    /// Replaces a superseded entry for the same `(canonical, world)` (an
+    /// earlier attempt's token). A non-request-reusable class is REFUSED
+    /// here rather than at the call site.
+    pub(crate) fn insert(
+        &self,
+        canonical: &str,
+        world: BundleMemoWorld,
+        token: StoreViewCompatToken,
+        reuse: ReuseClass,
+        bundle: Arc<PreparedDeclBundle>,
+    ) {
+        if !reuse.is_request_reusable() {
+            return;
+        }
+        let mut entries = self.entries.write();
+        entries.insert(
+            (canonical.to_owned(), world),
+            BundleMemoEntry {
+                token,
+                reuse,
+                bundle,
+            },
+        );
+        self.nonempty.store(true, Ordering::Release);
+        drop(entries);
+    }
+
+    /// Test-only: number of memoised bundles across all worlds.
+    #[cfg(test)]
+    pub(crate) fn len_for_tests(&self) -> usize {
+        self.entries.read().len()
+    }
+
+    /// Test-only: number of memoised bundles in ONE world — the
+    /// discriminator for base/overlay namespace isolation.
+    #[cfg(test)]
+    pub(crate) fn len_in_world_for_tests(&self, world: BundleMemoWorld) -> usize {
+        self.entries
+            .read()
+            .keys()
+            .filter(|(_, entry_world)| *entry_world == world)
+            .count()
+    }
 }
 
 /// Per-canonical derived hashes captured by the overlay. The fields
@@ -236,76 +353,123 @@ impl CanonicalCompletionOverlay {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
+            overlay_id: OverlayId::fresh(),
+            revision: BracketedGeneration::default(),
             whole_hashes: RwLock::new(FxHashMap::default()),
             derived_hashes: RwLock::new(FxHashMap::default()),
             file_facts: RwLock::new(FxHashMap::default()),
             whole_hashes_nonempty: AtomicBool::new(false),
             derived_hashes_nonempty: AtomicBool::new(false),
             file_facts_nonempty: AtomicBool::new(false),
-            overlay_bundle_memo: RwLock::new(FxHashMap::default()),
-            overlay_bundle_memo_nonempty: AtomicBool::new(false),
+            bundle_memo: RequestBundleMemo::default(),
+            #[cfg(test)]
+            verify_write_protocol: AtomicBool::new(false),
         }
     }
 
-    /// Read the memoised session-overlay prepared-decl bundle for
-    /// `(canonical, overlay_hash, token)`, if this request already
-    /// materialised it under exactly that overlay content and view
-    /// identity. See the [`Self::overlay_bundle_memo`] field docs for the
-    /// key semantics.
-    pub(crate) fn overlay_bundle_memo_get(
-        &self,
-        canonical: &str,
-        overlay_hash: Hash16,
-        token: StoreViewCompatToken,
-    ) -> Option<Arc<PreparedDeclBundle>> {
-        // Fast path: see `lookup_whole_hash` — skip the lock while the
-        // request has memoised nothing.
-        if !self.overlay_bundle_memo_nonempty.load(Ordering::Acquire) {
-            return None;
+    /// Snapshot the overlay's exact validation-visible shadowing state.
+    ///
+    /// The revision is sampled on both sides of the non-empty flags. A
+    /// writer that overlaps either sample makes the state unreadable;
+    /// one that completes between them leaves a different revision. In
+    /// both cases the caller receives `InFlight` rather than pairing a
+    /// revision with flags from another state.
+    fn completion_state(&self) -> CompletionOverlayState {
+        let Some(before) = self.revision.stable() else {
+            return CompletionOverlayState::InFlight;
+        };
+        let shadows = self.whole_hashes_nonempty.load(Ordering::Acquire)
+            || self.derived_hashes_nonempty.load(Ordering::Acquire)
+            || self.file_facts_nonempty.load(Ordering::Acquire);
+        let Some(after) = self.revision.stable() else {
+            return CompletionOverlayState::InFlight;
+        };
+        if before != after {
+            return CompletionOverlayState::InFlight;
         }
-        let memo = self.overlay_bundle_memo.read();
-        let entry = memo.get(canonical)?;
-        (entry.overlay_hash == overlay_hash && entry.token == token)
-            .then(|| Arc::clone(&entry.bundle))
+        if shadows {
+            CompletionOverlayState::Shadowing {
+                overlay_id: self.overlay_id,
+                revision: before,
+            }
+        } else {
+            CompletionOverlayState::Empty
+        }
     }
 
-    /// Memoise a successfully-materialised session-overlay prepared-decl
-    /// bundle for the rest of this request. Replaces a superseded entry
-    /// for the same owner (an earlier attempt's hash/token). The caller
-    /// owns the success-only gate — only a materialisation whose
-    /// cacheability scope stayed clean may be inserted.
-    pub(crate) fn overlay_bundle_memo_insert(
-        &self,
-        canonical: &str,
-        overlay_hash: Hash16,
-        token: StoreViewCompatToken,
-        bundle: Arc<PreparedDeclBundle>,
-    ) {
-        // Same flag-after-insert ordering discipline as
-        // `write_completion_entry` (flag stored under the write lock). The
-        // race is benign here — a reader observing `false` just
-        // re-materialises — but the overlay's writer pattern stays
-        // uniform.
-        let mut memo = self.overlay_bundle_memo.write();
-        memo.insert(
-            canonical.to_owned(),
-            OverlayBundleMemoEntry {
-                overlay_hash,
-                token,
-                bundle,
-            },
-        );
-        self.overlay_bundle_memo_nonempty
-            .store(true, Ordering::Release);
-        drop(memo);
-    }
-
-    /// Test-only: number of memoised overlay bundles. The discriminating
-    /// tests assert base-path / tombstone / non-cacheable reads never
-    /// populate the memo.
     #[cfg(test)]
-    pub(crate) fn overlay_bundle_memo_len_for_tests(&self) -> usize {
-        self.overlay_bundle_memo.read().len()
+    pub(crate) fn completion_state_for_tests(&self) -> CompletionOverlayState {
+        self.completion_state()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_write_protocol_for_tests(&self) {
+        self.verify_write_protocol.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_revision_in_flight_for_tests(
+        &self,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.revision.mutate(|| {
+            entered.send(()).expect("test reader must be waiting");
+            release.recv().expect("test writer must be released");
+            ((), false)
+        });
+    }
+
+    fn write_whole_hash(&self, canonical: &str, whole_hash: Hash16) -> bool {
+        let mut whole = self.whole_hashes.write();
+        self.whole_hashes_nonempty.store(true, Ordering::Release);
+        #[cfg(test)]
+        if self.verify_write_protocol.load(Ordering::Relaxed) {
+            assert!(self.whole_hashes_nonempty.load(Ordering::Acquire));
+            assert!(
+                self.whole_hashes.try_read().is_none(),
+                "the presence flag must be published while the map write lock is held"
+            );
+        }
+        whole.insert(canonical.to_owned(), whole_hash) != Some(whole_hash)
+    }
+
+    fn write_route_hash(&self, canonical: &str, route_hash: Hash16) -> bool {
+        let mut derived = self.derived_hashes.write();
+        self.derived_hashes_nonempty.store(true, Ordering::Release);
+        #[cfg(test)]
+        if self.verify_write_protocol.load(Ordering::Relaxed) {
+            assert!(self.derived_hashes_nonempty.load(Ordering::Acquire));
+            assert!(
+                self.derived_hashes.try_read().is_none(),
+                "the presence flag must be published while the map write lock is held"
+            );
+        }
+        let entry = derived.entry(canonical.to_owned()).or_default();
+        entry.route.replace(route_hash) != Some(route_hash)
+    }
+
+    fn write_file_facts(&self, canonical: &str, file_facts: Arc<FileFacts>) -> bool {
+        let mut facts = self.file_facts.write();
+        self.file_facts_nonempty.store(true, Ordering::Release);
+        #[cfg(test)]
+        if self.verify_write_protocol.load(Ordering::Relaxed) {
+            assert!(self.file_facts_nonempty.load(Ordering::Acquire));
+            assert!(
+                self.file_facts.try_read().is_none(),
+                "the presence flag must be published while the map write lock is held"
+            );
+        }
+        facts
+            .insert(canonical.to_owned(), Arc::clone(&file_facts))
+            .is_none_or(|previous| previous.as_ref() != file_facts.as_ref())
+    }
+
+    /// The request's prepared-decl bundle memo — the request-world reuse
+    /// tier every bundle producer consults. See [`RequestBundleMemo`].
+    #[inline]
+    pub(crate) fn bundle_memo(&self) -> &RequestBundleMemo {
+        &self.bundle_memo
     }
 
     /// Idempotently promote a freshly-loaded canonical's facts into the
@@ -391,9 +555,8 @@ impl CanonicalCompletionOverlay {
     ///
     /// This method writes the producer-known `(whole_hash, route_hash)`
     /// pair directly into the overlay. Each
-    /// flag-after-insert ordering matches
-    /// [`Self::write_completion_entry`] (lock held across the map
-    /// insert + `_nonempty` flag store + release).
+    /// presence-before-insert ordering matches the `write_*` helpers
+    /// (lock held across flag publication and map insertion).
     ///
     /// The epoch guard against `host.current_store_view_epoch !=
     /// base.mutation_epoch()` lives at the producer-side call site
@@ -408,25 +571,13 @@ impl CanonicalCompletionOverlay {
         whole_hash: Hash16,
         route_hash: Option<Hash16>,
     ) {
-        // Mirror the flag-after-insert ordering of
-        // `write_completion_entry`: hold the lock across the map
-        // insert + `_nonempty` flag store + release so a concurrent
-        // reader observing `_nonempty == false` is guaranteed to also
-        // observe the map as still empty for the canonical.
-        {
-            let mut whole = self.whole_hashes.write();
-            whole.insert(canonical.to_owned(), whole_hash);
-            self.whole_hashes_nonempty.store(true, Ordering::Release);
-            drop(whole);
-        }
-
-        if let Some(route_hash) = route_hash {
-            let mut derived = self.derived_hashes.write();
-            let entry = derived.entry(canonical.to_owned()).or_default();
-            entry.route = Some(route_hash);
-            self.derived_hashes_nonempty.store(true, Ordering::Release);
-            drop(derived);
-        }
+        self.revision.mutate(|| {
+            let mut changed = self.write_whole_hash(canonical, whole_hash);
+            if let Some(route_hash) = route_hash {
+                changed |= self.write_route_hash(canonical, route_hash);
+            }
+            ((), changed)
+        });
     }
 
     fn complete_canonical_inner(
@@ -536,25 +687,6 @@ impl CanonicalCompletionOverlay {
         whole_hash: crate::types::Hash16,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
-        // Flag-after-insert race fix:
-        // the `_nonempty` flag MUST be set BEFORE the write lock is
-        // released, otherwise a concurrent reader can observe
-        // `_nonempty == false` (and skip the overlay via the
-        // `lookup_*` fast paths) AFTER the map insert has already
-        // taken effect, falling through to the base view whose
-        // `FileWholeHash` validator optimistically accepts a stale
-        // cached dependency for an untracked canonical. Holding the
-        // lock across the flag-store closes that window: if a reader
-        // observes `false`, the writer has not yet inserted into the
-        // map (the writer's insert + flag-store + lock-release happen
-        // as one critical section).
-        {
-            let mut whole = self.whole_hashes.write();
-            whole.insert(canonical.to_owned(), whole_hash);
-            self.whole_hashes_nonempty.store(true, Ordering::Release);
-            drop(whole);
-        }
-
         // Per-canonical `IndexedReady` projection — populates `file_facts`
         // and the authored `Route` derived-hash entry. For a
         // session-overlaid canonical the caller passes the overlay
@@ -565,48 +697,36 @@ impl CanonicalCompletionOverlay {
                 .indexed()
                 .get_artifacts_for_content(canonical, whole_hash)
         });
-        if let Some(file_artifacts) = file_artifacts {
-            {
-                let mut facts = self.file_facts.write();
-                facts.insert(canonical.to_owned(), Arc::clone(&file_artifacts.facts));
-                self.file_facts_nonempty.store(true, Ordering::Release);
-                drop(facts);
-            }
-
+        let route_hash = file_artifacts.as_ref().and_then(|file_artifacts| {
             let indexed = &file_artifacts.indexed;
             // Parse-environment reuse gate. The route surface is authored
             // parse state, so an artifact built under a different parse
             // environment must not publish its hash into this overlay.
             let edge_current = host.indexed_surface_is_current(canonical, indexed);
-            let route_hash = if indexed.shallow_state.has_resolvable_surface() && edge_current {
+            if indexed.shallow_state.has_resolvable_surface() && edge_current {
                 Some(crate::resolver_store::hash_route_surface(
                     &indexed.shallow_state,
                 ))
             } else {
                 None
-            };
-            // The owner's import-route dependency is NOT an overlay
-            // derived hash: it is the resolve-domain resolution witness,
-            // validated against the base view's captured immutable
-            // resolution world. The per-request completion overlay
-            // carries promoted parse/content state only, so it neither
-            // records nor shadows that rail.
-            if route_hash.is_some() {
-                // Single write-lock acquisition for the derived-hash entry.
-                // Flag-set is performed under
-                // the same lock so a reader observing `_nonempty == false`
-                // is guaranteed to also observe the map as still empty
-                // for the canonical (same race as the `whole_hashes` /
-                // `file_facts` paths above).
-                let mut derived = self.derived_hashes.write();
-                let entry = derived.entry(canonical.to_owned()).or_default();
-                if let Some(h) = route_hash {
-                    entry.route = Some(h);
-                }
-                self.derived_hashes_nonempty.store(true, Ordering::Release);
-                drop(derived);
             }
-        }
+        });
+
+        // One revision brackets the whole logical promotion even though
+        // its effective shadowing spans three maps. A reader can therefore
+        // never name a population for a partially-published completion.
+        self.revision.mutate(|| {
+            let mut changed = self.write_whole_hash(canonical, whole_hash);
+            if let Some(file_artifacts) = file_artifacts {
+                changed |= self.write_file_facts(canonical, Arc::clone(&file_artifacts.facts));
+            }
+            // The owner's import-route dependency is not a completion-
+            // overlay fact. Only the authored route surface is shadowed.
+            if let Some(route_hash) = route_hash {
+                changed |= self.write_route_hash(canonical, route_hash);
+            }
+            ((), changed)
+        });
     }
 
     fn lookup_whole_hash(&self, canonical_id: &str) -> Option<Hash16> {
@@ -659,10 +779,8 @@ impl CanonicalCompletionOverlay {
     /// test in `block_6c_view_hoist_tests`.
     #[cfg(test)]
     pub(crate) fn insert_whole_hash_for_tests(&self, canonical: &str, whole_hash: Hash16) {
-        let mut whole = self.whole_hashes.write();
-        whole.insert(canonical.to_owned(), whole_hash);
-        self.whole_hashes_nonempty.store(true, Ordering::Release);
-        drop(whole);
+        self.revision
+            .mutate(|| ((), self.write_whole_hash(canonical, whole_hash)));
     }
 
     /// Test-only: directly insert a `(canonical, kind, hash)` derived-hash
@@ -679,17 +797,35 @@ impl CanonicalCompletionOverlay {
         kind: DerivedFactKind,
         hash: Hash16,
     ) {
-        let mut derived = self.derived_hashes.write();
-        let entry = derived.entry(canonical.to_owned()).or_default();
-        match kind {
-            DerivedFactKind::Route => entry.route = Some(hash),
-            // `DirectSource` is handled by the whole-hash arm; the
-            // overlay never records a derived hash for it (matches the
-            // `RouteDerivedHashes::get` contract).
-            DerivedFactKind::DirectSource => {}
-        }
-        self.derived_hashes_nonempty.store(true, Ordering::Release);
-        drop(derived);
+        self.revision.mutate(|| {
+            let changed = match kind {
+                DerivedFactKind::Route => self.write_route_hash(canonical, hash),
+                // `DirectSource` is handled by the whole-hash arm; the
+                // overlay never records a derived hash for it.
+                DerivedFactKind::DirectSource => false,
+            };
+            ((), changed)
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_file_facts_for_tests(&self, canonical: &str, facts: Arc<FileFacts>) {
+        self.revision
+            .mutate(|| ((), self.write_file_facts(canonical, facts)));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lookup_derived_hash_for_tests(
+        &self,
+        canonical: &str,
+        kind: DerivedFactKind,
+    ) -> Option<Hash16> {
+        self.lookup_derived_hash(canonical, kind)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracks_file_for_tests(&self, canonical: &str) -> bool {
+        self.tracks_file(canonical)
     }
 
     /// Whether the overlay tracks `canonical_id` (any per-canonical
@@ -749,6 +885,10 @@ pub(crate) struct RequestStoreView<'a> {
     /// (`promote_route_completion`) are NOT validation-promotion
     /// and stay live so the cold compute can still observe additive loads.
     base_is_current: bool,
+    #[cfg(test)]
+    validation_step_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    #[cfg(test)]
+    validation_step: AtomicUsize,
 }
 
 impl<'a> RequestStoreView<'a> {
@@ -761,6 +901,10 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current: true,
+            #[cfg(test)]
+            validation_step_hook: None,
+            #[cfg(test)]
+            validation_step: AtomicUsize::new(0),
         }
     }
 
@@ -782,6 +926,10 @@ impl<'a> RequestStoreView<'a> {
             base,
             overlay,
             base_is_current,
+            #[cfg(test)]
+            validation_step_hook: None,
+            #[cfg(test)]
+            validation_step: AtomicUsize::new(0),
         }
     }
 
@@ -803,31 +951,50 @@ impl<'a> RequestStoreView<'a> {
     pub(crate) fn peek_whole_hash_for_tests(&self, canonical_id: &str) -> Option<Hash16> {
         self.overlay.peek_whole_hash_for_tests(canonical_id)
     }
-}
 
-impl<'a> StoreView for RequestStoreView<'a> {
-    #[inline]
-    fn compat_token(&self) -> StoreViewCompatToken {
-        // The overlay does not change project-wide identity; report the
-        // base view's token unchanged so singleflight lanes still
-        // coalesce.
-        self.base.compat_token()
+    #[cfg(test)]
+    pub(crate) fn with_validation_step_hook_for_tests(
+        mut self,
+        hook: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> Self {
+        self.validation_step_hook = Some(hook);
+        self
     }
 
-    fn validates(&self, fact: &FactVersionRef) -> bool {
-        // Cold-seed fail-closed: a non-current base means the manager
-        // could not prove the snapshot coherent, so no warm-cache entry
-        // may validate through this view. Every nested probe misses and
-        // falls to its own cold path (whose promotion fence rejects a
-        // stale result).
-        if !self.base_is_current {
-            return false;
+    #[inline]
+    fn note_validation_step(&self) {
+        #[cfg(test)]
+        if let Some(hook) = &self.validation_step_hook {
+            hook(self.validation_step.fetch_add(1, Ordering::Relaxed));
         }
+    }
+
+    fn population_for(
+        &self,
+        state: CompletionOverlayState,
+    ) -> Option<verter_workspace::ViewPopulation> {
+        use verter_workspace::{ViewPopulation, ViewPopulationParent};
+
+        let parent = match self.base.view_population() {
+            ViewPopulation::Base => ViewPopulationParent::Base,
+            ViewPopulation::SessionOverlay(fingerprint) => {
+                ViewPopulationParent::SessionOverlay(fingerprint)
+            }
+            // A HostStoreView is a durable parent, never another request
+            // completion. Refuse if that construction invariant changes.
+            ViewPopulation::RequestCompletion(_) => return None,
+        };
+        ViewPopulation::refined_by_completion(parent, state)
+    }
+
+    fn validates_at_completion_state(
+        &self,
+        fact: &FactVersionRef,
+        state: CompletionOverlayState,
+    ) -> bool {
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash } => {
                 if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
-                    // Shadowing: overlay value is authoritative; mismatch
-                    // rejects without falling through.
                     return &overlay_hash == hash;
                 }
                 self.base.validates(fact)
@@ -836,26 +1003,22 @@ impl<'a> StoreView for RequestStoreView<'a> {
                 canonical_id,
                 kind,
                 hash,
-            } => {
-                match kind {
-                    DerivedFactKind::DirectSource => {
-                        // `DirectSource` is a content-hash alias for
-                        // `FileWholeHash` — same shadowing arm as above.
-                        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
-                            return &overlay_hash == hash;
-                        }
-                        self.base.validates(fact)
+            } => match kind {
+                DerivedFactKind::DirectSource => {
+                    if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
+                        return &overlay_hash == hash;
                     }
-                    _ => {
-                        if let Some(overlay_hash) =
-                            self.overlay.lookup_derived_hash(canonical_id, *kind)
-                        {
-                            return &overlay_hash == hash;
-                        }
-                        self.base.validates(fact)
-                    }
+                    self.base.validates(fact)
                 }
-            }
+                _ => {
+                    if let Some(overlay_hash) =
+                        self.overlay.lookup_derived_hash(canonical_id, *kind)
+                    {
+                        return &overlay_hash == hash;
+                    }
+                    self.base.validates(fact)
+                }
+            },
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
@@ -870,13 +1033,185 @@ impl<'a> StoreView for RequestStoreView<'a> {
                 *parser_version,
                 file_language_id,
             ),
-            FactVersionRef::ProjectGeneration { .. } => {
-                // ProjectGeneration validation is rooted on the base
-                // view's snapshot; the overlay never alters project-wide
-                // generation.
-                self.base.validates(fact)
+            FactVersionRef::ProjectGeneration { .. } => self.base.validates(fact),
+            FactVersionRef::DomainGeneration(aggregate) => {
+                use verter_workspace::CompactionDomain;
+                match aggregate.domain {
+                    // These populations are independent of per-canonical
+                    // completion shadowing.
+                    CompactionDomain::WorkspaceShape | CompactionDomain::Resolution => {
+                        self.base.validates(fact)
+                    }
+                    // Empty completion state genuinely is the parent
+                    // world: no validation-visible key is shadowed. Once
+                    // a completion lands, the id/revision population makes
+                    // the base helper compare the identical stamp under a
+                    // distinct world rather than refusing the domain
+                    // unconditionally.
+                    CompactionDomain::Content
+                    | CompactionDomain::SourceEnv
+                    | CompactionDomain::SemanticImports
+                    | CompactionDomain::RouteSurface => {
+                        self.population_for(state).is_some_and(|population| {
+                            self.base.validates_domain_aggregate_in_population(
+                                aggregate, fact, population,
+                            )
+                        })
+                    }
+                }
+            }
+            FactVersionRef::StrictSelfRootWorld(world) => self
+                .strict_self_root_world_at_completion_state(state)
+                .is_some_and(|current| current == *world),
+        }
+    }
+
+    fn strict_self_root_world_at_completion_state(
+        &self,
+        state: CompletionOverlayState,
+    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        let mut world = self.base.strict_self_root_world_identity()?;
+        world.population = self.population_for(state)?;
+        Some(world)
+    }
+
+    fn strict_self_root_is_witnessable_at_completion_state(&self, canonical_id: &str) -> bool {
+        self.overlay.lookup_whole_hash(canonical_id).is_some()
+            || self.base.strict_self_root_is_witnessable(canonical_id)
+    }
+
+    fn validates_self_root_at_completion_state(
+        &self,
+        canonical_id: &str,
+        hash: &ResolverHash16,
+    ) -> bool {
+        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
+            return &overlay_hash == hash;
+        }
+        self.base.validates_self_root_whole_hash(canonical_id, hash)
+    }
+}
+
+impl<'a> StoreView for RequestStoreView<'a> {
+    #[inline]
+    fn compat_token(&self) -> StoreViewCompatToken {
+        // The overlay does not change project-wide identity; report the
+        // base view's token unchanged so singleflight lanes still
+        // coalesce.
+        self.base.compat_token()
+    }
+
+    /// Reuse the base view's captured composites while replacing its
+    /// durable population with this request view's exact completion-
+    /// overlay refinement. Vouch for nothing when the base was not
+    /// proven current.
+    ///
+    /// The currentness gate is the same fail-closed rule every
+    /// `validates*` method below applies: a scope seeded from a stale
+    /// base must not detect movement against stamps that base could not
+    /// vouch for, and must not compact. The overlay identity is a
+    /// population discriminant, not a stamp: empty overlays project to
+    /// the parent, shadowing overlays carry their own id and revision,
+    /// and an in-flight writer supplies no population.
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        if !self.base_is_current {
+            return verter_workspace::AggregateBasisSeed::Unvouched;
+        }
+        let verter_workspace::AggregateBasisSeed::Vouched {
+            view_domains,
+            semantic_imports,
+            route_surface,
+            ..
+        } = crate::resolver_core::StoreView::aggregate_basis_seed(self.base)
+        else {
+            return verter_workspace::AggregateBasisSeed::Unvouched;
+        };
+        verter_workspace::AggregateBasisSeed::Vouched {
+            view_population: self.population_for(self.overlay.completion_state()),
+            view_domains,
+            semantic_imports,
+            route_surface,
+        }
+    }
+
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        // Cold-seed fail-closed: a non-current base means the manager
+        // could not prove the snapshot coherent, so no warm-cache entry
+        // may validate through this view. Every nested probe misses and
+        // falls to its own cold path (whose promotion fence rejects a
+        // stale result).
+        if !self.base_is_current {
+            return false;
+        }
+        self.note_validation_step();
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return false;
+        }
+        self.validates_at_completion_state(fact, state) && self.overlay.completion_state() == state
+    }
+
+    fn validate_fact_signature(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> Result<(), usize> {
+        if sig.is_empty() {
+            return Ok(());
+        }
+        if !self.base_is_current {
+            return Err(0);
+        }
+
+        let carries_resolution_aggregate = sig.iter().any(|fact| {
+            matches!(
+                fact.attribution(),
+                verter_workspace::FactAttribution::DomainAggregate(
+                    verter_workspace::CompactionDomain::Resolution
+                )
+            )
+        });
+        if carries_resolution_aggregate {
+            if let Some(index) = sig.iter().position(|fact| {
+                matches!(
+                    fact.attribution(),
+                    verter_workspace::FactAttribution::DomainAggregate(
+                        verter_workspace::CompactionDomain::Content
+                            | verter_workspace::CompactionDomain::SourceEnv
+                            | verter_workspace::CompactionDomain::SemanticImports
+                            | verter_workspace::CompactionDomain::RouteSurface
+                    )
+                )
+            }) {
+                return Err(index);
             }
         }
+
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return Err(0);
+        }
+
+        for (index, fact) in sig.iter().enumerate() {
+            self.note_validation_step();
+            let valid = match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                {
+                    self.validates_self_root_at_completion_state(canonical_id, hash)
+                }
+                other => self.validates_at_completion_state(other, state),
+            };
+            if !valid {
+                return Err(index);
+            }
+        }
+
+        if self.overlay.completion_state() != state {
+            return Err(0);
+        }
+        Ok(())
     }
 
     #[inline]
@@ -911,12 +1246,50 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if !self.base_is_current {
             return false;
         }
-        if let Some(overlay_hash) = self.overlay.lookup_whole_hash(canonical_id) {
-            // Shadowing: overlay is authoritative for the self-root
-            // identity.
-            return &overlay_hash == hash;
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return false;
         }
-        self.base.validates_self_root_whole_hash(canonical_id, hash)
+        self.validates_self_root_at_completion_state(canonical_id, hash)
+            && self.overlay.completion_state() == state
+    }
+
+    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        if !self.base_is_current {
+            return None;
+        }
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return None;
+        }
+        let world = self.strict_self_root_world_at_completion_state(state)?;
+        (self.overlay.completion_state() == state).then_some(world)
+    }
+
+    fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+        self.strict_self_root_is_witnessable_at_completion_state(canonical_id)
+    }
+
+    fn mint_strict_self_root_world(
+        &self,
+        roots: &[(&str, ResolverHash16)],
+    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        if !self.base_is_current {
+            return None;
+        }
+        let state = self.overlay.completion_state();
+        if state == CompletionOverlayState::InFlight {
+            return None;
+        }
+        let before = self.strict_self_root_world_at_completion_state(state)?;
+        if !roots.iter().all(|(canonical, hash)| {
+            self.strict_self_root_is_witnessable_at_completion_state(canonical)
+                && self.validates_self_root_at_completion_state(canonical, hash)
+        }) {
+            return None;
+        }
+        let after = self.strict_self_root_world_at_completion_state(state)?;
+        (before == after && self.overlay.completion_state() == state).then_some(before)
     }
 
     /// Strict contributor source-env identity validation on the
@@ -1038,8 +1411,8 @@ impl<'a> StoreView for RequestStoreView<'a> {
         // Route the call through the overlay's
         // `complete_route_canonical` writer — it writes
         // `whole_hashes` + `derived_hashes` entries with the same
-        // flag-after-insert ordering as the standard
-        // `write_completion_entry` path. The epoch guard lives at
+        // presence-before-insert ordering as the standard completion
+        // path. The epoch guard lives at
         // the producer-side call site (where the concrete host is
         // available) so this trait method stays off the
         // `VerterHost` type and the resolver-context seal

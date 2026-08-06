@@ -87,7 +87,7 @@ fn routed_shallow_bundle_materialisation_populates_overlay_whole_hash() {
     // shallow producer; the producer promotes the canonical's
     // content hash plus `Route` fact into the
     // overlay before publishing the bundle.
-    let bundle = host.prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts");
+    let bundle = host.prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts");
     assert!(
         bundle.is_some(),
         "the materialiser must produce a bundle for an existing `.d.ts` file"
@@ -143,7 +143,7 @@ fn routed_shallow_bundle_materialisation_view_lookup_observes_overlay_whole_hash
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts")
+        .prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts")
         .expect("materialiser must produce a bundle");
 
     let host_whole_hash = host
@@ -173,7 +173,7 @@ fn routed_shallow_bundle_materialisation_optional_import_route_promotion() {
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts")
+        .prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts")
         .expect("materialiser must produce a bundle");
 
     let host_route_hash = host.current_derived_fact_hash("/typedefs.d.ts", DerivedFactKind::Route);

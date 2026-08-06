@@ -770,7 +770,7 @@ defineProps<Payload>()
         "budget exhaustion must make the TypeInfo result partial"
     );
     assert!(
-        !output.facts_cacheable,
+        !output.facts_cacheable(),
         "budget exhaustion must refuse TypeInfo fact-footprint admission"
     );
 }
@@ -826,7 +826,7 @@ defineModel<string>('selected')
     assert_eq!(model.name, "selected");
     assert_eq!(model.value_type.as_str(), "string");
     assert!(output.completeness.is_partial());
-    assert!(!output.facts_cacheable);
+    assert!(!output.facts_cacheable());
 }
 
 #[test]
@@ -971,6 +971,7 @@ defineProps<{
     );
 
     let output = produce(&host, "/src/Props.vue", VueMacroCodegenDemand::Runtime);
+    let facts_cacheable = output.facts_cacheable();
     let runtime = output
         .runtime
         .expect("runtime demand must produce a bundle");
@@ -990,7 +991,7 @@ defineProps<{
             .any(|id| id == "/src/Props.vue"),
         "the per-call fact footprint must retain the owner canonical"
     );
-    assert!(output.facts_cacheable);
+    assert!(facts_cacheable);
     assert_eq!(
         output.completeness,
         crate::semantic_query::ResultCompleteness::Complete

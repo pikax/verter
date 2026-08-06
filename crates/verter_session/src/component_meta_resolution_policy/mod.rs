@@ -286,17 +286,21 @@ fn build_policy_macro_role_identities(
         // through the shared dispatch, walked over the structural skeleton
         // (no descent into function inner types or IndexedAccess).
         if let Some(locator) = mac.parsed_type_argument.as_ref() {
-            let payload = dispatch.raise_semantic_type_source_to_hot(
-                &verter_type_expr::facts::SemanticTypeSource::Authored(
-                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone()),
-                ),
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
-                    scope_owner: mac.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            );
+            let payload = dispatch
+                .raise_semantic_type_source_to_hot(
+                    &verter_type_expr::facts::SemanticTypeSource::Authored(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                            locator.clone(),
+                        ),
+                    ),
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        scope_owner: mac.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary();
             if let Some(hot) = payload {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
                     record_name(name, mac.owner, &mut identities, &mut visited_names);
@@ -315,17 +319,19 @@ fn build_policy_macro_role_identities(
                 &mut identities,
                 &mut visited_names,
             );
-            let shape_hot = dispatch.raise_semantic_type_source_to_hot(
-                &verter_type_expr::facts::SemanticTypeSource::Synthesized(
-                    resolved_local.shape.clone(),
-                ),
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
-                    scope_owner: mac.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            );
+            let shape_hot = dispatch
+                .raise_semantic_type_source_to_hot(
+                    &verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                        resolved_local.shape.clone(),
+                    ),
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        scope_owner: mac.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary();
             if let Some(hot) = shape_hot {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
                     record_name(name, mac.owner, &mut identities, &mut visited_names);
@@ -365,15 +371,18 @@ fn build_policy_macro_role_identities(
                 },
             ),
         );
-        let Some(hot) = dispatch.raise_semantic_type_source_to_hot(
-            &body_source,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id: owner_canonical,
-                scope_owner: identity.owner,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        ) else {
+        let Some(hot) = dispatch
+            .raise_semantic_type_source_to_hot(
+                &body_source,
+                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    scope_canonical_id: owner_canonical,
+                    scope_owner: identity.owner,
+                    context: transit_ctx,
+                    interior_failures: None,
+                },
+            )
+            .at_optional_boundary()
+        else {
             continue;
         };
         let mut newly_recorded: Vec<String> = Vec::new();

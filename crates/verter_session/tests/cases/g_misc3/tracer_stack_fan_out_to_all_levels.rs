@@ -59,7 +59,9 @@ fn fan_out_reaches_all_three_levels() {
             FactReadSetFinalise::NonCacheable(_) => {
                 panic!("{name} scope unexpectedly non-cacheable")
             }
-            FactReadSetFinalise::Overflow => panic!("{name} scope overflowed unexpectedly"),
+            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+                panic!("{name} scope overflowed unexpectedly")
+            }
         }
     }
 }

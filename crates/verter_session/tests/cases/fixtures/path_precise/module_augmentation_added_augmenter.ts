@@ -7,8 +7,8 @@
 // `ModuleAugmentationIndexShape(target).semantic_hash` invariance:
 // before secondary load, fingerprint = `hash([primary])`; after
 // secondary load, fingerprint = `hash([primary, secondary])` sorted.
-// Existing `EffectiveExportSet(specifier="vue")` cache entries
-// MUST invalidate when the augmenter set changes.
+// Existing consumer cache entries MUST invalidate when the
+// augmenter set changes.
 //
 // Stage 0 baseline characterisation: today there is no typed
 // augmenter-set fingerprint; the secondary's load forces a

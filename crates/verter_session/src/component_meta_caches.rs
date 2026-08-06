@@ -683,7 +683,7 @@ impl ImportedRegistryDb {
         >,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_admit_in_scope(key, ctx, probe, || compute(prepared))
@@ -980,7 +980,7 @@ impl DeclarationLookupDb {
         F: FnOnce(P) -> ComputedEntry<ResolvedTypeDeclaration>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1137,7 +1137,7 @@ impl ResolvabilityDb {
         F: FnOnce(P) -> ComputedEntry<bool>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1307,7 +1307,7 @@ impl OwnerCollectionDb {
         F: FnOnce(P) -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1878,7 +1878,7 @@ impl ShapeCacheDb {
         F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't>) -> R,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 f(ShapeCacheOwnerScope {
                     db: self,
@@ -3345,9 +3345,10 @@ where
     let validated_at_generation = ctx.project_type_store().current_project_generation();
     let mut compute_fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
     let mut observed_self_roots: Vec<(Arc<str>, crate::types::Hash16)> = Vec::new();
-    let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-        compute_bfs(&mut compute_fence, &mut observed_self_roots)
-    });
+    let (result, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        || compute_bfs(&mut compute_fence, &mut observed_self_roots),
+    );
     provenance
         .ref_cycle_fact_tracer_installs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3438,15 +3439,18 @@ where
         crate::resolver_core::FactReadSetFinalise::Ok(traced) => {
             // Build the observed-root carrier: visited-identity
             // self-roots prepended, traced facts merged on top.
-            match ref_cycle_read_set(&observed_self_roots, &traced) {
-                Some((facts, self_root_canonicals)) => ComputeAdmission::Cacheable(RefCycleEntry {
+            let completed = crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
+                ref_cycle_read_set(view, &observed_self_roots, &traced)
+            });
+            match completed {
+                Ok((facts, self_root_canonicals)) => ComputeAdmission::Cacheable(RefCycleEntry {
                     result,
                     read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
                     dispatch_dep_signature,
                     self_root_canonicals,
                     validated_at_generation,
                 }),
-                None => {
+                Err(reason) => {
                     // A torn observation among the visited
                     // self-roots — the value is valid but the
                     // signature cannot be built strictly. The
@@ -3457,7 +3461,7 @@ where
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     ComputeAdmission::ReturnOnly {
                         value: return_only_value(dispatch_dep_signature),
-                        reason: crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
+                        reason,
                     }
                 }
             }
@@ -3477,6 +3481,15 @@ where
                 reason: crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
             }
         }
+        // A compaction domain moved mid-scope. Same refusal, DIFFERENT
+        // reason: instability is not a size failure and must never be
+        // attributed as one.
+        crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            ComputeAdmission::ReturnOnly {
+                value: return_only_value(dispatch_dep_signature),
+                reason: crate::cache_runtime::NonAdmissionReason::MutationUnstable,
+            }
+        }
     }
 }
 
@@ -3494,14 +3507,18 @@ where
 /// self-root (it MUST agree — a mismatch is a torn read), every other
 /// traced fact is kept verbatim.
 ///
-/// Returns `None` — the caller routes the bool through `ReturnOnly` —
-/// when two visited identities name the same canonical with
-/// conflicting observed hashes, or a traced `FileWholeHash` disagrees
-/// with an observed self-root hash.
+/// Returns a typed refusal when visited identities conflict, a traced root
+/// disagrees, strict-world provenance cannot be established, or the completed
+/// carrier remains above the cap. The caller routes the bool through
+/// `ReturnOnly` in every refusal case.
 fn ref_cycle_read_set(
+    view: &dyn crate::resolver_core::StoreView,
     observed_self_roots: &[(Arc<str>, crate::types::Hash16)],
     traced_facts: &[crate::resolver_core::FactVersionRef],
-) -> Option<crate::fact_signature_helpers::StructuralCarrierReadSet> {
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use crate::resolver_core::FactVersionRef;
 
     // Collapse the visited self-roots into a per-canonical hash map;
@@ -3510,7 +3527,9 @@ fn ref_cycle_read_set(
         rustc_hash::FxHashMap::default();
     for (canonical, observed_hash) in observed_self_roots {
         match self_root_hashes.get(canonical) {
-            Some(existing) if existing != observed_hash => return None,
+            Some(existing) if existing != observed_hash => {
+                return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
+            }
             _ => {
                 self_root_hashes.insert(Arc::clone(canonical), *observed_hash);
             }
@@ -3532,7 +3551,7 @@ fn ref_cycle_read_set(
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
             if let Some(observed_hash) = self_root_hashes.get(canonical_id.as_str()) {
                 if hash != observed_hash {
-                    return None;
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
                 continue;
             }
@@ -3540,12 +3559,82 @@ fn ref_cycle_read_set(
         facts.push(fact.clone());
     }
 
-    let mut self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
-    self_root_canonicals.sort();
-    Some((Arc::from(facts), Arc::from(self_root_canonicals)))
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
+    crate::fact_signature_helpers::bound_completed_structural_carrier(
+        view,
+        facts,
+        self_root_canonicals,
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn ref_cycle_terminal_merge_enforces_the_completed_carrier_cap() {
+    let view = crate::semantic_graph_self_root_tests::StrictWorldTestView::default();
+    let root = Arc::<str>::from("/w/ref-cycle-root.ts");
+    let observed = vec![(Arc::clone(&root), [0x33; 16])];
+    let at_cap_after_merge: Vec<crate::resolver_core::FactVersionRef> = (0
+        ..crate::resolver_core::FACT_SIGNATURE_CAP - 1)
+        .map(
+            |generation| crate::resolver_core::FactVersionRef::ProjectGeneration {
+                generation: generation as u64,
+            },
+        )
+        .collect();
+
+    let (facts, retained_roots) = ref_cycle_read_set(&view, &observed, &at_cap_after_merge)
+        .expect("the exact-cap ref-cycle carrier remains admissible");
+    assert_eq!(facts.len(), crate::resolver_core::FACT_SIGNATURE_CAP);
+    assert_eq!(retained_roots.as_ref(), &[root]);
+
+    let mut above_cap_after_merge = at_cap_after_merge;
+    above_cap_after_merge.push(crate::resolver_core::FactVersionRef::ProjectGeneration {
+        generation: crate::resolver_core::FACT_SIGNATURE_CAP as u64,
+    });
+    assert_eq!(
+        ref_cycle_read_set(&view, &observed, &above_cap_after_merge).unwrap_err(),
+        crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RefCycle completed-carrier cap acceptance.
+#[cfg(test)]
+#[test]
+fn ref_cycle_publication_refuses_a_post_finalise_over_cap_carrier() {
+    let canonical = "/w/ref-cycle-publish.ts";
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from("export type Root = string;\n"),
+            file_language: crate::types::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert root");
+    let whole_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("ref-cycle root is indexed")
+        .whole_hash;
+    let traced = crate::semantic_graph_self_root_tests::exact_cap_terminal_witness_facts();
+
+    let admission = trace_ref_cycle_compute(&host, |_, observed_roots| {
+        crate::fact_signature_helpers::observe_fact_signature(&traced);
+        observed_roots.push((Arc::<str>::from(canonical), whole_hash));
+        true
+    });
+
+    assert!(matches!(
+        admission,
+        ComputeAdmission::ReturnOnly {
+            reason: crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+            ..
+        }
+    ));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // AppConfigNoOverrideProofDb production producer
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -3646,8 +3735,10 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise) =
-        crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
+    let (no_override, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        cold_body,
+    );
     host.provenance
         .app_config_proof_fact_tracer_installs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3681,5 +3772,9 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         }
+        // Refuses like an overflow and is counted as neither: the
+        // overflow counter is a SIZE observable and a stability refusal
+        // must not inflate it.
+        crate::resolver_core::FactReadSetFinalise::MutationUnstable => None,
     }
 }

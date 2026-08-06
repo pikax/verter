@@ -1588,8 +1588,8 @@ impl SemanticGraphStore {
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> RelationPublishDecision,
     {
-        let host = ctx.host_for_fact_tracer_install();
-        let (value, read_set) = host.with_fact_tracer(compute);
+        let (value, read_set) = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+            .with_fact_tracer(compute);
         match read_set.finalise() {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
                 RelationPublishDecision::Publish {
@@ -1597,24 +1597,21 @@ impl SemanticGraphStore {
                     result,
                     validated_at_generation,
                 } => {
-                    let mut self_root_canonicals: Vec<Arc<str>> =
-                        Vec::with_capacity(observed_self_roots.len());
-                    for (canonical, _) in &observed_self_roots {
-                        if !self_root_canonicals.iter().any(|root| root == canonical) {
-                            self_root_canonicals.push(Arc::clone(canonical));
-                        }
-                    }
-                    match semantic_graph_read_set_signature(&observed_self_roots, &facts) {
-                        Some(carrier) => self.insert_relation_owned(
+                    let completed =
+                        crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
+                            semantic_graph_read_set_signature(view, &observed_self_roots, &facts)
+                        });
+                    match completed {
+                        Ok((facts, self_root_canonicals)) => self.insert_relation_owned(
                             key,
-                            carrier,
-                            Arc::from(self_root_canonicals),
+                            crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                            self_root_canonicals,
                             result,
                             validated_at_generation,
                         ),
-                        None => crate::cache_runtime::admission::propagate_non_admission(
-                            crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
-                        ),
+                        Err(reason) => {
+                            crate::cache_runtime::admission::propagate_non_admission(reason)
+                        }
                     }
                 }
                 RelationPublishDecision::ReturnOnly(reason) => {
@@ -1629,6 +1626,11 @@ impl SemanticGraphStore {
             crate::resolver_core::FactReadSetFinalise::Overflow => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+                crate::cache_runtime::admission::propagate_non_admission(
+                    crate::cache_runtime::NonAdmissionReason::MutationUnstable,
                 );
             }
         }
@@ -3824,9 +3826,13 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 // `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
 // this body.
 pub(crate) fn semantic_graph_read_set_signature(
+    view: &dyn crate::resolver_core::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
     traced_facts: &[crate::resolver_core::FactVersionRef],
-) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use crate::resolver_core::FactVersionRef;
 
     // Collapse the observed self-roots into a per-canonical hash map;
@@ -3835,7 +3841,9 @@ pub(crate) fn semantic_graph_read_set_signature(
         rustc_hash::FxHashMap::default();
     for (canonical, observed_hash) in observed_self_roots {
         match self_root_hashes.get(canonical) {
-            Some(existing) if existing != observed_hash => return None,
+            Some(existing) if existing != observed_hash => {
+                return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
+            }
             _ => {
                 self_root_hashes.insert(Arc::clone(canonical), *observed_hash);
             }
@@ -3864,7 +3872,7 @@ pub(crate) fn semantic_graph_read_set_signature(
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
             if let Some(observed_hash) = self_root_hashes.get(canonical_id.as_str()) {
                 if hash != observed_hash {
-                    return None;
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
                 // Already emitted as a self-root above — do not
                 // duplicate.
@@ -3874,9 +3882,12 @@ pub(crate) fn semantic_graph_read_set_signature(
         facts.push(fact.clone());
     }
 
-    Some(crate::fact_signature_helpers::ReadSetSignature::new(
-        Arc::from(facts),
-    ))
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
+    crate::fact_signature_helpers::bound_completed_structural_carrier(
+        view,
+        facts,
+        self_root_canonicals,
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────

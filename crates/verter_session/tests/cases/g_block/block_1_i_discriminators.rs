@@ -60,8 +60,14 @@ fn execute_read_cold_build_persists_traced_facts() {
         "shared cold-build helper must exist on ProjectSemanticDispatch"
     );
     assert!(
-        mod_src.contains("install_fact_tracer(host"),
-        "shared cold-build helper must wrap the cold-build closure with install_fact_tracer"
+        mod_src.contains("install_fact_tracer(\n                &basis_source,"),
+        "shared cold-build helper must wrap the cold-build closure with install_fact_tracer, \
+         seeded from the request-bound basis source it captured before the closure — a \
+         host-only or unbound tracer disarms the cold build's compaction basis"
+    );
+    assert!(
+        mod_src.contains("let basis_source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);"),
+        "and that source must come from the dispatch's REQUEST-BOUND context"
     );
     assert!(
         raise_src.contains("self.execute_via_cold_build_helper(key)"),

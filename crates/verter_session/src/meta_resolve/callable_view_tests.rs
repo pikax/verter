@@ -1285,6 +1285,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the exact-owner authored source raises")
         .node();
     assert_eq!(

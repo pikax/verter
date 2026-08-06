@@ -1404,12 +1404,15 @@ fn owner_local_member_reaches_non_owner_ref(
     let Some(member) = prepared.member_index.get(member_name) else {
         return false;
     };
-    let Some(member_node) = dispatch.raise_authored_locator_to_hot(
-        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            ProjectionMode::Navigate,
-        ),
-    ) else {
+    let Some(member_node) = dispatch
+        .raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
+        )
+        .at_optional_boundary()
+    else {
         return false;
     };
     node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node(), 0)

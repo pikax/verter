@@ -11,10 +11,11 @@
 //! The witness here is the same information expressed as resolve-domain
 //! facts. Resolving an owner's authored specifiers through the shared
 //! route-edge policy drives the Engine's sealed resolution transaction,
-//! and every admitted resolution carries its own `ReadSetSignature` —
-//! the complete, path-precise observation set (`PathProbe`, `Realpath`,
-//! `Manifest`, `ExactResolution`, `DirectoryMembers`, `RecoveryScope`,
-//! `ContextSelection`) that produced the answer.
+//! and every admitted resolution carries its own `ReadSetSignature`. Its
+//! derived `Decision` fact is the bounded consumer witness; the resolution
+//! world's DAG retains the path-precise primitive observations (`PathProbe`,
+//! `Realpath`, `Manifest`, `ExactResolution`, `DirectoryMembers`,
+//! `RecoveryScope`, `ContextSelection`) that produced the answer.
 //!
 //! Consequences that the digest could not provide:
 //!
@@ -29,9 +30,9 @@
 //!
 //! # Why the collection is scoped, not ambient
 //!
-//! An admitted resolution's signature is the transaction's COMPLETE
-//! observation set — a single miss carries its whole exhausted probe
-//! set. Fanning every admitted resolution into whatever fact tracer
+//! An admitted resolution's signature contains its derived Decision node,
+//! whose DAG edges retain the transaction's complete observations. Fanning
+//! every admitted resolution into whatever fact tracer
 //! happens to be installed would inflate every read set in the process,
 //! because `resolve_for_persistent_state` sits on every route-edge hop.
 //! So the collection point is a DEDICATED scope
@@ -107,8 +108,8 @@ impl Drop for ResolutionWitnessScope {
     }
 }
 
-/// Record an admitted resolution's own observation signature into every
-/// open [`ResolutionWitnessScope`].
+/// Record an admitted resolution's sealed Decision signature into every open
+/// [`ResolutionWitnessScope`].
 ///
 /// This is the ONE collection point for the resolve-domain rooting rail.
 /// It is called from the two Engine entry points the session resolves
@@ -194,6 +195,14 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(String, Option<verter_workspace::ResolveRequestKind>)],
     ) -> Option<Vec<FactVersionRef>> {
+        #[cfg(test)]
+        if self
+            .test_force
+            .force_import_route_witness_refusal_for_tests
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.decline_import_route_witness();
+        }
         let witness = self.observed_import_route_witness(canonical_id, specifiers)?;
         if witness.len() > verter_workspace::FACT_SIGNATURE_CAP {
             // Overflow: the witness cannot represent the complete

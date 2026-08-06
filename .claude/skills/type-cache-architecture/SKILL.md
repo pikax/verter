@@ -56,9 +56,15 @@ the cache-runtime overhaul and any feature admitting cache entries.
    route through `ReturnOnly`.
 7. `ReturnOnly` never publishes a cache entry, never registers
    reverse-index metadata, and never becomes a persistent artifact.
-8. Reverse dependency graphs are not invalidation authority. They may
+8. Reverse dependency graphs are not cache-eviction authority. They may
    support observability, prefetch, diagnostics, and targeted stale
-   sweeps only.
+   sweeps only. A ROOT-OWNED resolution graph may additionally advance
+   derived resolution-currency facts, on three conditions: the edges are
+   recorded exhaustively by the same observation operation that creates
+   the witness; propagation runs inside the resolution mutation
+   publication protocol; and every dependent cache still RECORDS the
+   derived fact and VALIDATES it on read. It may not evict an entry and
+   it may not stand in for read-side validation.
 9. Same-canonical edits must be caught by strict self-root validation,
    not by eager own-canonical drains.
 10. Cross-file edits invalidate consumers lazily through recorded facts,
@@ -114,8 +120,24 @@ upsert does NOT iterate `reverse_deps_for` to drain its dependents — no
 reverse-dependent cascade. `smart_invalidate_dependents`, a
 `reverse_deps_for`-driven eviction loop, `invalidate_canonical` from upsert,
 and `*_db::invalidate_canonical` as a public API are all banned in production
-(the `reverse_graph_not_wired_to_invalidation` +
-`host_upsert_performs_no_reverse_dependent_eviction` guards enforce this).
+(the `host_upsert_performs_no_reverse_dependent_eviction` guard enforces
+this).
+
+*Narrow exception — derived resolution currency.* Advancing a derived
+resolution fact (`ResolutionFactKey::Decision` /
+`::OwnerResolutionSet`) through the root-owned reverse edges is CURRENCY
+PROPAGATION, not eager cache invalidation. No reverse-dependent cache entry
+is drained: the entry stays exactly where it is and becomes cold only when
+its own recorded derived version fails ordinary read-side validation.
+Enforcement is structural plus behavioural, never a name-keyed scanner: the
+exhaustive `classify_resolution_observation` match is a compile rail that
+forces every fact variant into a direct-leaf / derived-node / terminal
+disposition. `ResolutionFactRef::is_decision` and
+`ResolutionFactRef::is_owner_resolution_set` are the read-only consumer
+oracles for identifying those derived nodes without exposing the key fields,
+and
+`reverse_decision_propagation_does_not_evict_cache_entries`
+(`verter_workspace`) proves the executable non-eviction behaviour.
 
 Distinct from the banned cascade: the **own-canonical drain**.
 `upsert_via_scheduler_with_priority` still drains the upserted canonical's
@@ -208,6 +230,21 @@ warm-read validator decides how strictly that self-root is checked:
   artifact is the SOLE route-surface authority (no secondary route-surface
   artifact), gated by `indexed_surface_is_current` — edge currency plus the
   `project_generation` stamp for surfaces with cross-file edges.
+
+When a completed structural carrier would exceed `FACT_SIGNATURE_CAP` only
+because its explicit self-root tail was appended after tracer finalisation,
+the terminal publisher may replace those precise `FileWholeHash` roots with
+one `StrictSelfRootWorld`. Minting validates every root strictly in the exact
+effective view before and after the validation loop. The witness identity is
+the process-unique workspace authority id, its dedicated trackedness
+generation, the captured scheduler/artifact root epochs, and the exact
+`ViewPopulation` (including request-completion id/revision). It is unavailable
+during an authority transition and on an artifact-only backend whose external
+`file_exists` mutations are not completely bridged. A generic Content
+`DomainGeneration` is not a substitute for this witness. Semantic-graph,
+ref-cycle, and materialisation carriers all enforce the cap again after every
+post-finalisation merge; any non-self-root remainder still above the cap is
+typed `ReturnOnly` via `SignatureOverflow`.
 
 The own-canonical drain serving the edited file's own caches is retained only
 as a redundant fast eviction now that every query-identity cache validates its
@@ -483,9 +520,11 @@ Editing a member that `Pick<Foo, "a">` does not select does NOT invalidate that
 consumer.
 
 **R15.** `SyntacticExportSet` (parse-domain) records local exports and bare
-re-export specifiers only — no resolution. `EffectiveExportSet` (resolve-domain,
-owned by `RouteDb`) records post-wildcard-expansion, post-module-augmentation
-visible names with resolved canonicals. The two cannot be merged.
+re-export specifiers only — no resolution. Its resolve-domain counterpart is
+`RouteDb` — per-name route resolution (`RouteNameKey`) plus the barrel wildcard
+surface (`BarrelRouteSurface.wildcard_edges`, specifier → resolved canonical) —
+which resolves the specifiers the parse-domain fact only records. The two
+domains cannot be merged.
 
 **R16.** Semantic fingerprints are alpha-normalised structural hashes.
 Source-text hashes, span-based hashes, position offsets, or any hash that
@@ -949,8 +988,10 @@ Concrete contract:
   consults the ambient/types corpus (module augmentations); `parse_env_hash`
   and `project_identity` per their own scoping. `ResolvedImportFactsKey` =
   `{parse_env_hash, resolve_env_hash}` (NO `lib_env_hash`);
-  `EffectiveExportSetKey` = `{resolve_env_hash, lib_env_hash, project_identity}`
-  (lib because augmentations stitch in).
+  `AugmentationTargetKey` = `{project_identity, resolve_env_hash,
+  lib_env_hash, population, target}` and `RouteDb`'s `RouteNameKey` /
+  `BarrelSurfaceKey` both carry `lib_env_hash` (lib because the
+  ambient/types corpus supplies module augmentations).
 - **Resolve-domain ENV inputs** (hash into `resolve_env_hash` ONLY): the
   `moduleResolution` mode (`ModuleResolutionMode`), the active
   `exports`/`imports` condition set (`ConditionSet`), `base_url`/`paths`,
@@ -975,8 +1016,12 @@ untouched) and `resolve_env_does_not_fold_lib_dims` (a lib-only input moves
 
 **R22.** Eviction is memory-bound, not correctness-bound. The reverse import
 graph is content-addressed and serves reachability GC + LSP affected-files
-reporting + diagnostics; it is never wired to cache invalidation. Live-content
-reachability + a global LRU floor are the sole GC mechanisms.
+reporting + diagnostics; it is never wired to cache EVICTION. Live-content
+reachability + a global LRU floor are the sole GC mechanisms. The
+root-owned resolution decision graph is a separate structure under the Hard
+Rule 8 exception above: it advances derived resolution-currency facts and
+drains nothing, and dependent caches still record and validate the derived
+fact on read.
 
 ### Observability & cost
 
@@ -1168,20 +1213,22 @@ a session overlay's augmenters in a `Session` slot distinct from the `Base` slot
 **Index population semantics.** The augmentation index is populated
 **incrementally** as files enter `FileArtifactStore`. There is NO workspace-wide
 eager scan; out-of-program files contribute nothing — matching TypeScript's own
-augmentation visibility rule. A reachability-anchored query that needs
-`EffectiveExportSet(specifier)` triggers `ResolvedImportFacts` resolution for
-the relevant import graph, which pulls in any augmenter that is part of that
+augmentation visibility rule. A reachability-anchored query that needs the
+augmenters for a target triggers `ResolvedImportFacts` resolution for the
+relevant import graph, which pulls in any augmenter that is part of that
 reachability.
 
 **Augmenter-set identity fact.** A parse-domain-derived fact
 `ModuleAugmentationIndexShape { target: AugmentationTargetKey,
-augmenter_set_fingerprint }` is observed by `EffectiveExportSet(specifier)`
-consumers. `augmenter_set_fingerprint = stable_hash(sorted([(augmenter_canonical,
+augmenter_set_fingerprint }` — the SOLE `RouteSurface` fact; that domain is
+one-arm — is observed by the augmentation-stitch consumers.
+`augmenter_set_fingerprint = stable_hash(sorted([(augmenter_canonical,
 augmenter_parse_stable_hash)]))`. Adding / removing an augmenter changes the
-fingerprint → existing `EffectiveExportSet` candidates invalidate.
+fingerprint → every stitched candidate that observed it invalidates.
 
-**Stitching pipeline.** `RouteDb::get_or_compute_effective_export_set` is the
-cold path. It calls
+**Stitching pipeline.** `ProjectSemanticDispatch::stitch_module_augmentations`
+(through the shared `collect_augmentation_contributions` folder) is the cold
+path. It calls
 `FileArtifactStore::ensure_augmentation_index_populated(target_key)` on first
 miss — the scan walks every loaded `FileArtifacts.augmentations`, sorts matched
 augmenters by `(canonical, parse_stable_hash)`, computes the fingerprint,
@@ -1193,11 +1240,12 @@ re-population). Each `AugmenterSet` entry is an `AugmenterEntry` carrying the
 via `FileArtifactStore::get_artifacts(&key)` keyed by that exact key, never a
 content-agnostic canonical-only scan, so the stitch reads precisely the
 augmenter version the fingerprint was computed over. The stitcher then folds
-each augmenter's `(owner, augmented_name, space)` contributions into an
-`EffectiveExportSetEntry { entries, augmenter_count, augmenter_set_fingerprint,
-fact_dep_signature }`. The `fact_dep_signature` records the
+each augmenter's `(owner, augmented_name, space)` contributions, together with
+the base declaration's own contributors, into ONE `SemanticNodeData::MergedDecl`
+carrier. The result's `ReadSetSignature.facts` records the
 `RouteSurface(ModuleAugmentationIndexShape)` fact plus per-contributor
-`FileWholeHash` anchors so:
+`FileWholeHash` anchors (with `self_root_canonicals = {base} ∪ {augmenters}`)
+so:
 
 - adding / removing an augmenter changes the augmenter-set fingerprint →
   consumer invalidates (G1);
@@ -1226,35 +1274,34 @@ OVERLAY-AWARE across two layers with deliberately DIFFERENT key discipline:
   fresh scan). A `Session` slot is overlay ∪ base, distinct from `Base` without
   poisoning it; a base augmenter change invalidates the `Session` entries that
   include it.
-- The **query-identity** `EffectiveExportSetKey` (on `RouteDb`) is keyed by the
-  CONTENT-FREE `session_scope: EffectiveExportSetScope {Base,
-  Session(session_scope_id)}` — the `StoreViewCompatToken::session` (R6: the
-  overlay-set content fingerprint NEVER enters a query-identity key). Base and
-  session reads occupy DISTINCT slots, so a base warm entry can never satisfy a
-  session lookup (the "base-as-session" hazard) and vice-versa. Overlay CONTENT
-  identity is rooted on the VALUE's `fact_dep_signature` (the
-  `ModuleAugmentationIndexShape` augmenter-set fingerprint fact +
-  per-contributor `FileWholeHash` anchors), revalidated against the live view on
-  every warm hit — so a within-session overlay edit invalidates through facts,
-  not through a new key.
+- The **query-identity** consumers of that index — the `SemanticGraphStore` memo
+  entry the stitch produces, and `ComponentMetaResultDb` downstream of it — keep
+  CONTENT-FREE keys: the overlay-set content fingerprint NEVER enters a
+  query-identity key (R6). Overlay CONTENT identity is rooted on the VALUE's
+  `ReadSetSignature.facts` (the `ModuleAugmentationIndexShape` augmenter-set
+  fingerprint fact + per-contributor `FileWholeHash` anchors), revalidated
+  against the live view on every warm hit — so a within-session overlay edit
+  invalidates through facts, not through a new key. The base/session split is
+  therefore enforced at VALIDATION, not in the key: the route-surface validator
+  looks the fingerprint up under the CALLER VIEW's own population, so a session
+  consumer validates against the `Session(overlay-set fingerprint)` set and a
+  base consumer against `Base` — a base warm entry can never satisfy a session
+  lookup (the "base-as-session" hazard) and vice-versa.
 
-Both producers (the body stitch in `project_semantic_dispatch::build` and
-`RouteDb::get_or_compute_effective_export_set`) derive the content-addressed
-`(population, overlay_discriminator)` through the single shared
-`session_view::augmentation_population_for_view`; the content-free
-`EffectiveExportSetScope` and the route-surface validator's `EffectiveExportSet`-fact
-slot lookup both derive from
-`EffectiveExportSetScope::from_session(compat_token().session)`. Overlay
-augmenters NEVER poison the base index and NEVER cross sessions. The contract is
-locked by `tests/cases/g_misc3/module_augmentation_stitching.rs` —
-`session_overlay_augmenter_isolated_from_base_index`,
-`effective_export_set_warm_base_entry_does_not_satisfy_session_lookup`,
-`effective_export_set_warm_session_entry_does_not_satisfy_base_lookup`,
-`effective_export_set_same_session_overlay_content_edit_invalidates_via_facts`,
-`effective_export_set_content_free_key_warm_hits_across_unrelated_fingerprint_change` —
-plus the guard `no_effective_export_set_base_only_session_assert`
-(`tests/cases/g_misc0/critical_rules_have_guards.rs`) which pins that NO base-only
-`compat_token().session.is_none()` assert is re-introduced on this surface.
+The producer (the body stitch in `project_semantic_dispatch::build`) and the
+route-surface validator (`HostStoreView::validates_route_surface_domain`) both
+derive the content-addressed `(population, overlay_discriminator)` through the
+single shared `session_view::augmentation_population_for_view`, so a session view
+can never be validated against a base-only set. Overlay augmenters NEVER poison
+the base index and NEVER cross sessions. The contract is locked by
+`tests/cases/g_misc3/module_augmentation_stitching.rs` —
+`session_overlay_augmenter_isolated_from_base_index` plus the base-augmenter
+invalidation cases
+(`base_augmenter_publish_invalidates_session_augmentation_index`,
+`base_augmenter_remove_invalidates_index_via_evict`) — and by
+`tests/cases/g_session/session_overlay_augmentation_isolation.rs::session_overlay_augmentation_isolated_from_base_meta`.
+There is NO base-only `compat_token().session.is_none()` assert on this surface:
+a session view is accepted under `Session` population.
 
 **R30 (No heuristic cache semantics).** Cache identity and cache admission must
 not encode semantic policy through local heuristics. Every dimension that can
@@ -1305,6 +1352,36 @@ slice, or whole-file semantic hash. The producer reuses the canonical
 completeness and fact footprint, and hands the DTOs directly to the compiler.
 Only a future cache family with a complete typed policy identity and normal
 read-side fact validation could retain such an aggregate.
+
+**The producer's fact footprint crosses a thread boundary and must be replayed.**
+`produce_vue_macro_codegen_with_ctx` runs its build through
+`Scheduler::execute_scoped_cache_node`, which dispatches the closure onto a
+scheduler CPU-pool worker; a caller that joins an in-flight rendezvous returns
+from the flight terminal having run no closure at all. The fact tracer stack is
+thread-local with no cross-thread bridge, so the tracer the producer installs is
+invisible to the enclosing `Session` compile's tracer on the submitting thread.
+`VueMacroCodegenOutput.fact_footprint` (`MacroFactFootprint`) therefore carries
+the producer's finalised observation set AND its non-cacheable refusal back, and
+the call site replays both on the CONSUMING thread — for the leader and the
+follower arm alike. Without that replay the compile slot's `ReadSetSignature`
+omits every fact rooted at a TRANSITIVELY reached file, and an edit to such a
+file leaves the warm slot validating (the bundler emits stale runtime prop
+validators). The factless arms are the trap: `FactReadSetFinalise::{Overflow,
+MutationUnstable}` carry NO facts, so replaying either as an empty observation
+set reproduces that stale serve silently. All FOUR factless cases must route to
+`note_non_cacheable_propagation`, never to an empty replay: `Overflowed`,
+`MutationUnstable`, `Unobserved` (a cancelled / shut-down / faulted /
+re-entrant handoff), and a `RootedNonCacheable` whose fact set is empty — a
+refusal raised before anything was observed. Warm inner memos are
+already handled — the memo warm-hit paths bubble their recorded signatures
+(`cache_runtime/node.rs`, `semantic_query_memo`), so a producer served entirely
+from warm memos still seals the full transitive footprint. That sufficiency is
+INHERITED, not owned here: it rests on the pre-existing R3/R26/R28 bubble
+discipline holding at every warm-read layer, delivery is redundant across those
+layers, and nothing in the replay carrier guards it — a future layer that stops
+bubbling reopens the stale serve without failing any test in this file. Any
+future producer that hands a value across `execute_scoped_cache_node` inherits
+the replay obligation.
 
 ### Exact-owner version audit (2026-07-19)
 
@@ -1648,9 +1725,10 @@ is permitted.
   only on the dims it consults: `ResolvedImportFacts` keys on `{parse_env_hash,
   resolve_env_hash}` (moduleResolution / paths / baseUrl / conditions /
   extension order) and NEVER `lib_env_hash`; the augmentation-aware
-  `EffectiveExportSet` surface additionally keys on `lib_env_hash` (typeRoots /
-  types corpus) + `project_identity` because module augmentations stitch in. Lib
-  dimensions are NEVER folded into `resolve_env`. See
+  `AugmentationTargetKey` and `RouteDb`'s `RouteNameKey` / `BarrelSurfaceKey`
+  additionally key on `lib_env_hash` (typeRoots / types corpus) +
+  `project_identity` because module augmentations come from the ambient/types
+  corpus. Lib dimensions are NEVER folded into `resolve_env`. See
   `### Module-Resolution Keying (CRITICAL)`.
 - **Slot-keyed `Instantiate` / `ResolveMacroPayload` / `TypeOf`.**
   `SemanticQueryKey::Instantiate` / `ResolveMacroPayload` key their `base` /

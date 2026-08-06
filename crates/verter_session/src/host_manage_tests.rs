@@ -652,6 +652,7 @@ export interface CheckboxProps {
         matches!(
             host.prepared_type_decl_in_with_store_view(
                 &initial_view,
+                None,
                 "/workspace/Checkbox.vue",
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "CheckboxProps",
@@ -3432,10 +3433,14 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         },
         fact_versions: Vec::new(),
     };
-    crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
-        let admission = crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
-        host.cache_fallthrough_result(canonical, None, &result, &admission);
-    });
+    crate::fact_signature_helpers::with_cacheability_scope(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        |probe| {
+            let admission =
+                crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
+            host.cache_fallthrough_result(canonical, None, &result, &admission);
+        },
+    );
     let mirror_present = host
         .derived_raw_cache()
         .get(canonical)

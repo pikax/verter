@@ -123,9 +123,8 @@ together. Concretely:
 - A `resolve_env` addition (`jsx_import_source`, `module_resolution`,
   `package_conditions`, `custom_conditions`, `module_suffixes`) folds into
   `resolve_env_hash`, so it enters every resolution-dependent layer
-  (`ResolvedImportFacts`, `RouteDb`, `RouteDb` effective export set,
-  `AugmentationTargetKey`) and stays absent from a pure type-value layer
-  that does not re-resolve specifiers.
+  (`ResolvedImportFacts`, `RouteDb`, `AugmentationTargetKey`) and stays absent
+  from a pure type-value layer that does not re-resolve specifiers.
 
 These are split-env-hash **additions**, not query-identity content: none of
 them is a field on any query-identity key struct. Query-identity keys stay
@@ -144,17 +143,13 @@ material:
 - **Overlay / session identity** (`overlay_identity`, the active editor
   overlay set) enters **session cache identity ONLY** — never the **base**
   population of any layer. A base/persistent slot (`FileArtifactStore`, the
-  `Base` population of `ModuleAugmentationIndex`, the `Base` scope of
-  `EffectiveExportSet`, and any pure artifact cache) **NEVER** admits an
-  overlay-only result: an overlay edit produces a session-scoped value
-  returned to the caller but routed into a SESSION-keyed slot, never the base
-  one. `ModuleAugmentationIndex` and `EffectiveExportSet` are OVERLAY-AWARE:
-  the index's `AugmentationPopulation::Session(overlay-set fingerprint)` slot
-  unions the session's overlay augmenters with base (content-addressed
-  compute cache → content fingerprint in the key), while
-  `EffectiveExportSet`'s query-identity `EffectiveExportSetScope::Session(scope_id)`
-  slot is keyed by the content-free session scope (R6) with overlay content
-  rooted on the value's facts. Either way an overlay result populates the
+  `Base` population of `ModuleAugmentationIndex`, and any pure artifact
+  cache) **NEVER** admits an overlay-only result: an overlay edit produces a
+  session-scoped value returned to the caller but routed into a SESSION-keyed
+  slot, never the base one. `ModuleAugmentationIndex` is OVERLAY-AWARE: its
+  `AugmentationPopulation::Session(overlay-set fingerprint)` slot unions the
+  session's overlay augmenters with base (content-addressed compute cache →
+  content fingerprint in the key), so an overlay result populates the
   session-scoped slot, never the `Base` one. Pinned by
   **`persistent_caches_never_admit_overlay_only_results`**.
 - **Instantiation-depth policy** (`InstantiationDepthPolicy` — the
@@ -177,14 +172,13 @@ material:
 | Layer | Family | Key | Validation |
 |---|---|---|---|
 | `FileArtifactStore` | Content-addressed | `(canonical, content_hash, parse_env_hash, parser_version, file_language_id)` | Content-addressed; never invalidated. `file_language_id` is the file's `FileLanguage` row — the per-file classification dimension; every key producer currently derives it from the static registry resolution (identical to the host-resolved row while no gated registry rows exist), and the first gated row's producer wiring threads the host-resolved row so a capability flip misses exactly the affected files' slots |
-| `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, population, target }` | Content-addressed; incrementally populated. `population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}` — a `Base` scan reads base (`is_legacy`) artifacts only; a `Session` scan reads the session overlay (non-legacy) artifacts matched by the overlay discriminator UNIONED with base, so overlay augmenters never poison the base index. The `Session` slot's fingerprint is its content-view identity (self-invalidating on overlay content/membership change); a base augmenter add/edit invalidates the `Session` entries that include it via `refresh_augmentation_index_for_canonical` (the base set rebuilds in place, the session sets are dropped so the next session-scoped `ensure` cold-rescans base ∪ overlay). Distinct from the query-identity `EffectiveExportSetKey`, whose session dimension is the CONTENT-FREE `EffectiveExportSetScope` (R6) |
+| `ModuleAugmentationIndex` (on `FileArtifactStore`) | Content-addressed | `AugmentationTargetKey { project_identity, resolve_env_hash, lib_env_hash, population, target }` | Content-addressed; incrementally populated. `population: AugmentationPopulation {Base, Session(overlay-set fingerprint)}` — a `Base` scan reads base (`is_legacy`) artifacts only; a `Session` scan reads the session overlay (non-legacy) artifacts matched by the overlay discriminator UNIONED with base, so overlay augmenters never poison the base index. The `Session` slot's fingerprint is its content-view identity (self-invalidating on overlay content/membership change); a base augmenter add/edit invalidates the `Session` entries that include it via `invalidate_augmentation_index_for_augmenter` (the touched entries are retired so the next `ensure` cold-rescans). The content-bearing `Session` fingerprint is legitimate here precisely because this is a CONTENT-ADDRESSED cache; the query-identity layers below never carry content in their keys (R6) |
 | `ResolvedImportFacts` | Content-addressed | `(canonical, content_hash, parse_env_hash, resolve_env_hash, resolver_version)` — **no `lib_env_hash`** (R21) | Content + resolve-env addressed |
 | Typed-IR resolve | Content-addressed | `(canonical, content_hash, parse_env_hash, type_env_hash, lib_env_hash, parser_version)` | Content + type-env + lib addressed |
 | `MemberSemanticFactStore` | Content-addressed | `(canonical, parse_stable_hash, parse_env_hash, exporter, member_name, symbol_space)` | Keyed on `parse_stable_hash` so cosmetic edits do not recompute |
 | `MemberDisplayFactStore` | Content-addressed | `(canonical, content_hash, parse_env_hash, exporter, member_name, symbol_space)` | Keyed on `content_hash`; cosmetic edits recompute display only |
 | `RouteDb` per-name resolution | Query-identity (multi-candidate) | `RouteNameKey { provider_canonical, exported_name, symbol_space, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (R6 content-free; R21 — routes are resolve-domain, so `parse_env_hash` / `type_env_hash` do NOT key, but `lib_env_hash` does because module augmentations stitch into the route surface) | Fact-validated per candidate via the value-side `ValidatedFactCache` fact signature; stable misses preserved |
 | `RouteDb` effective barrel surface | Query-identity (multi-candidate) | `BarrelSurfaceKey { barrel_canonical, project_identity, resolve_env_hash, lib_env_hash, resolver_version }` (R6 content-free; R21 split-env) | Fact-validated per candidate via the value-side `ValidatedFactCache` over `BarrelRouteSurface.fact_dep_signature: Arc<[FactVersionRef]>` |
-| `RouteDb` effective export set | Query-identity (multi-candidate) | `EffectiveExportSetKey { provider_canonical, project_identity, resolve_env_hash, lib_env_hash, session_scope }` (R21 — lib_env enters because module augmentations live in libs; `session_scope: EffectiveExportSetScope {Base, Session(scope_id)}` is the CONTENT-FREE session scope, R6 — the overlay-set content fingerprint never enters the key) | Fact-validated per candidate via `EffectiveExportSetEntry.fact_dep_signature`, which records `RouteSurface(ModuleAugmentationIndexShape)` (the augmenter-set fingerprint) + per-contributor `FileWholeHash` anchors (R29 + G1). **Overlay-aware**: a session view stitches its own overlay augmenters (unioned with base) into a `Session(scope_id)` slot distinct from the `Base` slot; overlay CONTENT identity is validated on the value's facts (revalidated on every warm hit), NOT smuggled into the key. The content-addressed augmentation index it stitches keys its `Session` slot by the overlay-set fingerprint (compute input). |
 | `MaterializeStructureDb` | Query-identity (multi-candidate) | `MaterializationCacheKey { decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, scope_axis, projection_mode, normalized_type_args: Arc<[SemanticNodeId]>, resolve_env_hash }` (R6 — the SUBJECT is the content-free env-bearing slot, NOT a graph-instance `SemanticNodeId`; `normalized_type_args` carries `SemanticNodeId`s exactly as the compliant `SemanticQueryKey::Instantiate.args` does — args are query-identity, the violation was a SemanticNodeId *subject*. R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`.) The per-thread recursion/depth identity is the SEPARATE `MaterializeRuntimeKey { base: SemanticNodeId, scope_axis, mode }` (NOT a cache key). A root-less anonymous subject keys NO slot (uncached). | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the materialise subject's declaration-origin file — the extracted route root for a route-shaped subject, the `base` node's origin for a non-route subject; never the consumer scope — + `validated_at_generation`) |
 | `RefCycleResultDb` | Query-identity (multi-candidate) | `RefCycleResultKey { root: ResolvedDeclSlotIdentity, resolve_env_hash, version }` (R6 content-free — the versioned `DeclIdentity` is NOT the key; R21 — slot carries `type_env`/`lib_env`/`project_identity`, the key adds `resolve_env_hash`) | Fact-validated per candidate (`ReadSetSignature.facts` + `self_root_canonicals` = the BFS root + every visited declaration's file + `validated_at_generation`) |
 | `SemanticGraphStore` query nodes | Query-identity (multi-candidate) | `SemanticQueryKey` (slot identity, e.g. `Instantiate { base: ResolvedDeclSlotIdentity, args }`) | Fact-validated per candidate; the memo value version-roots on `ReadSetSignature.facts` + `self_root_canonicals` |
@@ -301,8 +295,7 @@ enum FactKey {
     ResolvedImportClause { specifier, binding, space, resolved_canonical, resolved_source_name },
     ResolvedReexportBinding { specifier, source_name, target_name, space, resolved_canonical, resolved_source_name },
 
-    // Route-surface domain (R12; populated downstream by RouteDb)
-    EffectiveExportSet,
+    // Route-surface domain (R12; populated downstream by RouteDb) — ONE arm
     ModuleAugmentationIndexShape { target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern },
 
     // Program-analysis domain (populated by the demand-sliced flow engine)

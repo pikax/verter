@@ -159,6 +159,11 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
     /// [`Self::raise_source`] under an explicit name-resolution scope — the
     /// declaring file for a located declaration body.
+    ///
+    /// EXPLICITLY OPTIONAL BOUNDARY: the policy walk answers a non-raise by
+    /// keeping the published source shallow verbatim, identically for a
+    /// genuine absence and for a typed failure, so it collapses the typed
+    /// outcome here rather than propagating it.
     pub(super) fn raise_source_in_scope(
         &self,
         source: &SemanticTypeSource,
@@ -166,17 +171,19 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         scope_owner: TopLevelOwnerId,
     ) -> Option<HotTypeRef> {
         let dispatch = ProjectSemanticDispatch::new(self.resolver_ctx());
-        dispatch.raise_semantic_type_source_to_hot(
-            source,
-            SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
-                ),
-                interior_failures: None,
-            },
-        )
+        dispatch
+            .raise_semantic_type_source_to_hot(
+                source,
+                SourceRaiseContext {
+                    scope_canonical_id,
+                    scope_owner,
+                    context: ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                    interior_failures: None,
+                },
+            )
+            .at_optional_boundary()
     }
 
     /// Node data reader (the shared dispatch-owned arena read).

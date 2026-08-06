@@ -114,6 +114,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the closed Function fact must raise through the bridge");
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
     assert!(
@@ -296,6 +297,7 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the variant source must raise through the bridge");
     let resolved = dispatch.resolve_hot_handle_with_context(
         raised,

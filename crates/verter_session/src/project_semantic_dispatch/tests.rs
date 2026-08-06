@@ -35,6 +35,35 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+#[test]
+fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
+    let canonical = "/w/semantic-publish.ts";
+    let host = host();
+    upsert_ts(&host, canonical, "export type Root = string;\n");
+    let whole_hash = host
+        .ensure_indexed_ready(canonical)
+        .expect("semantic root is indexed")
+        .whole_hash;
+    let traced = crate::semantic_graph_self_root_tests::exact_cap_terminal_witness_facts();
+    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+        (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
+    output.observed_self_roots = vec![(Arc::<str>::from(canonical), whole_hash)];
+
+    let completed = finalise_traced_build_output(
+        &host,
+        output,
+        crate::resolver_core::FactReadSetFinalise::Ok(Arc::from(traced)),
+        &host.provenance,
+        &CarrierNormalizationPrelude::none(),
+    );
+
+    assert!(completed.cache_suppress);
+    assert!(
+        completed.graph_carrier.is_none(),
+        "an over-cap carrier must not be broadcast or published",
+    );
+}
+
 /// `ResolveDecl` for a known top-level type returns a value node. The
 /// memo is keyed by the semantic identity, so a second query for the
 /// same key returns the same [`SemanticNodeId`].

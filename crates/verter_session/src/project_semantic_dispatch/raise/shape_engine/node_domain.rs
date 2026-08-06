@@ -1318,13 +1318,15 @@ pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failur
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
 ) -> bool {
+    // Derived from the SINGLE `QueryError` disposition authority — never a
+    // local re-listing of which arms are publishable.
     matches!(
         node_data_for(dispatch.ctx, node).as_deref(),
         Some(SemanticNodeData::Opaque(err))
-            if !matches!(
+            if crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(
                 err,
-                QueryError::RecursiveRef { .. } | QueryError::DeclPlaceholder { .. }
             )
+            .is_unknown_materializing()
     )
 }
 

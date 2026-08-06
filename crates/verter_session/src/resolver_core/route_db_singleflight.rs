@@ -118,8 +118,7 @@ impl RouteDb {
                     // Fires once per `(provider, exported_name)`
                     // resolution. The `augmented` field is `false`
                     // for the bare-route resolution path; the
-                    // post-augmentation-stitched
-                    // `EffectiveExportSet` path emits its own
+                    // post-augmentation-stitched path emits its own
                     // `ExportRouteResolved` with `augmented: true`
                     // when consumers walk its entries.
                     emit_export_route_resolved_event(

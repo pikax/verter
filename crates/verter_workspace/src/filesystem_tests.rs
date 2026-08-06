@@ -1955,11 +1955,47 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
          values — otherwise no first observation happened at all"
     );
 
+    for (family, key) in [
+        (
+            "PathProbe",
+            crate::resolution_currency::ResolutionFactKey::PathProbe {
+                canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
+                population: crate::resolution_currency::ResolutionPopulation::Base,
+            },
+        ),
+        (
+            "Realpath",
+            crate::resolution_currency::ResolutionFactKey::Realpath {
+                requested: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
+                population: crate::resolution_currency::ResolutionPopulation::Base,
+            },
+        ),
+        (
+            "Manifest",
+            crate::resolution_currency::ResolutionFactKey::Manifest {
+                canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
+                population: crate::resolution_currency::ResolutionPopulation::Base,
+            },
+        ),
+    ] {
+        assert_eq!(
+            workspace.engine.resolution_fact_version_for_test(
+                crate::resolution_currency::ResolutionPopulation::Base,
+                &key
+            ),
+            crate::resolution_currency::ResolutionFactVersion::INITIAL,
+            "a first observation must advance NO observed fact: it contradicts nothing, so \
+             no witness's meaning changed ({family})"
+        );
+    }
     assert_eq!(
         workspace.engine.current_resolution_fact_generation(),
         facts_before,
-        "a first observation must mint NO fact version: it contradicts \
-         nothing, so no witness's meaning changed"
+        "a first observation must count NO observable fact advance: it contradicts nothing, \
+         so no witness's meaning changed. Publishing this attempt's own DECISION node mints \
+         a version but is not an advance either — no witness can have recorded a node that \
+         did not exist, and counting it here would fence the compute against its own \
+         promotion through `StoreViewValidationToken`'s external-supersession set"
     );
     assert_eq!(
         base_world().base.id,
@@ -2558,4 +2594,47 @@ fn concurrent_resolutions_are_not_refused_for_retry_exhaustion() {
             THREADS * ROUNDS
         );
     });
+}
+
+/// The second production workspace exposes its source-env producer
+/// through the same `WorkspaceAccess` seam.
+///
+/// `MemoryWorkspace` has the sibling of this test. Both are needed: the
+/// trait method defaults to `None`, so a missing override is not a
+/// compile error on either impl — it silently disarms the source-env
+/// domain for every host backed by that workspace. Only a per-impl
+/// assertion catches it.
+///
+/// Mutation recipe, VERIFIED: delete the `source_env_generation`
+/// override from `impl WorkspaceAccess for FilesystemWorkspace`. The
+/// `expect` below fires on the `None` default.
+#[test]
+fn filesystem_workspace_exposes_the_source_env_generation_through_the_access_trait() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonical_temp_root(&dir);
+    std::fs::write(root.join("tsconfig.json"), "{}\n").unwrap();
+    let root_id = temp_canonical_id(&root);
+    let workspace = FilesystemWorkspace::new(FilesystemOptions::default());
+
+    let before = WorkspaceAccess::source_env_generation(&workspace)
+        .expect("a production workspace must expose its source-env producer, not the None default");
+
+    // `configure_resolver` reaches `rebuild_and_publish`, which
+    // recomposes the per-project env-hash tables.
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![crate::resolver::IdeProjectConfig::new(
+            root_id.clone(),
+            root_id.clone(),
+            Some(format!("{root_id}/tsconfig.json")),
+        )],
+    );
+
+    let after = WorkspaceAccess::source_env_generation(&workspace)
+        .expect("still Some after an env-table republication");
+    assert!(
+        after > before,
+        "republishing the env-hash tables advances the source-env domain, and the trait seam \
+         must see it"
+    );
 }

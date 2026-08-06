@@ -79,6 +79,23 @@ pub enum NonAdmissionReason {
     /// The path-precise fact signature exceeded the size cap. The value
     /// is correct; the signature is too large to admit safely.
     SignatureOverflow,
+    /// A compaction domain the compute was COMPACTING advanced between
+    /// the moment its basis was installed and the moment it tried to
+    /// admit. Its terminal aggregate would assert that the domain held
+    /// as of a generation the observations do not come from.
+    ///
+    /// DISTINCT from [`Self::SignatureOverflow`] on purpose, and never
+    /// folded into it: instability is a STABILITY failure, not a
+    /// CARDINALITY one. Reporting it as overflow would refuse the
+    /// attempt under a rail that is about size, and leave the caller
+    /// unable to tell a genuinely wide compute from a racing one.
+    ///
+    /// Terminal on the first unstable attempt — no automatic retry. A
+    /// retry re-runs closures whose accumulators append and whose
+    /// budgets do not reset between attempts, so it can turn a complete
+    /// result into a partial one; a bounded retry needs a fresh-attempt
+    /// boundary that recreates attempt state, which does not exist.
+    MutationUnstable,
     /// The producer observed zero facts on a source-dependent cache, so
     /// there is no signature to validate a warm hit against.
     EmptySignature,
@@ -142,6 +159,7 @@ impl std::fmt::Display for NonAdmissionReason {
         let name = match self {
             Self::IntrinsicNonCacheable => "IntrinsicNonCacheable",
             Self::SignatureOverflow => "SignatureOverflow",
+            Self::MutationUnstable => "MutationUnstable",
             Self::EmptySignature => "EmptySignature",
             Self::SelfRootConflict => "SelfRootConflict",
             Self::RouteGenerationDependency => "RouteGenerationDependency",
@@ -406,12 +424,11 @@ pub enum StructuredAuditEvent {
         /// Reason for the refusal.
         reason: AdmissionRefusalReason,
     },
-    /// Module-augmentation stitching produced an effective export
-    /// set for an augmentation target (R29 + G1).
+    /// Module-augmentation stitching folded an augmenter set into a
+    /// consumer's merged declaration surface (R29 + G1).
     ///
-    /// Cold-path only — emitted once per `EffectiveExportSet`
-    /// cold/stale compute, after the augmenter set has been folded
-    /// into the consumer's effective surface. The `target_kind_tag`
+    /// Cold-path only — emitted once per cold/stale stitch, after the
+    /// augmenter set has been folded in. The `target_kind_tag`
     /// together with the parallel optional fields below identify the
     /// target. `augmenter_count` and `fingerprint` describe the
     /// `AugmenterSet` that contributed.
@@ -542,7 +559,7 @@ pub enum StructuredAuditEvent {
     },
     /// `RouteDb` resolved a per-name route to a canonical+source
     /// target (R15). Cold-path only — fires when a consumer
-    /// actually walks the `EffectiveExportSet` and the resolver
+    /// actually walks the provider's export surface and the resolver
     /// admits a fresh route candidate. The `augmented` field
     /// records whether the resolution went through module
     /// augmentation stitching, so consumers can correlate
@@ -966,6 +983,7 @@ mod non_admission_reason_tests {
         NonAdmissionReason::ResolutionUntrackedBackend,
         NonAdmissionReason::ResolutionIncompleteProvenance,
         NonAdmissionReason::ResolutionRetryExhausted,
+        NonAdmissionReason::MutationUnstable,
     ];
 
     /// Exhaustive positional index over the enum.
@@ -998,11 +1016,12 @@ mod non_admission_reason_tests {
             NonAdmissionReason::ResolutionUntrackedBackend => 17,
             NonAdmissionReason::ResolutionIncompleteProvenance => 18,
             NonAdmissionReason::ResolutionRetryExhausted => 19,
+            NonAdmissionReason::MutationUnstable => 20,
         }
     }
 
     /// The variant count the exhaustive `variant_index` match covers.
-    const VARIANT_COUNT: usize = 20;
+    const VARIANT_COUNT: usize = 21;
 
     #[test]
     fn all_lists_every_variant_exactly_once() {

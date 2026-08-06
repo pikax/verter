@@ -197,6 +197,17 @@ per-funnel scopes — one owner-controlled outer scope.
 (`crates/verter_session/src/resolver_core/imported_root_db.rs:234`) and the production
 `RouteDb::get_or_compute_effective_export_set` funnel. Do not harden a dead API; remove it.
 
+> **DONE — both halves are absent from the tree.** `ImportedRootDb::insert_with_facts` no
+> longer exists (removed independently of the resolution-currency work; a dangling
+> intra-doc reference to it survives at `imported_root_db.rs:437` and is a separate
+> one-line fix). The whole
+> `EffectiveExportSet` surface (funnel, cache table, `FactKey` variant, validator arm and
+> types) was deleted in the resolution-currency cutover after its deadness was established
+> on two rails: zero callers of its only write path (which was itself `#[cfg(test)]`), and a
+> behavioural probe showing an empty table with the validator returning `false` for every
+> expected hash. `RouteSurface` is now a one-arm domain whose sole fact is
+> `ModuleAugmentationIndexShape`. Nothing remains to delete here.
+
 **Compile-confine the raw mutators behind the EXISTING `test-support` cargo feature** — it is
 already declared at `crates/verter_session/Cargo.toml:33`, and that file's own comments already
 identify `debug_assertions` as an unacceptable production hole:

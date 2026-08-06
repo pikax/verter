@@ -30,10 +30,11 @@ pub fn observe_fence_entry_for_tests(
     host: &crate::VerterHost,
     sig: &DepSignature,
 ) -> FactReadSetFinalise {
-    let (_, read_set) = host.with_fact_tracer(|| {
-        for (canonical, version) in sig.iter() {
-            crate::component_meta_audit::observe_fence_entry(host, canonical, version);
-        }
-    });
+    let (_, read_set) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            for (canonical, version) in sig.iter() {
+                crate::component_meta_audit::observe_fence_entry(host, canonical, version);
+            }
+        });
     read_set.finalise()
 }

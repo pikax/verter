@@ -1142,8 +1142,10 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
                     use crate::request_context::{RequestContext, RequestContextGuard};
                     let rctx = RequestContext::new(1, Arc::from(owner), false, None);
                     let _req_guard = RequestContextGuard::install(rctx);
-                    let (result, read_set) =
-                        host.with_fact_tracer(|| host.ensure_indexed_ready(owner));
+                    let (result, read_set) = host
+                        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                            host.ensure_indexed_ready(owner)
+                        });
                     let non_cacheable = read_set.non_cacheable_read_observed();
                     let result_is_partial =
                         crate::request_context::current_request_result_is_partial();
@@ -1231,7 +1233,10 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
     // Negative control: a clean (published) serve marks NO non-cacheability.
     *host.materialize_seam_hook.lock() = None;
     *host.flight_retry_seam_hook.lock() = None;
-    let (clean, clean_read_set) = host.with_fact_tracer(|| host.ensure_indexed_ready(owner));
+    let (clean, clean_read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            host.ensure_indexed_ready(owner)
+        });
     assert!(clean.is_some(), "the clean re-run must serve");
     assert!(
         !clean_read_set.non_cacheable_read_observed(),
@@ -3004,7 +3009,7 @@ fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
         let flight = {
             let host = Arc::clone(&host);
             let view = &view;
-            scope.spawn(move || host.prepared_decl_bundle_with_store_view(view, owner))
+            scope.spawn(move || host.prepared_decl_bundle_with_store_view(view, None, owner))
         };
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
@@ -3027,7 +3032,7 @@ fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
     // adopt the fenced-derived bundle as a joinable rendezvous — it
     // re-runs the cold build against fresh state.
     host.provenance().reset();
-    let second = host.prepared_decl_bundle_with_store_view(&view, owner);
+    let second = host.prepared_decl_bundle_with_store_view(&view, None, owner);
     assert!(second.is_some(), "the late claimant must be served");
     assert_eq!(
         snap(&host).bundle_materializations,
@@ -3109,7 +3114,7 @@ fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
         let flight = {
             let host = Arc::clone(&host);
             let view = &view;
-            scope.spawn(move || host.prepared_decl_bundle_with_store_view(view, owner))
+            scope.spawn(move || host.prepared_decl_bundle_with_store_view(view, None, owner))
         };
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
@@ -3131,7 +3136,7 @@ fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
     // The discriminator: a late claimant on the SAME lane must NOT
     // adopt the fenced-derived miss as a joinable rendezvous — it
     // re-runs the cold build against live state and finds the surface.
-    let second = host.prepared_decl_bundle_with_store_view(&view, owner);
+    let second = host.prepared_decl_bundle_with_store_view(&view, None, owner);
     drop(lane_pin);
     let bundle = second.expect(
         "a fenced-derived surface-empty miss must not be retained as a \
@@ -3186,7 +3191,7 @@ fn unfenced_surface_empty_miss_stays_a_joinable_rendezvous() {
         .singleflight()
         .participate(owner.to_string(), view.compat_token());
 
-    let miss = host.prepared_decl_bundle_with_store_view(&view, owner);
+    let miss = host.prepared_decl_bundle_with_store_view(&view, None, owner);
     assert!(miss.is_none(), "the surface-empty owner has no bundle");
     assert_eq!(
         snap(&host).bundle_cold_flight_runs,
@@ -3208,7 +3213,7 @@ fn unfenced_surface_empty_miss_stays_a_joinable_rendezvous() {
     // any materialisation counter — only the flight-body run itself
     // separates adopt from re-run.
     host.provenance().reset();
-    let second = host.prepared_decl_bundle_with_store_view(&view, owner);
+    let second = host.prepared_decl_bundle_with_store_view(&view, None, owner);
     drop(lane_pin);
     assert!(
         second.is_none(),
@@ -3897,20 +3902,10 @@ fn vue_fatal_script_parse_defaults_outputs_without_second_parse() {
     );
 }
 
-/// Number of unresolvable specifiers an owner needs before the union of
-/// its per-specifier resolution observations exceeds
-/// `FACT_SIGNATURE_CAP` (1,024). Each miss contributes its complete
-/// exhausted probe set, so a couple of hundred is comfortably over the
-/// bound while staying a fast fixture. Overflow is the reachable
-/// unrootable shape: a single miss roots fine on its own observations.
-const WITNESS_OVERFLOW_SPECIFIERS: usize = 250;
-
 /// Strict-admission empty-facts is a SUPPRESSION signal, not just a
 /// RouteDb-local negative-cache pattern — UNROOTABLE-WILDCARD arm. A
 /// route entry concluded over an owner whose unresolved `export *`
-/// edges cannot be rooted in an import-route RESOLUTION WITNESS (here:
-/// the union of their observations OVERFLOWS `FACT_SIGNATURE_CAP`, so
-/// the witness cannot represent the complete observation set) is
+/// edges cannot be rooted in an import-route RESOLUTION WITNESS is
 /// served with EMPTY facts and never persisted by `RouteDb`. But an ENCLOSING traced cold compute (a semantic-memo
 /// build, a component-meta proof producer) observes NOTHING from an
 /// empty fact list — its own fact stamps validate against the live
@@ -3925,31 +3920,26 @@ const WITNESS_OVERFLOW_SPECIFIERS: usize = 250;
 /// admissions.
 #[test]
 fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
-    // MANY unresolvable wildcards, then a RESOLVABLE one: the walk
-    // records every unresolved edge and still resolves `Shared`
-    // through `./present`. The unresolved-edge rooting loop builds one
-    // witness over ALL of them, and their combined observation set
-    // exceeds `FACT_SIGNATURE_CAP` — the one shape that reaches the
-    // unrootable arm now that a single known-miss specifier roots
-    // perfectly well on its own exhausted probe set.
+    // One unresolvable wildcard, then a resolvable one. Decision facts make
+    // the former overflow fixture bounded, so the typed refusal seam selects
+    // the same route-walk unrootable exit directly.
     let host = make_host(&[]);
     let barrel = "/workspace/src/index.ts";
     let present = "/workspace/src/present.ts";
     upsert(&host, present, "export type Shared = { a: 1 };\n");
-    let mut source = String::new();
-    for index in 0..WITNESS_OVERFLOW_SPECIFIERS {
-        source.push_str(&format!("export * from './missing{index}';\n"));
-    }
-    source.push_str("export * from './present';\n");
-    upsert(&host, barrel, &source);
+    upsert(
+        &host,
+        barrel,
+        "export * from './missing';\nexport * from './present';\n",
+    );
 
-    // Precondition: the owner's witness genuinely overflows, so the
-    // rooting loop cannot represent its observations.
+    assert!(host.owner_import_route_witness_for_tests(barrel).is_some());
+    host.test_force
+        .force_import_route_witness_refusal_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(
         host.owner_import_route_witness_for_tests(barrel).is_none(),
-        "fixture invariant: {WITNESS_OVERFLOW_SPECIFIERS} unresolvable \
-         wildcard sources must overflow the fact-signature bound — \
-         otherwise the unrootable arm is not exercised",
+        "fixture invariant: the typed refusal seam must make the wildcard witness unrootable",
     );
 
     // The producer-level observable: run the route-entry build inside
@@ -3957,9 +3947,10 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // compute (semantic-memo builds, the owner-import-surface and
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.build_named_type_export_route_entry(barrel, "Shared")
-    });
+    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || host.build_named_type_export_route_entry(barrel, "Shared"),
+    );
     let suppression_raised = matches!(
         finalise,
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
@@ -4009,9 +4000,10 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
         "export * from './missing';\nexport * from './present';\n",
     );
 
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.build_named_type_export_route_entry(barrel, "Shared")
-    });
+    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || host.build_named_type_export_route_entry(barrel, "Shared"),
+    );
     let suppression_raised = matches!(
         finalise,
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
@@ -4038,9 +4030,7 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
 /// producer-local non-admission — OWNER-IMPORT-SURFACE UNROOTED-SKIP
 /// arm. A surface built over an owner with unresolvable direct imports
 /// (the specifiers are SKIPPED) that cannot be rooted in the owner's
-/// import-route RESOLUTION WITNESS (here: their combined observation
-/// set OVERFLOWS `FACT_SIGNATURE_CAP`, so the witness cannot represent
-/// it and is never truncated into a partial signature) is served to the
+/// import-route RESOLUTION WITNESS is served to the
 /// caller and refused its OWN warm admission. But an
 /// ENCLOSING traced cold compute (a semantic-memo build, a
 /// component-meta proof producer) observes NOTHING from the refusal —
@@ -4057,32 +4047,25 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
 /// route exit already does for the route-walk shape of the same hole.
 #[test]
 fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
-    // MANY unresolvable direct imports: the surface build skips every
-    // `Missing` binding and records each `./missingN` as an unresolved
-    // source that must be rooted in the owner's witness. Their combined
-    // observation set exceeds `FACT_SIGNATURE_CAP`, so the witness is
-    // unrootable — the one shape that reaches the unrooted-skip arm now
-    // that a single skipped specifier roots perfectly well on its own
-    // exhausted probe set.
+    // One unresolvable direct import. The typed refusal seam makes its
+    // otherwise-rootable Decision witness take the unrooted-skip exit.
     let host = make_host(&[]);
     let owner = "/workspace/src/index.ts";
-    let mut source = String::new();
-    for index in 0..WITNESS_OVERFLOW_SPECIFIERS {
-        source.push_str(&format!(
-            "import type {{ Missing{index} }} from './missing{index}';\n"
-        ));
-    }
-    source.push_str("export type Uses = Missing0;\n");
-    upsert(&host, owner, &source);
+    upsert(
+        &host,
+        owner,
+        "import type { Missing } from './missing';\nexport type Uses = Missing;\n",
+    );
     host.ensure_indexed_ready(owner)
         .expect("the owner must index");
 
-    // Precondition: the owner's witness genuinely overflows.
+    assert!(host.owner_import_route_witness_for_tests(owner).is_some());
+    host.test_force
+        .force_import_route_witness_refusal_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(
         host.owner_import_route_witness_for_tests(owner).is_none(),
-        "fixture invariant: {WITNESS_OVERFLOW_SPECIFIERS} unresolvable \
-         import sources must overflow the fact-signature bound — \
-         otherwise the unrooted-skip arm is not exercised",
+        "fixture invariant: the typed refusal seam must make the skipped import unrootable",
     );
 
     // The producer-level observable: run the surface build inside an
@@ -4091,9 +4074,10 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // producers) installs around its cold body — and read the
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.owner_import_surface(owner)
-    });
+    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || host.owner_import_surface(owner),
+    );
     let suppression_raised = matches!(
         finalise,
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
@@ -4102,7 +4086,7 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     assert_eq!(
         snap(&host).owner_import_surface_unrooted_skip_refusals,
         before + 1,
-        "precondition: the skipped ./missingN specifiers cannot be rooted \
+        "precondition: the skipped ./missing specifier cannot be rooted \
          — the build takes the unrooted-skip refusal arm",
     );
     assert!(
@@ -4148,9 +4132,10 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     );
 
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        host.owner_import_surface(owner)
-    });
+    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || host.owner_import_surface(owner),
+    );
     let suppression_raised = matches!(
         finalise,
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)

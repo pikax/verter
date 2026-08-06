@@ -1688,6 +1688,18 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.current_content_generation()
     }
 
+    fn strict_self_root_generation(&self) -> Option<u64> {
+        Some(self.engine.current_strict_self_root_generation())
+    }
+
+    fn strict_self_root_authority_id(&self) -> Option<u64> {
+        Some(self.engine.strict_self_root_authority_id())
+    }
+
+    fn strict_self_root_transition_active(&self) -> bool {
+        self.engine.strict_self_root_transition_active()
+    }
+
     fn resolution_fact_generation(&self) -> u64 {
         self.engine.current_resolution_fact_generation()
     }
@@ -1796,6 +1808,28 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 }
 
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
+    fn begin_strict_self_root_transition(&self) {
+        self.engine.begin_strict_self_root_transition();
+    }
+
+    fn end_strict_self_root_transition(&self) {
+        self.engine.end_strict_self_root_transition();
+    }
+
+    fn publish_owner_resolution_set(
+        &self,
+        owner_canonical: &str,
+    ) -> Option<crate::fact_cache::FactVersionRef> {
+        self.engine.publish_owner_resolution_set(
+            owner_canonical,
+            crate::traits::WorkspaceRead::resolution_population(self),
+        )
+    }
+
+    fn source_env_generation(&self) -> Option<u64> {
+        Some(self.engine.current_source_env_generation())
+    }
+
     fn reset_vfs_provenance(&self) {
         FilesystemWorkspace::reset_vfs_provenance(self);
     }

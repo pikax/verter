@@ -394,14 +394,16 @@ impl VerterHost {
             });
             // Output-dependency tracing stays SEPARATE from any outer
             // analysis tracer scope (none is active on the warm path).
-            let (output, _output_read_set) = self.with_fact_tracer(|| {
-                crate::meta_resolve::projectors::build_component_meta_output(
-                    ctx,
-                    canonical.as_str(),
-                    cached.analysis.clone(),
-                    seed,
-                )
-            });
+            let (output, _output_read_set) =
+                crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                    .with_fact_tracer(|| {
+                        crate::meta_resolve::projectors::build_component_meta_output(
+                            ctx,
+                            canonical.as_str(),
+                            cached.analysis.clone(),
+                            seed,
+                        )
+                    });
             return output.map(Some);
         }
 
@@ -438,14 +440,17 @@ impl VerterHost {
         // fold into the analysis entry's fact signature (the cold body's
         // tracer already sealed + published above). Reuse the SAME live
         // session context that extraction used.
-        let (output, _output_read_set) = self.with_fact_tracer(|| {
-            crate::meta_resolve::projectors::build_component_meta_output(
-                ctx,
-                canonical.as_str(),
-                meta,
-                seed,
-            )
-        });
+        let (output, _output_read_set) =
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx).with_fact_tracer(
+                || {
+                    crate::meta_resolve::projectors::build_component_meta_output(
+                        ctx,
+                        canonical.as_str(),
+                        meta,
+                        seed,
+                    )
+                },
+            );
         output.map(Some)
     }
 
