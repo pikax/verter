@@ -52,8 +52,8 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, FrameSpan, FunctionBodySkeleton, FunctionBodySource, NameMeaning,
-    SkeletonBindingKind,
+    build_function_body_skeleton, value_descent, FrameSpan, FunctionBodySkeleton,
+    FunctionBodySource, NameMeaning, SkeletonBindingKind, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     inventory_statement_list, resolve_function_node, FunctionControlRegion, FunctionNode,
@@ -2007,11 +2007,19 @@ impl Lowerer<'_> {
     }
 
     /// Lower one expression. Parameter and in-scope local identifiers
-    /// become dedicated carriers; a plain string-keyed object literal
-    /// lowers STRUCTURALLY (each member value is a flow expression, gated
-    /// by the demand selection); a bare-identifier call to the function
-    /// itself becomes the recursion hold; every other form lowers through
-    /// the shared shallow-pass per-expression lowering for the position.
+    /// become dedicated carriers, a nested function value becomes its own
+    /// frame, and a bare-identifier call to the function itself becomes
+    /// the recursion hold — three frame-local carriers this half mints
+    /// and the demand planner has no descent into.
+    ///
+    /// Every OTHER form takes the disposition the shared classifier
+    /// `verter_semantic::analysis::flow::value_descent` assigns it, which
+    /// is the same verdict the skeleton's `open_site` descends on: a
+    /// plain string-keyed object literal lowers STRUCTURALLY (each member
+    /// value is a flow expression, gated by the demand selection), a
+    /// conditional joins its branch values, a type carrier and a leaf
+    /// take the shared shallow-pass per-expression lowering for the
+    /// position.
     fn lower_expr(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
         match expr {
             Expression::Identifier(identifier) => {
@@ -2039,129 +2047,11 @@ impl Lowerer<'_> {
                     NameBinding::Free => self.lower_leaf(expr, mode),
                 }
             }
-            Expression::ParenthesizedExpression(paren) => {
-                // A parenthesized wrapper is structurally transparent.
-                self.lower_expr(&paren.expression, mode)
-            }
             Expression::FunctionExpression(func) => {
                 self.lower_nested_function(&FunctionNode::Function(func))
             }
             Expression::ArrowFunctionExpression(arrow) => {
                 self.lower_nested_function(&FunctionNode::Arrow(arrow))
-            }
-            Expression::ObjectExpression(object) => {
-                let mut members = Vec::with_capacity(object.properties.len());
-                let mut structural = true;
-                for prop in &object.properties {
-                    let ObjectPropertyKind::ObjectProperty(p) = prop else {
-                        structural = false;
-                        break;
-                    };
-                    let key = match &p.key {
-                        PropertyKey::StaticIdentifier(id) => Arc::from(id.name.as_str()),
-                        PropertyKey::StringLiteral(lit) => Arc::from(lit.value.as_str()),
-                        _ => {
-                            structural = false;
-                            break;
-                        }
-                    };
-                    // A member value OUTSIDE the demand selection never
-                    // lowers — the elided sibling rides the typed carrier
-                    // (present in the member LIST so missing-member
-                    // detection stays static, content-free forever).
-                    if !self.value_span_selected(p.value.span()) {
-                        members.push(SliceObjectMember {
-                            key,
-                            value: SliceExpr::Elided,
-                            method_kind: match (p.method, p.kind) {
-                                (false, PropertyKind::Init) => None,
-                                (_, PropertyKind::Get) => {
-                                    Some(verter_type_expr::ObjectMethodKind::Get)
-                                }
-                                (_, PropertyKind::Set) => {
-                                    Some(verter_type_expr::ObjectMethodKind::Set)
-                                }
-                                (true, PropertyKind::Init) => {
-                                    Some(verter_type_expr::ObjectMethodKind::Method)
-                                }
-                            },
-                            spans: verter_type_expr::MemberSpans {
-                                declaration: Some(p.span.into()),
-                                name: Some(p.key.span().into()),
-                                type_annotation: None,
-                            },
-                        });
-                        continue;
-                    }
-                    // A method / accessor member with a body is a nested
-                    // function value (its return evaluates inline through
-                    // the same flow machinery); a method without a body
-                    // keeps the whole-literal leaf lowering.
-                    if p.method || !matches!(p.kind, PropertyKind::Init) {
-                        let method_kind = match p.kind {
-                            PropertyKind::Get => verter_type_expr::ObjectMethodKind::Get,
-                            PropertyKind::Set => verter_type_expr::ObjectMethodKind::Set,
-                            _ => verter_type_expr::ObjectMethodKind::Method,
-                        };
-                        let value = match &p.value {
-                            Expression::FunctionExpression(func) => {
-                                self.lower_nested_function(&FunctionNode::Function(func))
-                            }
-                            Expression::ArrowFunctionExpression(arrow) => {
-                                self.lower_nested_function(&FunctionNode::Arrow(arrow))
-                            }
-                            _ => {
-                                structural = false;
-                                break;
-                            }
-                        };
-                        members.push(SliceObjectMember {
-                            key,
-                            value,
-                            method_kind: Some(method_kind),
-                            spans: verter_type_expr::MemberSpans {
-                                declaration: Some(p.span.into()),
-                                name: Some(p.key.span().into()),
-                                type_annotation: None,
-                            },
-                        });
-                        continue;
-                    }
-                    // An object-literal member's fresh literal ALWAYS
-                    // widens to its primitive (the member slot is
-                    // mutable), in every enclosing position — tsc's
-                    // object-literal property widening rule. An `as
-                    // const` member keeps its literal.
-                    let widen_member =
-                        !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                            &p.value,
-                            self.source,
-                        );
-                    let value = self.lower_expr(&p.value, mode);
-                    let value = match (widen_member, value) {
-                        (true, SliceExpr::Type(leaf)) => SliceExpr::Type(leaf.map_ty(
-                            verter_semantic::analysis::type_eval_build::widen_shallow_literal,
-                        )),
-                        (_, value) => value,
-                    };
-                    members.push(SliceObjectMember {
-                        key,
-                        value,
-                        method_kind: None,
-                        spans: verter_type_expr::MemberSpans {
-                            declaration: Some(p.span.into()),
-                            name: Some(p.key.span().into()),
-                            type_annotation: None,
-                        },
-                    });
-                }
-                if structural {
-                    SliceExpr::Object {
-                        members: Arc::from(members.into_boxed_slice()),
-                    }
-                } else {
-                    self.lower_leaf(expr, mode)
-                }
             }
             Expression::CallExpression(call)
                 if matches!(
@@ -2267,71 +2157,177 @@ impl Lowerer<'_> {
                     },
                 }
             }
-            // A CONDITIONAL's value is the union of its branch values,
-            // and each branch is lowered as a flow expression — so a call
-            // in a branch rides `SliceExpr::Call` to the evaluator's one
-            // call sink, exactly as the `if` / `return` twin's does.
-            // Folding the whole ternary through the leaf lowering instead
-            // published the callee's UNREDUCED return carrier: its own
-            // binders intact, its overload group unconsulted, warm.
-            Expression::ConditionalExpression(conditional) => {
-                let consequent = self.lower_expr(&conditional.consequent, mode);
-                let alternate = self.lower_expr(&conditional.alternate, mode);
-                SliceExpr::Union {
-                    arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+            // ── THE shared value-structural descent ──────────────────
+            //
+            // Every remaining form takes the disposition the ONE shared
+            // classifier assigns it (`verter_semantic::analysis::flow::
+            // value_descent`), which is the SAME verdict the skeleton's
+            // `open_site` descends on. Neither half carries a wildcard
+            // over `Expression`: the exhaustive match lives in the
+            // classifier, so a new variant does not compile until it is
+            // dispositioned there — and both halves inherit that
+            // disposition in the same change.
+            //
+            // The arms above (identifier / nested function value / call)
+            // are `Leaf` to the classifier: they have no
+            // value-contributing sub-expression the demand plan must
+            // reach, only a frame-local carrier this half mints.
+            other => match value_descent(other) {
+                ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
+                // A TYPE carrier decides the published type (`x as
+                // const` pins what a bare literal would widen), so the
+                // whole carrier lowers as ONE leaf here while the
+                // planner descends through it. Over-selection, by
+                // design — see [`ValueDescent::TypeCarrier`].
+                ValueDescent::TypeCarrier(_) => self.lower_leaf(other, mode),
+                ValueDescent::Object(object) => self.lower_object_literal(object, other, mode),
+                // A CONDITIONAL's value is the union of its branch
+                // values, and each branch is lowered as a flow
+                // expression — so a call in a branch rides
+                // `SliceExpr::Call` to the evaluator's one call sink,
+                // exactly as the `if` / `return` twin's does. Folding
+                // the whole ternary through the leaf lowering instead
+                // published the callee's UNREDUCED return carrier: its
+                // own binders intact, its overload group unconsulted,
+                // warm.
+                ValueDescent::Branches(conditional) => {
+                    let consequent = self.lower_expr(&conditional.consequent, mode);
+                    let alternate = self.lower_expr(&conditional.alternate, mode);
+                    SliceExpr::Union {
+                        arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+                    }
                 }
+                // A leaf-answered form takes the shared shallow-pass
+                // leaf lowering THROUGH `lower_leaf`, whose gate refuses
+                // a leaf answer that embeds an unreduced call-return
+                // carrier. A form here therefore either contains no call
+                // whose return would ride out as a raw `ReturnType<…>`
+                // carrier, or fails closed. It does NOT follow that every
+                // leaf form is call-exact: most answer the shallow pass's
+                // `any`, which is reached BEFORE the carrier gate and is
+                // never a carrier — see `lower_leaf`.
+                ValueDescent::Leaf => self.lower_leaf(other, mode),
+            },
+        }
+    }
+
+    /// Lower one plain string-keyed object literal STRUCTURALLY: each
+    /// member value is a flow expression, gated by the demand selection.
+    /// A literal this half cannot model structurally (a spread, a
+    /// computed key, a non-function method value) falls back to the
+    /// whole-literal leaf lowering of `whole`.
+    fn lower_object_literal(
+        &mut self,
+        object: &oxc_ast::ast::ObjectExpression<'_>,
+        whole: &Expression<'_>,
+        mode: ExprMode,
+    ) -> SliceExpr {
+        let mut members = Vec::with_capacity(object.properties.len());
+        let mut structural = true;
+        for prop in &object.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                structural = false;
+                break;
+            };
+            let key = match &p.key {
+                PropertyKey::StaticIdentifier(id) => Arc::from(id.name.as_str()),
+                PropertyKey::StringLiteral(lit) => Arc::from(lit.value.as_str()),
+                _ => {
+                    structural = false;
+                    break;
+                }
+            };
+            // A member value OUTSIDE the demand selection never
+            // lowers — the elided sibling rides the typed carrier
+            // (present in the member LIST so missing-member
+            // detection stays static, content-free forever).
+            if !self.value_span_selected(p.value.span()) {
+                members.push(SliceObjectMember {
+                    key,
+                    value: SliceExpr::Elided,
+                    method_kind: match (p.method, p.kind) {
+                        (false, PropertyKind::Init) => None,
+                        (_, PropertyKind::Get) => Some(verter_type_expr::ObjectMethodKind::Get),
+                        (_, PropertyKind::Set) => Some(verter_type_expr::ObjectMethodKind::Set),
+                        (true, PropertyKind::Init) => {
+                            Some(verter_type_expr::ObjectMethodKind::Method)
+                        }
+                    },
+                    spans: verter_type_expr::MemberSpans {
+                        declaration: Some(p.span.into()),
+                        name: Some(p.key.span().into()),
+                        type_annotation: None,
+                    },
+                });
+                continue;
             }
-            // ── Leaf-answered forms ──────────────────────────────────
-            //
-            // Everything below takes the shared shallow-pass leaf
-            // lowering THROUGH `lower_leaf`, whose gate refuses a leaf
-            // answer that embeds an unreduced call-return carrier. So a
-            // form here either contains no call in a value position, or
-            // fails closed — it never publishes a callee's raw return.
-            //
-            // The match is EXHAUSTIVE by construction: there is no `_`
-            // arm, so a new `Expression` variant does not compile until
-            // someone decides which of the three dispositions it takes
-            // (a structural arm above, this leaf list, or a fail-closed
-            // carrier). The wildcard is what let a conditional expression
-            // sit silently in the leaf list for the whole life of the
-            // substrate.
-            Expression::BooleanLiteral(_)
-            | Expression::NullLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::RegExpLiteral(_)
-            | Expression::StringLiteral(_)
-            | Expression::TemplateLiteral(_)
-            | Expression::MetaProperty(_)
-            | Expression::Super(_)
-            | Expression::ArrayExpression(_)
-            | Expression::AssignmentExpression(_)
-            | Expression::AwaitExpression(_)
-            | Expression::BinaryExpression(_)
-            | Expression::ChainExpression(_)
-            | Expression::ClassExpression(_)
-            | Expression::ImportExpression(_)
-            | Expression::LogicalExpression(_)
-            | Expression::NewExpression(_)
-            | Expression::SequenceExpression(_)
-            | Expression::TaggedTemplateExpression(_)
-            | Expression::ThisExpression(_)
-            | Expression::UnaryExpression(_)
-            | Expression::UpdateExpression(_)
-            | Expression::YieldExpression(_)
-            | Expression::PrivateInExpression(_)
-            | Expression::JSXElement(_)
-            | Expression::JSXFragment(_)
-            | Expression::TSAsExpression(_)
-            | Expression::TSSatisfiesExpression(_)
-            | Expression::TSTypeAssertion(_)
-            | Expression::TSNonNullExpression(_)
-            | Expression::TSInstantiationExpression(_)
-            | Expression::V8IntrinsicExpression(_)
-            | Expression::ComputedMemberExpression(_)
-            | Expression::StaticMemberExpression(_)
-            | Expression::PrivateFieldExpression(_) => self.lower_leaf(expr, mode),
+            // A method / accessor member with a body is a nested
+            // function value (its return evaluates inline through
+            // the same flow machinery); a method without a body
+            // keeps the whole-literal leaf lowering.
+            if p.method || !matches!(p.kind, PropertyKind::Init) {
+                let method_kind = match p.kind {
+                    PropertyKind::Get => verter_type_expr::ObjectMethodKind::Get,
+                    PropertyKind::Set => verter_type_expr::ObjectMethodKind::Set,
+                    _ => verter_type_expr::ObjectMethodKind::Method,
+                };
+                let value = match &p.value {
+                    Expression::FunctionExpression(func) => {
+                        self.lower_nested_function(&FunctionNode::Function(func))
+                    }
+                    Expression::ArrowFunctionExpression(arrow) => {
+                        self.lower_nested_function(&FunctionNode::Arrow(arrow))
+                    }
+                    _ => {
+                        structural = false;
+                        break;
+                    }
+                };
+                members.push(SliceObjectMember {
+                    key,
+                    value,
+                    method_kind: Some(method_kind),
+                    spans: verter_type_expr::MemberSpans {
+                        declaration: Some(p.span.into()),
+                        name: Some(p.key.span().into()),
+                        type_annotation: None,
+                    },
+                });
+                continue;
+            }
+            // An object-literal member's fresh literal ALWAYS
+            // widens to its primitive (the member slot is
+            // mutable), in every enclosing position — tsc's
+            // object-literal property widening rule. An `as
+            // const` member keeps its literal.
+            let widen_member = !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                &p.value,
+                self.source,
+            );
+            let value = self.lower_expr(&p.value, mode);
+            let value = match (widen_member, value) {
+                (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
+                    leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
+                ),
+                (_, value) => value,
+            };
+            members.push(SliceObjectMember {
+                key,
+                value,
+                method_kind: None,
+                spans: verter_type_expr::MemberSpans {
+                    declaration: Some(p.span.into()),
+                    name: Some(p.key.span().into()),
+                    type_annotation: None,
+                },
+            });
+        }
+        if structural {
+            SliceExpr::Object {
+                members: Arc::from(members.into_boxed_slice()),
+            }
+        } else {
+            self.lower_leaf(whole, mode)
         }
     }
 

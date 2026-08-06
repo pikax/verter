@@ -1982,12 +1982,13 @@ const FLOW_FIXTURE: &str = "export function alpha(n: number) {\n\
 fn function_program_index_builds_once_and_covers_every_function_position() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
     let first = memo.function_program_index();
-    let names: Vec<&str> = first
-        .entries
-        .iter()
-        .map(|entry| entry.key.declaration.name.as_ref())
-        .collect();
-    assert_eq!(names, vec!["alpha", "beta", "Gamma"]);
+    assert_eq!(first.len(), 3, "three function positions are served");
+    for name in ["alpha", "beta", "Gamma"] {
+        assert!(
+            first.matches_named(name).next().is_some(),
+            "{name} must be indexed"
+        );
+    }
 
     let alpha = first
         .value_function(
@@ -1996,7 +1997,8 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
             &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             0,
         )
-        .expect("alpha is indexed");
+        .expect("alpha is indexed")
+        .entry();
     assert_eq!(alpha.return_sites.len(), 2);
     assert_eq!(alpha.direct_calls.len(), 1, "the self-call is exact");
     assert_eq!(
@@ -2017,48 +2019,38 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
 fn function_program_index_hash_folds_parse_env_identity() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
     let index = memo.function_program_index();
-    let alpha = index
-        .value_function(
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "alpha",
-            &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-            0,
-        )
-        .expect("alpha is indexed");
+    let alpha_of = |index: &verter_semantic::analysis::function_program::FunctionProgramIndex| {
+        index
+            .value_function(
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "alpha",
+                &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            )
+            .expect("alpha is indexed")
+            .entry()
+            .flow_body_stable_hash
+    };
+    let memo_folded = alpha_of(&index);
 
     let env_a = crate::hash::hash_16(b"env-a");
     let env_b = crate::hash::hash_16(b"env-b");
-    let refolded_a = fold_flow_body_env_identity(
-        verter_semantic::analysis::function_program::FunctionProgramIndex {
-            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
-        },
-        &env_a,
-        oxc_span::SourceType::ts(),
-    );
-    let refolded_a2 = fold_flow_body_env_identity(
-        verter_semantic::analysis::function_program::FunctionProgramIndex {
-            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
-        },
-        &env_a,
-        oxc_span::SourceType::ts(),
-    );
-    let refolded_b = fold_flow_body_env_identity(
-        verter_semantic::analysis::function_program::FunctionProgramIndex {
-            entries: Arc::from(vec![alpha.clone()].into_boxed_slice()),
-        },
-        &env_b,
-        oxc_span::SourceType::ts(),
-    );
+    let refolded_a = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
+    let refolded_a2 = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
+    let refolded_b = fold_flow_body_env_identity(&index, &env_b, oxc_span::SourceType::ts());
     assert_eq!(
-        refolded_a.entries[0].flow_body_stable_hash, refolded_a2.entries[0].flow_body_stable_hash,
+        alpha_of(&refolded_a),
+        alpha_of(&refolded_a2),
         "the fold is deterministic"
     );
     assert_ne!(
-        refolded_a.entries[0].flow_body_stable_hash, refolded_b.entries[0].flow_body_stable_hash,
+        alpha_of(&refolded_a),
+        alpha_of(&refolded_b),
         "a parse-env move changes the folded hash"
     );
     assert_ne!(
-        refolded_a.entries[0].flow_body_stable_hash, alpha.flow_body_stable_hash,
+        alpha_of(&refolded_a),
+        memo_folded,
         "the folded hash is the artifact-boundary identity, not the memo-folded one"
     );
 }
@@ -2076,6 +2068,7 @@ fn function_program_index_hash_tracks_body_content_across_files() {
                 0,
             )
             .expect("alpha is indexed")
+            .entry()
             .flow_body_stable_hash
     };
     assert_eq!(

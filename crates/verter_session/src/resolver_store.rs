@@ -3279,14 +3279,21 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     return false;
                 };
                 let index = indexed.shallow_state.decl_bodies().function_program_index();
-                index.entries.iter().any(|entry| {
-                    entry.key.declaration.owner == function.owner
-                        && entry.key.declaration.name.as_ref()
-                            == function.merged_symbol_name.as_ref()
-                        && entry.key.declaration.space == function.symbol_space
-                        && entry.key.part == function.function_part
-                        && entry.key.overload_ordinal == function.overload_ordinal
-                        && &entry.flow_body_stable_hash == flow_body_stable_hash
+                // The KEYED lookup: the fact names one function position,
+                // and validity is that position's own live body hash —
+                // never "some entry in this file matches closely enough".
+                let key = verter_semantic::analysis::function_program::FunctionProgramKey {
+                    declaration:
+                        verter_semantic::analysis::function_program::FunctionDeclarationRef {
+                            owner: function.owner,
+                            name: Arc::clone(&function.merged_symbol_name),
+                            space: function.symbol_space,
+                        },
+                    part: function.function_part.clone(),
+                    overload_ordinal: function.overload_ordinal,
+                };
+                index.get(&key).is_some_and(|matched| {
+                    &matched.entry().flow_body_stable_hash == flow_body_stable_hash
                 })
             }
         }

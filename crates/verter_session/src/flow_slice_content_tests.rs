@@ -36,26 +36,25 @@ fn memo_for(source: &str) -> Arc<DeclBodyMemo> {
     Arc::clone(state.decl_bodies())
 }
 
-fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &str) -> &'a FunctionProgramEntry {
+fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &'a str) -> &'a FunctionProgramEntry {
     index
-        .entries
-        .iter()
-        .find(|entry| entry.key.declaration.name.as_ref() == name)
+        .matches_named(name)
+        .next()
+        .map(|matched| matched.entry())
         .unwrap_or_else(|| panic!("{name} must be indexed"))
 }
 
 fn member_entry_of<'a>(
     index: &'a FunctionProgramIndex,
-    class_name: &str,
+    class_name: &'a str,
     ordinal: u32,
 ) -> &'a FunctionProgramEntry {
     index
-        .entries
-        .iter()
-        .find(|entry| {
-            entry.key.declaration.name.as_ref() == class_name
-                && matches!(&entry.key.part, FunctionPartIdentity::Member { member_path } if member_path.contains(&ordinal))
+        .matches_named(class_name)
+        .find(|matched| {
+            matches!(&matched.key().part, FunctionPartIdentity::Member { member_path } if member_path.contains(&ordinal))
         })
+        .map(|matched| matched.entry())
         .unwrap_or_else(|| panic!("{class_name} member {ordinal} must be indexed"))
 }
 

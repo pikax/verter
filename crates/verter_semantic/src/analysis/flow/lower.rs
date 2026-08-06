@@ -178,21 +178,29 @@ pub fn lower_slice_plan(
                         elided_entries: elided,
                     }
                 }
-                SkeletonExprShape::Other => FlowExprShape::Opaque {
-                    reads: Arc::from(
-                        site.reads
-                            .iter()
-                            .map(|read| {
-                                let name = skeleton.name(read.name);
-                                FlowRead {
-                                    name: Arc::from(name),
-                                    slot: slot_of_name(name),
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
-                },
+                // A branch JOIN carries no lowered shape of its own: its
+                // arms ride as their OWN selected expression records
+                // (the graph made them value providers), and the content
+                // half re-reads the authored branch structure from the
+                // retained snapshot through this site's span locator —
+                // exactly as it does for any other non-object site.
+                SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+                    FlowExprShape::Opaque {
+                        reads: Arc::from(
+                            site.reads
+                                .iter()
+                                .map(|read| {
+                                    let name = skeleton.name(read.name);
+                                    FlowRead {
+                                        name: Arc::from(name),
+                                        slot: slot_of_name(name),
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        ),
+                    }
+                }
             };
             FlowExpr {
                 site: *site_id,

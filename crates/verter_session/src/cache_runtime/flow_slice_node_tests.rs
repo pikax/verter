@@ -482,9 +482,9 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .decl_bodies()
         .function_program_index();
     let entry = index
-        .entries
-        .iter()
-        .find(|entry| entry.key.declaration.name.as_ref() == "myType")
+        .matches_named("myType")
+        .next()
+        .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceHashKey {
@@ -1051,12 +1051,12 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
             .shallow_state
             .decl_bodies()
             .function_program_index();
-        index
-            .entries
-            .iter()
-            .find(|entry| entry.key.declaration.name.as_ref() == "shiftedSecond")
-            .expect("shiftedSecond is a served function position")
-            .flow_body_stable_hash
+        let hash = index
+            .matches_named("shiftedSecond")
+            .next()
+            .map(|matched| matched.entry().flow_body_stable_hash)
+            .expect("shiftedSecond is a served function position");
+        hash
     };
     let base = hash_of(SHIFT_FIXTURE);
     assert_eq!(

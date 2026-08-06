@@ -827,10 +827,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 context,
             )
         } else if !prepared.signatures.is_empty() {
-            // Overload visibility (projection-time rule): a lone signature is
-            // always visible (even if bodied); a multi-signature overload group
-            // surfaces every bodiless overload in source order and HIDES the
-            // trailing implementation signature. Each visible signature lowers
+            // Overload visibility (projection-time rule) comes from the ONE
+            // shared authority — the same rule the member-position overload
+            // carrier applies, so a group reached as `typeof f` and the same
+            // group reached as `C['m']` publish the same contributors. Each
+            // visible signature lowers
             // through the located body source at its GROUP-level
             // `ValueSignature` ordinal (the whole-signature deref recovers the
             // function IR from the retained snapshot — binding the signature's
@@ -840,24 +841,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // composed constructor-like object is interned directly.
             let is_class =
                 prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
-            let visible: Vec<usize> = if prepared.signatures.len() == 1 {
-                vec![0]
-            } else {
-                let bodiless: Vec<usize> = prepared
+            let visible = crate::semantic_query::visible_overload_ordinals(
+                prepared
                     .signatures
                     .iter()
-                    .enumerate()
-                    .filter(|(_, sig)| !sig.has_implementation_body)
-                    .map(|(ordinal, _)| ordinal)
-                    .collect();
-                // Defensive: an overload set with no bodiless members is
-                // ill-formed TS; surface every signature rather than none.
-                if bodiless.is_empty() {
-                    (0..prepared.signatures.len()).collect()
-                } else {
-                    bodiless
-                }
-            };
+                    .map(|sig| sig.has_implementation_body),
+            );
             let signature_nodes: Vec<crate::semantic_query::SemanticNodeId> =
                 visible
                     .into_iter()
@@ -5654,9 +5643,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   surface MAY carry user-level members (a class's static surface)
     ///   and MAY carry both buckets (a call+construct hybrid) — selection
     ///   never requires the other bucket or the member list to be empty.
-    /// - A multi-signature bucket is a visibility-filtered overload group
-    ///   (build_typeof already hides trailing implementation signatures);
+    /// - A multi-signature bucket is a visibility-filtered overload group;
     ///   per TS, the signature utilities read the LAST visible overload.
+    ///   That filter is this function's PRECONDITION, not its job, and it
+    ///   has exactly one implementation — `semantic_query::
+    ///   visible_overload_ordinals` — which BOTH producers of a
+    ///   multi-signature bucket call: `build_typeof` for a top-level
+    ///   function group, and `SurfaceView::project_known_key_overload_group`
+    ///   for a method-position group. The member carrier once fed this
+    ///   function an UNFILTERED bucket, so for a bodied group the "last
+    ///   visible overload" was the implementation and `ReturnType<C['m']>`
+    ///   read `any`.
     /// - `Alias` chains unwrap (cycle guarded).
     ///
     /// Returns `None` when the shape carries no signature in the requested

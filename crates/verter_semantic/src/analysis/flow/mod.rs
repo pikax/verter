@@ -46,6 +46,9 @@ pub mod frame_span;
 pub mod hashing;
 pub mod lower;
 pub mod peeker;
+pub mod value_descent;
+
+pub use value_descent::{value_descent, ValueDescent};
 
 #[cfg(test)]
 #[path = "skeleton_tests.rs"]
@@ -407,12 +410,26 @@ pub enum SkeletonObjectEntry {
 }
 
 /// The recorded shape of one expression site.
+///
+/// The variants other than [`Self::Other`] are exactly the
+/// [`ValueDescent`] dispositions that HAVE value-providing children:
+/// each one records the child sites the flow graph turns into
+/// value-provider edges, so the demand planner reaches every
+/// sub-expression the content half lowers.
 #[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
 pub enum SkeletonExprShape {
     /// An object literal with its property footprint, in authored order.
     ObjectLiteral {
         /// The entries in authored order.
         entries: Arc<[SkeletonObjectEntry]>,
+    },
+    /// A branch JOIN (a conditional expression): every arm site provides
+    /// the WHOLE value of this site, so a demand for this site's value —
+    /// or for a projection under it — is a demand for each arm's, at the
+    /// same remaining path.
+    BranchJoin {
+        /// The arm sites, in authored order (consequent, alternate).
+        arms: Arc<[SkeletonExprSiteId]>,
     },
     /// Any other expression shape (footprint-only).
     Other,
@@ -1045,18 +1062,69 @@ impl SkeletonBuilder {
         self.open_site(expression, None)
     }
 
+    /// Track one expression position, descending through exactly the
+    /// forms the SHARED classifier ([`value_descent`]) says have
+    /// value-providing children.
+    ///
+    /// This is the planner-side twin of `flow_slice_content`'s
+    /// `lower_expr`: every position the content half lowers is a
+    /// position opened here, and both dispatch on the same verdict — so
+    /// a form the content half descends into cannot be a form this half
+    /// skips. The site's SPAN stays the OUTERMOST expression's
+    /// throughout the descent, which is the span the content half
+    /// rebases and asks the selection about.
     fn open_site(
         &mut self,
         expression: &Expression<'_>,
         parent: Option<SkeletonExprSiteId>,
     ) -> SkeletonExprSiteId {
-        if let Expression::ObjectExpression(object) = unwrap_expression_carriers(expression) {
-            return self.open_object_site(object, parent, expression.span().into());
+        self.open_site_at(expression, parent, expression.span().into())
+    }
+
+    fn open_site_at(
+        &mut self,
+        expression: &Expression<'_>,
+        parent: Option<SkeletonExprSiteId>,
+        span: verter_span::Span,
+    ) -> SkeletonExprSiteId {
+        match value_descent(expression) {
+            // Both carriers descend HERE. The type carrier is the one
+            // asymmetric disposition: the content half leaf-lowers it,
+            // so this side over-selects — see [`ValueDescent`].
+            ValueDescent::Transparent(inner) | ValueDescent::TypeCarrier(inner) => {
+                self.open_site_at(inner, parent, span)
+            }
+            ValueDescent::Object(object) => self.open_object_site(object, parent, span),
+            ValueDescent::Branches(conditional) => self.open_branch_site(conditional, parent, span),
+            ValueDescent::Leaf => {
+                let id = self.alloc_site(span, parent);
+                self.site_stack.push(id.index());
+                self.visit_expression(expression);
+                self.site_stack.pop();
+                id
+            }
         }
-        let id = self.alloc_site(expression.span().into(), parent);
+    }
+
+    /// A branch JOIN site: the test's footprint stays on this site (its
+    /// value is never consumed, its evaluation effects are), and each arm
+    /// becomes its own child site so the graph can name it a value
+    /// provider of the whole join.
+    fn open_branch_site(
+        &mut self,
+        conditional: &oxc_ast::ast::ConditionalExpression<'_>,
+        parent: Option<SkeletonExprSiteId>,
+        span: verter_span::Span,
+    ) -> SkeletonExprSiteId {
+        let id = self.alloc_site(span, parent);
         self.site_stack.push(id.index());
-        self.visit_expression(expression);
+        self.visit_expression(&conditional.test);
         self.site_stack.pop();
+        let consequent = self.open_site(&conditional.consequent, Some(id));
+        let alternate = self.open_site(&conditional.alternate, Some(id));
+        self.sites[id.index()].shape = SkeletonExprShape::BranchJoin {
+            arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+        };
         id
     }
 

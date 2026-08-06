@@ -3512,6 +3512,12 @@ impl SurfaceView {
     /// `None` for zero or one collision, and for a collision set that is
     /// not wholly methods (a property colliding with a method is a merge
     /// artifact, not an overload group — first-wins still rules there).
+    ///
+    /// The returned signatures are the group's VISIBLE overloads under
+    /// the one shared [`visible_overload_ordinals`] rule, so the carrier
+    /// this feeds is the same shape `build_typeof` mints for a top-level
+    /// function group of the same contributor list — implementation
+    /// signature hidden included.
     pub fn project_known_key_overload_group(
         &self,
         key: &PropertyKey,
@@ -3534,7 +3540,12 @@ impl SurfaceView {
         {
             return None;
         }
-        Some(group.into_iter().map(|member| member.value).collect())
+        Some(
+            visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
+                .into_iter()
+                .map(|ordinal| group[ordinal].value)
+                .collect(),
+        )
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -3570,6 +3581,48 @@ impl SurfaceView {
     pub(crate) fn with_call_signatures(mut self, call_signatures: Arc<[SemanticNodeId]>) -> Self {
         self.call_signatures = call_signatures;
         self
+    }
+}
+
+/// THE overload-VISIBILITY projection rule — the ordinals of `signatures`
+/// TypeScript surfaces, given each contributor's `has_implementation_body`
+/// in source order.
+///
+/// The rule is ONE sentence: surface every BODILESS contributor in source
+/// order, and if there is none, surface every contributor. That covers
+/// both of the shapes usually stated separately — a multi-signature
+/// overload group hides its trailing implementation, and a LONE bodied
+/// signature (`class C { m(x: string): "LA" { … } }`, an ill-formed
+/// all-bodied set) stays visible because there is nothing bodiless to
+/// prefer. Spelling the lone case as its own early-out was redundant
+/// with the fallback in both producers, and a redundant branch is a
+/// branch no mutation can discriminate.
+///
+/// Two producers apply it and they must not diverge: `build_typeof` over
+/// a prepared declaration's `ValueSignature`s, and
+/// [`SurfaceView::project_known_key_overload_group`] over an object
+/// surface's same-named method members. They agreed by CONVENTION, and
+/// the convention broke the moment the second one landed — the member
+/// carrier published all three contributors of a bodied group, so
+/// `select_signature_function` (which documents this filter as its
+/// PRECONDITION and reads the LAST overload) took the implementation:
+/// `ReturnType<C['m']>` became `any` and `Parameters<C['m']>` became
+/// `[x: any]`, cleanly and warm, where the checker answers `"MB"` and
+/// `[x: number]`.
+pub(crate) fn visible_overload_ordinals(
+    has_implementation_body: impl IntoIterator<Item = bool>,
+) -> Vec<usize> {
+    let bodied: Vec<bool> = has_implementation_body.into_iter().collect();
+    let bodiless: Vec<usize> = bodied
+        .iter()
+        .enumerate()
+        .filter(|(_, has_body)| !**has_body)
+        .map(|(ordinal, _)| ordinal)
+        .collect();
+    if bodiless.is_empty() {
+        (0..bodied.len()).collect()
+    } else {
+        bodiless
     }
 }
 

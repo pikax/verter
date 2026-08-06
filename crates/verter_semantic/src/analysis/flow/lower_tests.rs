@@ -100,13 +100,11 @@ fn lower_slice_plan_lowers_only_selected_nodes() {
         0,
         verter_span::Span::new(
             source.find("new Mytype()").expect("fixture") as u32,
-            source.find("new Mytype()").expect("fixture") as u32,
+            (source.find("new Mytype()").expect("fixture") + "new Mytype()".len()) as u32,
         ),
     );
     assert!(
-        ir.exprs
-            .iter()
-            .all(|expr| expr.span.start() != mytype_at.start()),
+        ir.exprs.iter().all(|expr| !expr.span.contains(mytype_at)),
         "the unselected initializer must not produce an expression record"
     );
 

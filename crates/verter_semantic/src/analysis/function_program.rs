@@ -272,7 +272,17 @@ pub struct FunctionProgramTypeParam {
 
 /// One served function position: identity, body locator, structural
 /// inventory, and the whole-function stable hash.
+///
+/// `#[non_exhaustive]`, so no crate but this one can CONSTRUCT one —
+/// neither by struct literal nor by `Clone` + functional update. An
+/// entry is a STATEMENT about an authored function this file's discovery
+/// walk found; a consumer that fabricates one is stating something no
+/// walk observed, and the flow substrate's callee rail reads a clause off
+/// exactly this record. Fields stay public for READING: the value is a
+/// shallow structural fact, and the hazard is minting one, not reading
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FunctionProgramEntry {
     /// The program identity.
     pub key: FunctionProgramKey,
@@ -342,18 +352,67 @@ pub struct FunctionProgramEntry {
     pub flow_body_exact_hash: Option<Hash16>,
 }
 
+/// A LOOKUP-PROVEN entry: what THIS index answered when asked for one
+/// specific function position.
+///
+/// The field is private and there is no public constructor, so the type
+/// IS the witness: it cannot be forged, and it cannot be manufactured
+/// from an entry obtained any other way — including a legitimately
+/// obtained entry belonging to a DIFFERENT callee.
+///
+/// That second case is the one that mattered. While the flow rail's
+/// clause reader took a bare `&FunctionProgramEntry`, two defeats
+/// compiled. The first was a struct literal assembled out of nothing
+/// (now separately impossible: [`FunctionProgramEntry`] is
+/// `#[non_exhaustive]`). The second, and the realistic one, was an index
+/// MISS falling back to `index.entries.first()` — a real entry, for the
+/// wrong function, handed to a reader whose doc claimed the reference
+/// itself was proof of a successful lookup. Both are closed by
+/// construction now: this index hands out no entry except through a
+/// KEYED lookup, and what it hands out is this witness.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionProgramMatch<'a> {
+    entry: &'a FunctionProgramEntry,
+}
+
+impl<'a> FunctionProgramMatch<'a> {
+    /// The matched entry's structural record.
+    #[must_use]
+    pub fn entry(self) -> &'a FunctionProgramEntry {
+        self.entry
+    }
+
+    /// The position this lookup matched — the entry's own identity, so a
+    /// caller can cross-check what it asked for against what it got.
+    #[must_use]
+    pub fn key(self) -> &'a FunctionProgramKey {
+        &self.entry.key
+    }
+}
+
 /// The per-file function program index.
+///
+/// `entries` is PRIVATE and there is no positional accessor: every way
+/// out of this index is a lookup that NAMES the position it wants
+/// ([`Self::get`], [`Self::value_function`], [`Self::matches_named`]),
+/// and each returns a [`FunctionProgramMatch`]. `index.entries.first()`
+/// — the shape a callee-lookup miss actually fell back to — does not
+/// exist to be written, and neither does any spelling that reaches an
+/// entry without naming its function first.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionProgramIndex {
     /// Every served function position, in source order.
-    pub entries: Arc<[FunctionProgramEntry]>,
+    entries: Arc<[FunctionProgramEntry]>,
 }
 
 impl FunctionProgramIndex {
     /// The entry for `key`, when the position is served by this file.
     #[must_use]
-    pub fn get(&self, key: &FunctionProgramKey) -> Option<&FunctionProgramEntry> {
-        self.entries.iter().find(|entry| &entry.key == key)
+    pub fn get(&self, key: &FunctionProgramKey) -> Option<FunctionProgramMatch<'_>> {
+        self.entries
+            .iter()
+            .find(|entry| &entry.key == key)
+            .map(|entry| FunctionProgramMatch { entry })
     }
 
     /// The entry for a value-space function declaration / initializer of
@@ -365,14 +424,68 @@ impl FunctionProgramIndex {
         name: &str,
         part: &FunctionPartIdentity,
         overload_ordinal: u32,
-    ) -> Option<&FunctionProgramEntry> {
-        self.entries.iter().find(|entry| {
-            entry.key.declaration.owner == owner
-                && entry.key.declaration.name.as_ref() == name
-                && entry.key.declaration.space == SymbolSpace::Value
-                && &entry.key.part == part
-                && entry.key.overload_ordinal == overload_ordinal
-        })
+    ) -> Option<FunctionProgramMatch<'_>> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.key.declaration.owner == owner
+                    && entry.key.declaration.name.as_ref() == name
+                    && entry.key.declaration.space == SymbolSpace::Value
+                    && &entry.key.part == part
+                    && entry.key.overload_ordinal == overload_ordinal
+            })
+            .map(|entry| FunctionProgramMatch { entry })
+    }
+
+    /// Every served position DECLARED under `name`, in source order —
+    /// the keyed lookup for a declaration whose part / overload ordinal
+    /// the caller does not know up front (a class's members, an overload
+    /// group's contributors).
+    pub fn matches_named<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> impl Iterator<Item = FunctionProgramMatch<'a>> + 'a {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.key.declaration.name.as_ref() == name)
+            .map(|entry| FunctionProgramMatch { entry })
+    }
+
+    /// How many function positions this file serves.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether this file serves no function position.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// This index with every entry's `flow_body_stable_hash` re-folded
+    /// through `mix`.
+    ///
+    /// The artifact boundary mixes the parser / language / parse-env
+    /// identity into the semantic walk's body-content hash. It is
+    /// expressed as a fold HERE rather than as a rebuild at the consumer
+    /// because rebuilding needs to construct entries, and constructing an
+    /// entry outside this module is exactly what must stay impossible.
+    #[must_use]
+    pub fn map_stable_hashes(&self, mix: impl Fn(&Hash16) -> Hash16) -> Self {
+        Self {
+            entries: Arc::from(
+                self.entries
+                    .iter()
+                    .map(|entry| {
+                        let mut folded = entry.clone();
+                        folded.flow_body_stable_hash = mix(&entry.flow_body_stable_hash);
+                        folded
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+        }
     }
 }
 

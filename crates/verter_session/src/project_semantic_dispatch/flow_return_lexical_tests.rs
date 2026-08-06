@@ -1403,9 +1403,18 @@ export function ncUse(k: boolean) {
 }
 
 // ── Call forms reached through a COMPOSITE expression ─────────────────
-// A call inside a ternary arm / logical operand / member base is still a
-// call: its callee's clause must be instantiated, and an overload group
-// reached through one must degrade exactly as it does at a bare call.
+// A call in a TERNARY arm is a call: the branch has a structural arm, so
+// the callee's clause is instantiated and an overload group reached
+// through one degrades exactly as it does at a bare call.
+//
+// A call in a LOGICAL / NULLISH / SEQUENCE operand, under a non-null
+// assertion, or as a MEMBER BASE does NOT: those forms are `Leaf` to the
+// shared descent, and the shallow leaf pass answers each of them `any`
+// BEFORE the call-carrier gate can refuse anything. They publish
+// `Primitive(Any)` cleanly and warm — under the checker's answer, never
+// over it, and never the callee's raw return carrier — and the rows
+// below assert exactly that, so a change that starts routing any of them
+// through the call sink has to say so here.
 export declare function tnAmb(x: string): "TA";
 export declare function tnAmb(x: number): "TB";
 
@@ -1434,7 +1443,7 @@ export function tnAmbSequence(k: boolean) {
   return (k, tnAmb("a"));
 }
 
-export function tnAmbAwait(k: boolean) {
+export function tnAmbNonNull(k: boolean) {
   return tnAmb("a")!;
 }
 
@@ -1581,6 +1590,205 @@ export function mpWholeUse(x: { w: ReturnType<typeof mpFlow> }) {
 
 export function mpMemberUse(x: ReturnType<typeof mpFlow>["m"]) {
   return x;
+}
+
+// ── A conditional expression's branch STRUCTURE ───────────────────────
+// The content half descends into both branches; the demand PLANNER must
+// descend through the very same forms, or an object literal in a branch
+// lowers with every member value `Elided` and the whole return fails
+// closed.
+export function ctObj(k: boolean) {
+  return k ? { a: 1 } : 2;
+}
+
+export function ctObjBoth(k: boolean) {
+  return k ? { a: 1 } : { a: 2 };
+}
+
+export function ctObjDisjoint(k: boolean) {
+  return k ? { a: 1 } : { b: 2 };
+}
+
+export function ctObjLocalRead(k: boolean) {
+  const q = 1;
+  return k ? { a: q } : 2;
+}
+
+export function ctObjMethod(k: boolean) {
+  return k
+    ? {
+        m() {
+          return 1;
+        },
+      }
+    : 2;
+}
+
+export function ctObjNested(k: boolean) {
+  return k ? { a: { b: 1 } } : 2;
+}
+
+export function ctObjInObj(k: boolean) {
+  return { a: k ? { b: 1 } : 2 };
+}
+
+export function ctNestedTernary(k: boolean) {
+  return k ? (k ? { a: 1 } : 2) : 3;
+}
+
+export function ctObjEmpty(k: boolean) {
+  return k ? {} : 2;
+}
+
+export function ctArray(k: boolean) {
+  return k ? [1] : [2];
+}
+
+export function ctIdent(k: boolean) {
+  return k ? k : 2;
+}
+
+export function ctNull(k: boolean) {
+  return k ? null : 1;
+}
+
+export function ctArrow(k: boolean) {
+  return k ? () => 1 : () => 2;
+}
+
+// ── Self-recursion through a ternary ──────────────────────────────────
+// The `if` spelling holds coinductively and converges; the ternary
+// spelling must reach the SAME fixed point, not convert the hold into a
+// whole-evaluation failure.
+export function ctRec(n: number) {
+  return n > 0 ? ctRec(n - 1) : 0;
+}
+
+export function ctRecIf(n: number) {
+  if (n > 0) return ctRecIf(n - 1);
+  return 0;
+}
+
+export function ctRecObjMember(n: number) {
+  return { a: n > 0 ? ctRecObjMember(n - 1) : 0 };
+}
+
+// ── A BODIED method overload group ────────────────────────────────────
+// The trailing implementation signature is HIDDEN by TypeScript. The
+// shared PathWalker member hop must apply the same overload-visibility
+// rule `build_typeof` applies to a top-level function group, or the
+// published group leaks `(x: any): any` and every signature utility
+// reads it.
+export class OvImpl {
+  m(x: string): "MA";
+  m(x: number): "MB";
+  m(x: any): any {
+    return x;
+  }
+}
+
+export function ovImplGroup(x: OvImpl["m"]) {
+  return x;
+}
+
+export function ovImplReturn(x: ReturnType<OvImpl["m"]>) {
+  return x;
+}
+
+export function ovImplParams(x: Parameters<OvImpl["m"]>) {
+  return x;
+}
+
+// CONTROL — the same group with NO implementation keeps every declared
+// signature visible.
+export declare class OvAmbient {
+  m(x: string): "AA";
+  m(x: number): "AB";
+}
+
+export function ovAmbientGroup(x: OvAmbient["m"]) {
+  return x;
+}
+
+// CONTROL — a LONE BODIED method is visible (the lone-signature carve-out
+// `build_typeof` applies).
+export class OvLoneImpl {
+  m(x: string): "LA" {
+    return "LA";
+  }
+}
+
+export function ovLoneImplGroup(x: OvLoneImpl["m"]) {
+  return x;
+}
+
+// CONTROL — ONE declared overload plus an implementation: exactly one
+// signature is visible, so the group carrier holds one contributor.
+export class OvSingleImpl {
+  m(x: string): "OA";
+  m(x: any): any {
+    return x;
+  }
+}
+
+export function ovSingleImplGroup(x: OvSingleImpl["m"]) {
+  return x;
+}
+
+// The signature UTILITIES over the same carrier, forced to MATERIALIZE by
+// a projection ON the utility's result — the end-to-end route
+// `select_signature_function` serves.
+export function ovImplReturnProj(x: ReturnType<OvImpl["m"]>["length"]) {
+  return x;
+}
+
+export function ovImplParamsProj(x: Parameters<OvImpl["m"]>[0]) {
+  return x;
+}
+
+export function ovAmbientReturnProj(x: ReturnType<OvAmbient["m"]>["length"]) {
+  return x;
+}
+
+// ── PARKED pre-existing defects (see the `#[ignore]`d rows below) ──────
+// Each fixture characterizes a defect this substrate does NOT own. They
+// are authored here so the parked test has a real body to fail with.
+export declare class HbBase {
+  hb(x: string): "BASE";
+}
+export declare class HbDerived extends HbBase {
+  hb(x: string): "BASE";
+}
+export declare const hbDerivedValue: HbDerived;
+
+export function hbClassCall() {
+  return hbDerivedValue.hb("a");
+}
+
+export interface EbBase {
+  eb(x: string): "EB";
+}
+export interface EbDerived extends EbBase {
+  eb(x: string): "EB";
+}
+export declare const ebDerivedValue: EbDerived;
+
+export function ebIfaceCall() {
+  return ebDerivedValue.eb("a");
+}
+
+export declare class GaClass {
+  get ga(): "GA";
+  set ga(v: "GA");
+}
+export declare const gaValue: GaClass;
+
+export function gaRead() {
+  return gaValue.ga;
+}
+
+export function undefTernary(k: boolean) {
+  return k ? undefined : 1;
 }
 "#;
 
@@ -4422,13 +4630,26 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// `SliceExpr::Call` and degraded correctly. Two spellings of one body,
 /// two answers.
 ///
-/// Two halves close it. A CONDITIONAL now has a structural arm: both
-/// branches lower as flow expressions, so their calls ride the one call
-/// sink and join through the same normalizing interner the contributor
-/// join uses. Every remaining form goes through `lower_leaf`'s
-/// call-carrier gate and FAILS CLOSED rather than publishing the carrier.
-/// And the match is exhaustive — no `_` arm — so a new `Expression`
-/// variant does not compile until it is dispositioned.
+/// Two halves close it. A CONDITIONAL is a `Branches` disposition of the
+/// shared value-structural classifier, so both branches lower as flow
+/// expressions and their calls ride the one call sink, joining through
+/// the same normalizing interner the contributor join uses. And a leaf
+/// answer that would EMBED the carrier goes through `lower_leaf`'s
+/// call-carrier gate and FAILS CLOSED rather than publishing it.
+///
+/// Two things that gate does NOT claim, stated because the round that
+/// landed it read as if it did. First, exhaustiveness now lives in the
+/// shared classifier (`value_descent`), not in `lower_expr`: `lower_expr`
+/// ends in `other => match value_descent(other)`, and it is the
+/// classifier's wildcard-free match over `Expression` that refuses to
+/// compile for a new variant — which is the point, because the SKELETON's
+/// `open_site` reads the same verdict, so one half can no longer descend
+/// where the other does not. Second, the gate covers leaf answers that
+/// CARRY a call return; it does not make every leaf form call-exact. Most
+/// leaf forms — a logical operand, a sequence, a non-null assertion, a
+/// member base — answer the shallow pass's `any`, which is reached before
+/// the gate and is not a carrier. Those rows are asserted as `any` in
+/// `flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`, read as the wrapper's `ReturnType` through
@@ -4447,11 +4668,11 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// argument) and, discriminatingly, that NO callee binder survives in the
 /// published node.
 ///
-/// Mutation recipe: restoring `_ => self.lower_leaf(expr, mode)` and
-/// deleting the `ConditionalExpression` arm flips `tnAmbTernary` back to
-/// `deg=None cands=1` and puts a `ReturnType` `InstantiationRef` inside
-/// every generic row; deleting only the `lower_leaf` gate flips the two
-/// array rows back to a published carrier.
+/// Mutation recipe: dispositioning `ConditionalExpression` as
+/// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
+/// back to `deg=None cands=1` and puts a `ReturnType` `InstantiationRef`
+/// inside every generic row; deleting only the `lower_leaf` gate flips
+/// the two array rows back to a published carrier.
 #[test]
 fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
     let host = make_r5_host();
@@ -4576,4 +4797,737 @@ fn flow_return_method_position_overload_groups_reach_the_size_gate() {
     // first-wins answer: the gate must not over-fire on either.
     assert_clean_warm(&host, "ovSoloMethodCall", string_lit("SOLO"));
     assert_clean_warm(&host, "ovPropRead", string_lit("PROP"));
+}
+
+/// The demand PLANNER and the content LOWERING descend through exactly
+/// the same expression forms.
+///
+/// The substrate has two halves that must agree about which forms have
+/// value-contributing sub-expressions: the skeleton opens a tracked
+/// expression site per such sub-expression and the graph makes it a
+/// value provider (so the planner reaches it), and the content lowering
+/// descends into it and gates an object member value on whether the plan
+/// VALUE-selected it. The round that gave a conditional expression its
+/// structural arm extended the CONTENT half only. The planner had never
+/// needed to descend into a branch, so it still did not — and every
+/// object literal in a branch lowered with each member value on the
+/// typed `SliceExpr::Elided` carrier, which the union arm turns into a
+/// whole-evaluation failure:
+///
+/// ```text
+/// k ? { a: 1 } : 2                 Error(Miss) cands=0
+/// k ? { a: 1 } : { a: 2 }          Error(Miss) cands=0
+/// k ? { a: 1 } : { b: 2 }          Error(Miss) cands=0
+/// const q = 1; k ? { a: q } : 2    Error(Miss) cands=0
+/// k ? { m() { return 1 } } : 2     Error(Miss) cands=0
+/// k ? { a: { b: 1 } } : 2          Error(Miss) cands=0
+/// { a: k ? { b: 1 } : 2 }          Error(Miss) cands=0
+/// k ? (k ? { a: 1 } : 2) : 3       Error(Miss) cands=0
+/// ```
+///
+/// while `k ? {} : 2` (no member value to elide) stayed green, which is
+/// exactly the signature of an UNDER-SELECTED plan rather than a broken
+/// arm.
+///
+/// The fix is one classifier, `verter_semantic::analysis::flow::
+/// value_descent`, with ONE wildcard-free match over `Expression` and two
+/// consumers: the skeleton's `open_site` and the content half's
+/// `lower_expr`. Neither carries a wildcard over `Expression` any more,
+/// so a new variant does not compile until it is dispositioned in the
+/// classifier — and both halves inherit that disposition in the same
+/// change. `ValueDescent::TypeCarrier` is a NAMED variant for the one
+/// asymmetric case (`x as const`: the planner descends, the content half
+/// leaf-lowers), because over-selection is harmless and under-selection
+/// is this bug.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`, read as the wrapper's `ReturnType` through
+/// `declare const w: ReturnType<typeof f>; const p: null = w;`):
+///
+/// ```text
+/// ctObj:           2 | { a: number }
+/// ctObjBoth:       { a: number }
+/// ctObjDisjoint:   { a: number; b?: undefined } | { a?: undefined; b: number }
+/// ctObjLocalRead:  2 | { a: number }
+/// ctObjMethod:     2 | { m(): number }
+/// ctObjNested:     2 | { a: { b: number } }
+/// ctObjInObj:      { a: number | { b: number } }
+/// ctNestedTernary: 2 | 3 | { a: number }
+/// ctObjEmpty:      {}
+/// ctArray:         number[]
+/// ctIdent:         2 | true
+/// ctNull:          1 | null
+/// ctArrow:         () => number
+/// ```
+///
+/// Four rows carry a recorded, PRE-EXISTING divergence from that oracle,
+/// none of them introduced or removed here, all of them shape-level and
+/// none of them a leak:
+///
+/// - `ctObjBoth` publishes two structurally identical arms where the
+///   checker publishes one. Union dedup is by interned NODE id and two
+///   object literals at different spans intern distinct nodes; the
+///   `if` / `return` twin dedups the same way (`arms.contains`), so this
+///   is a property of the whole rail, not of the branch join.
+/// - `ctObjDisjoint` publishes no `?: undefined` normalization.
+/// - `ctNestedTernary` publishes a NESTED union
+///   (`Union([Union([2, { a }]), 3])`);
+///   `intern_normalized_union_or_intersection` sorts and dedups but does
+///   not flatten a union arm.
+/// - `ctObjEmpty` publishes `2 | {}` where the checker's subtype
+///   reduction collapses it to `{}`; `ctIdent` publishes `boolean | 2`
+///   where the checker narrows the consequent to `true`.
+///
+/// Mutation recipe: dispositioning `ObjectExpression` as
+/// `ValueDescent::Leaf` in the classifier flips every object row to a
+/// whole-literal leaf answer; deleting the `BranchJoin` `ValueDef` edges
+/// in `build_function_flow_graph` restores the exact `Error(Miss)` table
+/// above with `ctObjEmpty` / `ctArray` / `ctIdent` / `ctNull` / `ctArrow`
+/// left green.
+#[test]
+fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
+    let host = make_r5_host();
+
+    // Every row below was `Error(Miss)` cands=0 before the planner learnt
+    // the same descent the content half performs.
+    for (name, expected) in [
+        ("ctObj", "{a:number}|2"),
+        // The recorded dedup divergence: the checker publishes ONE arm.
+        ("ctObjBoth", "{a:number}|{a:number}"),
+        ("ctObjDisjoint", "{a:number}|{b:number}"),
+        ("ctObjLocalRead", "2|{a:number}"),
+        ("ctObjMethod", "2|{m():number}"),
+        ("ctObjNested", "2|{a:{b:number}}"),
+        // A branch join reached as an object MEMBER value, through the
+        // member's own path-write edge.
+        ("ctObjInObj", "{a:2|{b:number}}"),
+        // The recorded nesting divergence: the checker flattens to
+        // `2 | 3 | { a: number }`.
+        ("ctNestedTernary", "(2|{a:number})|3"),
+        // CONTROLS — rows that were already green must be unchanged, so
+        // the new descent is proven not to have moved them.
+        ("ctObjEmpty", "2|{}"),
+        ("ctArray", "number[]"),
+        ("ctIdent", "boolean|2"),
+        ("ctNull", "1|null"),
+        ("ctArrow", "()=>number"),
+    ] {
+        let outcome = r5_eval(&host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
+        assert_eq!(outcome.degradation, None, "{name} must evaluate clean");
+        assert_eq!(
+            outcome.candidates, 1,
+            "{name} must warm-admit exactly one candidate"
+        );
+        assert_eq!(shape_of(&outcome.ty), expected, "{name} published shape");
+    }
+}
+
+/// A compact, span-free spelling of one published `TypeExpr`, so a
+/// branch-join assertion compares MEANING and not member spans.
+fn shape_of(ty: &TypeExpr) -> String {
+    match ty {
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(n)) => {
+            let rounded = *n as i64;
+            if (*n - rounded as f64).abs() < f64::EPSILON {
+                rounded.to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        TypeExpr::Literal(verter_type_expr::LiteralValue::String(s)) => format!("\"{s}\""),
+        TypeExpr::Primitive(name) => format!("{name:?}").to_lowercase(),
+        // A nested union arm is PARENTHESISED: the substrate does not
+        // flatten one, and a spelling that silently joined it would hide
+        // exactly that from an assertion.
+        TypeExpr::Union(arms) => arms
+            .iter()
+            .map(|arm| match arm {
+                TypeExpr::Union(_) => format!("({})", shape_of(arm)),
+                other => shape_of(other),
+            })
+            .collect::<Vec<String>>()
+            .join("|"),
+        TypeExpr::Array { element, .. } => format!("{}[]", shape_of(element)),
+        TypeExpr::Function(function) => format!(
+            "()=>{}",
+            function
+                .return_type
+                .as_deref()
+                .map_or_else(|| "?".to_string(), shape_of)
+        ),
+        TypeExpr::Object(object) => {
+            let members: Vec<String> = object
+                .properties
+                .iter()
+                .map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(property) => format!(
+                        "{}:{}",
+                        property.key.as_string().unwrap_or_default(),
+                        shape_of(&property.ty)
+                    ),
+                    verter_type_expr::ObjectMember::Method(method) => format!(
+                        "{}():{}",
+                        method.key.as_string().unwrap_or_default(),
+                        method
+                            .function
+                            .return_type
+                            .as_deref()
+                            .map_or_else(|| "?".to_string(), shape_of)
+                    ),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            format!("{{{}}}", members.join(","))
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// The METHOD-position overload-group carrier applies TypeScript's
+/// overload VISIBILITY rule — the same one `build_typeof` applies.
+///
+/// The carrier that made a same-named method group reach the call rail's
+/// size gate filtered on `visibility.is_public() && method_kind ==
+/// Method` and stopped there. `build_typeof` additionally HIDES the
+/// trailing implementation signature of a multi-signature group, and
+/// `select_signature_function` documents that filter as its PRECONDITION
+/// before reading the LAST overload. The carrier fed it an unfiltered
+/// bucket, so for a group with an implementation the LAST overload WAS
+/// the implementation:
+///
+/// ```text
+///                        before          after       checker
+/// OvImpl['m']            3 signatures    2           2
+///   incl. (x: any): any
+/// ReturnType<…>          any             "MB"        "MB"
+/// Parameters<…>          [x: any]        [x: number] [x: number]
+/// ```
+///
+/// Both states were wrong; the carrier's was strictly worse — `any`
+/// erases every downstream check, and the published surface leaked a
+/// signature TypeScript hides. Two claims made when the carrier landed
+/// are corrected with it: it was NOT "byte-identical in shape to what
+/// `build_typeof` mints" (that producer filtered and this one did not),
+/// and `select_signature_function` did NOT read "the last overload
+/// exactly as it does for `f`" (for a bodied group it read the
+/// implementation). The rule now has ONE home,
+/// `semantic_query::visible_overload_ordinals`, and both producers call
+/// it, so the two cannot drift again — a group reached as `typeof f` and
+/// the same group reached as `C['m']` publish the same contributors by
+/// construction.
+///
+/// The blast radius is the SHARED PathWalker known-key Object hop —
+/// component-meta published prop types, indexed access, every signature
+/// utility — not the flow rail, which degrades on a group of arity > 1
+/// either way. Every overload fixture that shipped with the carrier is
+/// implementation-FREE, so the suite structurally could not catch it;
+/// `OvImpl` below is the bodied fixture that closes that gap.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`):
+///
+/// ```text
+/// OvImpl['m']:        { (x: string): "MA"; (x: number): "MB"; }
+/// ReturnType<…>:      "MB"
+/// Parameters<…>:      [x: number]
+/// OvAmbient['m']:     { (x: string): "AA"; (x: number): "AB"; }
+/// OvSingleImpl['m']:  (x: string) => "OA"
+/// OvLoneImpl['m']:    (x: string) => "LA"
+/// ```
+///
+/// Mutation recipe: dropping `!has_implementation_body` from
+/// `visible_overload_ordinals` puts `(x: any): any` back as `OvImpl`'s
+/// third signature AND flips the `select_signature_function` rows to
+/// `any` / `[x: any]`; replacing its all-bodied fallback with an empty
+/// selection flips `OvSingleImpl` and `OvLoneImpl`.
+#[test]
+fn method_overload_group_carrier_hides_the_implementation_signature() {
+    let host = make_r5_host();
+
+    /// The group carrier's call-signature list as `(param) -> return`
+    /// shapes, projected through the SHARED PathWalker member hop.
+    #[track_caller]
+    fn group_signatures(host: &Arc<VerterHost>, name: &str) -> Vec<(NodeShape, NodeShape)> {
+        r5_node(
+            host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let base = indexed_access_object(dispatch, node);
+                let projected = project_member_path(dispatch, base, "m");
+                match dispatch.graph().node_data(projected).as_deref() {
+                    Some(SemanticNodeData::Object(view)) => view
+                        .call_signatures
+                        .iter()
+                        .map(|sig| {
+                            let parts = signature_parts(dispatch, *sig);
+                            (
+                                node_shape(dispatch, parts.params[0]),
+                                node_shape(dispatch, parts.return_type),
+                            )
+                        })
+                        .collect(),
+                    other => panic!("{name}: expected the group carrier, got {other:?}"),
+                }
+            },
+        )
+    }
+    let literal = |text: &str| NodeShape::Other(format!("Literal(String({text:?}))"));
+
+    // A BODIED group publishes exactly the bodiless overloads, in source
+    // order — the implementation is hidden.
+    assert_eq!(
+        group_signatures(&host, "ovImplGroup"),
+        vec![
+            (NodeShape::Primitive(PrimitiveKind::String), literal("MA")),
+            (NodeShape::Primitive(PrimitiveKind::Number), literal("MB")),
+        ],
+        "the implementation signature must not reach the published carrier"
+    );
+    // CONTROL — an AMBIENT group has no implementation to hide.
+    assert_eq!(
+        group_signatures(&host, "ovAmbientGroup"),
+        vec![
+            (NodeShape::Primitive(PrimitiveKind::String), literal("AA")),
+            (NodeShape::Primitive(PrimitiveKind::Number), literal("AB")),
+        ],
+    );
+    // CONTROL — one declared overload plus an implementation leaves ONE
+    // visible contributor.
+    assert_eq!(
+        group_signatures(&host, "ovSingleImplGroup"),
+        vec![(NodeShape::Primitive(PrimitiveKind::String), literal("OA"))],
+    );
+
+    // END TO END: the utility route. `select_signature_function` reads
+    // the LAST visible overload, which is what `ReturnType<C['m']>` and
+    // `Parameters<C['m']>` publish.
+    for (name, expected_param, expected_return) in [
+        ("ovImplGroup", PrimitiveKind::Number, "MB"),
+        ("ovAmbientGroup", PrimitiveKind::Number, "AB"),
+    ] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let base = indexed_access_object(dispatch, node);
+                let projected = project_member_path(dispatch, base, "m");
+                let selected = dispatch
+                    .select_signature_function(projected, super::build::SignatureBucket::Call)
+                    .unwrap_or_else(|| panic!("{name}: the group must select a signature"));
+                let parts = signature_parts(dispatch, selected);
+                assert_eq!(
+                    node_shape(dispatch, parts.return_type),
+                    literal(expected_return),
+                    "{name}: ReturnType reads the last VISIBLE overload"
+                );
+                assert_eq!(
+                    node_shape(dispatch, parts.params[0]),
+                    NodeShape::Primitive(expected_param),
+                    "{name}: Parameters reads the last VISIBLE overload"
+                );
+            },
+        );
+    }
+
+    // CONTROL — a LONE BODIED method is not a group at all (the
+    // collision gate needs two), and stays the plain first-wins
+    // `Signature` the carrier never touches.
+    r5_node(
+        &host,
+        "ovLoneImplGroup",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let base = indexed_access_object(dispatch, node);
+            let projected = project_member_path(dispatch, base, "m");
+            let parts = signature_parts(dispatch, projected);
+            assert_eq!(node_shape(dispatch, parts.return_type), literal("LA"));
+        },
+    );
+}
+
+/// SELF-RECURSION through a ternary is NOT the `if` spelling's twin, and
+/// the checker is where that asymmetry comes from.
+///
+/// The union arm converts a coinductive HOLD into `Err` for the whole
+/// ternary, so `return n > 0 ? f(n - 1) : 0` fails closed while
+/// `if (n > 0) return f(n - 1); return 0` converges to `number`. That
+/// reads like a parity gap in this substrate. It is not: tsgo makes the
+/// SAME distinction, and makes it louder.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`, UNANNOTATED — the annotated spellings both trivially
+/// answer `number` from the annotation and say nothing about body-derived
+/// inference, which is the only thing this rail computes):
+///
+/// ```text
+/// if (n > 0) return f(n - 1); return 0;    number      no error
+/// if (n > 0) return 0; return f(n - 1);    number      no error
+/// return n > 0 ? f(n - 1) : 0;             any         TS7023
+/// return n > 0 ? 0 : f(n - 1);             any         TS7023
+/// return n > 0 && f(n - 1);                any         TS7023
+/// return { a: n > 0 ? f(n - 1) : 0 };      any         TS7023
+/// ```
+///
+/// TypeScript aggregates return STATEMENTS and tolerates a circular one
+/// among several; a circular reference INSIDE one return expression
+/// poisons that expression, and the whole inferred return becomes the
+/// circularity error — reported as TS7023 with `any` as the fallback.
+///
+/// So a fail-closed `Error(Miss)` here is the honest answer, not a
+/// missing feature: it refuses exactly where the checker refuses. Making
+/// the union arm drop held arms and publish the concrete ones would
+/// publish `number` where the checker publishes an ERROR — a divergence,
+/// in the direction this substrate must never move.
+///
+/// This corrects the record: the round that gave the conditional its
+/// structural arm claimed the two spellings answer alike. They do not,
+/// and they should not.
+///
+/// Mutation recipe: making `SliceExpr::Union`'s arm skip a held arm
+/// (`Ok(None) => continue`) instead of failing closed flips `ctRec` to
+/// `Primitive(Number)` cands=1 — the divergence — while leaving
+/// `ctRecIf` green.
+#[test]
+fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
+    let host = make_r5_host();
+
+    // The `if` spelling converges through the SCC fixed point.
+    assert_clean_warm(&host, "ctRecIf", TypeExpr::Primitive(PrimitiveName::Number));
+
+    // The ternary spelling refuses — as tsgo does, with TS7023.
+    assert_fails_closed(&host, "ctRec");
+    // And so does a hold nested inside an object member, which is the
+    // same shape one level down.
+    assert_fails_closed(&host, "ctRecObjMember");
+}
+
+/// A LEAF-answered call form publishes `any`, not a carrier — and not
+/// the checker's answer either.
+///
+/// `lower_leaf`'s gate refuses a leaf answer that EMBEDS an unreduced
+/// `ReturnType<callee>` carrier, which is what stops a call in an array
+/// element or a spread from publishing the callee's raw return. It is
+/// easy to read that as "every leaf-answered form passes a gate that
+/// fails closed". It is not: the shallow pass's per-expression lowering
+/// ends in `_ => Ok(Primitive(Any))`, and `lower_leaf`'s
+/// `LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any` arm runs
+/// BEFORE the carrier gate. Most leaf forms therefore answer `any` and
+/// never reach the gate at all.
+///
+/// The fixtures below were added with the carrier gate and asserted by
+/// nothing, under a header claiming they "must degrade exactly as at a
+/// bare call". They do not degrade. They publish `Primitive(Any)`,
+/// cleanly and warm, and this test says so — so the distinction between
+/// "the gate refused" and "the leaf pass answered `any`" is recorded
+/// rather than implied, and a change that starts routing any of these
+/// through the call sink has to update this table.
+///
+/// `any` is UNDER the checker's answer at every row, never over it, and
+/// never a leaked callee binder — which is why this is a recorded
+/// interim (`U6.CALL_RESOLVE`) and not a defect row.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`):
+///
+/// ```text
+///                    checker           published here
+/// tnAmbLogical       "TA" | true       any
+/// tnAmbNullish       "TA"              any
+/// tnAmbSequence      "TA"              any
+/// tnAmbNonNull       "TA"              any
+/// tnGenericLogical   string | true     any
+/// tnGenericMember    string            any
+/// tnAmbAs            "TA"              "TA"        ← exact
+/// tnStrTernary       "a" | "b"         "a" | "b"   ← exact
+/// tnGenericBare      string            unknown     ← the recorded
+///                                                    explicit-type-argument
+///                                                    interim
+/// ```
+///
+/// Mutation recipe: making the shallow pass's fallback arm return
+/// anything other than `any` flips the six `any` rows; dispositioning
+/// `LogicalExpression` as `ValueDescent::Branches` flips `tnAmbLogical`
+/// to `UnrepresentableCallee` and `tnGenericLogical` to a union.
+#[test]
+fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
+    let host = make_r5_host();
+
+    for name in [
+        "tnAmbLogical",
+        "tnAmbNullish",
+        "tnAmbSequence",
+        "tnAmbNonNull",
+        "tnGenericLogical",
+        "tnGenericMember",
+    ] {
+        assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::Any));
+    }
+
+    // The two rows that ARE exact, and the one recorded interim: they
+    // discriminate the `any` rows above from "everything answers `any`".
+    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
+    assert_clean_warm(
+        &host,
+        "tnStrTernary",
+        TypeExpr::Union(Arc::from(
+            vec![string_lit("a"), string_lit("b")].into_boxed_slice(),
+        )),
+    );
+    assert_clean_warm(
+        &host,
+        "tnGenericBare",
+        TypeExpr::Primitive(PrimitiveName::Unknown),
+    );
+}
+
+/// The overload-visibility rule agrees across every group SHAPE, because
+/// there is only one of it.
+///
+/// The carrier and `build_typeof` are not compared shape-by-shape here —
+/// they cannot disagree, because neither computes the rule: both call
+/// `semantic_query::visible_overload_ordinals` and there is no second
+/// copy in the tree. What this test pins is the rule ITSELF over the
+/// shapes a group can take, so a change to it is a change both producers
+/// are known to inherit.
+#[test]
+fn visible_overload_ordinals_covers_every_group_shape() {
+    use crate::semantic_query::visible_overload_ordinals;
+
+    // Degenerate.
+    assert_eq!(visible_overload_ordinals([]), Vec::<usize>::new());
+    // A lone signature is visible whether or not it is bodied.
+    assert_eq!(visible_overload_ordinals([false]), vec![0]);
+    assert_eq!(visible_overload_ordinals([true]), vec![0]);
+    // The ordinary overload group: bodiless overloads, implementation
+    // hidden.
+    assert_eq!(visible_overload_ordinals([false, false, true]), vec![0, 1]);
+    assert_eq!(visible_overload_ordinals([false, true]), vec![0]);
+    // An AMBIENT group has nothing to hide.
+    assert_eq!(visible_overload_ordinals([false, false]), vec![0, 1]);
+    // Ill-formed: no bodiless member at all. Surfacing everything beats
+    // surfacing nothing, and it is what makes the lone-bodied signature
+    // visible without a special case.
+    assert_eq!(visible_overload_ordinals([true, true]), vec![0, 1]);
+    // A bodied contributor that is NOT last is still hidden: the rule is
+    // "bodiless", not "all but the last".
+    assert_eq!(visible_overload_ordinals([true, false, false]), vec![1, 2]);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// PARKED pre-existing defects
+//
+// Each row below is a measured, PRE-EXISTING divergence whose fix belongs
+// to a layer this block does not own. Each carries a REAL body asserting
+// the CHECKER's answer — the answer the code should give — plus the
+// verbatim failure it produces un-ignored today, so the owning block
+// inherits an executable repro rather than a paragraph.
+//
+// Registration note: `crates/verter_session/src/**` lib tests have no
+// general ignored-test registry. The two that exist are scoped elsewhere
+// and neither admits these rows — `typeinfo_ignored_test_manifest`
+// discovers only `crates/verter_session/src/typeinfo/typeinfo_tests`
+// (generated by `scripts/gen-typeinfo-ignore-manifest.mjs` from the
+// append-only typeinfo parity row registry), and
+// `framework_known_bug_manifest` keys its reverse scan on the
+// `vue-` / `svelte-` / `react-` / `solid-` id prefixes and asserts its
+// ledger EMPTY. Filing U6 flow-return debt in either would misfile it and
+// would silently retire the framework ledger's own emptiness assertions.
+// ──────────────────────────────────────────────────────────────────────
+
+/// A heritage-REDECLARED method degrades where the checker answers the
+/// declared literal.
+///
+/// A derived `class` / `interface` that re-declares a base method leaves
+/// the composed surface carrying BOTH contributors under one key, so the
+/// shared PathWalker's Object hop sees a two-member same-name method
+/// collision and hands the call rail an overload GROUP of arity 2 — which
+/// the rail refuses (`UnrepresentableCallee`). It is not an overload
+/// group: TypeScript's derived declaration OVERRIDES the base one.
+///
+/// OWNER: the shared PathWalker / type-resolution heritage member
+/// projection — the composed surface must not retain a base contributor
+/// a derived declaration overrides. Not the flow rail: the rail's refusal
+/// is correct for a genuine arity-2 group, and the defect is that this is
+/// not one. Pre-existing (the reviewer proved it by mutation control
+/// against the pre-carrier tree).
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `hbClassCall()` is `"BASE"`, `ebIfaceCall()` is
+/// `"EB"`.
+///
+/// Verbatim failure, un-ignored on this tree:
+///
+/// ```text
+/// assertion `left == right` failed: hbClassCall must evaluate clean
+///   left: Some(UnrepresentableCallee)
+///  right: None
+/// ```
+#[ignore = "owned by the shared PathWalker / type-resolution heritage member projection: a \
+            derived re-declaration must OVERRIDE the base contributor on the composed surface \
+            rather than leave both under one key, which the method-overload-group carrier then \
+            reads as an arity-2 group"]
+#[test]
+fn heritage_redeclared_method_answers_the_derived_declaration() {
+    let host = make_r5_host();
+    assert_clean_warm(&host, "hbClassCall", string_lit("BASE"));
+    assert_clean_warm(&host, "ebIfaceCall", string_lit("EB"));
+}
+
+/// Reading an accessor pair publishes the GETTER's `Signature` node
+/// instead of the getter's RETURN.
+///
+/// `class C { get a(): "GA"; set a(v: "GA") }` — reading `.a` publishes
+/// the getter's callable signature, cleanly and warm, where the property
+/// read's value is the getter's return type.
+///
+/// OWNER: the shared PathWalker / type-resolution accessor member
+/// projection. Structurally untouched by the flow-return substrate — the
+/// flow rail only reads whatever the member hop published.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `gaRead()` is `"GA"`.
+///
+/// Verbatim failure, un-ignored on this tree:
+///
+/// ```text
+/// assertion `left == right` failed: gaRead's read of an accessor pair must publish the getter's RETURN, not its signature
+///   left: Other("Signature { kind: Call, params: [], return_type: SemanticNodeId(3), type_parameters: [], signature_span: Some(Span { start: 41651, end: 41660 }), return_type_span: Some(Span { start: 41655, end: 41659 }) }")
+///  right: Other("Literal(String(\"GA\"))")
+/// ```
+///
+/// (The `SemanticNodeId` and the two spans are fixture-POSITION
+/// dependent — an edit anywhere above `GaClass` in the shared R5 fixture
+/// moves them. The load-bearing part is the node KIND: a `Signature`
+/// where the read's value must be that signature's return.)
+#[ignore = "owned by the shared PathWalker / type-resolution accessor member projection: a \
+            property read of a get/set pair must project the GETTER's return type, not the \
+            getter's Signature node"]
+#[test]
+fn accessor_pair_read_publishes_the_getters_return() {
+    let host = make_r5_host();
+    r5_node(
+        &host,
+        "gaRead",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Other("Literal(String(\"GA\"))".to_string()),
+                "gaRead's read of an accessor pair must publish the getter's RETURN, \
+                 not its signature"
+            );
+        },
+    );
+}
+
+/// The `undefined` IDENTIFIER publishes a semantic-miss carrier instead
+/// of the `undefined` primitive.
+///
+/// `k ? undefined : 1` publishes
+/// `Union([1, Unknown { raw: "semanticMiss" }])`, cleanly and warm: the
+/// `undefined` identifier resolves to nothing the value pass models, so
+/// the leaf lowering answers a miss carrier rather than
+/// `PrimitiveKind::Undefined`.
+///
+/// OWNER: `U6.VALUE_INFERENCE` — the `undefined`-identifier gap in the
+/// shared shallow value pass. Pre-existing; it is newly REACHABLE through
+/// the conditional's structural arm (before it, the whole ternary folded
+/// through one leaf answer), not newly wrong.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `undefTernary(k)` is `1 | undefined`.
+///
+/// Verbatim failure, un-ignored on this tree:
+///
+/// ```text
+/// assertion `left == right` failed: the `undefined` identifier must publish the undefined primitive
+///   left: ["Opaque", "Other(\"Literal(Number(1.0))\")"]
+///  right: ["Other(\"Literal(Number(1.0))\")", "Primitive(Undefined)"]
+/// ```
+///
+/// (`Opaque` is `node_shape`'s spelling of `SemanticNodeData::Opaque(
+/// QueryError::Miss)` — the same node the PROJECTED surface renders as
+/// `Unknown { raw: "semanticMiss" }`. Arms are compared sorted, because
+/// the union interner orders by node id.)
+#[ignore = "owned by U6.VALUE_INFERENCE: the `undefined` identifier must lower to \
+            PrimitiveKind::Undefined in the shared shallow value pass instead of a \
+            semantic-miss carrier"]
+#[test]
+fn undefined_identifier_publishes_the_undefined_primitive() {
+    let host = make_r5_host();
+    r5_node(
+        &host,
+        "undefTernary",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            // The union interner sorts arms by interned node id, so the
+            // comparison is order-INDEPENDENT: an authored-order
+            // assertion would fail for a reason the owning block does
+            // not own.
+            let mut arms: Vec<String> = union_members(dispatch, node)
+                .iter()
+                .map(|arm| format!("{:?}", node_shape(dispatch, *arm)))
+                .collect();
+            arms.sort();
+            let mut expected = vec![
+                format!("{:?}", NodeShape::Other("Literal(Number(1.0))".to_string())),
+                format!("{:?}", NodeShape::Primitive(PrimitiveKind::Undefined)),
+            ];
+            expected.sort();
+            assert_eq!(
+                arms, expected,
+                "the `undefined` identifier must publish the undefined primitive"
+            );
+        },
+    );
+}
+
+/// A call in a LOGICAL operand publishes `any` because the shallow pass's
+/// per-expression lowering ends in `_ => Ok(Primitive(Any))`.
+///
+/// `k || tnAmb("a")` answers `Primitive(Any)`, cleanly and warm. The
+/// flow rail's call-carrier gate never sees it: `lower_leaf`'s
+/// `LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any` arm runs
+/// FIRST. So the form is neither call-exact nor refused — it is the
+/// shallow pass's fallback, surfaced.
+///
+/// OWNER: the SHALLOW PASS (`verter_semantic::analysis::type_eval_build`
+/// per-expression lowering) under `U6.VALUE_INFERENCE` — not the flow
+/// rail, which owns only what happens to an answer the shallow pass
+/// produced. The green counterpart
+/// (`flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`)
+/// pins the CURRENT `any` behaviour so the interim is recorded; this row
+/// pins the answer it must eventually give.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
+/// additionally needs argument-driven overload resolution —
+/// `U6.CALL_RESOLVE` — so this row does not close until both land.)
+///
+/// Verbatim failure, un-ignored on this tree:
+///
+/// ```text
+/// assertion `left == right` failed: tnAmbLogical return type
+///   left: Primitive(Any)
+///  right: Union([Literal(String("TA")), Literal(Boolean(true))])
+/// ```
+#[ignore = "owned by U6.VALUE_INFERENCE (the shallow pass's `_ => Ok(Primitive(Any))` \
+            per-expression fallback) plus U6.CALL_RESOLVE for the overload half: a call in a \
+            logical operand must publish the operand union, not the shallow pass's `any`"]
+#[test]
+fn call_in_a_logical_operand_publishes_the_operand_union() {
+    let host = make_r5_host();
+    assert_clean_warm(
+        &host,
+        "tnAmbLogical",
+        TypeExpr::Union(Arc::from(
+            vec![
+                string_lit("TA"),
+                TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true)),
+            ]
+            .into_boxed_slice(),
+        )),
+    );
 }

@@ -477,8 +477,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             overload_ordinal: identity.overload_ordinal,
         };
         let index = decl_bodies.function_program_index();
-        let entry = index.get(&key)?;
-        Some(CalleeClause::read_from_program_entry_at_unknown(entry))
+        let matched = index.get(&key)?;
+        Some(CalleeClause::read_from_program_entry_at_unknown(matched))
     }
 
     /// The whole-function `FlowReturn` authority. Every whole-function
@@ -1359,12 +1359,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
             vec![(Arc::from(canonical), indexed.whole_hash)];
         let index = indexed.shallow_state.decl_bodies().function_program_index();
-        let Some(entry) = index.entries.iter().find(|entry| {
-            entry.key.declaration.owner == owner
-                && entry.key.declaration.name.as_ref() == name
-                && entry.key.part == key.function.function_part
-                && entry.key.overload_ordinal == key.function.overload_ordinal
-        }) else {
+        // The KEYED lookup, not a scan: a function position is named by
+        // its whole program key, and "the first entry that looks close
+        // enough" is exactly the shape that hands over the wrong callee.
+        let Some(entry) = index
+            .value_function(
+                owner,
+                name,
+                &key.function.function_part,
+                key.function.overload_ordinal,
+            )
+            .map(|matched| matched.entry())
+        else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
         // The whole-body fact rail: the candidate roots on the indexed
@@ -2723,9 +2729,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             return CalleeClauseLookup::Unavailable;
         };
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
-        let Some(entry) = decl_bodies.function_program_index().get(target).cloned() else {
+        let index = decl_bodies.function_program_index();
+        let Some(matched) = index.get(target) else {
             return CalleeClauseLookup::Unavailable;
         };
+        let entry = matched.entry();
         // The lowered clause is demanded lazily and at most once, and
         // only when some parameter's default is actually needed.
         let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
@@ -2733,9 +2741,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // index answered with. This route reads the authority and hands
         // it over; it cannot assemble a clause out of nothing, because
         // the constructors that would let it are private there.
-        CalleeClause::read_from_program_entry(&entry, site, |ordinal, param| {
+        CalleeClause::read_from_program_entry(matched, site, |ordinal, param| {
             let clause =
-                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(&entry));
+                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(entry));
             // Matched by ORDINAL, with the name as a cross-check: the
             // shallow index and the lowered clause both walk the SAME
             // authored clause in declaration order, so the ordinal is the

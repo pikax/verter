@@ -17,11 +17,19 @@
 //! call after every write at any non-zero anchor.
 //!
 //! So the two coordinate systems are DIFFERENT TYPES. `FrameSpan`'s fields are
-//! private, its only constructor from a source position is [`FrameSpan::rebase`]
-//! (the one crossing IN), and the only way back to a live file position is
-//! [`FrameSpan::to_absolute`] (the one crossing OUT, which has to be handed the
-//! anchor). A stored field typed `FrameSpan` cannot hold an absolute offset,
-//! and `frame_span.start() < absolute.start` does not compile.
+//! private, it EXPOSES no offset at all, its only constructor from a source
+//! position is [`FrameSpan::rebase`] (the one crossing IN), and the only way
+//! back to a live file position is [`FrameSpan::to_absolute`] (the one crossing
+//! OUT, which has to be handed the anchor). Every offset comparison a consumer
+//! can write is therefore `FrameSpan`-to-`FrameSpan`
+//! ([`FrameSpan::contains`], the derived `Ord`), and
+//! `frame_span.start < absolute.start` does not compile — it has no left-hand
+//! side to write.
+//!
+//! That last sentence used to be false. `start()` / `end()` were `pub fn ->
+//! u32` with zero production callers, so the mixed comparison the module
+//! claimed was impossible was one accessor away, in a module whose entire
+//! reason to exist is that the comparison must not be writable. They are gone.
 //!
 //! [`verter_span::RelativeSpan`] cannot serve this: its fields are PUBLIC (so a
 //! mixed comparison compiles), it has a `new(start, end)` constructor and a
@@ -30,6 +38,25 @@
 //! where the sub-parser's spans are already content-relative and the type only
 //! records which base they belong to; it is the opposite of what this rail
 //! needs, which is a type whose ONLY inhabitants have been rebased.
+//!
+//! ## What this type does NOT claim
+//!
+//! Two things stay conventions, stated here rather than implied away:
+//!
+//! - The ANCHOR is a bare `u32` on both crossings, so `rebase(0, absolute)`
+//!   still mints a `FrameSpan` holding an absolute offset, and
+//!   `to_absolute(wrong_anchor)` still lands somewhere. Nothing pairs a
+//!   `FrameSpan` with the anchor it was taken against — a `FrameSpan` outlives
+//!   the file version it was recorded on, which is exactly why the anchor is
+//!   re-supplied at egress rather than carried, and exactly why the pairing
+//!   cannot be checked here. Every in-tree ingress is
+//!   `SkeletonBuilder::frame_span` (the function's own start) and every egress
+//!   pairs the same function's live anchor; that is reviewed, not enforced.
+//! - `Ord` / `Hash` are derived, so two frames' spans can be compared and
+//!   hashed together without either frame being named. Every artifact here is
+//!   PER-FUNCTION, so no in-tree consumer mixes frames — the derives exist for
+//!   the source-order effect sort and the selection hash set, both within one
+//!   frame.
 
 use verter_no_typeexpr::NoTypeExpr;
 
@@ -73,18 +100,6 @@ impl FrameSpan {
             self.start.saturating_add(anchor),
             self.end.saturating_add(anchor),
         )
-    }
-
-    /// The frame-relative start offset.
-    #[must_use]
-    pub fn start(self) -> u32 {
-        self.start
-    }
-
-    /// The frame-relative end offset.
-    #[must_use]
-    pub fn end(self) -> u32 {
-        self.end
     }
 
     /// The width in bytes.

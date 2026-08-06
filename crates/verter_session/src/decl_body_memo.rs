@@ -1200,7 +1200,8 @@ impl DeclBodyMemo {
             );
             return Arc::new(Default::default());
         };
-        let folded = fold_flow_body_env_identity(index, &self.key.parse_env_hash, self.source_type);
+        let folded =
+            fold_flow_body_env_identity(&index, &self.key.parse_env_hash, self.source_type);
         self.function_program_index
             .get_or_init(|| Arc::new(folded))
             .clone()
@@ -3105,29 +3106,18 @@ fn collect_augmentation_statement_dependencies(
 /// mix is what makes a parse-env move or a parser/language flip miss
 /// exactly the affected artifact slots without re-walking the body.
 fn fold_flow_body_env_identity(
-    index: verter_semantic::analysis::function_program::FunctionProgramIndex,
+    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
     parse_env_hash: &crate::types::Hash16,
     source_type: oxc_span::SourceType,
 ) -> verter_semantic::analysis::function_program::FunctionProgramIndex {
     const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
-    let entries: Vec<verter_semantic::analysis::function_program::FunctionProgramEntry> = index
-        .entries
-        .iter()
-        .map(|entry| {
-            let mut buf = Vec::with_capacity(64);
-            buf.extend_from_slice(SALT);
-            buf.extend_from_slice(&entry.flow_body_stable_hash);
-            buf.extend_from_slice(parse_env_hash);
-            buf.extend_from_slice(
-                &crate::file_artifact_store::CURRENT_PARSER_VERSION.to_le_bytes(),
-            );
-            buf.extend_from_slice(format!("{source_type:?}").as_bytes());
-            let mut folded = entry.clone();
-            folded.flow_body_stable_hash = crate::hash::hash_16(&buf);
-            folded
-        })
-        .collect();
-    verter_semantic::analysis::function_program::FunctionProgramIndex {
-        entries: Arc::from(entries.into_boxed_slice()),
-    }
+    index.map_stable_hashes(|stable| {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(SALT);
+        buf.extend_from_slice(stable);
+        buf.extend_from_slice(parse_env_hash);
+        buf.extend_from_slice(&crate::file_artifact_store::CURRENT_PARSER_VERSION.to_le_bytes());
+        buf.extend_from_slice(format!("{source_type:?}").as_bytes());
+        crate::hash::hash_16(&buf)
+    })
 }

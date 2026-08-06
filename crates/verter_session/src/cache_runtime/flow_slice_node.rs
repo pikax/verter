@@ -183,7 +183,7 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         let serve = resolver.ensure_indexed_ready_serve(key.canonical_id.as_ref())?;
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
         let index = decl_bodies.function_program_index();
-        let entry = index.get(&key.function)?;
+        let entry = index.get(&key.function)?.entry();
         // `None` on the ENTRY is a typed miss (its own bytes could not be
         // read), and a miss serves nothing: `Some(k) != None` holds, so the
         // comparison already refuses — stated here because the two sides

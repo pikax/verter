@@ -66,6 +66,7 @@ fn live_alpha_hash(host: &VerterHost, canonical_id: &str) -> crate::types::Hash1
             0,
         )
         .expect("alpha is indexed")
+        .entry()
         .flow_body_stable_hash
 }
 
@@ -160,7 +161,8 @@ fn flow_body_fact_identity_discriminates_overload_ordinals() {
             &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             1,
         )
-        .expect("the implementation is indexed at ordinal 1");
+        .expect("the implementation is indexed at ordinal 1")
+        .entry();
     let view = host.resolver_store_view_read().into_owned_view();
     // The implementation's hash validates only at its own ordinal.
     assert!(view.validates(&alpha_fact_at(

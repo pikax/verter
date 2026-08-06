@@ -346,41 +346,54 @@ pub fn build_function_flow_graph(skeleton: &FunctionBodySkeleton) -> FunctionFlo
                 edges.push((site_node(parent), node, FlowEdgeKind::EvalEffect));
             }
         }
-        if let SkeletonExprShape::ObjectLiteral { entries } = &site.shape {
-            for entry in entries.iter() {
-                match entry {
-                    SkeletonObjectEntry::Property { key, value, .. } => {
-                        let path: Arc<[SkeletonPathSegment]> = match key {
-                            SkeletonObjectKey::Static(name) => Arc::from(
-                                vec![SkeletonPathSegment::Static(*name)].into_boxed_slice(),
-                            ),
-                            SkeletonObjectKey::Computed(_) => {
-                                Arc::from(vec![SkeletonPathSegment::Computed].into_boxed_slice())
-                            }
-                        };
-                        edges.push((
-                            node,
-                            site_node(*value),
-                            FlowEdgeKind::PathWrite {
-                                path,
-                                certainty: SkeletonWriteCertainty::Definite,
-                            },
-                        ));
-                    }
-                    SkeletonObjectEntry::Spread { source } => {
-                        edges.push((
-                            node,
-                            site_node(*source),
-                            FlowEdgeKind::PathWrite {
-                                path: Arc::from(
+        match &site.shape {
+            // A branch JOIN's arms each provide the WHOLE value, so they
+            // are `ValueDef` providers: the value frontier threads the
+            // remaining demanded path through them UNCHANGED, which is
+            // what makes `(k ? { a: 1 } : x).a` reach the member of the
+            // arm that has one.
+            SkeletonExprShape::BranchJoin { arms } => {
+                for arm in arms.iter() {
+                    edges.push((node, site_node(*arm), FlowEdgeKind::ValueDef));
+                }
+            }
+            SkeletonExprShape::ObjectLiteral { entries } => {
+                for entry in entries.iter() {
+                    match entry {
+                        SkeletonObjectEntry::Property { key, value, .. } => {
+                            let path: Arc<[SkeletonPathSegment]> = match key {
+                                SkeletonObjectKey::Static(name) => Arc::from(
+                                    vec![SkeletonPathSegment::Static(*name)].into_boxed_slice(),
+                                ),
+                                SkeletonObjectKey::Computed(_) => Arc::from(
                                     vec![SkeletonPathSegment::Computed].into_boxed_slice(),
                                 ),
-                                certainty: SkeletonWriteCertainty::Optional,
-                            },
-                        ));
+                            };
+                            edges.push((
+                                node,
+                                site_node(*value),
+                                FlowEdgeKind::PathWrite {
+                                    path,
+                                    certainty: SkeletonWriteCertainty::Definite,
+                                },
+                            ));
+                        }
+                        SkeletonObjectEntry::Spread { source } => {
+                            edges.push((
+                                node,
+                                site_node(*source),
+                                FlowEdgeKind::PathWrite {
+                                    path: Arc::from(
+                                        vec![SkeletonPathSegment::Computed].into_boxed_slice(),
+                                    ),
+                                    certainty: SkeletonWriteCertainty::Optional,
+                                },
+                            ));
+                        }
                     }
                 }
             }
+            SkeletonExprShape::Other => {}
         }
     }
 

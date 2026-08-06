@@ -88,7 +88,7 @@ use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
     ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
 };
-use verter_semantic::analysis::function_program::{FunctionProgramEntry, FunctionProgramTypeParam};
+use verter_semantic::analysis::function_program::{FunctionProgramMatch, FunctionProgramTypeParam};
 
 /// Where the node a clause instantiates into was LOWERED, which decides
 /// which SPELLINGS of a clause parameter that node can contain.
@@ -270,28 +270,34 @@ impl CalleeClause {
     }
 
     /// READ a callee's own clause from the shallow function-program
-    /// ENTRY the index answered with — the one producer on the direct
+    /// entry the index ANSWERED WITH — the one producer on the direct
     /// rail, and the reason that rail cannot fabricate a clause.
     ///
-    /// The `entry` reference IS the witness. There is no way to obtain a
-    /// [`FunctionProgramEntry`] except by looking the callee up in the
-    /// per-file index and finding it, so a serve miss or an index miss
+    /// The [`FunctionProgramMatch`] IS the witness, and it is a witness
+    /// because its own field is private and only a KEYED lookup on a
+    /// `FunctionProgramIndex` mints one. A serve miss or an index miss
     /// has nothing to pass here and returns
     /// [`CalleeClauseLookup::Unavailable`] by calling nothing at all.
-    /// Before this, the caller assembled the clause itself out of
-    /// `non_generic()` / `new(…)` / `bare(…)`, every one of which was
-    /// reachable from a MISS — the module's claim that "a route that
-    /// fails to read the clause cannot produce one" described the one
-    /// existing caller rather than an enforced invariant.
+    ///
+    /// A bare `&FunctionProgramEntry` was NOT that witness, though this
+    /// doc once said it was. Two defeats compiled against it: a struct
+    /// literal assembled out of nothing, and — the realistic one — a
+    /// miss falling back to `index.entries.first()`, which hands over a
+    /// genuine entry for the WRONG callee and reads that callee's clause
+    /// as this one's. The first is now impossible because
+    /// `FunctionProgramEntry` is `#[non_exhaustive]`; the second because
+    /// the index exposes no positional accessor and this signature
+    /// accepts nothing an iteration could produce.
     ///
     /// `default_of` lowers ONE declared default, by ordinal, and is
     /// called only for a parameter whose default the call-site rule
     /// actually needs.
     pub(super) fn read_from_program_entry(
-        entry: &FunctionProgramEntry,
+        matched: FunctionProgramMatch<'_>,
         site: SliceCallSite,
         mut default_of: impl FnMut(usize, &FunctionProgramTypeParam) -> Option<SemanticNodeId>,
     ) -> CalleeClauseLookup {
+        let entry = matched.entry();
         if entry.type_parameters.is_empty() {
             return CalleeClauseLookup::Clause(Self::non_generic());
         }
@@ -325,9 +331,10 @@ impl CalleeClause {
     /// used to: a clause it FAILED to read left the callee's return
     /// untouched — the callee's own binder, published warm — while the
     /// call-site route degraded on the identical miss.
-    pub(super) fn read_from_program_entry_at_unknown(entry: &FunctionProgramEntry) -> Self {
+    pub(super) fn read_from_program_entry_at_unknown(matched: FunctionProgramMatch<'_>) -> Self {
         Self::new(
-            entry
+            matched
+                .entry()
                 .type_parameters
                 .iter()
                 .map(|param| CalleeClauseParam::bare(Arc::clone(&param.name))),

@@ -98,7 +98,9 @@ fn object_entries(
 ) -> Vec<SkeletonObjectEntry> {
     match &skeleton.expr_site(site).shape {
         SkeletonExprShape::ObjectLiteral { entries } => entries.to_vec(),
-        SkeletonExprShape::Other => panic!("site must be an object literal"),
+        SkeletonExprShape::BranchJoin { .. } | SkeletonExprShape::Other => {
+            panic!("site must be an object literal")
+        }
     }
 }
 
