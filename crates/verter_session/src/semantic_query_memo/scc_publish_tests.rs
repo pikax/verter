@@ -114,11 +114,18 @@ fn pending_flow_members(
         .collect()
 }
 
-/// Run one batch of `members` (in the given order) against a store whose
-/// global family budget is `cap`, and report `(published, resident)`.
-fn run_batch(cap: usize, member_order: &[usize]) -> (bool, Vec<String>) {
+/// Run one batch of `members` (in the given order) plus `flow_members`
+/// flow-return members against a store whose global family budget is
+/// `cap`, and report `(published, resident)`.
+///
+/// The flow count is a real axis, not a convenience: the whole-batch
+/// refusal releases the two domains' flights through two SEPARATE loops,
+/// so a relation-only batch leaves the flow loop unexercised and a leak
+/// there is invisible.
+fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, Vec<String>) {
     let store = SemanticGraphStore::new_with_memo_budget_for_test(cap);
     let keys = distinct_keys(&store, member_order.len() + 1);
+    let flow_keys = distinct_flow_keys(flow_members);
     let root_key = keys[0].clone();
     let witness = seed_root(&store, &root_key);
 
@@ -135,6 +142,8 @@ fn run_batch(cap: usize, member_order: &[usize]) -> (bool, Vec<String>) {
         });
     }
 
+    let pending_flow = pending_flow_members(&store, &flow_keys);
+
     let published = store.publish_scc_members_fenced(
         None,
         &witness,
@@ -142,12 +151,12 @@ fn run_batch(cap: usize, member_order: &[usize]) -> (bool, Vec<String>) {
         &Arc::from(Vec::<Arc<str>>::new()),
         0,
         pending,
-        Vec::new(),
+        pending_flow,
     );
 
-    // Residency is reported by STABLE NAME (`root`, `m0`, `m1`, ...), not
-    // by publication order, so the two orderings' reports are directly
-    // comparable.
+    // Residency is reported by STABLE NAME (`root`, `m0`, `m1`, ...,
+    // `f0`, ...), not by publication order, so the two orderings' reports
+    // are directly comparable.
     let mut resident = Vec::new();
     if store.slot_candidate_count_for_tests(&root_key.to_query_key()) > 0 {
         resident.push("root".to_string());
@@ -155,6 +164,14 @@ fn run_batch(cap: usize, member_order: &[usize]) -> (bool, Vec<String>) {
     for index in 0..member_order.len() {
         if store.slot_candidate_count_for_tests(&keys[index + 1].to_query_key()) > 0 {
             resident.push(format!("m{index}"));
+        }
+    }
+    for (index, key) in flow_keys.iter().enumerate() {
+        if store
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+            > 0
+        {
+            resident.push(format!("f{index}"));
         }
     }
 
@@ -226,8 +243,8 @@ fn scc_batch_never_evicts_its_own_root_or_members_under_retention_pressure() {
     // orders must refuse WHOLE, and the ledger (asserted inside
     // `run_batch`) must not end up pinned above the cap by an
     // over-wide exemption.
-    let (published_boundary, resident_boundary) = run_batch(3, &[0, 1, 2]);
-    let (published_boundary_rev, resident_boundary_rev) = run_batch(3, &[2, 1, 0]);
+    let (published_boundary, resident_boundary) = run_batch(3, &[0, 1, 2], 0);
+    let (published_boundary_rev, resident_boundary_rev) = run_batch(3, &[2, 1, 0], 0);
     assert!(
         !published_boundary && !published_boundary_rev,
         "a component whose ROOT is what pushes it past the cap must refuse WHOLE \
@@ -243,11 +260,15 @@ fn scc_batch_never_evicts_its_own_root_or_members_under_retention_pressure() {
         "member ORDER must never change which keys stay warm"
     );
 
-    // OVERSIZED — root + 3 members needs 4 resident families against a
-    // cap of 2. The component cannot be retained coherently, so NOTHING
-    // publishes and the pre-existing root survives untouched.
-    let (published_forward, resident_forward) = run_batch(2, &[0, 1, 2]);
-    let (published_reverse, resident_reverse) = run_batch(2, &[2, 1, 0]);
+    // OVERSIZED — root + 3 relation members + 1 FLOW member needs 5
+    // resident families against a cap of 2. The component cannot be
+    // retained coherently, so NOTHING publishes and the pre-existing root
+    // survives untouched. This is the MIXED refusal leg: the refusal
+    // releases the two domains' flights through two separate loops, and
+    // the flight assertions inside `run_batch` are what hold the flow
+    // one.
+    let (published_forward, resident_forward) = run_batch(2, &[0, 1, 2], 1);
+    let (published_reverse, resident_reverse) = run_batch(2, &[2, 1, 0], 1);
     assert!(
         !published_forward && !published_reverse,
         "a component that cannot fit the retention budget must refuse WHOLE \
@@ -265,8 +286,8 @@ fn scc_batch_never_evicts_its_own_root_or_members_under_retention_pressure() {
 
     // FITTING — root + 3 members against a cap of 8. The whole component
     // publishes, root included, identically in both orders.
-    let (published_fit, resident_fit) = run_batch(8, &[0, 1, 2]);
-    let (published_fit_rev, resident_fit_rev) = run_batch(8, &[2, 1, 0]);
+    let (published_fit, resident_fit) = run_batch(8, &[0, 1, 2], 0);
+    let (published_fit_rev, resident_fit_rev) = run_batch(8, &[2, 1, 0], 0);
     assert!(
         published_fit && published_fit_rev,
         "a component that fits must publish WHOLE \
@@ -443,6 +464,17 @@ fn run_exact_fit_pressure_batch(
         store.retained_claimed_flight_keys_for_tests().is_empty(),
         "every member flight must be released ({label}): {:?}",
         store.retained_claimed_flight_keys_for_tests()
+    );
+    // The `completed`-IGNORING probe too. The claimed-only probe filters
+    // on `completed.is_none()`, so it is structurally blind to a flight
+    // that completed and was then retired into the wrong table — a
+    // permanently resident joiner-only entry that can never re-warm.
+    // Asserting only the filtered probe here is exactly the blindness
+    // that hid a flight leak.
+    assert!(
+        store.resident_flight_keys_for_tests().is_empty(),
+        "every member flight must be retired ({label}): {:?}",
+        store.resident_flight_keys_for_tests()
     );
 }
 

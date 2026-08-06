@@ -943,6 +943,98 @@ export function paramBodyLocalInvisible(b: typeof loc) {
   const loc = 1;
   return b;
 }
+
+// ── A BLOCK-scoped local in the binder's OWN frame ────────────────────
+// TS2300 constrains only a BODY-level collision. A BLOCK-level `class` /
+// `enum` of the binder's name is LEGAL and WINS for everything the block
+// encloses, so this frame's own clause cannot short-circuit ahead of
+// this frame's own lexical authority.
+export type BT = "moduleBT";
+export type BE = "moduleBE";
+export type BN = "moduleBN";
+export type BQ = "moduleBQ";
+export type BD = "moduleBD";
+export type BC = "moduleBC";
+export type CP = "moduleCP";
+export type CN = "moduleCN";
+
+export function blockClassVsOwnBinder<BT>() {
+  {
+    class BT {
+      inner = 1;
+    }
+    return null as unknown as BT;
+  }
+}
+
+export function blockClassNestedSig<BT>() {
+  {
+    class BT {
+      inner = 1;
+    }
+    return (p: BT) => p;
+  }
+}
+
+export function blockEnumVsOwnBinder<BE>() {
+  {
+    enum BE {
+      A,
+    }
+    return null as unknown as BE;
+  }
+}
+
+export function blockClassDeeper<BN>() {
+  {
+    class BN {
+      inner = 1;
+    }
+    {
+      return null as unknown as BN;
+    }
+  }
+}
+
+export function blockNamespaceQual<BQ>() {
+  {
+    enum BQ {
+      Inner,
+    }
+    return null as unknown as BQ.Inner;
+  }
+}
+
+export function blockClassOneFrameDown<BD>() {
+  return () => {
+    {
+      class BD {
+        inner = 1;
+      }
+      return null as unknown as BD;
+    }
+  };
+}
+
+export function bodyClassCollides<BC>() {
+  class BC {
+    inner = 1;
+  }
+  return null as unknown as BC;
+}
+
+export function ctrlRootParam<CP>() {
+  return null as unknown as CP;
+}
+
+export function ctrlNoLocal<CN>() {
+  {
+    class NotCN {
+      inner = 1;
+    }
+    return null as unknown as CN;
+  }
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -2461,6 +2553,97 @@ fn flow_return_nearest_declaration_wins_between_binders_and_frame_locals() {
             },
         );
     }
+}
+
+/// A BLOCK-scoped type-space local in the binder's OWN frame is NEARER
+/// than that frame's own type-parameter clause.
+///
+/// TS2300 constrains only a BODY-level collision: `function f<T>() {
+/// class T {} }` is a duplicate identifier, but `function f<T>() { {
+/// class T {} … } }` is LEGAL and the block-scoped class WINS for
+/// everything the block encloses. A frame's own clause consulted as a
+/// short-circuit AHEAD of the frame's own lexical authority therefore
+/// publishes the binder cleanly and warm for an answer whose type is an
+/// unmodellable local class — and at a call site that binder is
+/// substituted with the caller's type argument, so the wrong type fully
+/// materialises.
+///
+/// Oracle (tsgo checker), each probed by assignability because the local
+/// class / enum is what the checker NAMES:
+///
+/// ```text
+/// const a: number = blockLevel<number>().inner;  // clean — the local class won
+/// const b: number = blockLevel<number>();        // TS2322 'blockLevel.BT'
+/// blockClassNestedSig<number>()(…)               : TS2322 'blockClassNestedSig.BT'
+/// blockEnumVsOwnBinder<string>()                 : TS2322 'BE'
+/// blockClassDeeper<number>()                     : TS2322 'blockClassDeeper.BN'
+/// blockNamespaceQual<string>()                   : TS2322 'BQ'
+/// blockClassOneFrameDown<number>()()             : TS2322 'blockClassOneFrameDown.BD'
+/// ctrlRootParam<number>() / ctrlNoLocal<number>(): clean — the binder won
+/// bodyClassCollides<…>                           : TS2300 (either verdict is acceptable)
+/// ```
+///
+/// A local class / enum is not a modellable answer, so every row whose
+/// answer is one fails CLOSED — never the frame's own binder published
+/// cleanly and warm, and never the module twin.
+///
+/// Mutation recipes. Reverting `name_is_frame_bound` to consult this
+/// frame's own clause BESIDE `binders` (one two-step short-circuit)
+/// flips the four TYPE-meaning rows to a warm `TypeParam`;
+/// `blockNamespaceQual` survives that mutation through the NAMESPACE arm
+/// alone, which is exactly why it is not the row this test rests on.
+/// Consulting the SKELETON ahead of BOTH inventories instead — the naive
+/// swap — leaves every row here green and flips `tpShadowParamAnnot` to
+/// `Error(Miss)`, because there `binders` is the NESTED signature's
+/// clause while the skeleton is the ENCLOSING frame's. Applying only the
+/// `name_is_frame_bound` reorder without passing an EMPTY binder list at
+/// the two BODY-position call sites (the declarator annotation and
+/// `leaf_type`) leaves exactly three rows warm and fixes only
+/// `blockClassNestedSig`, which reaches the gate through a nested
+/// signature.
+#[test]
+fn flow_return_block_scoped_local_shadows_this_frames_own_binder() {
+    let host = make_r5_host();
+
+    // The block-scoped local wins: bare TYPE meaning, ENUM, a deeper
+    // block, a nested SIGNATURE annotation, and the QUALIFIED head.
+    for name in [
+        "blockClassVsOwnBinder",
+        "blockClassNestedSig",
+        "blockEnumVsOwnBinder",
+        "blockClassDeeper",
+        "blockNamespaceQual",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+
+    // CONTROL — the same collision ONE FRAME DOWN already failed closed
+    // before this fix: there the class sits in the NESTED frame's own
+    // skeleton, so that frame's own lexical authority answers and no
+    // clause was ever consulted ahead of it. It pins that this fix did
+    // not change the frame the answer comes from.
+    assert_fails_closed(&host, "blockClassOneFrameDown");
+
+    // CONTROLS — no local of the binder's name: the binder is the
+    // answer, clean and warm, asserted on the GRAPH NODE (a `DeclRef` to
+    // the module twin raises to the same `Ref { name }`).
+    for (name, binder) in [("ctrlRootParam", "CP"), ("ctrlNoLocal", "CN")] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(node_shape(dispatch, node), type_param(binder));
+            },
+        );
+    }
+
+    // A BODY-level collision is TS2300 — malformed input. Either verdict
+    // is acceptable; the gate must not panic on it.
+    with_dispatch(&host, |dispatch| {
+        let key = r5_key(dispatch, "bodyClassCollides");
+        let _ = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)));
+    });
 }
 
 /// A CLASS type-parameter clause binds inside every member body it

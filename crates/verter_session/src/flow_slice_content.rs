@@ -1294,25 +1294,36 @@ impl Lowerer<'_> {
     /// lexically but denotes no namespace, so `T.B` is unresolvable and
     /// reporting it frame-bound IS the fail-closed answer.
     ///
-    /// Three binder inventories feed that rule, and they are consulted
-    /// in NESTING ORDER rather than as one union, because the nearest
+    /// FOUR binder inventories feed that rule, and they are consulted in
+    /// NESTING ORDER rather than as one union, because the nearest
     /// declaration wins and a binder and a local of the same name can
-    /// genuinely coexist across frames:
+    /// genuinely coexist — across frames AND within one frame:
     ///
-    /// 1. `binders` (the clause the answer is lowered under) and this
-    ///    frame's own clause. Nothing can be nearer, and a same-frame
-    ///    local of the same name is TS2300, so these short-circuit.
-    /// 2. This frame's own lexical declarations.
-    /// 3. The ENCLOSING frames', through [`CaptureScope`].
+    /// 1. `binders` — the clause the answer is lowered under, when that
+    ///    clause is STRICTLY NEARER than this frame's region chain (a
+    ///    NESTED signature's own type parameters, which bind inside a
+    ///    signature that merely SITS in this frame). Nothing can be
+    ///    nearer, so this short-circuits.
+    /// 2. This frame's own lexical declarations, at the reference's
+    ///    region.
+    /// 3. This frame's OWN type-parameter clause — SAME level as the
+    ///    region chain in step 2, and therefore BEHIND it.
+    /// 4. The ENCLOSING frames', through [`CaptureScope`].
     ///
-    /// TS2300 constrains only ONE frame: `function f<T>() { class T {} }`
-    /// is a duplicate identifier, but `function f<T>() { return () =>
-    /// { class T {}; … } }` is not — and there the nearer `class T`
-    /// shadows the binder for everything it encloses, while a nearer
-    /// `<T>` shadows an outer frame's `class T`. Both directions are
-    /// checker-verified. [`Lowerer::capture_scope_for`] keeps the
-    /// captured inventories disjoint per name, so step 3 needs no
-    /// nesting order of its own.
+    /// Steps 2 and 3 are the reason `binders` and `type_param_names` are
+    /// separate parameters rather than one union: they express two
+    /// different lexical distances, and a BODY position must pass an
+    /// EMPTY `binders` so this frame's clause is consulted at step 3.
+    ///
+    /// TS2300 constrains only a BODY-level collision of ONE frame:
+    /// `function f<T>() { class T {} }` is a duplicate identifier, but
+    /// `function f<T>() { { class T {}; … } }` is LEGAL and the
+    /// BLOCK-scoped class WINS for everything the block encloses — as
+    /// does a `class T` in a nested frame (`function f<T>() { return ()
+    /// => { class T {}; … } }`), while a nearer `<T>` shadows an outer
+    /// frame's `class T`. All three directions are checker-verified.
+    /// [`Lowerer::capture_scope_for`] keeps the captured inventories
+    /// disjoint per name, so step 4 needs no nesting order of its own.
     fn name_is_frame_bound(
         &self,
         name: &str,
@@ -1320,12 +1331,7 @@ impl Lowerer<'_> {
         meaning: NameMeaning,
         binders: &[Arc<str>],
     ) -> bool {
-        if binders.iter().any(|binder| binder.as_ref() == name)
-            || self
-                .type_param_names
-                .iter()
-                .any(|binder| binder.as_ref() == name)
-        {
+        if binders.iter().any(|binder| binder.as_ref() == name) {
             return meaning == NameMeaning::Namespace;
         }
         if let Some(name_id) = self.skeleton.name_id(name) {
@@ -1337,7 +1343,12 @@ impl Lowerer<'_> {
                 return true;
             }
         }
-        if self.captures.binder_names.contains(name) {
+        if self
+            .type_param_names
+            .iter()
+            .any(|binder| binder.as_ref() == name)
+            || self.captures.binder_names.contains(name)
+        {
             return meaning == NameMeaning::Namespace;
         }
         match meaning {
@@ -1496,8 +1507,12 @@ impl Lowerer<'_> {
                 declares_type_space = true;
             }
             // This frame's own type-space declaration is NEARER than any
-            // enclosing frame's binder of the same name. (It can never be
-            // nearer than THIS frame's own binder — that is TS2300.)
+            // enclosing frame's binder of the same name. THIS frame's own
+            // clause is a separate question, decided per REFERENCE by
+            // [`Lowerer::name_is_frame_bound`]'s region walk rather than
+            // here: a BODY-level collision is TS2300, but a BLOCK-scoped
+            // one is legal and wins only inside its block, so a
+            // frame-wide inventory could not express it.
             if declares_type_space {
                 binder_names.remove(text);
             }
@@ -1636,17 +1651,20 @@ impl Lowerer<'_> {
                         // not merely suppress the initializer's
                         // widening.
                         // A declarator annotation is a BODY position: it
-                        // sees this frame's body-local type declarations,
-                        // so it takes the frame gate under this frame's
-                        // own type-parameter binders. The initializer's
-                        // gate cannot stand in for it — the `(Some(init),
-                        // None)` arm binds the DECLARED node and skips
-                        // the initializer entirely.
+                        // sits IN this frame's region chain, so it takes
+                        // the frame gate with NO nearer-clause binders —
+                        // this frame's own clause is consulted BEHIND
+                        // this frame's lexical authority, which is what
+                        // lets a block-scoped local of the binder's name
+                        // win. The initializer's gate cannot stand in for
+                        // it — the `(Some(init), None)` arm binds the
+                        // DECLARED node and skips the initializer
+                        // entirely.
                         let declared = declarator.type_annotation.as_ref().map(|annotation| {
                             self.gate(
                                 lower_ts_type(&annotation.type_annotation, self.source),
                                 id.span,
-                                self.type_param_names,
+                                &[],
                             )
                         });
                         // A WIDENING literal binding: an unannotated
@@ -2293,7 +2311,11 @@ impl Lowerer<'_> {
             }
             return LeafLowering::Free(ty);
         }
-        let shadowed = self.answer_names_frame_bound(&ty, expr.span(), self.type_param_names);
+        // A leaf expression is a BODY position: it sits IN this frame's
+        // region chain, so no clause is NEARER than the frame's own
+        // lexical authority. This frame's clause answers at its own step,
+        // behind the skeleton.
+        let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
         if shadowed.is_empty() {
             LeafLowering::Free(ty)
         } else {
