@@ -9,8 +9,24 @@ use std::sync::Arc;
 
 use verter_type_expr::{
     referenced_names, FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty,
-    PrimitiveName, TypeExpr, ValueRef,
+    PrimitiveName, ReferencedTypeName, TypeExpr, ValueRef,
 };
+
+/// One BARE (unqualified) referenced-name occurrence.
+fn bare(head: &str) -> ReferencedTypeName {
+    ReferencedTypeName {
+        head: head.to_string(),
+        qualified: false,
+    }
+}
+
+/// One QUALIFIED (dotted) referenced-name occurrence.
+fn qual(head: &str) -> ReferencedTypeName {
+    ReferencedTypeName {
+        head: head.to_string(),
+        qualified: true,
+    }
+}
 
 fn type_of(root: &str) -> TypeExpr {
     TypeExpr::TypeOf(ValueRef {
@@ -81,7 +97,7 @@ fn referenced_names_reaches_every_nested_carrier() {
     type_names.sort();
     assert_eq!(
         type_names,
-        vec!["InCheck".to_string(), "Outer".to_string()],
+        vec![bare("InCheck"), bare("Outer")],
         "every named type reference surfaces"
     );
 }
@@ -125,11 +141,11 @@ fn referenced_names_takes_the_type_reference_head_not_the_dotted_name() {
     type_names.sort();
     assert_eq!(
         type_names,
-        vec!["A".to_string(), "E".to_string(), "R".to_string()],
+        vec![qual("A"), qual("E"), qual("R")],
         "a qualified type reference names its head binding, not the dotted path"
     );
     assert!(
-        !type_names.iter().any(|name| name.contains('.')),
+        !type_names.iter().any(|name| name.head.contains('.')),
         "no dotted name survives into `type_names`: {type_names:?}"
     );
 }
@@ -143,7 +159,7 @@ fn referenced_names_leaves_an_undotted_reference_head_intact() {
     ]));
     let mut type_names = names.type_names;
     type_names.sort();
-    assert_eq!(type_names, vec!["Info".to_string(), "Rec".to_string()]);
+    assert_eq!(type_names, vec![bare("Info"), bare("Rec")]);
 }
 
 #[test]
@@ -170,5 +186,137 @@ fn referenced_names_is_depth_safe() {
     assert_eq!(
         referenced_names(&deep).value_roots,
         vec!["deepRoot".to_string()]
+    );
+}
+
+#[test]
+fn referenced_names_marks_qualified_occurrences_per_occurrence() {
+    // An answer may reference the SAME head both bare and qualified.
+    // The two occurrences carry different meanings — a bare `A` is a
+    // Type-meaning lookup, a qualified `A.B` head is a Namespace-meaning
+    // one — so a per-NAME bit (or a deduplicated set) loses the
+    // distinction and makes one of the two consumers wrong.
+    let subject = TypeExpr::union(vec![
+        named("A"),
+        TypeExpr::Ref {
+            name: Arc::from("A.B"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        },
+        named("Plain"),
+    ]);
+
+    let mut occurrences = referenced_names(&subject).type_names;
+    occurrences.sort();
+    assert_eq!(
+        occurrences,
+        vec![bare("A"), qual("A"), bare("Plain"),],
+        "each occurrence carries its own qualified bit"
+    );
+}
+
+#[test]
+fn referenced_names_masks_function_and_constructor_binders_depth_safely() {
+    use verter_type_expr::TypeParam;
+
+    // A generic function type's OWN type parameters are binders of the
+    // ANSWER, not references into the scope the answer was lowered in. A
+    // consumer asking "does this frame bind any name this answer
+    // references" must never see them, or a frame with a same-named
+    // `class T` spuriously fails closed on `<T>(x: T) => T`.
+    let generic = |name: &str, body: TypeExpr| {
+        TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            vec![FunctionParam::synthetic(
+                Some("p".to_string()),
+                named(name),
+                false,
+                false,
+            )],
+            Some(Arc::new(body)),
+            vec![TypeParam {
+                name: name.to_string(),
+                constraint: None,
+                default: None,
+            }],
+        )))
+    };
+
+    let masked = referenced_names(&generic("T", named("T")));
+    assert!(
+        masked.type_names.is_empty(),
+        "a function's own binder is not a scope reference: {:?}",
+        masked.type_names
+    );
+
+    // A SIBLING of the binder frame stays visible: the mask is scoped to
+    // the function's own subtree, not to the whole walk.
+    let sibling = TypeExpr::union(vec![generic("T", named("T")), named("T")]);
+    assert_eq!(
+        referenced_names(&sibling).type_names,
+        vec![bare("T")],
+        "the binder frame exits with its subtree"
+    );
+
+    // A FREE name inside the binder's subtree still surfaces.
+    let free_inside = generic("T", named("Info"));
+    assert_eq!(
+        referenced_names(&free_inside).type_names,
+        vec![bare("Info")],
+        "masking removes only the binder's own name"
+    );
+
+    // A CONSTRUCTOR type's binders mask identically.
+    let ctor_source = generic("C", named("C"));
+    let TypeExpr::Function(ref ctor_body) = ctor_source else {
+        unreachable!("the helper builds a function type")
+    };
+    assert!(
+        referenced_names(&TypeExpr::ConstructorType(Arc::clone(ctor_body)))
+            .type_names
+            .is_empty(),
+        "a constructor type's own binder is masked too"
+    );
+
+    // A METHOD / call signature inside an object carries its own frame,
+    // and the object's OTHER members are outside it.
+    let object = TypeExpr::Object(Arc::new(ObjectExpr {
+        properties: vec![
+            ObjectMember::Property(ObjectProperty::synthetic_public_key(
+                "sibling".into(),
+                named("T"),
+                false,
+                false,
+            )),
+            ObjectMember::CallSignature(FunctionExpr::synthetic(
+                vec![FunctionParam::synthetic(
+                    Some("p".to_string()),
+                    named("T"),
+                    false,
+                    false,
+                )],
+                None,
+                vec![TypeParam {
+                    name: "T".to_string(),
+                    constraint: None,
+                    default: None,
+                }],
+            )),
+        ],
+    }));
+    assert_eq!(
+        referenced_names(&object).type_names,
+        vec![bare("T")],
+        "a call signature's binder masks only inside the signature"
+    );
+
+    // Depth-safe: the enter/exit frames ride the same explicit heap
+    // work-stack the rest of the walk uses.
+    let mut deep = named("Free");
+    for _ in 0..20_000 {
+        deep = generic("T", deep);
+    }
+    assert_eq!(
+        referenced_names(&deep).type_names,
+        vec![bare("Free")],
+        "20k nested binder frames complete without a stack overflow"
     );
 }

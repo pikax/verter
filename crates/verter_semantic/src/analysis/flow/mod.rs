@@ -205,6 +205,86 @@ pub enum SkeletonBindingKind {
     Namespace,
     /// A local `import x = …` declaration's name.
     ImportEquals,
+    /// A local `type X = …` alias declaration's name. TYPE space only.
+    TypeAlias,
+    /// A local `interface X { … }` declaration's name. TYPE space only.
+    Interface,
+}
+
+/// The name MEANING one lookup demands, mirroring the TypeScript
+/// `SymbolFlags` split that decides which declarations can answer it.
+///
+/// A BARE reference (`x as N`) demands `Type`; the HEAD of a QUALIFIED
+/// reference (`x as N.B`) demands `Namespace`
+/// (`SymbolFlags.Namespace = ValueModule | NamespaceModule | Enum` — a
+/// class is NOT in it). The two are genuinely different questions about
+/// the same name: a local `class N` shadows the bare reference but not
+/// the qualified head, and a local `namespace N` does the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum NameMeaning {
+    /// A type reference's own name (`N`).
+    Type,
+    /// A qualified type reference's HEAD (`N` in `N.B`).
+    Namespace,
+}
+
+impl SkeletonBindingKind {
+    /// Whether this kind declares a VALUE.
+    ///
+    /// `type` / `interface` declare a type and NOTHING else, so a value
+    /// lookup must walk straight past them to the enclosing scope —
+    /// exactly as [`FunctionBodySkeleton::declares_meaning_in_scope`]
+    /// walks past a value-only kind in type space. The two spaces are
+    /// symmetric: whichever space a lookup asks about, a declaration
+    /// that does not occupy it is transparent.
+    #[must_use]
+    pub const fn declares_value(self) -> bool {
+        !matches!(self, Self::TypeAlias | Self::Interface)
+    }
+
+    /// Whether this kind declares `meaning`.
+    ///
+    /// Oracle-anchored against `tsc --strict`, one fixture per cell:
+    ///
+    /// | kind                    | `Type` | `Namespace` |
+    /// |-------------------------|--------|-------------|
+    /// | `class` (static or not) | yes    | no          |
+    /// | `enum` / `const enum`   | yes    | yes         |
+    /// | `namespace`             | no     | yes         |
+    /// | `type` / `interface`    | yes    | no          |
+    /// | `import x = …`          | yes\*  | yes\*       |
+    /// | value-only kinds        | no     | no          |
+    ///
+    /// \* An `import x = …` is MEANING-TRANSPARENT: it occupies exactly
+    /// the spaces its target occupies, and the target is not decidable
+    /// from the skeleton. It therefore answers both meanings — a
+    /// deliberate over-fire that can only FAIL CLOSED, never publish a
+    /// wrong answer. (An `import =` inside a function body is TS1232
+    /// anyway; the skeleton still records the recovered binding.)
+    ///
+    /// DECLARATION MERGING needs no special case: `class N` + `namespace
+    /// N` are two separate bindings of the same name in the same region,
+    /// and the scope walk asks `any`, so the merge answers both meanings
+    /// while `function N` + `namespace N` answers only `Namespace`.
+    #[must_use]
+    pub const fn declares(self, meaning: NameMeaning) -> bool {
+        match (self, meaning) {
+            (Self::Enum | Self::ImportEquals, _) => true,
+            (Self::Class | Self::TypeAlias | Self::Interface, NameMeaning::Type) => true,
+            (Self::Namespace, NameMeaning::Namespace) => true,
+            (Self::Class | Self::TypeAlias | Self::Interface, NameMeaning::Namespace)
+            | (Self::Namespace, NameMeaning::Type) => false,
+            (
+                Self::Param
+                | Self::Const
+                | Self::Let
+                | Self::Var
+                | Self::NestedFunction
+                | Self::CatchParam,
+                _,
+            ) => false,
+        }
+    }
 }
 
 /// The binding kind of one variable declaration. `using` / `await using`
@@ -543,6 +623,13 @@ impl FunctionBodySkeleton {
     ///
     /// An EMPTY result means the name is FREE in this frame (a module- or
     /// outer-scope reference), never "unknown".
+    ///
+    /// The walk is MEANING-FILTERED, symmetrically with
+    /// [`Self::declares_meaning_in_scope`]: a TYPE-ONLY declaration
+    /// (`type` / `interface`) occupies no value space, so it is
+    /// transparent here at EVERY hop rather than stopping the walk. A
+    /// filter applied only at the first hit would report "free" the
+    /// moment `type Info = …` shadowed an enclosing `const Info`.
     #[must_use]
     pub fn bindings_of_name_in_scope(
         &self,
@@ -553,7 +640,10 @@ impl FunctionBodySkeleton {
         while let Some(enclosing) = current {
             let mut hits: Vec<SkeletonBindingId> = Vec::new();
             for (index, binding) in self.bindings.iter().enumerate() {
-                if binding.name == name && binding.region == enclosing {
+                if binding.name == name
+                    && binding.region == enclosing
+                    && binding.kind.declares_value()
+                {
                     hits.push(SkeletonBindingId::from_index(index as u32));
                 }
             }
@@ -580,48 +670,44 @@ impl FunctionBodySkeleton {
     }
 
     /// The TYPE-SPACE twin of [`Self::bindings_of_name_in_scope`]:
-    /// whether this frame declares `name` in TYPE space anywhere on the
+    /// whether this frame declares `name` in `meaning` anywhere on the
     /// region chain enclosing `region`.
     ///
-    /// The two spaces are resolved SEPARATELY, not by filtering the value
+    /// The spaces are resolved SEPARATELY, not by filtering the value
     /// lookup's answer. `bindings_of_name_in_scope` stops at the nearest
-    /// region binding the name in ANY space, so filtering its result by
+    /// region binding the name in VALUE space, so filtering its result by
     /// kind reports "not type-bound" the moment a value-only binding
     /// (`const` / `let` / `var` / a parameter / a nested function
     /// declaration) shadows a type-declaring OUTER binding of the same
     /// frame — `class Info {}` at the frame root with `const Info = 1` in
     /// an inner block still owns `Info` in type space at that inner
-    /// block. TypeScript's `resolveName` with a Type meaning SKIPS a scope
-    /// whose symbol carries no type meaning and continues outward, so this
-    /// walk filters by kind at EVERY hop instead of at the first hit only.
+    /// block. TypeScript's `resolveName` with a given meaning SKIPS a
+    /// scope whose symbol lacks that meaning and continues outward, so
+    /// this walk filters at EVERY hop instead of at the first hit only.
     ///
-    /// `class` and `enum` declare a type alongside their value;
-    /// `namespace` declares a namespace-qualified type space; `import X =
-    /// …` re-declares whatever spaces its target occupies. Everything else
-    /// declares a VALUE only and leaves an outer same-name type completely
-    /// visible. (`namespace` and `import =` are illegal inside a function
-    /// body — TS1235 / TS1232 — but the skeleton still records the
-    /// recovered binding, and it genuinely occupies type space when it
-    /// does.)
+    /// Which kind answers which meaning is
+    /// [`SkeletonBindingKind::declares`]. (`namespace` and `import =` are
+    /// illegal inside a function body — TS1235 / TS1232 — but the
+    /// skeleton still records the recovered binding, and it genuinely
+    /// occupies its spaces when it does.)
     ///
     /// There is no hoisting union here: no hoisting kind (`var`, a nested
-    /// function declaration) declares a type, so the function-scope
-    /// hoisting fallback that [`Self::bindings_of_name_in_scope`] applies
-    /// can contribute nothing to type space.
+    /// function declaration) declares a type or a namespace, so the
+    /// function-scope hoisting fallback that
+    /// [`Self::bindings_of_name_in_scope`] applies can contribute nothing.
     #[must_use]
-    pub fn declares_type_space_in_scope(&self, name: FlowNameId, region: SkeletonRegionId) -> bool {
+    pub fn declares_meaning_in_scope(
+        &self,
+        name: FlowNameId,
+        region: SkeletonRegionId,
+        meaning: NameMeaning,
+    ) -> bool {
         let mut current = Some(region);
         while let Some(enclosing) = current {
             if self.bindings.iter().any(|binding| {
                 binding.name == name
                     && binding.region == enclosing
-                    && matches!(
-                        binding.kind,
-                        SkeletonBindingKind::Class
-                            | SkeletonBindingKind::Enum
-                            | SkeletonBindingKind::Namespace
-                            | SkeletonBindingKind::ImportEquals
-                    )
+                    && binding.kind.declares(meaning)
             }) {
                 return true;
             }
@@ -1467,6 +1553,31 @@ impl<'a> Visit<'a> for SkeletonBuilder {
                     false,
                 );
                 walk::walk_statement(self, it);
+            }
+            // A local `type` / `interface` declares a TYPE-ONLY binding.
+            // It is invisible to every value lookup (the meaning filter
+            // in `bindings_of_name_in_scope` walks past it), but it OWNS
+            // the name in type space: an unindexed one reads as FREE and
+            // silently resolves `x as Info` to an unrelated module-scope
+            // (or imported) declaration of the same name. The bodies are
+            // pure type positions, which this visitor never enters.
+            Statement::TSTypeAliasDeclaration(alias) => {
+                self.push_binding(
+                    alias.id.name.as_str(),
+                    SkeletonBindingKind::TypeAlias,
+                    alias.id.span.into(),
+                    None,
+                    false,
+                );
+            }
+            Statement::TSInterfaceDeclaration(interface) => {
+                self.push_binding(
+                    interface.id.name.as_str(),
+                    SkeletonBindingKind::Interface,
+                    interface.id.span.into(),
+                    None,
+                    false,
+                );
             }
             _ => walk::walk_statement(self, it),
         }

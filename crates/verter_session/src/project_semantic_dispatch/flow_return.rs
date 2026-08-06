@@ -1108,7 +1108,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.lower_type_expr_in_owner_scope_with_context(
                     canonical,
                     owner,
-                    c,
+                    c.ty(),
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 )
             });
@@ -1116,7 +1116,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.lower_type_expr_in_owner_scope_with_context(
                     canonical,
                     owner,
-                    d,
+                    d.ty(),
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 )
             });
@@ -1399,11 +1399,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // file-scope alias); an empty clause reproduces the owner-scope
         // lowering exactly. Parameters lower through it.
         let binder_env = self.flow_binder_env(canonical, owner, &ir.type_parameters);
+        // THE root-identifier gate at the SIGNATURE entrances. Every
+        // signature answer the content half minted carries the frame
+        // names it references; if the owner scope answers one of them,
+        // evaluating it would publish an unrelated module-scope (or
+        // cross-file imported) symbol's type for a frame-owned binding —
+        // cleanly and warm. The ROOT function's own signature is minted
+        // UNGATED (its body-locals are not in scope there), so this only
+        // ever fires for a nested signature reached through the same
+        // slice content.
+        if ir
+            .type_parameters
+            .iter()
+            .flat_map(|tp| tp.constraint.iter().chain(tp.default.iter()))
+            .chain(ir.params.iter().map(|param| &param.ty))
+            .any(|gated| signature_answer_is_frame_shadowed(self, &binder_env, gated))
+        {
+            return degraded(FlowReturnFailure::UnmodeledBinding, self_roots);
+        }
         let mut params: Vec<SemanticNodeId> = Vec::with_capacity(ir.params.len());
         for param in ir.params.iter() {
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
             let node = self.shallow_lower_type_expr_with_context(
-                &param.ty,
+                param.ty.ty(),
                 &binder_env.env,
                 &binder_env.scope,
                 &binder_env.name_resolution,
@@ -1693,6 +1711,72 @@ struct FlowBinderEnv {
     env: rustc_hash::FxHashMap<String, SemanticNodeId>,
     /// The binder declarations, for a composed signature's generic clause.
     type_param_decls: Vec<crate::semantic_query::TypeParamDecl>,
+}
+
+/// Whether the file OWNER SCOPE answers `name` in the name meaning it was
+/// referenced in — THE root-identifier gate's owner-side probe, shared by
+/// every consumer of a
+/// [`crate::flow_slice_content::GatedType`]'s shadow list.
+///
+/// Asked through the ONE shared lowering the answer itself would take
+/// (`typeof name` for a value reference, a bare `name` reference for a
+/// type or namespace one), so the verdict is exactly "would the answer
+/// bind something here". A typed MISS means the owner scope answers
+/// nothing, so nothing can be mis-bound.
+///
+/// The two type-space meanings share one probe by construction: the HEAD
+/// of `N.B` is the same scope lookup as a bare `N`, and it is the FRAME
+/// side — which local declarations shadow the reference — that the
+/// meanings differ on.
+fn owner_scope_answers_frame_name(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    binder_env: &FlowBinderEnv,
+    name: &crate::flow_slice_content::FrameShadowedName,
+) -> bool {
+    let probe = match name {
+        crate::flow_slice_content::FrameShadowedName::Value(name) => {
+            verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec![name.as_ref().to_string()],
+                type_args: Vec::new(),
+            })
+        }
+        crate::flow_slice_content::FrameShadowedName::Type(name)
+        | crate::flow_slice_content::FrameShadowedName::Namespace(name) => {
+            verter_type_expr::TypeExpr::Ref {
+                name: Arc::clone(name),
+                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+            }
+        }
+    };
+    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+    let node = dispatch.shallow_lower_type_expr_with_context(
+        &probe,
+        &binder_env.env,
+        &binder_env.scope,
+        &binder_env.name_resolution,
+        binder_env.scope_payload.as_ref(),
+        &binder_env.shadowing,
+        &mut substitutions,
+        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+    );
+    !matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::Opaque(_))
+    )
+}
+
+/// Whether ANY frame-owned name a signature answer references is
+/// answered by the owner scope — the fail-closed test at every
+/// [`crate::flow_slice_content::GatedType`] consumption point.
+fn signature_answer_is_frame_shadowed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    binder_env: &FlowBinderEnv,
+    gated: &crate::flow_slice_content::GatedType,
+) -> bool {
+    gated
+        .shadowed()
+        .iter()
+        .any(|name| owner_scope_answers_frame_name(dispatch, binder_env, name))
 }
 
 /// The per-frame evaluator state.
@@ -2034,25 +2118,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &self,
         name: &crate::flow_slice_content::FrameShadowedName,
     ) -> bool {
-        let probe = match name {
-            crate::flow_slice_content::FrameShadowedName::Value(name) => {
-                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                    path: vec![name.as_ref().to_string()],
-                    type_args: Vec::new(),
-                })
-            }
-            crate::flow_slice_content::FrameShadowedName::Type(name) => {
-                verter_type_expr::TypeExpr::Ref {
-                    name: Arc::clone(name),
-                    type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-                }
-            }
-        };
-        let node = self.lower_body_type(&probe);
-        !matches!(
-            self.dispatch.graph().node_data(node).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        )
+        owner_scope_answers_frame_name(self.dispatch, self.binder_env, name)
     }
 
     /// Evaluate one region, returning its contributor nodes and whether
@@ -2208,7 +2274,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     //   - an initializer with a UNION declared type ⇒
                     //     `getAssignmentReducedType`, below.
                     if let Some(declared) = declared.as_ref() {
-                        let declared_node = self.lower_body_type(declared);
+                        // THE root-identifier gate at the declarator
+                        // annotation. `const v: Info` in a frame that
+                        // declares its own `Info` names the LOCAL one;
+                        // the shared shallow pass resolved it in owner
+                        // scope. The initializer's own gate cannot stand
+                        // in — the non-union arm below binds the DECLARED
+                        // node and never evaluates the initializer.
+                        if declared
+                            .shadowed()
+                            .iter()
+                            .any(|name| self.owner_scope_answers_name(name))
+                        {
+                            return (
+                                Err(FlowReturnFailure::UnmodeledBinding),
+                                region.can_fall_through,
+                            );
+                        }
+                        let declared_node = self.lower_body_type(declared.ty());
                         let arms = self.dispatch.union_arms_of(declared_node);
                         match (init, arms) {
                             (None, _) | (Some(_), None) => {
@@ -2330,13 +2413,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let binder_env = self
             .dispatch
             .flow_binder_env(self.canonical, self.owner, type_parameters);
+        // The SAME signature gate the root evaluation takes. A nested
+        // signature sits inside the enclosing frame's body, so its
+        // annotations, its type-parameter constraints / defaults, and
+        // its parameter defaults were all gated against that frame; an
+        // owner-scope answer for one of those names is the WRONG binding.
+        if type_parameters
+            .iter()
+            .flat_map(|tp| tp.constraint.iter().chain(tp.default.iter()))
+            .chain(nested_params.iter().map(|param| &param.ty))
+            .any(|gated| signature_answer_is_frame_shadowed(self.dispatch, &binder_env, gated))
+        {
+            return Err(FlowReturnFailure::UnmodeledBinding);
+        }
         let mut params: Vec<SemanticNodeId> = Vec::with_capacity(nested_params.len());
         let mut signature_params: Vec<crate::semantic_query::FunctionParam> =
             Vec::with_capacity(nested_params.len());
         for param in nested_params.iter() {
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
             let node = self.dispatch.shallow_lower_type_expr_with_context(
-                &param.ty,
+                param.ty.ty(),
                 &binder_env.env,
                 &binder_env.scope,
                 &binder_env.name_resolution,

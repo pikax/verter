@@ -284,7 +284,7 @@ fn return_of_parameter_is_param_carrier() {
     assert!(!node.params[0].optional);
     assert!(!node.params[0].rest);
     assert_eq!(
-        node.params[0].ty,
+        *node.params[0].ty.ty(),
         TypeExpr::Primitive(PrimitiveName::Number),
         "the authored annotation lowers"
     );
@@ -309,7 +309,7 @@ fn optional_and_rest_params_lower() {
     assert!(node.params[0].optional);
     assert!(!node.params[0].rest);
     assert_eq!(
-        node.params[0].ty,
+        *node.params[0].ty.ty(),
         TypeExpr::union(vec![
             TypeExpr::Primitive(PrimitiveName::String),
             TypeExpr::Primitive(PrimitiveName::Undefined),
@@ -320,9 +320,9 @@ fn optional_and_rest_params_lower() {
     assert!(!node.params[1].optional);
     assert!(node.params[1].rest);
     assert!(
-        matches!(&node.params[1].ty, TypeExpr::Array { .. }),
+        matches!(node.params[1].ty.ty(), TypeExpr::Array { .. }),
         "the rest annotation lowers: {:?}",
-        node.params[1].ty
+        node.params[1].ty.ty()
     );
 }
 

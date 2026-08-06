@@ -468,6 +468,292 @@ export function qDeep(x: unknown) {
   }
   return x as QA.B.C;
 }
+
+// ── The NAME-MEANING matrix ───────────────────────────────────────────
+// A BARE `N` reference demands a Type meaning; the HEAD of a qualified
+// `N.B` demands a Namespace meaning (`SymbolFlags.Namespace =
+// ValueModule | NamespaceModule | Enum` — a class is NOT in it). The two
+// are different questions about the same local declaration, and every
+// row below is one oracle-anchored cell of the matrix.
+export type BareOuter = "bareOuter";
+export declare const defC: "outer";
+export declare const localVal: "outerLocalVal";
+
+// Qualified head, frame declares NO namespace ⇒ the module namespace is
+// the right answer, cleanly and warm.
+export function qClassHead(x: unknown) {
+  class QNS {}
+  return x as QNS.Inner;
+}
+
+export function qClassStaticHead(x: unknown) {
+  class QNS {
+    static Inner = 1;
+  }
+  return x as QNS.Inner;
+}
+
+export function qTypeAliasHead(x: unknown) {
+  type QNS = 1;
+  return x as QNS.Inner;
+}
+
+export function qInterfaceHead(x: unknown) {
+  interface QNS {
+    k: 1;
+  }
+  return x as QNS.Inner;
+}
+
+export function qFnHead(x: unknown) {
+  function QNS() {}
+  return x as QNS.Inner;
+}
+
+export function qConstHead(x: unknown) {
+  const QNS = 1;
+  return x as QNS.Inner;
+}
+
+export function qLetHead(x: unknown) {
+  let QNS = 1;
+  QNS = 2;
+  return x as QNS.Inner;
+}
+
+export function qVarHead(x: unknown) {
+  var QNS = 1;
+  return x as QNS.Inner;
+}
+
+export function qParamHead(QNS: number, x: unknown) {
+  return x as QNS.Inner;
+}
+
+// Qualified head, frame DOES declare a namespace ⇒ the module answer is
+// the wrong one.
+export function qConstEnumHead(x: unknown) {
+  const enum QNS {
+    Inner = "innerConstEnum",
+  }
+  return x as QNS.Inner;
+}
+
+export function qClassNsMergeHead(x: unknown) {
+  class QNS {}
+  namespace QNS {
+    export type Inner = "innerClassNs";
+  }
+  return x as QNS.Inner;
+}
+
+export function qFnNsMergeHead(x: unknown) {
+  function QNS() {}
+  namespace QNS {
+    export type Inner = "innerFnNs";
+  }
+  return x as QNS.Inner;
+}
+
+// Bare reference, frame declares NO type ⇒ the module alias is right.
+export function bNamespaceLocal(x: unknown) {
+  namespace BareOuter {
+    export const inner = 1;
+  }
+  return x as BareOuter;
+}
+
+// Bare reference, frame DOES declare a type ⇒ the module alias is wrong.
+export function bTypeAliasLocal(x: unknown) {
+  type BareOuter = "innerAlias";
+  return x as BareOuter;
+}
+
+export function bInterfaceLocal(x: unknown) {
+  interface BareOuter {
+    k: 1;
+  }
+  return x as BareOuter;
+}
+
+export function bClassNsMergeLocal(x: unknown) {
+  class BareOuter {}
+  namespace BareOuter {
+    export type Inner = "innerClassNs";
+  }
+  return x as BareOuter;
+}
+
+// The CAPTURE half of the same matrix: a nested function value reads the
+// enclosing frame's declarations through the capture scope, which must
+// carry the two meanings separately.
+export function capQualClass() {
+  class QNS {}
+  return (x: unknown) => x as QNS.Inner;
+}
+
+export function capNamespaceBare() {
+  namespace BareOuter {
+    export const inner = 1;
+  }
+  return (x: unknown) => x as BareOuter;
+}
+
+export function capNamespaceQual() {
+  namespace QNS {
+    export type Inner = "innerCapNs";
+  }
+  return (x: unknown) => x as QNS.Inner;
+}
+
+export function capTypeAlias() {
+  type BareOuter = "innerCapAlias";
+  return (x: unknown) => x as BareOuter;
+}
+
+// ── Declarator-annotation entrance ────────────────────────────────────
+// `SliceStatement::Binding.declared` is a BODY position, so this frame's
+// body-local type declarations ARE in scope in it. The initializer's own
+// gate cannot stand in: a non-union declared type binds the DECLARED
+// node and never evaluates the initializer.
+export type AnnotOuter = "annotOuter";
+
+export function annotDeclCtrl(x: unknown) {
+  const v: AnnotOuter = x as any;
+  return v;
+}
+
+export function annotDeclBare(x: unknown) {
+  class AnnotOuter {
+    inner = 1;
+  }
+  const v: AnnotOuter = x as any;
+  return v;
+}
+
+export function annotDeclQualified(x: unknown) {
+  enum QNS {
+    Inner = "innerAnnotEnum",
+  }
+  const v: QNS.Inner = x as any;
+  return v;
+}
+
+export function annotDeclTypeofValue(x: unknown) {
+  const localVal = 1;
+  const v: typeof localVal = x as any;
+  return v;
+}
+
+// ── ROOT signature: body-locals are NOT in scope ──────────────────────
+// `checker.ts::resolveName` discards a Type-meaning hit in a function's
+// own `locals` when `lastLocation !== location.body`. These four must
+// stay CLEAN and WARM — gating them trades a correct answer for a
+// spurious fail-closed.
+export type RootInfo = "rootInfo";
+
+export function rootParamAnnot(p: RootInfo) {
+  class RootInfo {
+    inner = 1;
+  }
+  return p;
+}
+
+export function rootTypeParamConstraint<T extends RootInfo>(p: T) {
+  class RootInfo {
+    inner = 1;
+  }
+  return 1;
+}
+
+export function rootParamDefault(p = defC) {
+  const defC = "inner" as const;
+  return p;
+}
+
+// ── NESTED signature: the ENCLOSING frame's body-locals ARE in scope ──
+export type NestOuter = "nestOuter";
+
+export function nestedParamAnnot() {
+  class NestOuter {
+    inner = 1;
+  }
+  return (p: NestOuter) => p;
+}
+
+export function nestedRestAnnot() {
+  class NestOuter {
+    inner = 1;
+  }
+  return (...p: NestOuter[]) => p;
+}
+
+export function nestedTypeParamConstraint() {
+  class NestOuter {
+    inner = 1;
+  }
+  return function <T extends NestOuter>(p: T) {
+    return p;
+  };
+}
+
+export function nestedTypeParamDefault() {
+  class NestOuter {
+    inner = 1;
+  }
+  return function <T = NestOuter>(p: T) {
+    return p;
+  };
+}
+
+export function nestedParamDefaultInit() {
+  const defC = "inner" as const;
+  return (p = defC) => p;
+}
+
+// ── A nested signature's OWN type parameters are BINDERS ──────────────
+// They shadow a captured same-named type-space declaration, so gating
+// them against the enclosing frame is a spurious fail-closed.
+export type T = "outerT";
+
+export function tpShadowClass() {
+  class T {
+    inner = 1;
+  }
+  return <T,>(x: unknown) => x as T;
+}
+
+export function tpShadowEnum() {
+  enum T {
+    A,
+  }
+  return <T,>(x: unknown) => x as T;
+}
+
+export function tpShadowClassFnExpr() {
+  class T {
+    inner = 1;
+  }
+  return function <T>(x: unknown) {
+    return x as T;
+  };
+}
+
+export function tpShadowParamAnnot() {
+  class T {
+    inner = 1;
+  }
+  return function <T>(p: T) {
+    return p;
+  };
+}
+
+export function genuineCapture() {
+  class GC {
+    inner = 1;
+  }
+  return (x: unknown) => x as GC;
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -1248,4 +1534,242 @@ fn flow_return_qualified_type_reference_is_owned_by_its_head_segment() {
     for name in ["qEnum", "qNs", "qDeep"] {
         assert_fails_closed(&host, name);
     }
+}
+
+/// A `TypeExpr::Ref` to `name` with no type arguments — how a shallow
+/// published answer names a module-scope type.
+fn type_ref(name: &str) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from(name),
+        type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+    }
+}
+
+/// One evaluated function's nested function value's return type.
+#[track_caller]
+fn nested_return(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
+    let outcome = r5_eval(host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
+    assert_eq!(outcome.degradation, None, "{name} must evaluate clean");
+    assert_eq!(
+        outcome.candidates, 1,
+        "{name} must warm-admit exactly one candidate"
+    );
+    function_return(&outcome.ty).clone()
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The NAME-MEANING matrix
+// ──────────────────────────────────────────────────────────────────────
+
+/// A type-space reference's MEANING selects which local declarations
+/// shadow it, and the meaning is a property of the OCCURRENCE.
+///
+/// TypeScript resolves a BARE `N` with a Type meaning and the HEAD of a
+/// qualified `N.B` with a Namespace meaning
+/// (`SymbolFlags.Namespace = ValueModule | NamespaceModule | Enum` — a
+/// class is NOT in it). The two questions have genuinely different
+/// answers for the same declaration, so one verdict per name cannot be
+/// right for both:
+///
+/// | local declaration      | bare shadows | qualified head shadows |
+/// |------------------------|--------------|------------------------|
+/// | `class` (± statics)    | yes          | NO                     |
+/// | `enum` / `const enum`  | yes          | yes                    |
+/// | `namespace`            | NO           | yes                    |
+/// | `type` / `interface`   | yes          | NO                     |
+/// | value-only kinds       | NO           | NO                     |
+/// | `class` + `namespace`  | yes          | yes                    |
+/// | `function` + `namespace` | NO         | yes                    |
+///
+/// Oracle (tsgo 7.0.2, checker not emitter — `const c: "outerNs" =
+/// qClassHead(0)` and friends): every row below assigns cleanly exactly
+/// when the module declaration is the answer, and reports TS2322 exactly
+/// when the local one is.
+///
+/// Mutation recipes, each flipping a DIFFERENT row:
+///   * a meaning-BLIND predicate (any type-space kind answers both
+///     questions) flips `qClassHead` / `qTypeAliasHead` /
+///     `qInterfaceHead` to `Error(Miss)` AND `bNamespaceLocal` to a warm
+///     wrong answer;
+///   * dropping the per-occurrence `qualified` bit from
+///     `verter_type_expr::referenced_names` flips the same rows
+///     identically (the head is then always asked as a bare Type);
+///   * dropping `SkeletonBindingKind::{TypeAlias, Interface}` flips
+///     `bTypeAliasLocal` / `bInterfaceLocal` to a warm wrong answer.
+#[test]
+fn flow_return_type_space_meaning_is_selected_per_reference_occurrence() {
+    let host = make_r5_host();
+    let outer_ns = || type_ref("QNS.Inner");
+    let bare_outer = || type_ref("BareOuter");
+
+    // QUALIFIED head, local declares no NAMESPACE ⇒ the module namespace
+    // is the right answer and must publish clean and warm.
+    for name in [
+        "qClassHead",
+        "qClassStaticHead",
+        "qTypeAliasHead",
+        "qInterfaceHead",
+        "qFnHead",
+        "qConstHead",
+        "qLetHead",
+        "qVarHead",
+        "qParamHead",
+    ] {
+        assert_clean_warm(&host, name, outer_ns());
+    }
+
+    // QUALIFIED head, local DOES declare a namespace ⇒ fail closed.
+    for name in [
+        "qEnum",
+        "qNs",
+        "qDeep",
+        "qConstEnumHead",
+        "qClassNsMergeHead",
+        "qFnNsMergeHead",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+
+    // BARE reference, local declares no TYPE ⇒ the module alias stands.
+    assert_clean_warm(&host, "bNamespaceLocal", bare_outer());
+
+    // BARE reference, local DOES declare a type ⇒ fail closed. `type` and
+    // `interface` are the two kinds the skeleton did not index at all.
+    for name in ["bTypeAliasLocal", "bInterfaceLocal", "bClassNsMergeLocal"] {
+        assert_fails_closed(&host, name);
+    }
+
+    // The CAPTURE half carries the two meanings as SEPARATE inventories:
+    // a captured `class` owns the bare question but not the qualified
+    // one, a captured `namespace` the reverse.
+    assert_eq!(nested_return(&host, "capQualClass"), outer_ns());
+    assert_eq!(nested_return(&host, "capNamespaceBare"), bare_outer());
+    assert_fails_closed(&host, "capNamespaceQual");
+    assert_fails_closed(&host, "capTypeAlias");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The producer ENTRANCE class
+// ──────────────────────────────────────────────────────────────────────
+
+/// A declarator's authored annotation is a BODY position: this frame's
+/// body-local type declarations ARE in scope in it.
+///
+/// The annotation is minted by the shared shallow pass, which resolves
+/// every name in FILE-OWNER scope, and the initializer's own gate cannot
+/// stand in for it: with a NON-UNION declared type the evaluator binds
+/// the DECLARED node and never evaluates the initializer at all.
+///
+/// Oracle (tsgo checker): `annotDeclCtrl` is `"annotOuter"` (the module
+/// alias); `annotDeclBare` is the local class instance type,
+/// `annotDeclQualified` the local enum member, `annotDeclTypeofValue`
+/// the local `1` — none of which any owner-scope resolution can supply.
+///
+/// Mutation recipe: leaving `SliceStatement::Binding.declared` ungated
+/// flips all three leak rows to a warm wrong answer (`deg=None`,
+/// `cands=1`) carrying the module symbol, while `annotDeclCtrl` is
+/// unaffected either way; gating it against the VALUE inventory instead
+/// flips `annotDeclCtrl` to `Error(Miss)`.
+#[test]
+fn flow_return_declarator_annotation_resolves_through_the_frame() {
+    let host = make_r5_host();
+    assert_clean_warm(&host, "annotDeclCtrl", type_ref("AnnotOuter"));
+    for name in [
+        "annotDeclBare",
+        "annotDeclQualified",
+        "annotDeclTypeofValue",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+}
+
+/// A function's OWN signature does NOT see its body-local declarations;
+/// a NESTED function value's signature DOES see the enclosing frame's.
+///
+/// `checker.ts::resolveName` discards a Type-meaning hit in a
+/// function-like `location`'s `locals` whenever `lastLocation !==
+/// location.body` (the value side mirrors it in
+/// `useOuterVariableScopeInParameter`). So the root rows below must stay
+/// CLEAN and WARM on the OUTER declaration, and the nested rows — whose
+/// signatures sit INSIDE the enclosing body — must fail closed on it.
+///
+/// Oracle (tsgo checker, on exactly these bodies):
+///
+/// ```text
+/// rootParamAnnot(p: RootInfo): "rootInfo"          // the MODULE alias
+/// rootTypeParamConstraint<T extends RootInfo>: number
+/// rootParamDefault(p?: "outer"): "outer"           // the MODULE const
+/// nestedParamAnnot(): (p: { inner: number }) => …   // the LOCAL class
+/// nestedRestAnnot(): (...p: { inner: number }[]) => …
+/// nestedTypeParamConstraint(): <T extends { inner: number }>(p: T) => T
+/// nestedTypeParamDefault(): <T = { inner: number }>(p: T) => T
+/// nestedParamDefaultInit(): (p?: "inner") => "inner" // the LOCAL const
+/// ```
+///
+/// Mutation recipes: gating the two ROOT call sites (passing
+/// `SignatureScope::Nested` in `build_flow_slice_content`) flips all
+/// three root controls to `Error(Miss)`; leaving ANY single nested
+/// entrance ungated flips exactly its row to a warm wrong answer
+/// (`deg=None`, `cands=1`) naming the module symbol.
+#[test]
+fn flow_return_signature_entrances_follow_the_root_versus_nested_scope_rule() {
+    let host = make_r5_host();
+
+    // ROOT signature — the OUTER declaration is the correct answer.
+    assert_clean_warm(&host, "rootParamAnnot", type_ref("RootInfo"));
+    assert_clean_warm(&host, "rootTypeParamConstraint", number());
+    assert_clean_warm(&host, "rootParamDefault", string_lit("outer"));
+
+    // NESTED signature — the enclosing frame's body-locals shadow it, and
+    // no owner-scope answer can be right.
+    for name in [
+        "nestedParamAnnot",
+        "nestedRestAnnot",
+        "nestedTypeParamConstraint",
+        "nestedTypeParamDefault",
+        "nestedParamDefaultInit",
+    ] {
+        assert_fails_closed(&host, name);
+    }
+}
+
+/// A nested function's OWN type parameters are BINDERS of its signature
+/// and body, not references into the enclosing frame.
+///
+/// The evaluator's nested binder environment interns exactly those names,
+/// so an answer naming one resolves to the binder — a captured same-named
+/// `class` / `enum` does not shadow it and reporting it frame-bound is a
+/// spurious fail-closed. A capture with NO same-named binder still fails
+/// closed.
+///
+/// Oracle (tsgo): `tpShadowClass` / `tpShadowEnum` /
+/// `tpShadowClassFnExpr` / `tpShadowParamAnnot` are all
+/// `<T>(…) => T`; `genuineCapture` is `(x: unknown) => { inner: number }`
+/// — the local class, which owner scope cannot supply.
+///
+/// Mutation recipe: dropping the binder subtraction in
+/// `Lowerer::name_is_frame_bound` flips all four `tpShadow*` rows to
+/// `Error(Miss)`; masking in NAMESPACE meaning as well as TYPE meaning
+/// leaves them green but is unsound (a type parameter denotes no
+/// namespace); dropping the binder frames from
+/// `verter_type_expr::referenced_names` leaves these rows green (their
+/// answers are bare `Ref`s, not function types) but flips
+/// `referenced_names_masks_function_and_constructor_binders_depth_safely`.
+#[test]
+fn flow_return_nested_signature_type_parameter_shadows_captured_type_space_name() {
+    let host = make_r5_host();
+    for name in [
+        "tpShadowClass",
+        "tpShadowEnum",
+        "tpShadowClassFnExpr",
+        "tpShadowParamAnnot",
+    ] {
+        let returned = nested_return(&host, name);
+        assert!(
+            matches!(&returned, TypeExpr::Ref { name: n, .. } if n.as_ref() == "T")
+                || matches!(&returned, TypeExpr::TypeParameter(tp) if tp.name == "T"),
+            "{name}: the nested binder `T` must survive, got {returned:?}"
+        );
+    }
+    assert_fails_closed(&host, "genuineCapture");
 }

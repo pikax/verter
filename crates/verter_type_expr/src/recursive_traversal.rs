@@ -812,52 +812,122 @@ pub struct ReferencedNames {
     /// The ROOT of every `typeof x.y.z` value path (`x`), in encounter
     /// order. These name VALUE bindings.
     pub value_roots: Vec<String>,
-    /// The head of every named type reference (`Ref` / `RecursiveRef` /
-    /// `TypeParameter`), in encounter order. These name TYPE bindings.
+    /// Every named type reference (`Ref` / `RecursiveRef` /
+    /// `TypeParameter`) the answer makes into the scope it was lowered
+    /// in, in encounter order — see [`ReferencedTypeName`].
     ///
-    /// A QUALIFIED reference contributes its LEFTMOST segment only:
-    /// `E.M` and `A.B.C` name `E` and `A`. The trailing segments select
-    /// members INSIDE whatever the head denotes, so they are not scope
-    /// lookups and never name a binding. This mirrors the value-space
-    /// rule, where `typeof x.y.z` contributes `x`.
-    pub type_names: Vec<String>,
+    /// One entry PER OCCURRENCE, never per distinct name: the same head
+    /// may be referenced both bare (`A`) and qualified (`A.B`), and the
+    /// two require different name MEANINGS of the same binding, so a
+    /// deduplicated set would answer one of the two consumers wrongly.
+    pub type_names: Vec<ReferencedTypeName>,
 }
 
-/// The one segment of a (possibly qualified) type reference that names a
-/// binding — see [`ReferencedNames::type_names`].
-fn type_reference_head(name: &str) -> &str {
-    match name.split_once('.') {
-        Some((head, _)) => head,
-        None => name,
+/// One named type-reference OCCURRENCE, reduced to the single segment
+/// that is a scope lookup plus the bit that selects which name MEANING
+/// that lookup demands.
+///
+/// A QUALIFIED reference contributes its LEFTMOST segment only: `E.M`
+/// and `A.B.C` name `E` and `A`. The trailing segments select members
+/// INSIDE whatever the head denotes, so they are not scope lookups and
+/// never name a binding. This mirrors the value-space rule, where
+/// `typeof x.y.z` contributes `x`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReferencedTypeName {
+    /// The one segment that resolves as a binding.
+    pub head: String,
+    /// Whether the occurrence was DOTTED (`A.B`), so the head is used as
+    /// a NAMESPACE rather than as a type. TypeScript's `SymbolFlags`
+    /// separate the two: a `class N` occupies Type but not Namespace, a
+    /// `namespace N` the reverse — so a consumer deciding whether a
+    /// local declaration shadows the reference must ask about the
+    /// meaning this bit selects.
+    pub qualified: bool,
+}
+
+/// One traversal step of the referenced-name walk.
+///
+/// The walk carries three step kinds rather than bare nodes so a
+/// generic function type's own type parameters can mask their subtree:
+/// the frame is pushed when the function node is reached and popped by
+/// its own [`NameStep::ExitBinders`] marker, which — LIFO — pops after
+/// every node of that subtree and before any sibling.
+enum NameStep<'a> {
+    /// One type node to visit.
+    Node(&'a TypeExpr),
+    /// One object member to visit. Members ride the work stack instead
+    /// of being expanded in a loop, because a method / call signature
+    /// opens a binder frame that must close before the NEXT member is
+    /// visited.
+    Member(&'a ObjectMember),
+    /// Close the innermost binder frame.
+    ExitBinders,
+}
+
+/// Whether `name` is masked by an ACTIVE binder frame — the answer's own
+/// type parameter rather than a reference into the lowering scope.
+fn binder_masks(binders: &[Vec<&str>], name: &str) -> bool {
+    binders.iter().any(|frame| frame.contains(&name))
+}
+
+/// Record one named type reference, split into its head plus the
+/// qualified bit, unless an active binder frame owns the head.
+fn push_type_reference(out: &mut ReferencedNames, binders: &[Vec<&str>], name: &str) {
+    let (head, qualified) = match name.split_once('.') {
+        Some((head, _)) => (head, true),
+        None => (name, false),
+    };
+    if binder_masks(binders, head) {
+        return;
     }
+    out.type_names.push(ReferencedTypeName {
+        head: head.to_string(),
+        qualified,
+    });
 }
 
 /// Collect every referenced name of `ty` (see [`ReferencedNames`]).
 ///
 /// Depth-safe: the traversal runs on an explicit heap work-stack, never
-/// the call stack, exactly like the iterative `Drop` / `Hash` above.
+/// the call stack, exactly like the iterative `Drop` / `Hash` above —
+/// binder enter/exit included.
 #[must_use]
 pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
     let mut out = ReferencedNames::default();
-    let mut stack: Vec<&TypeExpr> = vec![ty];
-    while let Some(node) = stack.pop() {
+    let mut stack: Vec<NameStep<'_>> = vec![NameStep::Node(ty)];
+    // The active binder frames, outermost first. A generic function
+    // type's `<T>` binds `T` throughout its own signature; a consumer
+    // asking "does the lowering scope bind any name this answer
+    // references" must never be handed that `T`.
+    let mut binders: Vec<Vec<&str>> = Vec::new();
+    while let Some(step) = stack.pop() {
+        let node = match step {
+            NameStep::ExitBinders => {
+                binders.pop();
+                continue;
+            }
+            NameStep::Member(member) => {
+                push_object_member_children(member, &mut stack, &mut binders);
+                continue;
+            }
+            NameStep::Node(node) => node,
+        };
         match node {
             TypeExpr::TypeOf(value_ref) => {
                 if let Some(root) = value_ref.path.first() {
                     out.value_roots.push(root.clone());
                 }
                 for arg in &value_ref.type_args {
-                    stack.push(arg);
+                    stack.push(NameStep::Node(arg));
                 }
             }
             TypeExpr::Ref {
                 name,
                 type_arguments,
             } => {
-                out.type_names
-                    .push(type_reference_head(name.as_ref()).to_string());
+                push_type_reference(&mut out, &binders, name.as_ref());
                 for arg in type_arguments.iter() {
-                    stack.push(arg);
+                    stack.push(NameStep::Node(arg));
                 }
             }
             TypeExpr::RecursiveRef {
@@ -865,18 +935,18 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 type_arguments,
                 conditional_context,
             } => {
-                out.type_names
-                    .push(type_reference_head(name.as_ref()).to_string());
+                push_type_reference(&mut out, &binders, name.as_ref());
                 for arg in type_arguments.iter() {
-                    stack.push(arg);
+                    stack.push(NameStep::Node(arg));
                 }
                 for frame in conditional_context.iter() {
-                    stack.push(&frame.check);
-                    stack.push(&frame.extends);
+                    stack.push(NameStep::Node(&frame.check));
+                    stack.push(NameStep::Node(&frame.extends));
                 }
             }
             TypeExpr::TypeParameter(tp) => {
-                out.type_names.push(tp.name.clone());
+                // A type-parameter carrier's name is never dotted.
+                push_type_reference(&mut out, &binders, tp.name.as_str());
                 push_type_param_children(tp, &mut stack);
             }
             TypeExpr::ImportType {
@@ -889,34 +959,34 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 // lowering scope, so neither the specifier nor the
                 // qualifier is a scope-resolved name.
                 for arg in type_arguments.iter() {
-                    stack.push(arg);
+                    stack.push(NameStep::Node(arg));
                 }
             }
             TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
                 for member in members.iter() {
-                    stack.push(member);
+                    stack.push(NameStep::Node(member));
                 }
             }
-            TypeExpr::Array { element, .. } => stack.push(element),
+            TypeExpr::Array { element, .. } => stack.push(NameStep::Node(element)),
             TypeExpr::Tuple { elements, .. } => {
                 for element in elements.iter() {
-                    stack.push(&element.ty);
+                    stack.push(NameStep::Node(&element.ty));
                 }
             }
             TypeExpr::Object(object) => {
                 for member in &object.properties {
-                    push_object_member_children(member, &mut stack);
+                    stack.push(NameStep::Member(member));
                 }
             }
             TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                push_function_children(func, &mut stack);
+                push_function_children(func, &mut stack, &mut binders);
             }
             TypeExpr::KeyOf(inner) | TypeExpr::Rest(inner) | TypeExpr::Parenthesized(inner) => {
-                stack.push(inner);
+                stack.push(NameStep::Node(inner));
             }
             TypeExpr::IndexedAccess { object, index } => {
-                stack.push(object);
-                stack.push(index);
+                stack.push(NameStep::Node(object));
+                stack.push(NameStep::Node(index));
             }
             TypeExpr::Conditional {
                 check,
@@ -924,10 +994,10 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 true_type,
                 false_type,
             } => {
-                stack.push(check);
-                stack.push(extends);
-                stack.push(true_type);
-                stack.push(false_type);
+                stack.push(NameStep::Node(check));
+                stack.push(NameStep::Node(extends));
+                stack.push(NameStep::Node(true_type));
+                stack.push(NameStep::Node(false_type));
             }
             TypeExpr::Mapped {
                 source,
@@ -937,15 +1007,15 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 optional: _,
                 readonly: _,
             } => {
-                stack.push(source);
-                stack.push(value);
+                stack.push(NameStep::Node(source));
+                stack.push(NameStep::Node(value));
                 if let Some(name_type) = name_type {
-                    stack.push(name_type);
+                    stack.push(NameStep::Node(name_type));
                 }
             }
             TypeExpr::TemplateLiteral { expressions, .. } => {
                 for expression in expressions.iter() {
-                    stack.push(expression);
+                    stack.push(NameStep::Node(expression));
                 }
             }
             // Leaves: no name, no recursive child.
@@ -959,51 +1029,75 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
     out
 }
 
-fn push_type_param_children<'a>(tp: &'a TypeParam, stack: &mut Vec<&'a TypeExpr>) {
+fn push_type_param_children<'a>(tp: &'a TypeParam, stack: &mut Vec<NameStep<'a>>) {
     if let Some(constraint) = tp.constraint.as_deref() {
-        stack.push(constraint);
+        stack.push(NameStep::Node(constraint));
     }
     if let Some(default) = tp.default.as_deref() {
-        stack.push(default);
+        stack.push(NameStep::Node(default));
     }
 }
 
-fn push_function_children<'a>(func: &'a FunctionExpr, stack: &mut Vec<&'a TypeExpr>) {
+/// Push one function-like signature's children, opening a binder frame
+/// for its OWN type parameters first so every node of the signature —
+/// parameters, return type, and the sibling type parameters' own
+/// constraints / defaults — sees them masked.
+fn push_function_children<'a>(
+    func: &'a FunctionExpr,
+    stack: &mut Vec<NameStep<'a>>,
+    binders: &mut Vec<Vec<&'a str>>,
+) {
+    if !func.type_parameters.is_empty() {
+        binders.push(
+            func.type_parameters
+                .iter()
+                .map(|tp| tp.name.as_str())
+                .collect(),
+        );
+        stack.push(NameStep::ExitBinders);
+    }
     for param in &func.parameters {
-        stack.push(&param.ty);
+        stack.push(NameStep::Node(&param.ty));
     }
     if let Some(return_type) = func.return_type.as_deref() {
-        stack.push(return_type);
+        stack.push(NameStep::Node(return_type));
     }
     for tp in &func.type_parameters {
         push_type_param_children(tp, stack);
     }
 }
 
-fn push_object_member_children<'a>(member: &'a ObjectMember, stack: &mut Vec<&'a TypeExpr>) {
+fn push_object_member_children<'a>(
+    member: &'a ObjectMember,
+    stack: &mut Vec<NameStep<'a>>,
+    binders: &mut Vec<Vec<&'a str>>,
+) {
     match member {
         ObjectMember::Property(property) => {
             push_property_key_children(&property.key, stack);
-            stack.push(&property.ty);
+            stack.push(NameStep::Node(&property.ty));
         }
         ObjectMember::IndexSignature(signature) => {
-            stack.push(&signature.key_type);
-            stack.push(&signature.value_type);
+            stack.push(NameStep::Node(&signature.key_type));
+            stack.push(NameStep::Node(&signature.value_type));
         }
         ObjectMember::CallSignature(func) | ObjectMember::ConstructSignature(func) => {
-            push_function_children(func, stack);
+            push_function_children(func, stack, binders);
         }
         ObjectMember::Method(method) => {
+            // The key is pushed FIRST so it pops AFTER the signature's
+            // `ExitBinders`: a method's own type parameters are not in
+            // scope in its computed key.
             push_property_key_children(&method.key, stack);
-            push_function_children(&method.function, stack);
+            push_function_children(&method.function, stack, binders);
         }
-        ObjectMember::Spread(spread) => stack.push(&spread.ty),
+        ObjectMember::Spread(spread) => stack.push(NameStep::Node(&spread.ty)),
     }
 }
 
-fn push_property_key_children<'a>(key: &'a TypeAuthoredPropertyKey, stack: &mut Vec<&'a TypeExpr>) {
+fn push_property_key_children<'a>(key: &'a TypeAuthoredPropertyKey, stack: &mut Vec<NameStep<'a>>) {
     match key {
-        AuthoredPropertyKey::Computed(child) => stack.push(child),
+        AuthoredPropertyKey::Computed(child) => stack.push(NameStep::Node(child)),
         AuthoredPropertyKey::String(_)
         | AuthoredPropertyKey::Number(_)
         | AuthoredPropertyKey::UniqueSymbol(_) => {}

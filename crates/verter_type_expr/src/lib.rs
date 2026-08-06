@@ -33,7 +33,7 @@ mod span_transform;
 /// `Hash` for [`TypeExpr`] (orphan-rule-permitted in this crate-local
 /// implementation module), plus the exhaustive referenced-name walk.
 mod recursive_traversal;
-pub use recursive_traversal::{referenced_names, ReferencedNames};
+pub use recursive_traversal::{referenced_names, ReferencedNames, ReferencedTypeName};
 
 /// Stack-safe TypeScript display projection for complete [`TypeExpr`] values.
 mod display;
