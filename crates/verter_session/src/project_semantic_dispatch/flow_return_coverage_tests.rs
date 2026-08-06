@@ -1553,8 +1553,9 @@ fn dynamic_import_expression_return_is_not_any() {
 ///  right: Primitive(Any)
 /// ```
 ///
-/// Owning layer: `flow_slice_content` — `MetaProperty` never reaches an
-/// arm at all, so the shallow pass answers `any`, admitted warm.
+/// Owning layer: `flow_slice_content::lower_leaf` — `MetaProperty` is in
+/// the leaf fall-through set with no `new.target` rule, so the shallow
+/// pass answers `any`, admitted warm.
 #[test]
 #[ignore = "MetaProperty (`new.target`) has no arm: it evaluates to `any` and is admitted warm"]
 fn meta_property_new_target_return_is_not_any() {
@@ -2286,10 +2287,20 @@ fn symbol_keyed_member_call_resolves_to_the_member_return() {
 /// downstream sees a partial. `CLAUDE.md`'s Stub Prevention section names
 /// exactly this shape ("an always-`Opaque(Miss)` resolve is a nop").
 ///
-/// Owning layer: the flow evaluator's leaf / member arm — a
-/// `StaticMemberExpression` whose root the frame BINDS is a
-/// `FrameShadowed` leaf, and the evaluator has no projection over the
-/// binding's own annotation.
+/// Owning layer: the `SliceExpr::FrameShadowed` arm of
+/// `project_semantic_dispatch::flow_return`'s evaluator. `x.q` lowers
+/// through `flow_slice_content::lower_leaf` to a leaf answer naming
+/// `typeof x`, and because the frame BINDS `x` the leaf is wrapped as
+/// `FrameShadowed { shadowed: [Value("x")] }`. The arm's guard
+/// (`owner_scope_answers_name`) is the fail-closed test for the case
+/// where the OWNER scope has a same-named twin; here it does not, so the
+/// guard passes and the inner leaf evaluates unchanged — resolving
+/// `typeof x` in owner scope, where nothing answers, to `Opaque(Miss)`.
+/// The arm's own comment calls that "its own typed miss carrier is the
+/// honest answer"; the defect is not the value but the ADMISSION — a
+/// complete, `degradation: None`, warm-admitted result, so
+/// `execute_function_return_source` never folds the cache-read rails and
+/// an enclosing composition warms with an opaque interior.
 #[test]
 #[ignore = "a member read off an annotated parameter evaluates to Opaque(Miss) and is admitted warm: the flow evaluator has no member projection over a frame-bound leaf root"]
 fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
