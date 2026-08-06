@@ -24,6 +24,9 @@ use super::dispatch_txn::{
     CompletedFlowReturnMember, FlowReturnPendingOutcome, FlowReturnPendingState,
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
+use super::flow_return_callee::{
+    CallValue, CalleeClause, CalleeClauseParam, HeldCallee, SignatureCall,
+};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef};
@@ -77,7 +80,7 @@ struct FlowEvaluationOutcome {
     /// The frame's own file roots.
     self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The coinductive hold targets the evaluation met.
-    holds: Vec<FlowReturnKey>,
+    holds: Vec<HeldCallee>,
     /// The materialised point set the compute ACTUALLY produced (§3.4).
     materialized: crate::semantic_query::demand::MaterializedSet,
     /// Whether every one of the frame's OWN return contributors was a
@@ -970,10 +973,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     arms.push(result.return_type);
                 }
                 let mut ready = true;
-                for target in &entries[i].holds {
-                    match index.get(target).and_then(|j| current[*j].as_ref()) {
+                for hold in &entries[i].holds {
+                    match index.get(hold.key()).and_then(|j| current[*j].as_ref()) {
                         Some(result) => {
-                            arms.push(result.return_type);
+                            // The SAME transfer the call arm performs, so
+                            // it applies the SAME rule: a hold target is a
+                            // CALLEE, and its admitted return is expressed
+                            // in the CALLEE's binders. Joining
+                            // `result.return_type` raw here re-published
+                            // exactly the binder the call arm had already
+                            // instantiated away — the fixed point ran the
+                            // transfer a second time, around the gate. The
+                            // hold's own accessor is now the only way to
+                            // reach a node from a target's result.
+                            arms.push(hold.discharged(self, result.return_type).into_node());
                             if degradation.is_none() {
                                 degradation = result.degradation;
                             }
@@ -1604,7 +1617,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         contributors: Vec<FlowContribution>,
         can_fall_through: bool,
         bare_return_seen: bool,
-        holds: &[FlowReturnKey],
+        holds: &[HeldCallee],
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
         let graph = self.graph();
@@ -1894,7 +1907,7 @@ struct FlowEvaluator<'d, 'b> {
     /// The coinductive hold targets this evaluation met (in-flight direct
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle outcome on its targets' admitted returns.
-    holds: Vec<FlowReturnKey>,
+    holds: Vec<HeldCallee>,
     /// The first typed degradation this evaluation observed (a
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
@@ -2587,17 +2600,78 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }))
     }
 
+    /// The CALLEE's own type-parameter clause at a direct-call site.
+    ///
+    /// Names come from the shallow per-file FUNCTION PROGRAM INDEX — the
+    /// one authority that answers for every position it serves, the
+    /// value registry included, a namespace-scoped function included.
+    ///
+    /// A DEFAULT is a body lowering, not a shallow fact, so it is
+    /// demanded separately and ONLY for the parameters the index already
+    /// flagged as authoring one: an ordinary generic callee never pays
+    /// for it. A clause whose defaults cannot be recovered (a locator
+    /// miss) degrades to bare names — `unknown` for every parameter,
+    /// which is the conservative direction: it never publishes the
+    /// callee's binder, it only loses the exactness a default would have
+    /// added.
+    fn direct_callee_clause(
+        &mut self,
+        target: &verter_semantic::analysis::function_program::FunctionProgramKey,
+    ) -> CalleeClause {
+        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
+            return CalleeClause::empty();
+        };
+        let decl_bodies = serve.indexed.shallow_state.decl_bodies();
+        let Some(entry) = decl_bodies.function_program_index().get(target).cloned() else {
+            return CalleeClause::empty();
+        };
+        if entry.type_parameters.is_empty() {
+            return CalleeClause::empty();
+        }
+        if !entry.type_parameters.iter().any(|param| param.has_default) {
+            return CalleeClause::new(
+                entry
+                    .type_parameters
+                    .iter()
+                    .map(|param| CalleeClauseParam::bare(Arc::clone(&param.name))),
+            );
+        }
+        // At least one parameter authored a default: demand the lowered
+        // clause and lower each default in the CALLEE's owner scope (a
+        // direct-call target is same-file by construction, and a
+        // root-signature clause carries no frame gate to satisfy).
+        let lowered = decl_bodies.function_type_param_clause(&entry);
+        CalleeClause::new(entry.type_parameters.iter().map(|param| {
+            let default = param
+                .has_default
+                .then(|| {
+                    lowered
+                        .as_ref()?
+                        .iter()
+                        .find(|slice| slice.name == param.name)?
+                        .default
+                        .as_ref()
+                        .and_then(|gated| {
+                            self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                                self.canonical,
+                                target.declaration.owner,
+                                gated.ty(),
+                                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                            )
+                        })
+                })
+                .flatten();
+            CalleeClauseParam::with_default(Arc::clone(&param.name), default)
+        }))
+    }
+
     /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
     /// that is `ReturnOnly` by contract.
-    fn degraded_unrepresentable_callee(
-        &mut self,
-    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
+    fn degraded_unrepresentable_callee(&mut self) -> Result<Option<CallValue>, FlowReturnFailure> {
         self.record_degradation(
             crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
         );
-        Ok(Some(self.dispatch.graph().intern_node(
-            SemanticNodeData::Primitive(PrimitiveKind::Any),
-        )))
+        Ok(Some(CallValue::modeled_any(self.dispatch)))
     }
 
     /// The call-bucket return of an already-lowered CALLEE TYPE — the one
@@ -2606,8 +2680,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn call_return_of_callee_node(
         &mut self,
         callee_node: SemanticNodeId,
-    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
-        let graph = self.dispatch.graph();
+    ) -> Result<Option<CallValue>, FlowReturnFailure> {
         let resolved = self.dispatch.resolve_signature_source_carrier(
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -2618,26 +2691,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         else {
             return self.degraded_unrepresentable_callee();
         };
-        let data = graph.node_data(function_node);
-        let Some(SemanticNodeData::Signature { return_type, .. }) = data.as_deref() else {
-            return self.degraded_unrepresentable_callee();
-        };
-        let return_type = *return_type;
-        // A semantic-miss carrier at the signature's return position is a
-        // DEGRADED nested demand (an in-flight / failed callee) —
-        // propagate the typed failure, never count the miss as a
-        // contributor.
-        if matches!(
-            graph.node_data(return_type).as_deref(),
-            Some(SemanticNodeData::Opaque(QueryError::Miss))
-        ) {
-            return Err(FlowReturnFailure::Unresolved);
+        match CallValue::of_signature_node(self.dispatch, function_node) {
+            SignatureCall::Value(value) => Ok(Some(value)),
+            SignatureCall::NotCallable => self.degraded_unrepresentable_callee(),
+            SignatureCall::ReturnMiss => Err(FlowReturnFailure::Unresolved),
         }
-        // Free signature generics instantiate at `unknown` (the sb15 rule).
-        Ok(Some(
-            self.dispatch
-                .instantiate_free_signature_params_at_unknown(function_node, return_type),
-        ))
     }
 
     /// Evaluate one flow expression to a graph node. `Ok(None)` is a
@@ -2776,20 +2834,68 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 )?;
                 Ok(Some(signature))
             }
-            crate::flow_slice_content::SliceExpr::NestedCall(function) => {
+            // EVERY call form, through the ONE call sink. `CallValue`'s
+            // constructors all decide what happens to the callee's own
+            // type-parameter clause, so no arm below can hand a callee's
+            // return back to this frame untouched by accident — only by
+            // asking for `own_frame_binder` by name.
+            crate::flow_slice_content::SliceExpr::Call(call) => {
+                Ok(self.eval_call(call)?.map(CallValue::into_node))
+            }
+            crate::flow_slice_content::SliceExpr::Any => Ok(Some(
+                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            )),
+            // A name the frame's lexical authority resolved to a
+            // function-local binding the content half does not model
+            // (a destructuring element, a local `class` / `enum` /
+            // `namespace` / `import =`, a `catch` parameter, a nested
+            // function declaration read as a value). The name is
+            // RESOLVED — never free — so there is no honest value to
+            // publish: fail closed with the typed no-value failure
+            // rather than bind an unrelated same-named declaration.
+            crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
+                Err(FlowReturnFailure::UnmodeledBinding)
+            }
+            // Content the demand slice did not select: never lowered,
+            // never evaluable. Reaching one is a planner/content mismatch
+            // — undecided, fail closed; never a fabricated `any`.
+            crate::flow_slice_content::SliceExpr::Elided => Err(FlowReturnFailure::Unresolved),
+        }
+    }
+
+    /// Evaluate one CALL to the value it contributes to this frame.
+    ///
+    /// The ONE place a callee's return becomes a caller's value. Every
+    /// arm returns a [`CallValue`], whose constructors each decide what
+    /// happens to the CALLEE's own type-parameter clause — the rule
+    /// cannot be silently skipped at a new arm, only chosen. `Ok(None)`
+    /// is a coinductive HOLD, exactly as in [`Self::eval_expr`].
+    fn eval_call(
+        &mut self,
+        call: &crate::flow_slice_content::SliceCall,
+    ) -> Result<Option<CallValue>, FlowReturnFailure> {
+        let graph = self.dispatch.graph();
+        match call {
+            crate::flow_slice_content::SliceCall::Nested(function) => {
                 // An IIFE: the call's value is the nested function's
-                // evaluated return.
+                // evaluated return. The nested function's signature node
+                // carries its OWN clause — `(<T>(x: T): T => x)("a")`
+                // declares `T` right there — so the same clause rule the
+                // resolved-callee route applies has to apply here, and it
+                // does, because both routes take their value from the ONE
+                // signature reader.
                 let signature = match self.eval_expr(function)? {
                     Some(signature) => signature,
                     None => return Ok(None),
                 };
-                let data = graph.node_data(signature);
-                match data.as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => Ok(Some(*return_type)),
-                    _ => Err(FlowReturnFailure::Unresolved),
+                match CallValue::of_signature_node(self.dispatch, signature) {
+                    SignatureCall::Value(value) => Ok(Some(value)),
+                    SignatureCall::NotCallable | SignatureCall::ReturnMiss => {
+                        Err(FlowReturnFailure::Unresolved)
+                    }
                 }
             }
-            crate::flow_slice_content::SliceExpr::DirectCall(target) => {
+            crate::flow_slice_content::SliceCall::Direct(target) => {
                 // An exact same-file direct call — a Flow obligation edge
                 // through the ONE key construction when the callee's return
                 // is body-derived, or its DECLARED carrier when the callee
@@ -2851,6 +2957,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     _ => 0,
                 };
+                // An OVERLOADED callee is not answerable here. The
+                // function-program index carries ONE entry per overload
+                // group, at the trailing IMPLEMENTATION, so this rail
+                // reaches exactly the signature the language HIDES: a
+                // multi-signature group surfaces its bodiless overloads
+                // and never its implementation, so `ovX("a")` — whose
+                // visible overloads return `OA` and `string` — would
+                // publish the implementation's `any`, cleanly and warm,
+                // with no visible signature that ever returns it.
+                //
+                // Picking the right overload needs argument-driven
+                // overload resolution, which is `U6.CALL_RESOLVE`'s. Until
+                // then this is the `UnrepresentableCallee` degradation it
+                // already exists for: a usable modeled `any` that is
+                // ReturnOnly by contract — never a warm-admitted wrong
+                // answer. A LONE signature is untouched, bodied or not:
+                // the rule is overload VISIBILITY, not "any function with
+                // a body".
+                if prepared.as_ref().is_some_and(|prepared| {
+                    prepared.signatures.len() > 1
+                        && prepared
+                            .signatures
+                            .get(ordinal)
+                            .is_some_and(|signature| signature.has_implementation_body)
+                }) {
+                    return self.degraded_unrepresentable_callee();
+                }
                 let source = prepared.as_ref().and_then(|prepared| {
                     prepared
                         .signatures
@@ -2868,14 +3001,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // `Holder<number>` into a value that has nothing to do
                 // with it — cleanly and warm.
                 //
-                // Instantiating those parameters at `unknown` is the same
-                // sb15 rule the sibling callee-TYPE path applies
-                // (`call_return_of_callee_node`), so BOTH routes to one
-                // callee answer alike. Call-site instantiation proper —
+                // Instantiating those parameters is the same rule the
+                // sibling callee-TYPE / signature-node routes apply
+                // (`CallValue::of_signature_node`), so EVERY route to one
+                // callee answers alike. Call-site instantiation proper —
                 // explicit type arguments AND argument inference — is
-                // U6.CALL_RESOLVE's; this is the interim HONEST answer,
-                // exact for the one shape TS itself cannot infer
-                // (`bare<T>(): T` called with no arguments IS `unknown`).
+                // U6.CALL_RESOLVE's; a DECLARED DEFAULT is already exact
+                // (`f<T = number>()` IS `number`), and `unknown` is the
+                // interim answer everywhere else — exact for the one shape
+                // TS itself cannot infer (`bare<T>(): T` called with no
+                // arguments IS `unknown`).
                 //
                 // The clause is read from the per-file FUNCTION PROGRAM
                 // INDEX, keyed by the target's exact program identity
@@ -2886,20 +3021,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // function has no prepared declaration, and reading the
                 // clause from there would silently leave exactly those
                 // callees leaking their binder.
-                let callee_type_params: Arc<[Arc<str>]> = self
-                    .dispatch
-                    .ctx
-                    .ensure_indexed_ready_serve(self.canonical)
-                    .and_then(|serve| {
-                        serve
-                            .indexed
-                            .shallow_state
-                            .decl_bodies()
-                            .function_program_index()
-                            .get(target)
-                            .map(|entry| Arc::clone(&entry.type_parameter_names))
-                    })
-                    .unwrap_or_else(|| Arc::from(Vec::new().into_boxed_slice()));
+                let callee_clause = self.direct_callee_clause(target);
                 // A target the value registry does not carry as a
                 // prepared declaration (a namespace-scoped function) is
                 // only reachable through the body-derived demand.
@@ -2950,23 +3072,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     .pending_len()
                                     > pending_before
                                 {
-                                    self.holds.push(key);
+                                    // The hold carries the SAME clause this
+                                    // arm just applied: the fixed point
+                                    // repeats this transfer, so it owes the
+                                    // same obligation.
+                                    self.holds
+                                        .push(HeldCallee::foreign(key, callee_clause.clone()));
                                 }
-                                Ok(Some(self.dispatch.instantiate_named_params_at_unknown(
-                                    callee_type_params.iter().map(Arc::as_ref),
+                                Ok(Some(CallValue::of_served_return(
+                                    self.dispatch,
+                                    &callee_clause,
                                     result.return_type,
-                                    /* include_unbound_heads */ true,
                                 )))
                             }
                             FlowReturnStep::Hold(key) => {
-                                self.holds.push(*key);
+                                self.holds
+                                    .push(HeldCallee::foreign(*key.clone(), callee_clause));
                                 Ok(None)
                             }
                             FlowReturnStep::Degraded(FlowReturnFailure::EmptyCycle) => {
                                 // An empty-cycle callee IS a hold — the SCC
                                 // close discharges it (and its callers) on
                                 // the component's admitted returns.
-                                self.holds.push(key);
+                                self.holds.push(HeldCallee::foreign(key, callee_clause));
                                 Ok(None)
                             }
                             FlowReturnStep::Degraded(failure) => Err(failure),
@@ -2976,13 +3104,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         .dispatch
                         .execute_function_return_source(source, self.canonical)
                     {
-                        super::flow_return::FunctionReturnNode::Declared(hot) => {
-                            Ok(Some(self.dispatch.instantiate_named_params_at_unknown(
-                                callee_type_params.iter().map(Arc::as_ref),
-                                hot.node(),
-                                /* include_unbound_heads */ true,
-                            )))
-                        }
+                        super::flow_return::FunctionReturnNode::Declared(hot) => Ok(Some(
+                            CallValue::of_served_return(self.dispatch, &callee_clause, hot.node()),
+                        )),
                         super::flow_return::FunctionReturnNode::DeclaredMiss => {
                             Err(FlowReturnFailure::Unresolved)
                         }
@@ -2996,7 +3120,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     },
                 }
             }
-            crate::flow_slice_content::SliceExpr::CallOnBinding {
+            crate::flow_slice_content::SliceCall::OnBinding {
                 param,
                 name,
                 captured,
@@ -3021,41 +3145,52 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if *captured {
                         return Err(FlowReturnFailure::UnmodeledBinding);
                     }
-                    return Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    ));
+                    return Ok(Some(CallValue::modeled_any(self.dispatch)));
                 };
-                let data = graph.node_data(node);
-                match data.as_deref() {
-                    Some(SemanticNodeData::Signature { return_type, .. }) => Ok(Some(*return_type)),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => Ok(Some(
-                        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-                    )),
-                    _ => {
+                // A function-typed BINDING carries the callee's clause on
+                // its own signature node — `const id = <T>(x: T): T => x`
+                // binds `T` there — so this route takes its value from the
+                // same signature reader the resolved-callee route does. A
+                // binding is otherwise indistinguishable from any other
+                // callee: nothing about "the callee happens to be a local"
+                // makes its binders this frame's to publish.
+                match CallValue::of_signature_node(self.dispatch, node) {
+                    SignatureCall::Value(value) => Ok(Some(value)),
+                    SignatureCall::ReturnMiss => Err(FlowReturnFailure::Unresolved),
+                    SignatureCall::NotCallable
+                        if matches!(
+                            graph.node_data(node).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                        ) =>
+                    {
+                        Ok(Some(CallValue::modeled_any(self.dispatch)))
+                    }
+                    SignatureCall::NotCallable => {
                         self.record_degradation(
                             crate::semantic_query::FlowReturnDegradation::NonCallableBinding,
                         );
-                        Ok(Some(graph.intern_node(SemanticNodeData::Primitive(
-                            PrimitiveKind::Any,
-                        ))))
+                        Ok(Some(CallValue::modeled_any(self.dispatch)))
                     }
                 }
             }
-            crate::flow_slice_content::SliceExpr::LocalFunctionShadow => {
+            crate::flow_slice_content::SliceCall::LocalFunctionShadow => {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
                 // recovery of the nested declaration's own return is not
                 // implemented — fail closed, never bind the outer callee.
                 Err(FlowReturnFailure::Unresolved)
             }
-            crate::flow_slice_content::SliceExpr::DirectSelfCall => {
+            crate::flow_slice_content::SliceCall::DirectSelf => {
                 // Only the frame that OWNS a flow slot can hold on it.
                 let Some(self_slot) = self.self_slot else {
                     return Err(FlowReturnFailure::Unresolved);
                 };
                 match self.dispatch.execute_flow_return(self_slot.clone()) {
                     FlowReturnStep::Hold(_) => {
-                        self.holds.push(self_slot.clone());
+                        // The one hold whose target's binders are THIS
+                        // frame's own: a self-call's callee IS the caller,
+                        // so the fixed point must leave them alone.
+                        self.holds.push(HeldCallee::own_frame(self_slot.clone()));
                         Ok(None)
                     }
                     FlowReturnStep::Complete(_) => {
@@ -3064,7 +3199,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     FlowReturnStep::Degraded(failure) => Err(failure),
                 }
             }
-            crate::flow_slice_content::SliceExpr::SymbolicCall(ty) => {
+            crate::flow_slice_content::SliceCall::Symbolic(ty) => {
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -3091,24 +3226,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 self.call_return_of_callee_node(callee_node)
             }
-            crate::flow_slice_content::SliceExpr::Any => Ok(Some(
-                graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-            )),
-            // A name the frame's lexical authority resolved to a
-            // function-local binding the content half does not model
-            // (a destructuring element, a local `class` / `enum` /
-            // `namespace` / `import =`, a `catch` parameter, a nested
-            // function declaration read as a value). The name is
-            // RESOLVED — never free — so there is no honest value to
-            // publish: fail closed with the typed no-value failure
-            // rather than bind an unrelated same-named declaration.
-            crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
-                Err(FlowReturnFailure::UnmodeledBinding)
-            }
-            // Content the demand slice did not select: never lowered,
-            // never evaluable. Reaching one is a planner/content mismatch
-            // — undecided, fail closed; never a fabricated `any`.
-            crate::flow_slice_content::SliceExpr::Elided => Err(FlowReturnFailure::Unresolved),
         }
     }
 }

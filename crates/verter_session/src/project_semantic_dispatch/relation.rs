@@ -317,7 +317,7 @@ pub(super) struct DrainedFlowReturnMember {
     /// The coinductive hold targets the member's evaluation met — the SCC
     /// close discharges an empty-cycle member on its targets' admitted
     /// returns.
-    pub(super) holds: Vec<crate::semantic_query::FlowReturnKey>,
+    pub(super) holds: Vec<super::flow_return_callee::HeldCallee>,
     /// The member's own file roots (unioned into the published component's
     /// self-roots).
     pub(super) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,

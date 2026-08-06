@@ -515,7 +515,7 @@ pub(crate) struct FlowReturnPendingState {
     /// The coinductive hold targets the member's evaluation met (in-flight
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle member on its targets' admitted returns.
-    pub(crate) holds: Vec<FlowReturnKey>,
+    pub(super) holds: Vec<super::flow_return_callee::HeldCallee>,
     /// The member's own file roots — the published component's self-roots
     /// are the UNION of every drained member's roots, so a cross-file edit
     /// invalidates the whole component.
@@ -1377,8 +1377,9 @@ pub(super) struct FlowDischargeEntry {
     pub(super) key: crate::semantic_query::FlowReturnKey,
     /// The member's outcome (updated in place by the discharge).
     pub(super) outcome: FlowReturnPendingOutcome,
-    /// The member's coinductive hold targets.
-    pub(super) holds: Vec<crate::semantic_query::FlowReturnKey>,
+    /// The member's coinductive hold targets, each carrying the
+    /// instantiation obligation the fixed point owes its callee.
+    pub(super) holds: Vec<super::flow_return_callee::HeldCallee>,
     /// Whether the member's own contributors were all FRESH literals —
     /// the post-convergence literal-widening input.
     pub(super) fresh_seed: bool,

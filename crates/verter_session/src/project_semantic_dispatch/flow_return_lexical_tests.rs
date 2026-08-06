@@ -1118,6 +1118,136 @@ namespace GcNs {
     return nsPlain();
   }
 }
+
+// ── Every OTHER route from a callee's return to a caller ──────────────
+// A generic callee reached through a LOCAL function-typed binding, an
+// IIFE, and a generic function-typed PARAMETER. None of these is a
+// direct-call obligation edge, and every one of them reads a signature
+// node that carries the callee's own clause.
+export function rvLocalLambdaCall() {
+  const idL = <RL>(x: RL): RL => x;
+  return idL("a");
+}
+
+export function rvIife() {
+  return (<RI>(x: RI): RI => x)("a");
+}
+
+export function rvParamCall(fn: <RP>(x: RP) => RP) {
+  return fn("a");
+}
+
+// The MEMBER-ALIASING bait: the class clause is spelled `RL`, exactly
+// the local lambda's parameter name, so a leaked callee binder is
+// substitutable by `new RvHolder<number>()`.
+export class RvHolder<RL> {
+  viaLocal() {
+    const idL = <RL>(x: RL): RL => x;
+    return idL("a");
+  }
+  ownRL(): RL {
+    return null as unknown as RL;
+  }
+}
+
+// ── A GENERIC mutual-recursion component ──────────────────────────────
+// Both members are provisional when the component closes, so each one's
+// contribution to the other arrives through the SCC fixed point rather
+// than through the direct-call arm's own instantiation.
+export function cgOne<CO>(x: CO, f: boolean) {
+  if (f) return x;
+  return cgTwo(x, f);
+}
+
+export function cgTwo<CT>(y: CT, f: boolean) {
+  if (f) return y;
+  return cgOne(y, f);
+}
+
+// The bait twin for the component: `CT` is also a class clause.
+export class CgHolder<CT> {
+  ownCT(): CT {
+    return null as unknown as CT;
+  }
+}
+
+// ── A clause name that SHADOWS a file-scope declaration ───────────────
+// `ShItem` / `SH` name both a file-scope interface and a callee clause
+// parameter. The callee's DECLARED return lowers in file OWNER scope,
+// where the name RESOLVES to the interface — so the leak is a resolved
+// `DeclRef`, not an unbound head.
+export interface ShItem {
+  id: string;
+}
+
+export function shFirst<ShItem>(xs: ShItem[]): ShItem {
+  return xs[0];
+}
+
+export function shUseFirst(xs: number[]) {
+  return shFirst(xs);
+}
+
+// CONTROL — the SAME interface name, reached through a NON-generic
+// callee. Nothing declares `ShItem` as a clause parameter here, so the
+// published `DeclRef` is the interface and must survive untouched.
+export function shPlainItem(): ShItem {
+  return { id: "a" };
+}
+
+export function shUsePlainItem() {
+  return shPlainItem();
+}
+
+export interface SH {
+  sh: string;
+}
+
+export function shDecl<SH>(x: SH): SH {
+  return x;
+}
+
+export function callsShDecl() {
+  return shDecl("a");
+}
+
+// ── An OVERLOAD group ─────────────────────────────────────────────────
+// The visible overloads return `OA` / `string`; only the HIDDEN trailing
+// implementation returns `any`.
+export function ovX<OA>(x: OA): OA;
+export function ovX(x: string, y: number): string;
+export function ovX(x: any, y?: number): any {
+  return x;
+}
+
+export function ovXCall() {
+  return ovX("a");
+}
+
+export function ovSingle<OS>(x: OS): OS {
+  return x;
+}
+
+export function ovSingleCall() {
+  return ovSingle("a");
+}
+
+// ── A clause parameter carrying a DEFAULT ─────────────────────────────
+export function rvDefaulted<GDF = number>(): GDF {
+  return null as unknown as GDF;
+}
+
+export function rvDefaultedCall() {
+  return rvDefaulted();
+}
+
+export function rvDefaultedFlow<GDN = number>(x: GDN) {
+  return x;
+}
+
+export function rvDefaultedFlowCall() {
+  return rvDefaultedFlow(1);
+}
 "#;
 
 fn make_r5_host() -> Arc<VerterHost> {
@@ -2991,5 +3121,451 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         "a call's published value must never BE the enclosing class's own \
          type-parameter node: an enclosing `GcHolder<number>` would then \
          substitute into it"
+    );
+}
+
+/// Every `TypeParam` binder NAME reachable in one answer's node tree.
+///
+/// A leaked binder is rarely the whole answer: the SCC fixed point joins
+/// it into a union, so asserting only the ROOT node's shape would call
+/// `unknown | CT` clean. This walks the tree the way a substitution
+/// would.
+fn reachable_type_param_names(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    root: SemanticNodeId,
+) -> Vec<String> {
+    let mut visited: std::collections::BTreeSet<SemanticNodeId> = Default::default();
+    let mut stack = vec![root];
+    let mut names: Vec<String> = Vec::new();
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let Some(data) = dispatch.graph().node_data(node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::TypeParam { display_name, .. } => {
+                names.push(display_name.to_string());
+            }
+            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                stack.extend(members.iter().copied());
+            }
+            SemanticNodeData::Array { element, .. } => stack.push(*element),
+            SemanticNodeData::Alias(target) => stack.push(*target),
+            _ => {}
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// EVERY route from a callee's return to its caller instantiates the
+/// callee's own clause — not just the direct-call rail.
+///
+/// A callee's return is expressed in the CALLEE's binders, and the
+/// binder identity is file-scoped and name-keyed, so handing that return
+/// back verbatim publishes a node an unrelated enclosing
+/// `class Holder<T>` can substitute into. The direct-call rail learned
+/// that rule; three sibling routes reading the SAME
+/// `SemanticNodeData::Signature { return_type }` shape did not:
+///
+/// - a call on a LOCAL function-typed binding (`const idL = <RL>(x: RL): RL => x; idL("a")`),
+/// - an IIFE (`(<RI>(x: RI): RI => x)("a")`),
+/// - a call on a generic function-typed PARAMETER (`fn: <RP>(x: RP) => RP`).
+///
+/// Each published the callee's binder as the caller's whole return,
+/// cleanly and warm — and `RvHolder::viaLocal` published the very
+/// `SemanticNodeId` the enclosing `class RvHolder<RL>` clause interns,
+/// so `new RvHolder<number>().viaLocal()` answered `number` for a value
+/// that has nothing to do with `RL`.
+///
+/// Oracle (tsgo checker, `--strict --declaration`):
+///
+/// ```text
+/// rvLocalLambdaCall(): string   rvIife():      string
+/// rvParamCall():       string   new RvHolder<number>().viaLocal(): string
+/// new RvHolder<number>().ownRL(): RL
+/// ```
+///
+/// The `unknown` rows are the recorded interim: TypeScript instantiates
+/// these clauses from ARGUMENT INFERENCE, which is `U6.CALL_RESOLVE`'s.
+/// `unknown` is not the checker's answer here — a leaked binder is not
+/// either, and it is the answer that cannot be substituted into.
+///
+/// Mutation recipes (each verified to flip exactly these rows):
+///
+/// - taking `*return_type` off the signature node in the binding-call
+///   arm flips `rvLocalLambdaCall` / `rvParamCall` / `viaLocal` and
+///   re-aliases `viaLocal` onto `ownRL`;
+/// - the same in the IIFE arm flips `rvIife` alone;
+/// - the CONTROL `ownRL` — the caller's OWN clause — must survive every
+///   one of them.
+#[test]
+fn flow_return_every_call_route_instantiates_the_callees_clause() {
+    let host = make_r5_host();
+
+    for name in ["rvLocalLambdaCall", "rvIife", "rvParamCall"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name} must instantiate the callee's own clause, never publish \
+                     the callee's binder"
+                );
+            },
+        );
+    }
+
+    // The MEMBER-ALIASING pair: the local lambda's clause is spelled
+    // `RL`, exactly the enclosing class's, so before the fix both members
+    // published ONE node.
+    let via_local = r5_node(
+        &host,
+        "RvHolder",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "RvHolder::viaLocal must not publish a binder"
+            );
+            node
+        },
+    );
+    let own_rl = r5_node(
+        &host,
+        "RvHolder",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![1u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                type_param("RL"),
+                "RvHolder::ownRL is the class's OWN clause and must survive"
+            );
+            node
+        },
+    );
+    assert_ne!(
+        via_local, own_rl,
+        "a local-binding call's published value must never BE the enclosing \
+         class's own type-parameter node: an enclosing `RvHolder<number>` \
+         would then substitute into it"
+    );
+}
+
+/// The SCC fixed point performs the same callee-return transfer the call
+/// arm does, so it owes the same instantiation.
+///
+/// In a GENERIC mutual-recursion component both members are provisional
+/// when the component closes, so each one's contribution to the other
+/// arrives through the equation `result_i = seed_i ∪ (⋃ hold targets)`
+/// rather than through the call arm's own return value. Joining a hold
+/// target's `return_type` raw there re-published exactly the binder the
+/// call arm had already instantiated away: `cgOne` answered
+/// `unknown | CO | CT`, where the `unknown` arm is the call arm's
+/// instantiated contribution and `CT` is `cgTwo`'s clause — the SAME
+/// `SemanticNodeId` the unrelated `class CgHolder<CT>` interns.
+///
+/// Oracle (tsgo checker, `--strict`): `cgOne` and `cgTwo` are TS7023
+/// (`implicitly has return type 'any' because it ... is referenced
+/// directly or indirectly in one of its return expressions`), so
+/// TypeScript declines to type them at all. The substrate's coinductive
+/// answer is the component's own union — which must contain each
+/// member's OWN binder and no other member's.
+///
+/// Mutation recipe: joining `result.return_type` instead of
+/// `hold.discharged(...)` restores `CT` to `cgOne` (and `CO` to
+/// `cgTwo`), leaving both members' own-binder rows green.
+#[test]
+fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
+    let host = make_r5_host();
+
+    // The bait: an unrelated class whose clause is spelled `CT`. Under
+    // the file-scoped name-keyed binder identity it interns the very node
+    // `cgTwo`'s clause does, so `cgOne` republishing `CT` hands
+    // `CgHolder<number>` a substitution site it does not own.
+    let own_ct = r5_node(
+        &host,
+        "CgHolder",
+        FunctionPartIdentity::Member {
+            member_path: Arc::from(vec![0u32].into_boxed_slice()),
+        },
+        |dispatch, node| {
+            assert_eq!(node_shape(dispatch, node), type_param("CT"));
+            node
+        },
+    );
+
+    r5_node(
+        &host,
+        "cgOne",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let names = reachable_type_param_names(dispatch, node);
+            assert!(
+                !names.iter().any(|name| name == "CT"),
+                "cgOne must not republish cgTwo's clause through the fixed point; got {names:?}"
+            );
+            assert!(
+                names.iter().any(|name| name == "CO"),
+                "cgOne's OWN binder must survive the fixed point; got {names:?}"
+            );
+            let mut stack = vec![node];
+            let mut seen = false;
+            while let Some(current) = stack.pop() {
+                seen |= current == own_ct;
+                if let Some(SemanticNodeData::Union(members)) =
+                    dispatch.graph().node_data(current).as_deref()
+                {
+                    stack.extend(members.iter().copied());
+                }
+            }
+            assert!(
+                !seen,
+                "cgOne must not reach `CgHolder::ownCT`'s node — an unrelated \
+                 `CgHolder<number>` would substitute into cgOne's value"
+            );
+        },
+    );
+
+    r5_node(
+        &host,
+        "cgTwo",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            let names = reachable_type_param_names(dispatch, node);
+            assert!(
+                !names.iter().any(|name| name == "CO"),
+                "cgTwo must not republish cgOne's clause through the fixed point; got {names:?}"
+            );
+            assert!(
+                names.iter().any(|name| name == "CT"),
+                "cgTwo's OWN binder must survive the fixed point; got {names:?}"
+            );
+        },
+    );
+}
+
+/// A callee clause parameter whose name ALSO names a file-scope
+/// declaration still instantiates.
+///
+/// A declaration's own clause is not in scope where its DECLARED return
+/// locator lowers (file owner scope), so `first<Item>(xs: Item[]): Item`
+/// interns its return as a bare `Item` head. The name-keyed claim that
+/// catches the UNRESOLVED spelling (`BareRef`) sees nothing when the file
+/// also declares `interface Item` — the owner-scope lowering RESOLVES
+/// the head, to the wrong symbol — so the caller published the unrelated
+/// INTERFACE as its own value, cleanly and warm.
+///
+/// The `shDecl` / `callsShDecl` pair is the ROUTE-AGREEMENT half: the
+/// callee's own body-derived return answers `TypeParam("SH")` (its frame
+/// binds the clause) while the caller's declared-return route answered
+/// `DeclRef("SH")` — two routes to one callee disagreeing about what
+/// `SH` even is.
+///
+/// Oracle (tsgo checker, `--strict --declaration`):
+///
+/// ```text
+/// shFirst<Item>(xs: Item[]): Item   shUseFirst(xs: number[]): number
+/// shDecl<SH>(x: SH): SH             callsShDecl():             string
+/// shPlainItem():        ShItem      shUsePlainItem():          ShItem
+/// ```
+///
+/// The two `unknown` rows are the recorded interim (argument inference is
+/// `U6.CALL_RESOLVE`'s); the CONTROL pair is exact and is what keeps the
+/// claim clause-scoped rather than name-scoped: `shUsePlainItem` reaches
+/// the same `ShItem` interface through a NON-generic callee, which
+/// declares no clause, so its `DeclRef` must survive untouched.
+///
+/// Mutation recipe: dropping the `DeclRef` arm from the name-driven
+/// binder collection flips `shUseFirst` back to `DeclRef("ShItem")` and
+/// `callsShDecl` back to `DeclRef("SH")`, while every `BareRef`-spelled
+/// row (`gcDecl*` / `gcBare*`) and the control stay green.
+#[test]
+fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiates() {
+    let host = make_r5_host();
+
+    for name in ["shUseFirst", "callsShDecl"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    "{name}'s callee clause SHADOWS the same-named file-scope \
+                     declaration, so the resolved head is the clause parameter — \
+                     publishing the declaration is publishing an unrelated symbol"
+                );
+            },
+        );
+    }
+
+    // ROUTE AGREEMENT — the callee's own body-derived answer keeps its
+    // clause binder; the CALLER's route instantiates it. The two must not
+    // be the same node, and the caller's must not be a reference.
+    let decl = r5_node(
+        &host,
+        "shDecl",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                type_param("SH"),
+                "shDecl's OWN return is its own binder"
+            );
+            node
+        },
+    );
+    let caller = r5_node(
+        &host,
+        "callsShDecl",
+        FunctionPartIdentity::DeclarationBody,
+        |_dispatch, node| node,
+    );
+    assert_ne!(
+        decl, caller,
+        "the callee's own binder must never BE the caller's published value"
+    );
+
+    // CONTROL — the same interface name through a NON-generic callee.
+    // Nothing declares `ShItem` as a clause parameter there, so the
+    // published reference is the interface and must survive.
+    r5_node(
+        &host,
+        "shUsePlainItem",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                decl_ref("ShItem"),
+                "a non-generic callee declares no clause: its resolved return \
+                 reference must survive untouched"
+            );
+        },
+    );
+}
+
+/// An OVERLOADED callee never publishes its HIDDEN implementation.
+///
+/// The per-file function-program index carries ONE entry per overload
+/// group, at the trailing IMPLEMENTATION, so the direct-call rail
+/// reached exactly the signature the language HIDES. `ovX("a")` — whose
+/// two VISIBLE overloads return `OA` and `string` — published the
+/// implementation's `any`, cleanly and warm, with no visible signature
+/// that ever returns it. That contradicts this project's own
+/// overload-visibility rule: a multi-signature group surfaces its
+/// bodiless overloads in source order and hides the trailing
+/// implementation.
+///
+/// Picking the right overload needs argument-driven overload resolution
+/// (`U6.CALL_RESOLVE`). Until then the answer is the
+/// `UnrepresentableCallee` DEGRADATION the rail already defines: a usable
+/// modeled `any` that is `ReturnOnly` by contract — never warm-admitted.
+/// The degradation is what makes the two `any`s distinguishable, and it
+/// is what a consumer's cache gate reads.
+///
+/// Oracle (tsgo checker, `--strict --declaration`):
+///
+/// ```text
+/// ovXCall():      string     ← the FIRST visible overload, inferred
+/// ovSingleCall(): string
+/// ```
+///
+/// Mutation recipes:
+///
+/// - removing the overload gate republishes `Primitive(Any)` for
+///   `ovXCall` with NO degradation and ONE warm candidate — the exact
+///   pre-fix shape;
+/// - widening the gate to "any signature with an implementation body"
+///   flips the CONTROL `ovSingleCall`, a lone generic signature that is
+///   bodied and fully visible, from `unknown` to a degraded `any`.
+#[test]
+fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
+    let host = make_r5_host();
+
+    assert_degraded(
+        &host,
+        "ovXCall",
+        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+    );
+
+    // CONTROL — a LONE signature is untouched, bodied or not: the rule is
+    // overload VISIBILITY, not "any function with a body".
+    r5_node(
+        &host,
+        "ovSingleCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "a lone visible signature still instantiates its clause"
+            );
+        },
+    );
+}
+
+/// A clause parameter carrying a DECLARED DEFAULT instantiates to that
+/// default, not to `unknown`.
+///
+/// `unknown` is the recorded interim for a parameter TypeScript resolves
+/// by ARGUMENT INFERENCE, which this substrate does not model. A
+/// DEFAULTED parameter is not that case: TypeScript resolves it without
+/// inference, from the declaration itself, so `unknown` there is not an
+/// interim — it is a wrong answer the callee's own declaration rules
+/// out.
+///
+/// Both return routes are covered, because the default has to reach both:
+/// `rvDefaulted` annotates its return (the DECLARED carrier route) and
+/// `rvDefaultedFlow` does not (the body-derived flow route).
+///
+/// Oracle (tsgo checker, `--strict --declaration`):
+///
+/// ```text
+/// rvDefaultedCall():     number     rvDefaultedFlowCall(): number
+/// gcBareInferred():      unknown    ← no default, and the checker agrees
+/// ```
+///
+/// Mutation recipe: substituting `unknown` regardless of the declared
+/// default flips both `rvDefaulted*` rows to `unknown` and leaves every
+/// default-less row — including the exact `gcBareInferred` — green.
+#[test]
+fn flow_return_callee_clause_default_instantiates_to_the_default() {
+    let host = make_r5_host();
+
+    for name in ["rvDefaultedCall", "rvDefaultedFlowCall"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::Number),
+                    "{name}'s callee resolves its clause from its DECLARED default \
+                     without inference, so `unknown` is not an interim here"
+                );
+            },
+        );
+    }
+
+    // CONTROL — a clause with NO default keeps `unknown`, which is the
+    // checker's own answer for a bare `T` return with nothing to infer.
+    assert_clean_warm(
+        &host,
+        "gcBareInferred",
+        TypeExpr::Primitive(PrimitiveName::Unknown),
     );
 }

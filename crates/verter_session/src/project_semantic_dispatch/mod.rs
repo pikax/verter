@@ -103,6 +103,7 @@ pub(crate) mod output_materialization;
 // consumer depends on it; it exists only for its `const _` build-time checks.
 pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
+pub(crate) mod flow_return_callee;
 #[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]

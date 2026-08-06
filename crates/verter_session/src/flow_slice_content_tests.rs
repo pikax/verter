@@ -23,7 +23,8 @@ use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
-    FlowSliceSelection, SliceBindingKind, SliceContent, SliceExpr, SliceStatement, SliceUnsupported,
+    FlowSliceSelection, SliceBindingKind, SliceCall, SliceContent, SliceExpr, SliceStatement,
+    SliceUnsupported,
 };
 
 fn memo_for(source: &str) -> Arc<DeclBodyMemo> {
@@ -384,7 +385,7 @@ fn direct_self_call_is_recursion_hold() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
-            argument: Some(SliceExpr::DirectSelfCall),
+            argument: Some(SliceExpr::Call(SliceCall::DirectSelf)),
             widening_literal: false,
         }],
     );
@@ -399,7 +400,7 @@ fn symbolic_and_unrepresentable_calls() {
         "run",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::DirectCall(target)),
+        argument: Some(SliceExpr::Call(SliceCall::Direct(target))),
         ..
     }] = node.body.statements.as_ref()
     else {

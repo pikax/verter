@@ -1248,6 +1248,45 @@ impl DeclBodyMemo {
         node.map(Arc::new)
     }
 
+    /// The OWN type-parameter clause of one indexed function, lowered
+    /// through the same lease-only retained-snapshot run every other body
+    /// product uses (pure job, owned output, no host re-entry).
+    ///
+    /// NOT memoized: a caller demands it only for a clause the shallow
+    /// index already flagged as carrying a DEFAULT, which is rare, and
+    /// the caller's own family memo prevents same-demand recomputation.
+    /// Returns `None` on a locator miss (a typed miss, never a panic) or
+    /// on a seeded memo / broken lease pin.
+    pub(crate) fn function_type_param_clause(
+        &self,
+        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
+        let service = self.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let entry = entry.clone();
+        let Some(clause) = service.run_leased(&self.key, move |program| {
+            program.and_then(|p| {
+                crate::flow_slice_content::build_function_type_param_clause(
+                    p.borrow_dependent(),
+                    p.source_str(),
+                    &entry,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        clause
+    }
+
     /// The arena-free [`FunctionBodySkeleton`] of one indexed function —
     /// the demand-sliced flow substrate's structural input, built through
     /// the same lease-only retained-snapshot run every other body product

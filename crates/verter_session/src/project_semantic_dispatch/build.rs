@@ -5810,9 +5810,50 @@ impl<'a> ProjectSemanticDispatch<'a> {
         extracted: SemanticNodeId,
         include_unbound_heads: bool,
     ) -> SemanticNodeId {
+        self.instantiate_clause_params(
+            names.into_iter().map(|name| (name, None)),
+            extracted,
+            include_unbound_heads,
+        )
+    }
+
+    /// The CALL-SITE form of the clause rule, and the one the flow
+    /// evaluator's callee gate
+    /// ([`crate::project_semantic_dispatch::flow_return_callee`]) drives.
+    ///
+    /// Two differences from the signature-utility form above, both
+    /// call-site semantics:
+    ///
+    /// - a parameter with a DECLARED DEFAULT instantiates to that
+    ///   default, because an argument-free call resolves it without
+    ///   inference (`f<T = number>()` IS `number`). A signature UTILITY
+    ///   does not: `ReturnType<typeof f>` is `unknown` there, which is
+    ///   why the two entrances stay separate rather than sharing one
+    ///   default policy;
+    /// - deferred heads are always claimed, because a callee's DECLARED
+    ///   return lowers in file owner scope where its own clause is not
+    ///   in scope — every route to one callee must therefore claim the
+    ///   same spellings, or two routes to the same callee disagree.
+    pub(super) fn instantiate_clause_params_at_call<'n>(
+        &self,
+        params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.instantiate_clause_params(params, extracted, /* include_unbound_heads */ true)
+    }
+
+    /// The shared body: substitute each named clause parameter out of
+    /// `extracted`, at its declared default when one is supplied and at
+    /// `unknown` otherwise.
+    fn instantiate_clause_params<'n>(
+        &self,
+        params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
+        extracted: SemanticNodeId,
+        include_unbound_heads: bool,
+    ) -> SemanticNodeId {
         let mut unknown: Option<SemanticNodeId> = None;
         let mut result = extracted;
-        for name in names {
+        for (name, default) in params {
             // Shadowing-aware per-name collection: `extracted` is NOT the
             // owning signature, so a function node ANYWHERE in it (its root
             // included) that re-declares `name` owns every same-name
@@ -5824,12 +5865,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 /* root_is_own_signature */ false,
                 include_unbound_heads,
             ) {
-                let unknown = *unknown.get_or_insert_with(|| {
-                    self.graph().intern_node(SemanticNodeData::Primitive(
-                        crate::semantic_query::PrimitiveKind::Unknown,
-                    ))
-                });
-                result = self.substitute_semantic_type_param(result, binder, unknown);
+                let substitution = match default {
+                    Some(default) => default,
+                    None => *unknown.get_or_insert_with(|| {
+                        self.graph().intern_node(SemanticNodeData::Primitive(
+                            crate::semantic_query::PrimitiveKind::Unknown,
+                        ))
+                    }),
+                };
+                result = self.substitute_semantic_type_param(result, binder, substitution);
             }
         }
         result
@@ -6117,6 +6161,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         found.push(node);
                     }
                     stack.extend(data.carrier_type_args().iter().copied());
+                }
+                SemanticNodeData::DeclRef { identity } => {
+                    // A RESOLVED head spelling the searched parameter,
+                    // under `include_unbound_heads` — the third resolution
+                    // state of one clause parameter, alongside the bound
+                    // `TypeParam` and the deferred `BareRef`.
+                    //
+                    // A declaration's own clause is not in scope where its
+                    // DECLARED return locator lowers (file owner scope), so
+                    // `f<T>(): T` interns its return as a bare `T` head —
+                    // and when the file ALSO declares a type named `T`,
+                    // that owner-scope lowering RESOLVES it, to the wrong
+                    // symbol. `interface Item {}` beside
+                    // `function first<Item>(xs: Item[]): Item` is the
+                    // shape: the clause shadows the interface inside the
+                    // function, so every `Item` in that return is the
+                    // parameter, and a caller instantiating the clause must
+                    // claim this spelling too — otherwise the callee
+                    // publishes the unrelated INTERFACE as the caller's
+                    // value, cleanly and warm, and the name-keyed check
+                    // that catches the unresolved spelling sees nothing.
+                    //
+                    // The shadow stops above apply unchanged: a nested
+                    // signature (or mapper) re-declaring the name is never
+                    // descended into, so only occurrences the searched
+                    // clause actually binds are claimed.
+                    if include_unbound_heads && identity.decl_name.as_ref() == name {
+                        found.push(node);
+                    }
                 }
                 SemanticNodeData::TypeOf(_) | SemanticNodeData::ImportType(_) => {
                     stack.extend(data.carrier_type_args().iter().copied());

@@ -229,6 +229,21 @@ pub struct FunctionDirectCall {
     pub target: FunctionProgramKey,
 }
 
+/// One parameter of an indexed function's OWN type-parameter clause.
+///
+/// Purely syntactic: a name plus whether the parameter authored a
+/// DEFAULT. The default's TYPE is deliberately absent — this index is a
+/// shallow declaration fact, never a body lowering — so a caller that
+/// needs the default's meaning demands it through the shared lazy body
+/// service, and pays for it only on the clauses that have one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionProgramTypeParam {
+    /// The type-parameter name.
+    pub name: Arc<str>,
+    /// Whether the parameter authored a default (`<T = D>`).
+    pub has_default: bool,
+}
+
 /// One served function position: identity, body locator, structural
 /// inventory, and the whole-function stable hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,18 +268,22 @@ pub struct FunctionProgramEntry {
     pub control: Arc<[FunctionControlRegion]>,
     /// Exact direct local call targets.
     pub direct_calls: Arc<[FunctionDirectCall]>,
-    /// This function's OWN type-parameter names, in declaration order.
+    /// This function's OWN type-parameter clause, in declaration order.
     ///
     /// A shallow syntactic FACT, not a lowering: the names are what a
     /// CALLER needs to instantiate the callee's clause, and the caller
     /// cannot read them off the callee's declared or body-derived return
     /// (a parameter that never bound interns as a deferred name
-    /// reference, indistinguishable from an unrelated free name). The
-    /// value registry does not carry every served position — a
-    /// namespace-scoped function has no prepared declaration at all — so
-    /// this index is the one authority that answers for EVERY position it
-    /// serves.
-    pub type_parameter_names: Arc<[Arc<str>]>,
+    /// reference, indistinguishable from an unrelated free name).
+    ///
+    /// This index answers for every position it INDEXES, which is what a
+    /// direct-call target is by construction, and which the value
+    /// registry is not: a namespace-scoped function has no prepared
+    /// declaration at all. It is NOT an inventory of every declared
+    /// signature — an overload group is indexed once, at its
+    /// implementation, so a caller reaching a VISIBLE overload's clause
+    /// through here would be reading the implementation's.
+    pub type_parameters: Arc<[FunctionProgramTypeParam]>,
     /// The whole-function stable hash (structural content only — the
     /// parser / language / parse-env identity folds in at the artifact
     /// boundary).
@@ -1176,13 +1195,16 @@ fn build_entry(
     });
     bindings.dedup_by(|left, right| left.name == right.name && left.kind == right.kind);
 
-    let type_parameter_names: Vec<Arc<str>> = node
+    let type_parameters: Vec<FunctionProgramTypeParam> = node
         .type_parameters()
         .map(|declaration| {
             declaration
                 .params
                 .iter()
-                .map(|param| Arc::from(param.name.name.as_str()))
+                .map(|param| FunctionProgramTypeParam {
+                    name: Arc::from(param.name.name.as_str()),
+                    has_default: param.default.is_some(),
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1206,7 +1228,7 @@ fn build_entry(
         effects: Arc::from(effects.into_boxed_slice()),
         control: Arc::from(control.into_boxed_slice()),
         direct_calls: Arc::from(Vec::new().into_boxed_slice()),
-        type_parameter_names: Arc::from(type_parameter_names.into_boxed_slice()),
+        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
         flow_body_stable_hash: hash,
     }
 }

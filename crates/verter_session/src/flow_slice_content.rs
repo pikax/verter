@@ -31,14 +31,16 @@
 //! flow-only differences are explicit IR carriers: parameter references
 //! become [`SliceExpr::Param`], simple local bindings become
 //! [`SliceExpr::Local`] (reaching definitions resolved by the
-//! evaluator), a bare-identifier call resolves through ONE lexical
-//! binding authority — a hoisted nested function declaration of the same
-//! name is [`SliceExpr::LocalFunctionShadow`] (fail-closed), a parameter
-//! or in-scope local is [`SliceExpr::CallOnBinding`], a call to the
-//! function itself is [`SliceExpr::DirectSelfCall`], an index-exact
-//! direct call is [`SliceExpr::DirectCall`] — and any other call rides
-//! the symbolic `ReturnType<typeof …>` carrier (or `any` for an
-//! unrepresentable callee) as [`SliceExpr::SymbolicCall`].
+//! evaluator), and EVERY call form rides the single
+//! [`SliceExpr::Call`] carrier over the closed [`SliceCall`] vocabulary:
+//! a bare-identifier call resolves through ONE lexical binding authority
+//! — a hoisted nested function declaration of the same name is
+//! [`SliceCall::LocalFunctionShadow`] (fail-closed), a parameter or
+//! in-scope local is [`SliceCall::OnBinding`], a call to the function
+//! itself is [`SliceCall::DirectSelf`], an index-exact direct call is
+//! [`SliceCall::Direct`] — and any other call rides the symbolic
+//! `ReturnType<typeof …>` carrier (or `any` for an unrepresentable
+//! callee) as [`SliceCall::Symbolic`].
 
 use std::sync::Arc;
 
@@ -298,7 +300,7 @@ pub enum SliceExpr {
     /// one of them, and otherwise evaluates the wrapped leaf unchanged.
     FrameShadowed {
         /// The leaf carrier the gate wrapped ([`SliceExpr::Type`] or
-        /// [`SliceExpr::SymbolicCall`]).
+        /// [`SliceCall::Symbolic`]).
         inner: Box<SliceExpr>,
         /// Frame-owned names the answer references, by name space.
         shadowed: Arc<[FrameShadowedName]>,
@@ -360,38 +362,19 @@ pub enum SliceExpr {
         /// `return`.
         can_fall_through: bool,
     },
-    /// A direct call on a nested function value (an IIFE) — the call's
-    /// value is the nested function's evaluated return.
-    NestedCall(Box<SliceExpr>),
-    /// A call on a parameter or in-scope local binding of function type —
-    /// the call's value is the binding's signature return (a shadowed
-    /// name is never a flow obligation edge).
-    CallOnBinding {
-        /// The parameter ordinal (when the callee is a parameter).
-        param: Option<u32>,
-        /// The binding name.
-        name: Arc<str>,
-        /// Whether the callee is a CAPTURED enclosing binding (the same
-        /// axis [`SliceExpr::Local`] carries): an unbound capture fails
-        /// closed instead of taking the implicit-`any` call.
-        captured: bool,
-    },
-    /// A bare-identifier call to a name a hoisted nested function
-    /// declaration binds in this function. The nested declaration shadows
-    /// every outer same-name callee (function declarations hoist over
-    /// parameters, locals, and file-level bindings); exact recovery of the
-    /// nested declaration's own return is not implemented, so the
-    /// evaluator FAILS CLOSED, never binding the outer callee.
-    LocalFunctionShadow,
-    /// A bare-identifier call to the function itself — a direct same-slot
-    /// recursion hold.
-    DirectSelfCall,
-    /// A bare-identifier call whose target the per-file function index
-    /// resolves EXACTLY (a same-file served function position) — a Flow
-    /// obligation edge to that target.
-    DirectCall(verter_semantic::analysis::function_program::FunctionProgramKey),
-    /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
-    SymbolicCall(TypeExpr),
+    /// EVERY call form — the one carrier through which a CALLEE's return
+    /// can become this frame's value.
+    ///
+    /// Calls are grouped behind a single variant, over the closed
+    /// [`SliceCall`] vocabulary, precisely so the evaluator has ONE call
+    /// arm: its call sink is typed
+    /// [`CallValue`](crate::project_semantic_dispatch::flow_return_callee::CallValue),
+    /// whose constructors all decide what happens to the callee's own
+    /// type-parameter clause. A new call form is added HERE, and the
+    /// evaluator's exhaustive match then forces that decision at the new
+    /// arm rather than leaving "hand the callee's return back verbatim"
+    /// available as the path of least resistance.
+    Call(SliceCall),
     /// An expression the leaf lowering cannot represent (its `any`
     /// fallback), including a call with an unrepresentable callee.
     Any,
@@ -410,6 +393,52 @@ pub enum SliceExpr {
     /// and fails closed at the evaluator — it is never a fabricated
     /// `any` and never a silently widened sibling.
     Elided,
+}
+
+/// The CLOSED vocabulary of call forms — every way a callee's return can
+/// become the value of an expression in a flow frame.
+///
+/// One enum rather than six sibling [`SliceExpr`] variants because the
+/// evaluator's call sink is a single typed value: each arm has to say
+/// what happens to the CALLEE's own type-parameter clause before the
+/// callee's return can be this frame's answer. Splitting the forms back
+/// across `SliceExpr` would restore the per-arm drift this grouping
+/// exists to prevent (two of the arms below silently lost the rule while
+/// their siblings kept it).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceCall {
+    /// A direct call on a nested function value (an IIFE) — the call's
+    /// value is the nested function's evaluated return.
+    Nested(Box<SliceExpr>),
+    /// A call on a parameter or in-scope local binding of function type —
+    /// the call's value is the binding's signature return (a shadowed
+    /// name is never a flow obligation edge).
+    OnBinding {
+        /// The parameter ordinal (when the callee is a parameter).
+        param: Option<u32>,
+        /// The binding name.
+        name: Arc<str>,
+        /// Whether the callee is a CAPTURED enclosing binding (the same
+        /// axis [`SliceExpr::Local`] carries): an unbound capture fails
+        /// closed instead of taking the implicit-`any` call.
+        captured: bool,
+    },
+    /// A bare-identifier call to a name a hoisted nested function
+    /// declaration binds in this function. The nested declaration shadows
+    /// every outer same-name callee (function declarations hoist over
+    /// parameters, locals, and file-level bindings); exact recovery of the
+    /// nested declaration's own return is not implemented, so the
+    /// evaluator FAILS CLOSED, never binding the outer callee.
+    LocalFunctionShadow,
+    /// A bare-identifier call to the function itself — a direct same-slot
+    /// recursion hold.
+    DirectSelf,
+    /// A bare-identifier call whose target the per-file function index
+    /// resolves EXACTLY (a same-file served function position) — a Flow
+    /// obligation edge to that target.
+    Direct(verter_semantic::analysis::function_program::FunctionProgramKey),
+    /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
+    Symbolic(TypeExpr),
 }
 
 /// One name an answer references that the frame's LEXICAL AUTHORITY
@@ -715,6 +744,36 @@ impl SignatureScope<'_, '_> {
         }
         gated
     }
+}
+
+/// Lower ONE indexed function's own type-parameter clause against the
+/// retained parse snapshot — the callee-side half of the call-site
+/// clause rule.
+///
+/// A CALLER instantiating a generic callee's clause needs the declared
+/// DEFAULTS, not just the names: an argument-free call to
+/// `f<T = number>()` is `number`, and substituting `unknown` there
+/// publishes a type the callee's own declaration rules out. The names
+/// ride the shallow function-program index (a syntactic fact); the
+/// default TYPES are a body lowering, so they come from here, through
+/// the same lease-only retained-snapshot run every other body product
+/// uses — and only for the clauses the index says have one.
+///
+/// The clause is lowered in [`SignatureScope::Root`], the same scope the
+/// function's own signature lowers in: a function's body-local
+/// declarations are not in scope in its own type-parameter clause.
+/// Returns `None` on a locator miss (a typed miss, never a panic).
+pub(crate) fn build_function_type_param_clause(
+    program: &Program<'_>,
+    source: &str,
+    entry: &FunctionProgramEntry,
+) -> Option<Vec<SliceTypeParam>> {
+    let resolved = resolve_function_node(program, &entry.locator)?;
+    Some(lower_slice_type_params(
+        &resolved.node,
+        source,
+        &SignatureScope::Root,
+    ))
 }
 
 /// Build the slice content for one indexed function entry against the
@@ -1194,7 +1253,7 @@ impl CaptureScope {
 /// frame only — nested function values lower ungated, their bodies are
 /// beyond slice granularity), the shared leaf-lowering entry, the
 /// function's parameters (for [`SliceExpr::Param`] ordinals), its
-/// bare-identifier self name (for [`SliceExpr::DirectSelfCall`]), and the
+/// bare-identifier self name (for [`SliceCall::DirectSelf`]), and the
 /// frame's LEXICAL AUTHORITY — the same
 /// [`FunctionBodySkeleton`] the demand plan resolves against, so a
 /// planned edge and a lowered read can never disagree about which slot a
@@ -1974,7 +2033,7 @@ impl Lowerer<'_> {
                     }
                     _ => unreachable!("the guard admits function values only"),
                 };
-                SliceExpr::NestedCall(Box::new(function))
+                SliceExpr::Call(SliceCall::Nested(Box::new(function)))
             }
             Expression::CallExpression(call) => {
                 if let Expression::Identifier(callee) = &call.callee {
@@ -1985,38 +2044,40 @@ impl Lowerer<'_> {
                         // A hoisted nested function declaration shadows
                         // every outer same-name callee; exact recovery of
                         // its own return is not implemented (fail closed).
-                        NameBinding::NestedFunction => return SliceExpr::LocalFunctionShadow,
+                        NameBinding::NestedFunction => {
+                            return SliceExpr::Call(SliceCall::LocalFunctionShadow)
+                        }
                         NameBinding::Unmodeled => return SliceExpr::UnmodeledBinding,
                         // A parameter or local SHADOWS the file-level
                         // declaration: the call goes through the binding's
                         // signature, never a flow obligation edge.
                         NameBinding::Param(ordinal) => {
-                            return SliceExpr::CallOnBinding {
+                            return SliceExpr::Call(SliceCall::OnBinding {
                                 param: Some(ordinal),
                                 name: Arc::from(name),
                                 captured: false,
-                            }
+                            })
                         }
                         NameBinding::Local(param) => {
-                            return SliceExpr::CallOnBinding {
+                            return SliceExpr::Call(SliceCall::OnBinding {
                                 param,
                                 name: Arc::from(name),
                                 captured: false,
-                            }
+                            })
                         }
                         NameBinding::Captured => {
-                            return SliceExpr::CallOnBinding {
+                            return SliceExpr::Call(SliceCall::OnBinding {
                                 param: None,
                                 name: Arc::from(name),
                                 captured: true,
-                            }
+                            })
                         }
                         NameBinding::Free => {}
                     }
                     // A bare-identifier call to the function itself — a
                     // direct same-slot recursion hold.
                     if Some(name) == self.self_name {
-                        return SliceExpr::DirectSelfCall;
+                        return SliceExpr::Call(SliceCall::DirectSelf);
                     }
                     // A bare-identifier callee the function index resolves
                     // EXACTLY (same-file served function position, the
@@ -2028,7 +2089,7 @@ impl Lowerer<'_> {
                         .iter()
                         .find(|direct| direct.span == call.span.into())
                     {
-                        return SliceExpr::DirectCall(direct.target.clone());
+                        return SliceExpr::Call(SliceCall::Direct(direct.target.clone()));
                     }
                 }
                 // The SAME root-identifier gate the leaf path takes: a
@@ -2038,9 +2099,9 @@ impl Lowerer<'_> {
                 match self.leaf_type(expr, mode) {
                     LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
                     LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
-                    LeafLowering::Free(ty) => SliceExpr::SymbolicCall(ty),
+                    LeafLowering::Free(ty) => SliceExpr::Call(SliceCall::Symbolic(ty)),
                     LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                        inner: Box::new(SliceExpr::SymbolicCall(ty)),
+                        inner: Box::new(SliceExpr::Call(SliceCall::Symbolic(ty))),
                         shadowed,
                     },
                 }
