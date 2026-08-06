@@ -1592,10 +1592,43 @@ pub enum FlowReturnDegradation {
     /// answer keeps it) but admission is refused. Derived from the value
     /// node by [`FlowReturnResult::new`], never recorded per-arm.
     UnresolvedValue,
+    /// A SUB-EXPRESSION position whose resolver is a named DOWNSTREAM
+    /// block contributed the typed unresolved MARKER, and the enclosing
+    /// structure composed AROUND it.
+    ///
+    /// One reason for the whole class of "this position has no modelled
+    /// value": an unmodelled CALL form (`new f()`, `` tag`...` ``,
+    /// `f?.()`, `await f()`, `(0, f())`, `z = f()`, a leaf answer
+    /// embedding an unreduced `ReturnType<callee>` carrier), and a name
+    /// the frame's lexical authority resolved to a FUNCTION-LOCAL binding
+    /// the flow content does not model (a destructuring element, a local
+    /// `class` / `enum` / `namespace` / `import =`, a `catch` parameter, a
+    /// nested function declaration read as a value, a frame-shadowed leaf
+    /// answer the owner scope also answers).
+    ///
+    /// POSITIONAL, never frame-level: an object literal with ONE
+    /// unmodelled member still HAS a value, so every modelled sibling is
+    /// published and only the unmodelled slot carries the marker. The
+    /// result is a DEGRADED SUCCESS — usable, `ReturnOnly`, never warm.
+    /// A fabricated `any` is forbidden here: it is indistinguishable from
+    /// an authored one at every downstream gate.
+    UnmodeledPosition,
 }
 
-/// A typed `FlowReturn` failure — carried through `ReturnOnly` (never
-/// admitted, never `never`, never a fabricated miss node).
+/// A typed `FlowReturn` NO-VALUE failure — carried through `ReturnOnly`
+/// (never admitted, never `never`, never a fabricated miss node).
+///
+/// SCOPED TO OUTCOMES WITH NO VALUE AT ALL. Undecidability of a
+/// SUB-EXPRESSION is POSITIONAL: it stays a typed unresolved marker
+/// inside a degraded success ([`FlowReturnDegradation::UnmodeledPosition`]),
+/// because an object literal with one unmodelled member still HAS a
+/// value. Only undecidability of the RETURN SET ITSELF — an unmodelled
+/// control surface, a missing body, a budget edge, a torn view, an empty
+/// recursive cycle, an unmodelled demand point — is a
+/// `FlowReturnFailure`. The vocabulary below carries no positional
+/// variant, so positional non-modelling is UNREPRESENTABLE as a
+/// frame-level `Err`: whole-frame propagation cannot be reached by
+/// accident through a `?`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowReturnFailure {
     /// The function position has no served body (missing declaration,
@@ -1620,27 +1653,6 @@ pub enum FlowReturnFailure {
     /// lowering's depth / work budget, or the obligation runtime's
     /// connected-demand cap — surfaced as the work budget).
     Budget(verter_type_expr::facts::InferenceUnavailableReason),
-    /// A name the frame's lexical authority resolved to a
-    /// FUNCTION-LOCAL binding the flow content does not model: a
-    /// destructuring-pattern element, a local `class` / `enum` /
-    /// `namespace` / `import =`, a `catch` parameter, or a nested
-    /// function declaration read as a value. The name is RESOLVED, not
-    /// free — publishing anything here (an `any`, or the file-scope
-    /// resolution of the same name) would be a warm-admissible wrong
-    /// answer, so the evaluation fails closed.
-    UnmodeledBinding,
-    /// A CALL the flow content could not route through its call carrier:
-    /// the expression form containing it has no structural arm, so the
-    /// only answer available was the shared shallow pass's UNREDUCED
-    /// call-return carrier.
-    ///
-    /// That carrier is the callee's return with nothing instantiated —
-    /// its own type-parameter binders intact and its overload group
-    /// unconsulted — so publishing it hands a foreign binder to this
-    /// frame's consumer, cleanly and warm. The evaluation fails closed
-    /// instead; a call whose form DOES have a structural arm never
-    /// reaches here.
-    UnmodeledCallPosition,
 }
 
 /// The control surface a `FlowReturn` evaluation does not model.
@@ -1673,8 +1685,12 @@ pub(crate) enum FlowReturnStep {
     /// flight on this transaction — neither a contributor nor a failure.
     #[allow(dead_code)] // the hold identity is carried for the close's record
     Hold(Box<FlowReturnKey>),
-    /// Typed failure — `ReturnOnly`, never admitted.
-    Degraded(FlowReturnFailure),
+    /// Typed NO-VALUE failure — `ReturnOnly`, never admitted. Named for
+    /// the CONTRACT it carries: "degraded" is what a USABLE
+    /// [`FlowReturnResult::degradation`] value is, and sharing that word
+    /// with the no-value arm is exactly how the two kept being
+    /// misapplied at the call sites that dispatch on them.
+    NoValue(FlowReturnFailure),
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free
@@ -7090,7 +7106,7 @@ pub type AuthoredPropertyKey = verter_type_expr::AuthoredPropertyKey<
     verter_type_expr::facts::ValueDeclIdentityPart,
 >;
 
-fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<SemanticNodeId> {
+pub(crate) fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<SemanticNodeId> {
     match key {
         AuthoredPropertyKey::String(_)
         | AuthoredPropertyKey::Number(_)

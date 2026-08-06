@@ -74,7 +74,7 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 
 ### `FlowReturnInference` (U6 flow-return substrate)
 
-`RequestKind::FlowReturnInference` audits the whole-function flow-return
+`RequestKind::FlowReturnInference` audits the demand-sliced flow-return
 entry `VerterHost::get_flow_return_type_with_audit(function, demand)`
 (`crates/verter_session/src/host_flow_return_audit.rs`), which resolves ONE
 `SemanticQueryKey::FlowReturn` through the shared dispatch and returns

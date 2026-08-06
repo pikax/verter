@@ -48,7 +48,9 @@ pub mod lower;
 pub mod peeker;
 pub mod value_descent;
 
-pub use value_descent::{value_descent, value_is_unmodeled_call, ValueDescent};
+pub use value_descent::{
+    value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ValueDescent,
+};
 
 #[cfg(test)]
 #[path = "skeleton_tests.rs"]

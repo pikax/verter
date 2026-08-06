@@ -392,7 +392,9 @@ pub enum SliceExpr {
     /// The name is RESOLVED, not free — falling back to the shared leaf
     /// lowering would resolve it in FILE OWNER SCOPE and silently bind an
     /// unrelated module-scope (or cross-file imported) value of the same
-    /// name, cleanly and warm. Fails closed at the evaluator instead.
+    /// name, cleanly and warm. The evaluator fails closed POSITIONALLY
+    /// instead: this slot carries the typed unresolved marker and the
+    /// enclosing structure keeps every sibling it did model.
     UnmodeledBinding,
     /// A VALUE UNION of lowered arms — a conditional expression's two
     /// branches.
@@ -411,10 +413,15 @@ pub enum SliceExpr {
     /// carrier: a call reached through a form with no structural arm.
     ///
     /// The shared shallow pass has no frame and no resolver, so a CALL it
-    /// meets answers as `ReturnType<callee>` with nothing instantiated.
-    /// Publishing that as this frame's value hands out the callee's own
-    /// type-parameter binders and skips its overload group, warm. There
-    /// is no honest value here, so the evaluator fails closed.
+    /// meets answers as `ReturnType<callee>` with nothing instantiated —
+    /// or, for a form it has no model for at all, as a fabricated `any`
+    /// at the root or nested inside the structure it composed. Publishing
+    /// either as this frame's value hands out the callee's own
+    /// type-parameter binders (skipping its overload group) or a value
+    /// indistinguishable from an authored `any`, warm. There is no honest
+    /// value here, so the evaluator fails closed POSITIONALLY: this slot
+    /// carries the typed unresolved marker and the enclosing structure
+    /// survives.
     UnreducedCallValue,
     /// Content the demand slice did NOT select: never lowered, never
     /// evaluable. Observing an elided value is a planner/content mismatch
@@ -2483,34 +2490,30 @@ impl Lowerer<'_> {
     fn lower_leaf(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
         match self.leaf_type(expr, mode) {
             LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
-            // A bare `any` answer at a CALL POSITION is a fabricated
-            // value, not a modeled one. The classifier already routed
-            // every unmodeled call form to `UnreducedCallValue` before
-            // this function is reached; what survives to here is a call
-            // wrapped in a TYPE CARRIER whose own answer came out `any`
-            // (`f()!`), where the carrier was supposed to pin the type
-            // and did not. Same verdict — the shared predicate is the
-            // one authority for the question.
-            LeafLowering::Free(ty)
-                if is_any(&ty)
-                    && verter_semantic::analysis::flow::value_is_unmodeled_call(expr) =>
+            // THE fabricated-value gate, in ONE arm over BOTH shapes the
+            // shallow pass produces for a call it cannot model.
+            //
+            // Shape one — the unreduced `ReturnType<callee>` carrier:
+            // honest for a declaration initializer that is re-resolved
+            // later, a FOREIGN binder for a consumer that publishes the
+            // answer (nothing instantiated the callee's own clause and
+            // nothing consulted its overload group).
+            //
+            // Shape two — a fabricated `any`, at the root (`return
+            // new Box()`) or NESTED inside an otherwise-modelled answer
+            // (`["s", new Box()]` is `Array<string | any>`). The nested
+            // case carries no carrier and is not itself `any`, so both
+            // halves of the old gate passed it warm and clean. It is
+            // decided on the FORM — does this expression's value compose
+            // over a call with no structural arm — conjoined with "the
+            // answer embeds `any`", so a form whose answer the pass DOES
+            // model (`f() === 1` is `boolean`) is never refused.
+            LeafLowering::Free(ty) | LeafLowering::FrameShadowed { ty, .. }
+                if leaf_answer_is_fabricated_at_a_call_position(&ty, expr) =>
             {
                 SliceExpr::UnreducedCallValue
             }
             LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
-            // THE call-carrier gate. The shallow pass answers a CALL it
-            // meets with an unreduced `ReturnType<callee>` carrier —
-            // honest for a declaration initializer that is re-resolved
-            // later, and a foreign binder for a consumer that PUBLISHES
-            // the answer. Every call form with a structural arm was
-            // routed above; a call reached through any remaining form
-            // has no honest leaf value, so it fails closed here rather
-            // than at each form that might contain one.
-            LeafLowering::Free(ty) | LeafLowering::FrameShadowed { ty, .. }
-                if embeds_call_return_carrier(&ty) =>
-            {
-                SliceExpr::UnreducedCallValue
-            }
             LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty)),
             LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
                 inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
@@ -2682,4 +2685,29 @@ enum LeafLowering {
 
 fn is_any(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Primitive(PrimitiveName::Any))
+}
+
+/// Whether a leaf ANSWER contains a value the shared shallow pass
+/// FABRICATED for a call it has no model for.
+///
+/// Two independent readings, both of the same fact:
+///
+/// - the answer EMBEDS the pass's own unreduced `ReturnType<callee>`
+///   carrier — decided off the answer alone, because the carrier is a
+///   shape only this pass mints;
+/// - the answer EMBEDS `any` AND the expression's value composes over a
+///   call with no structural arm — decided off the answer AND the FORM,
+///   because an `any` is indistinguishable from an authored one and the
+///   form is what says whether it was authored.
+///
+/// The conjunction is what keeps the second reading from over-refusing: a
+/// form that contains a call but whose answer the pass models
+/// (`f() === 1` is `boolean`, `f() as T` is `T`) embeds no `any` and
+/// passes.
+fn leaf_answer_is_fabricated_at_a_call_position(ty: &TypeExpr, expr: &Expression<'_>) -> bool {
+    if embeds_call_return_carrier(ty) {
+        return true;
+    }
+    verter_type_expr::referenced_names(ty).embeds_any
+        && verter_semantic::analysis::flow::value_composes_unmodeled_call(expr)
 }

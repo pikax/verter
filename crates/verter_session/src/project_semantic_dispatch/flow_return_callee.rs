@@ -569,10 +569,36 @@ impl CallValue {
         )
     }
 
+    /// The call value of a position whose resolver is a named DOWNSTREAM
+    /// block: the typed UNRESOLVED MARKER, never a fabricated `any`.
+    ///
+    /// A fabricated `any` is indistinguishable from an authored one at
+    /// every downstream gate, so it publishes warm and clean; the marker
+    /// is a miss carrier the enclosing composition keeps in place while
+    /// the whole result degrades to `ReturnOnly`. The CALLER records the
+    /// positional degradation — this constructor only mints the node, so
+    /// it cannot be used to launder a marker in without one.
+    pub(super) fn unmodeled_position(dispatch: &ProjectSemanticDispatch<'_>) -> Self {
+        Self(unmodeled_position_marker(dispatch))
+    }
+
     /// The evaluated node.
     pub(super) fn into_node(self) -> SemanticNodeId {
         self.0
     }
+}
+
+/// THE typed unresolved MARKER a positionally-unmodelled sub-expression
+/// contributes — one mint point for the whole substrate.
+///
+/// A miss carrier (`means_type_is_not_yet_known`), so every consumer that
+/// already distinguishes "not known" from "known" — the projector's
+/// published-field reducer, the flow result's own backstop verdict, the
+/// component-meta boundary — sees it without a new taxonomy.
+pub(super) fn unmodeled_position_marker(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId {
+    dispatch.graph().intern_node(SemanticNodeData::Opaque(
+        crate::semantic_query::QueryError::Miss,
+    ))
 }
 
 /// One coinductive HOLD: a callee whose result is still provisional when

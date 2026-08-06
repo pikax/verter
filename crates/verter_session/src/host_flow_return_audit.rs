@@ -142,7 +142,7 @@ impl VerterHost {
                             crate::semantic_query::FlowReturnStep::Complete(result) => {
                                 Ok(Arc::new(result))
                             }
-                            crate::semantic_query::FlowReturnStep::Degraded(failure) => {
+                            crate::semantic_query::FlowReturnStep::NoValue(failure) => {
                                 Err(FlowReturnError::Failure(failure))
                             }
                             // A hold cannot surface at a fresh top-level

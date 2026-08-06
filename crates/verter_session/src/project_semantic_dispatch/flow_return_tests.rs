@@ -429,9 +429,16 @@ fn flow_return_symbolic_call_resolves_complete() {
 /// answers the whole expression with a bare `any`. That `any` carries no
 /// `ReturnType<callee>` carrier, so the leaf carrier gate never saw it
 /// and it published clean and WARM — a fabricated value at a call
-/// position, under a promise (`UnmodeledCallPosition`) that a call with
-/// no structural arm fails closed. The call-position verdict is now
-/// taken on the expression FORM, so the promise holds here.
+/// position, under a promise that a call with no structural arm fails
+/// closed. The call-position verdict is taken on the expression FORM, so
+/// the promise holds here.
+///
+/// The DISPOSITION is positional: the whole return of this member IS the
+/// call, so the marker is the whole-return value and the result is a
+/// degraded success admitting nothing — not a fabricated `any`, and not
+/// a discarded composite (there is no sibling to keep at this position).
+/// The composite-position TWIN — the same unmodelled call as ONE member
+/// of an object literal — is in `flow_return_positional_tests`.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, for the record — the answer the
 /// fail-closed arm declines to produce): `number`.
@@ -439,17 +446,26 @@ fn flow_return_symbolic_call_resolves_complete() {
 fn flow_return_this_call_fails_closed() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        assert!(flow_is_miss(
+        let key = flow_key(
             dispatch,
-            flow_key(
-                dispatch,
-                "SubThisCall",
-                FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![1u32].into_boxed_slice()),
-                },
-                0,
-            ),
-        ));
+            "SubThisCall",
+            FunctionPartIdentity::Member {
+                member_path: Arc::from(vec![1u32].into_boxed_slice()),
+            },
+            0,
+        );
+        super::flow_return_lexical_tests::assert_flow_fails_closed(
+            dispatch,
+            "SubThisCall",
+            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "SubThisCall must admit nothing"
+        );
     });
 }
 
@@ -908,7 +924,7 @@ fn function_return_helper_degraded_and_absent_arms() {
         // transaction's root-failure channel to the caller (`Unresolved`
         // only when the cold build never ran).
         match dispatch.execute_function_return_source(&loop_source, CANONICAL) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unsupported(
                     crate::semantic_query::FlowReturnUnsupported::Loop,
                 ),
@@ -1103,7 +1119,7 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
             "/ws/member-recur.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(_) => {}
+            super::flow_return::FunctionReturnNode::NoValue(_) => {}
             other => panic!("the recursive member call degrades, got {other:?}"),
         }
         // Nothing admitted: the family entry never materializes, and a
@@ -1302,7 +1318,7 @@ fn flow_return_direct_call_chain_charges_connected_work() {
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/chain.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Budget(_),
             ) => {}
             other => panic!("the over-limit chain degrades with Budget, got {other:?}"),
@@ -1344,7 +1360,7 @@ fn flow_return_direct_call_fails_closed_on_nested_function_declaration_shadow() 
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/fn-shadow.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unresolved,
             ) => {}
             other => panic!("the shadowed direct call fails closed, got {other:?}"),
@@ -1386,7 +1402,7 @@ fn flow_return_self_call_shadowed_by_nested_function_declaration_fails_closed() 
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/self-fn-shadow.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unresolved,
             ) => {}
             other => panic!("the shadowed self call fails closed, got {other:?}"),
@@ -1572,7 +1588,7 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/nested-fn-shadow.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unresolved,
             ) => {}
             other => panic!("the nested-value shadowed call fails closed, got {other:?}"),
@@ -1614,7 +1630,7 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/nested-self-shadow.ts",
         ) {
-            super::flow_return::FunctionReturnNode::Degraded(
+            super::flow_return::FunctionReturnNode::NoValue(
                 crate::semantic_query::FlowReturnFailure::Unresolved,
             ) => {}
             other => panic!(

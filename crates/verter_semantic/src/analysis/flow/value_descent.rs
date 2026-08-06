@@ -89,10 +89,13 @@ pub enum ValueDescent<'a, 'ast> {
     /// awaited call (`await f()`), or a sequence whose last operand is
     /// one of those.
     ///
-    /// This variant exists because the fail-closed promise
-    /// (`FlowReturnFailure::UnmodeledCallPosition`) has to key on the
-    /// EXPRESSION FORM, not on whatever the shared shallow pass happened
-    /// to produce for it. The content half's call-carrier gate
+    /// This variant exists because the fail-closed promise has to key on
+    /// the EXPRESSION FORM, not on whatever the shared shallow pass
+    /// happened to produce for it. The disposition is POSITIONAL: the
+    /// content half contributes the typed unresolved marker AT the
+    /// position and the enclosing structure survives — never a frame-level
+    /// failure, which would discard an object literal for a fact about one
+    /// of its members. The content half's call-carrier gate
     /// (`embeds_call_return_carrier`) only fires when that pass minted an
     /// unreduced `ReturnType<callee>` carrier; for every form here the
     /// pass answers a bare `any` instead, which carries no carrier, so
@@ -252,6 +255,11 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
             .expressions
             .last()
             .is_some_and(value_is_unmodeled_call),
+        // An ASSIGNMENT's value IS its right-hand side — the SAME relation
+        // that puts a sequence's last operand here. `(z = fs())` publishing
+        // a warm fabricated `any` while `(0, fs())` failed closed was that
+        // relation applied to one of the two forms it holds for.
+        Expression::AssignmentExpression(assign) => value_is_unmodeled_call(&assign.right),
         // A conditional's arms are each their own lowered position (the
         // content half unions them), so the join is not itself a call
         // position; an object / array / literal / identifier / nested
@@ -272,7 +280,6 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
         | Expression::MetaProperty(_)
         | Expression::Super(_)
         | Expression::ArrayExpression(_)
-        | Expression::AssignmentExpression(_)
         | Expression::BinaryExpression(_)
         | Expression::ImportExpression(_)
         | Expression::LogicalExpression(_)
@@ -287,6 +294,151 @@ pub fn value_is_unmodeled_call(expression: &Expression<'_>) -> bool {
         | Expression::ComputedMemberExpression(_)
         | Expression::StaticMemberExpression(_)
         | Expression::PrivateFieldExpression(_) => false,
+    }
+}
+
+/// Whether `expression`'s value COMPOSES over a call the flow substrate
+/// has no structural arm for — the same question
+/// [`value_is_unmodeled_call`] answers, asked of every sub-expression
+/// whose value the shared shallow pass FOLDS INTO ONE leaf answer.
+///
+/// The two predicates exist because the leaf lowering has two failure
+/// shapes. `value_is_unmodeled_call` catches the case where the WHOLE
+/// answer is the fabricated `any` (`return new Box()`). This one catches
+/// the case where the fabricated `any` is NESTED inside an answer that
+/// otherwise looks modelled: `["s", new Box()]` answers
+/// `Array<string | any>`, which embeds no call-return carrier and is not
+/// itself `any`, so both existing gates passed it warm and clean — a
+/// fabricated `any` at a call position, which is exactly the defect the
+/// call-position gate was written to close.
+///
+/// Descent covers the forms whose leaf answer is COMPOSED from
+/// sub-expression values: array elements (including a spread's argument),
+/// object member values, conditional arms, a sequence's last operand, an
+/// assignment's right-hand side, a member expression's object, and the
+/// value-transparent wrappers. It deliberately does NOT descend into a
+/// nested function body (its own frame) or a call's arguments (not value
+/// providers of the call's value).
+///
+/// The predicate is only ever consulted together with "the answer embeds
+/// `any`", so a form listed here whose answer the shallow pass DOES model
+/// (`f() === 1` is `boolean`) costs nothing: the conjunction never fires.
+/// That is what makes generosity here safe and stinginess unsafe.
+#[must_use]
+pub fn value_composes_unmodeled_call(expression: &Expression<'_>) -> bool {
+    if value_is_unmodeled_call(expression) {
+        return true;
+    }
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            value_composes_unmodeled_call(&paren.expression)
+        }
+        Expression::TSAsExpression(inner) => value_composes_unmodeled_call(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => {
+            value_composes_unmodeled_call(&inner.expression)
+        }
+        Expression::TSNonNullExpression(inner) => value_composes_unmodeled_call(&inner.expression),
+        Expression::TSTypeAssertion(inner) => value_composes_unmodeled_call(&inner.expression),
+        Expression::TSInstantiationExpression(inner) => {
+            value_composes_unmodeled_call(&inner.expression)
+        }
+        Expression::ArrayExpression(array) => array.elements.iter().any(|element| match element {
+            oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                value_composes_unmodeled_call(&spread.argument)
+            }
+            oxc_ast::ast::ArrayExpressionElement::Elision(_) => false,
+            other => other
+                .as_expression()
+                .is_some_and(value_composes_unmodeled_call),
+        }),
+        // A STRUCTURAL object literal never reaches the leaf lowering (the
+        // content half descends it member-wise); what does reach it is the
+        // non-structural fallback — a spread, a computed key, a
+        // method/accessor member — which folds the whole literal, nested
+        // fabricated `any` included, into one answer.
+        Expression::ObjectExpression(object) => {
+            object.properties.iter().any(|property| match property {
+                oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) => {
+                    value_composes_unmodeled_call(&prop.value)
+                }
+                oxc_ast::ast::ObjectPropertyKind::SpreadProperty(spread) => {
+                    value_composes_unmodeled_call(&spread.argument)
+                }
+            })
+        }
+        Expression::ConditionalExpression(conditional) => {
+            value_composes_unmodeled_call(&conditional.consequent)
+                || value_composes_unmodeled_call(&conditional.alternate)
+        }
+        Expression::SequenceExpression(sequence) => sequence
+            .expressions
+            .last()
+            .is_some_and(value_composes_unmodeled_call),
+        Expression::AssignmentExpression(assign) => value_composes_unmodeled_call(&assign.right),
+        Expression::BinaryExpression(binary) => {
+            value_composes_unmodeled_call(&binary.left)
+                || value_composes_unmodeled_call(&binary.right)
+        }
+        Expression::LogicalExpression(logical) => {
+            value_composes_unmodeled_call(&logical.left)
+                || value_composes_unmodeled_call(&logical.right)
+        }
+        Expression::UnaryExpression(unary) => value_composes_unmodeled_call(&unary.argument),
+        Expression::AwaitExpression(inner) => value_composes_unmodeled_call(&inner.argument),
+        Expression::ComputedMemberExpression(member) => {
+            value_composes_unmodeled_call(&member.object)
+                || value_composes_unmodeled_call(&member.expression)
+        }
+        Expression::StaticMemberExpression(member) => value_composes_unmodeled_call(&member.object),
+        Expression::PrivateFieldExpression(member) => value_composes_unmodeled_call(&member.object),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(_) => true,
+            ChainElement::TSNonNullExpression(inner) => {
+                value_composes_unmodeled_call(&inner.expression)
+            }
+            ChainElement::ComputedMemberExpression(member) => {
+                value_composes_unmodeled_call(&member.object)
+                    || value_composes_unmodeled_call(&member.expression)
+            }
+            ChainElement::StaticMemberExpression(member) => {
+                value_composes_unmodeled_call(&member.object)
+            }
+            ChainElement::PrivateFieldExpression(member) => {
+                value_composes_unmodeled_call(&member.object)
+            }
+        },
+        Expression::TemplateLiteral(template) => template
+            .expressions
+            .iter()
+            .any(value_composes_unmodeled_call),
+        // A nested function / class body is its own frame; a literal, an
+        // identifier, `this`, `super`, `import()`, a meta-property, an
+        // update or `in` expression, JSX, and a `yield` compose no
+        // sub-expression VALUE into a leaf answer this predicate could
+        // reach.
+        Expression::Identifier(_)
+        | Expression::CallExpression(_)
+        | Expression::NewExpression(_)
+        | Expression::TaggedTemplateExpression(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::ClassExpression(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::MetaProperty(_)
+        | Expression::Super(_)
+        | Expression::ImportExpression(_)
+        | Expression::ThisExpression(_)
+        | Expression::UpdateExpression(_)
+        | Expression::YieldExpression(_)
+        | Expression::PrivateInExpression(_)
+        | Expression::JSXElement(_)
+        | Expression::JSXFragment(_)
+        | Expression::V8IntrinsicExpression(_) => false,
     }
 }
 

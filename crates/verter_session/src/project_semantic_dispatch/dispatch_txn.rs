@@ -474,7 +474,7 @@ pub(crate) enum FlowReturnPendingOutcome {
     /// Complete evaluation (the admitted shape).
     Complete(FlowReturnResult),
     /// Typed failure — `ReturnOnly`, never admitted.
-    Degraded {
+    NoValue {
         /// The typed no-value failure.
         failure: FlowReturnFailure,
         /// The degradation the FAILED evaluation had already observed
@@ -500,7 +500,7 @@ impl FlowReturnPendingOutcome {
     pub(crate) fn degradation(&self) -> Option<crate::semantic_query::FlowReturnDegradation> {
         match self {
             Self::Complete(result) => result.degradation(),
-            Self::Degraded { degradation, .. } => *degradation,
+            Self::NoValue { degradation, .. } => *degradation,
         }
     }
 }

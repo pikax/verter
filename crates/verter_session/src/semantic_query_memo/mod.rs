@@ -58,6 +58,7 @@ mod reverse_index;
 mod scc_publish;
 #[cfg(test)]
 mod scc_publish_tests;
+mod unresolved_reach;
 
 pub(crate) use flow_return_memo::InlineFlowReturnFlight;
 pub(crate) use relation_memo::InlineRelationFlight;
@@ -347,6 +348,23 @@ pub struct SemanticGraphStore {
     /// already takes the entries lock, so the cost is in the noise and
     /// production cold-abort-sweep behaviour is unchanged.
     force_cold_abort_sweep: std::sync::atomic::AtomicBool,
+    /// Memoized `reaches an unresolved carrier` bit, per interned node id.
+    ///
+    /// The semantic graph is hash-consed and IMMUTABLE: a node's payload
+    /// never changes after intern, and its children are interned before
+    /// it. "This value reaches a carrier whose own resolution answered
+    /// nothing" is therefore a pure INDUCTIVE function of the node id —
+    /// computed once, from the children's bits, and true forever after.
+    ///
+    /// That is what makes the answer budget-free. A bounded walk that
+    /// reports "unresolved" on exhaustion is not a conservative
+    /// approximation of this function, it is a DIFFERENT function: a
+    /// 4,100-arm literal union with no miss in it is fully known, and
+    /// stamping it unresolved propagates a factually false permanent warm
+    /// refusal into every enclosing result. Memoizing removes the reason
+    /// the bound existed (re-walking the same structure per SCC fixpoint
+    /// iteration) instead of trading correctness for it.
+    unresolved_reach: Mutex<FxHashMap<SemanticNodeId, bool>>,
     /// Per-store test-only injection point for the
     /// [`Self::invalidate_all`] post-`entries`-clear tail. When a test
     /// arms it (via [`Self::test_invalidate_all_post_entries_clear_gate`])

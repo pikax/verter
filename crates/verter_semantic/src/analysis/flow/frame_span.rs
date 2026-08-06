@@ -26,6 +26,14 @@
 //! `frame_span.start < absolute.start` does not compile — it has no left-hand
 //! side to write.
 //!
+//! What that does NOT claim is that no mixed comparison is EXPRESSIBLE at all.
+//! `frame.to_absolute(0).start < absolute.start` compiles: `to_absolute` is
+//! the sanctioned crossing OUT, and a caller that passes a WRONG anchor (here,
+//! a fabricated `0`) gets a wrong absolute position and then a wrong
+//! comparison. The type wall makes the crossing EXPLICIT and anchor-bearing —
+//! it cannot make a caller pass the right anchor. Reviewing a `to_absolute`
+//! call means reviewing its anchor.
+//!
 //! That last sentence used to be false. `start()` / `end()` were `pub fn ->
 //! u32` with zero production callers, so the mixed comparison the module
 //! claimed was impossible was one accessor away, in a module whose entire

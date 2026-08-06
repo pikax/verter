@@ -712,7 +712,7 @@ impl ProjectSemanticDispatch<'_> {
                     super::flow_return::FunctionReturnNode::Flow(result) => result.return_type(),
                     super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
                     super::flow_return::FunctionReturnNode::DeclaredMiss
-                    | super::flow_return::FunctionReturnNode::Degraded(_) => {
+                    | super::flow_return::FunctionReturnNode::NoValue(_) => {
                         ctx.record_interior_failure();
                         self.miss_node(&scope)
                     }

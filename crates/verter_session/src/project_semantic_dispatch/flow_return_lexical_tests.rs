@@ -1889,18 +1889,35 @@ fn assert_clean_warm(host: &Arc<VerterHost>, name: &str, expected: TypeExpr) {
     );
 }
 
-/// Assert one function produces NO value (a typed `FlowReturnFailure`
-/// through `Error(Miss)`) and admits nothing.
+/// Assert one function FAILS CLOSED — it admits NOTHING, and it publishes
+/// no fabricated value.
+///
+/// Two shapes satisfy that, and the helper discriminates rather than
+/// accepting either loosely:
+///
+/// - a POSITIONAL non-modelling (a call form with no structural arm, a
+///   frame-local binding the flow content does not model) is a DEGRADED
+///   SUCCESS whose value REACHES the typed unresolved MARKER — at the
+///   root, or inside the structure the evaluation composed around it (a
+///   nested function value's signature keeps its shape and carries the
+///   marker at the unmodelled slot). The reach is asserted, so a leak to
+///   the module-scope twin — the exact defect these rows exist to catch —
+///   still fails, because a `DeclRef` reaches nothing;
+/// - a whole-frame NO-VALUE failure (an unmodelled control surface, a
+///   missing body, a torn view) is `Error(Miss)` with no value at all.
+///
+/// The composite-position TWIN of each positional class — the same
+/// unmodelled position INSIDE a structure with a modelled sibling — lives
+/// in `flow_return_positional_tests`, where the enclosing structure is
+/// asserted to SURVIVE with the marker in place.
 #[track_caller]
 fn assert_fails_closed(host: &Arc<VerterHost>, name: &str) {
     with_dispatch(host, |dispatch| {
         let key = r5_key(dispatch, name);
-        assert!(
-            matches!(
-                dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
-                QueryResult::Error(QueryError::Miss)
-            ),
-            "{name} must fail closed with a typed no-value failure"
+        assert_flow_fails_closed(
+            dispatch,
+            name,
+            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
         );
         assert_eq!(
             dispatch
@@ -1910,6 +1927,38 @@ fn assert_fails_closed(host: &Arc<VerterHost>, name: &str) {
             "{name} must admit nothing"
         );
     });
+}
+
+/// The shared fail-closed discriminator, over one dispatch outcome.
+#[track_caller]
+pub(crate) fn assert_flow_fails_closed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    name: &str,
+    outcome: QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
+) {
+    match outcome {
+        QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) => {
+            assert!(
+                dispatch
+                    .graph()
+                    .node_reaches_unresolved(result.return_type()),
+                "{name}: a positional non-modelling REACHES the typed unresolved MARKER — \
+                 at the root, or inside the structure the evaluation composed around it. \
+                 Never a fabricated value and never the module-scope twin (which is a \
+                 `DeclRef` and reaches nothing) — got {:?}",
+                dispatch.graph().node_data(result.return_type())
+            );
+            assert!(
+                result.degradation().is_some(),
+                "{name}: a marker value is a DEGRADED success, never clean"
+            );
+        }
+        QueryResult::Error(QueryError::Miss) => {}
+        other => panic!("{name} must fail closed; got {other:?}"),
+    }
 }
 
 /// Assert one function produces a DEGRADED SUCCESS (a usable value with
@@ -3345,12 +3394,10 @@ fn flow_return_nearest_declaration_wins_between_binders_and_frame_locals() {
                     member_path: Arc::from(vec![member_ordinal].into_boxed_slice()),
                 },
             );
-            assert!(
-                matches!(
-                    dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
-                    QueryResult::Error(QueryError::Miss)
-                ),
-                "ClassLocalShadow member {member_ordinal} must fail closed"
+            assert_flow_fails_closed(
+                dispatch,
+                &format!("ClassLocalShadow member {member_ordinal}"),
+                dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
             );
             assert_eq!(
                 dispatch
@@ -5229,47 +5276,50 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 }
 
 /// Where the leaf `any` still stands, and where the CALL-POSITION
-/// verdict now overrides it.
+/// verdict overrides it.
 ///
-/// `lower_leaf`'s carrier gate refuses a leaf answer that EMBEDS an
-/// unreduced `ReturnType<callee>` carrier, which is what stops a call in
-/// an array element or a spread from publishing the callee's raw return.
-/// It is easy to read that as "every leaf-answered form passes a gate
-/// that fails closed". It never was: the shallow pass's per-expression
-/// lowering ends in `_ => Ok(Primitive(Any))`, and the `is_any` arm runs
-/// BEFORE the carrier gate, so a form whose leaf answer is a bare `any`
-/// never reached the gate at all.
+/// `lower_leaf`'s gate refuses a leaf answer the shared shallow pass
+/// FABRICATED at a call position, in either shape the pass produces:
 ///
-/// That is now split in two, on a line drawn at the FORM:
+///   - the answer EMBEDS the pass's unreduced `ReturnType<callee>`
+///     carrier — a call in an array element or a spread;
+///   - the answer EMBEDS `any` AND the expression's value COMPOSES over a
+///     call the substrate has no structural arm for.
 ///
-///   - the form's OWN value IS a call's return (`new f()`, `` tag`…` ``,
-///     `f?.()`, `await f()`, `(k, f())`, `f()!`, an unrepresentable
-///     callee like `obj[k]()`) — the classifier calls it
-///     [`ValueDescent::UnmodeledCall`] and the content half fails
-///     closed, whatever the shallow pass answered;
-///   - the form's value is a JOIN (`k || f()`, `k ?? f()`) or a
-///     PROJECTION (`f().q`) over a call — the call contributes, but the
-///     form is not itself the call. Those still answer the shallow
-///     pass's `any`, and this test pins that so the boundary is recorded
-///     rather than implied.
+/// The second reading is what closed the residual class. It was
+/// previously drawn at "the form's OWN value IS a call's return"
+/// (`new f()`, `` tag`…` ``, `f?.()`, `await f()`, `(k, f())`, `f()!`),
+/// which left every JOIN (`k || f()`, `k ?? f()`), PROJECTION
+/// (`f().q`, `f()["q"]`, `f?.()?.q`), OPERATOR (`f() + "x"`) and
+/// ASSIGNMENT (`z = f()`) form publishing the pass's fabricated `any`,
+/// clean and warm.
 ///
-/// The remaining `any` rows are UNDER the checker's answer, never over
-/// it, and never a leaked callee binder. Their durable owners are the
-/// value-JOIN disposition of `LogicalExpression` (the same capability
-/// that would make it `ValueDescent::Branches`) and the member-read
-/// projection (`U6.VALUE_INFERENCE`) — not the call-position gate, which
-/// is why widening the gate to reach them would remove an answer without
-/// adding a capability.
+/// The old record justified those rows as "UNDER the checker's answer,
+/// never over it". That reasoning does not hold: `any` is
+/// BIDIRECTIONALLY assignable, so it is neither under nor over — it
+/// silences every check in both directions, and it is indistinguishable
+/// from an authored `any` at every downstream gate. Being under the
+/// checker was never the property that made a value safe to publish;
+/// being DISTINGUISHABLE from a known one is.
+///
+/// So every row below now fails closed, POSITIONALLY: the value is the
+/// typed unresolved marker and the result admits nothing. The
+/// composite-position twins — the same forms as ONE member of an object
+/// literal, with a modelled sibling that must SURVIVE — are in
+/// `flow_return_positional_tests`.
+///
+/// The `any` that still stands is the AUTHORED one: `x as any` answers
+/// `any` because the program says so, and no call composes into it.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`):
 ///
 /// ```text
 ///                    checker           published here
-/// tnAmbLogical       "TA" | true       any          ← join, not a call
-/// tnAmbNullish       "TA"              any          ← join, not a call
-/// tnGenericLogical   string | true     any          ← join, not a call
-/// tnGenericMember    string            any          ← member read
+/// tnAmbLogical       "TA" | true       fails closed ← composes a call
+/// tnAmbNullish       "TA"              fails closed ← composes a call
+/// tnGenericLogical   string | true     fails closed ← composes a call
+/// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              fails closed ← call position
 /// tnAmbNonNull       "TA"              fails closed ← call position
 /// tnAmbAs            "TA"              "TA"         ← exact
@@ -5279,24 +5329,27 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 ///                                                     interim
 /// ```
 ///
-/// Mutation recipe: making the shallow pass's fallback arm return
-/// anything other than `any` flips the four `any` rows; dispositioning
-/// `LogicalExpression` as `ValueDescent::Branches` flips `tnAmbLogical`
-/// to `UnrepresentableCallee` and `tnGenericLogical` to a union;
-/// dropping `SequenceExpression` / the type-carrier recursion from
-/// `value_is_unmodeled_call` flips the two fail-closed rows back to a
-/// warm `any`.
+/// Mutation recipe: dropping the `embeds_any && composes` half of
+/// `leaf_answer_is_fabricated_at_a_call_position` flips the four
+/// composing rows back to a warm `Primitive(Any)` with `degradation:
+/// None`; dropping `SequenceExpression` / the type-carrier recursion
+/// from `value_is_unmodeled_call` flips the two call-position rows the
+/// same way; making the gate unconditional on the form (dropping the
+/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to fail
+/// closed, which is the over-refusal direction.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
 
+    // The COMPOSING forms: a join / projection over a call the substrate
+    // has no arm for. The pass fabricated an `any`; it is not published.
     for name in [
         "tnAmbLogical",
         "tnAmbNullish",
         "tnGenericLogical",
         "tnGenericMember",
     ] {
-        assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::Any));
+        assert_fails_closed(&host, name);
     }
 
     // The CALL POSITIONS: the form's own value is the call's return, and
@@ -5465,10 +5518,13 @@ fn accessor_pair_read_publishes_the_getters_return() {
 /// of the `undefined` primitive.
 ///
 /// `k ? undefined : 1` publishes
-/// `Union([1, Unknown { raw: "semanticMiss" }])`, cleanly and warm: the
-/// `undefined` identifier resolves to nothing the value pass models, so
-/// the leaf lowering answers a miss carrier rather than
-/// `PrimitiveKind::Undefined`.
+/// `Union([1, Unknown { raw: "semanticMiss" }])`: the `undefined`
+/// identifier resolves to nothing the value pass models, so the leaf
+/// lowering answers a miss carrier rather than
+/// `PrimitiveKind::Undefined`. The result is a DEGRADED success — the
+/// value reaches an unresolved carrier, so nothing warms — which is why
+/// the row now fails at the "must evaluate clean" gate before it can
+/// reach the arm comparison it was written to make.
 ///
 /// OWNER: `U6.VALUE_INFERENCE` — the `undefined`-identifier gap in the
 /// shared shallow value pass. Pre-existing; it is newly REACHABLE through
@@ -5481,15 +5537,20 @@ fn accessor_pair_read_publishes_the_getters_return() {
 /// Verbatim failure, un-ignored on this tree:
 ///
 /// ```text
-/// assertion `left == right` failed: the `undefined` identifier must publish the undefined primitive
-///   left: ["Opaque", "Other(\"Literal(Number(1.0))\")"]
-///  right: ["Other(\"Literal(Number(1.0))\")", "Primitive(Undefined)"]
+/// assertion `left == right` failed: undefTernary must evaluate clean
+///   left: Some(UnresolvedValue)
+///  right: None
 /// ```
 ///
-/// (`Opaque` is `node_shape`'s spelling of `SemanticNodeData::Opaque(
-/// QueryError::Miss)` — the same node the PROJECTED surface renders as
-/// `Unknown { raw: "semanticMiss" }`. Arms are compared sorted, because
-/// the union interner orders by node id.)
+/// (The row dies at `r5_node`'s clean-and-warm gate, BEFORE the arm
+/// comparison: a value that reaches a miss carrier is a degraded success.
+/// The arm comparison it would then make is
+/// `["Opaque", "Other(\"Literal(Number(1.0))\")"]` against
+/// `["Other(\"Literal(Number(1.0))\")", "Primitive(Undefined)"]`, sorted,
+/// because the union interner orders by node id. `Opaque` is
+/// `node_shape`'s spelling of `SemanticNodeData::Opaque(QueryError::Miss)`
+/// — the same node the PROJECTED surface renders as
+/// `Unknown { raw: "semanticMiss" }`.)
 #[ignore = "owned by U6.VALUE_INFERENCE: the `undefined` identifier must lower to \
             PrimitiveKind::Undefined in the shared shallow value pass instead of a \
             semantic-miss carrier"]
@@ -5523,22 +5584,27 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
     );
 }
 
-/// A call in a LOGICAL operand publishes `any` because the shallow pass's
-/// per-expression lowering ends in `_ => Ok(Primitive(Any))`.
+/// A call in a LOGICAL operand FAILS CLOSED where it must publish the
+/// operand union.
 ///
-/// `k || tnAmb("a")` answers `Primitive(Any)`, cleanly and warm. The
-/// flow rail's call-carrier gate never sees it: `lower_leaf`'s
-/// `LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any` arm runs
-/// FIRST. So the form is neither call-exact nor refused — it is the
-/// shallow pass's fallback, surfaced.
+/// `k || tnAmb("a")` used to answer `Primitive(Any)` cleanly and warm —
+/// the shallow pass's per-expression fallback (`_ => Ok(Primitive(Any))`)
+/// surfaced as a value. It no longer publishes: the leaf gate refuses an
+/// answer that embeds `any` when the expression's value COMPOSES over a
+/// call with no structural arm, so the position carries the typed
+/// unresolved marker and the result is a degraded success admitting
+/// nothing.
+///
+/// That closes the fabricated-value half. The CAPABILITY half is still
+/// open, and is what this row pins.
 ///
 /// OWNER: the SHALLOW PASS (`verter_semantic::analysis::type_eval_build`
 /// per-expression lowering) under `U6.VALUE_INFERENCE` — not the flow
 /// rail, which owns only what happens to an answer the shallow pass
 /// produced. The green counterpart
 /// (`flow_return_leaf_answered_call_forms_publish_any_not_a_carrier`)
-/// pins the CURRENT `any` behaviour so the interim is recorded; this row
-/// pins the answer it must eventually give.
+/// pins the fail-closed disposition; this row pins the answer it must
+/// eventually give.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`): `tnAmbLogical(k)` is `"TA" | true`. (The `"TA"` half
@@ -5548,13 +5614,13 @@ fn undefined_identifier_publishes_the_undefined_primitive() {
 /// Verbatim failure, un-ignored on this tree:
 ///
 /// ```text
-/// assertion `left == right` failed: tnAmbLogical return type
-///   left: Primitive(Any)
-///  right: Union([Literal(String("TA")), Literal(Boolean(true))])
+/// assertion `left == right` failed: tnAmbLogical must evaluate clean
+///   left: Some(UnmodeledPosition)
+///  right: None
 /// ```
 #[ignore = "owned by U6.VALUE_INFERENCE (the shallow pass's `_ => Ok(Primitive(Any))` \
             per-expression fallback) plus U6.CALL_RESOLVE for the overload half: a call in a \
-            logical operand must publish the operand union, not the shallow pass's `any`"]
+            logical operand must publish the operand union, not the typed unresolved marker"]
 #[test]
 fn call_in_a_logical_operand_publishes_the_operand_union() {
     let host = make_r5_host();

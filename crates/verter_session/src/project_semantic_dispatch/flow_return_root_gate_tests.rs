@@ -294,18 +294,19 @@ fn assert_clean_warm(host: &Arc<VerterHost>, name: &str, expected: TypeExpr) {
     });
 }
 
-/// Assert one function produces NO value (a typed `FlowReturnFailure`
-/// through `Error(Miss)`) and admits nothing.
+/// Assert one function FAILS CLOSED — it admits NOTHING and publishes no
+/// fabricated value. See
+/// [`super::flow_return_lexical_tests::assert_flow_fails_closed`] for the
+/// two shapes that satisfy it and why the marker arm is still a
+/// discriminating assertion.
 #[track_caller]
 fn assert_fails_closed(host: &Arc<VerterHost>, name: &str) {
     with_dispatch(host, |dispatch| {
         let key = r6_key(dispatch, name);
-        assert!(
-            matches!(
-                dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
-                QueryResult::Error(QueryError::Miss)
-            ),
-            "{name} must fail closed with a typed no-value failure"
+        super::flow_return_lexical_tests::assert_flow_fails_closed(
+            dispatch,
+            name,
+            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
         );
         assert_eq!(
             dispatch

@@ -31,6 +31,12 @@
 //! its doc comment. They are not aspirational stubs — every body is
 //! discriminating, and every one was run un-ignored to confirm it fails
 //! for the documented reason.
+//!
+//! The recorded verbatim failure is a MEASUREMENT, so it goes stale when
+//! the substrate below the canary changes even though the canary's own
+//! claim does not. Whenever a change alters what these rows observe, the
+//! whole parked set is re-run un-ignored and every record that moved is
+//! re-captured — the header claim is only true if the records are.
 
 use std::sync::Arc;
 
@@ -717,7 +723,21 @@ fn assert_degraded(
 /// Assert one function produces NO value and admits nothing.
 #[track_caller]
 fn assert_fails_closed(host: &Arc<VerterHost>, canonical: &str, name: &str) {
-    assert_eq!(eval(host, canonical, name), Outcome::Miss, "{name}");
+    with_dispatch(host, |dispatch| {
+        let key = key_of(dispatch, canonical, name);
+        super::flow_return_lexical_tests::assert_flow_fails_closed(
+            dispatch,
+            name,
+            dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))),
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "{name} must admit nothing"
+        );
+    });
 }
 
 fn number() -> TypeExpr {
@@ -1601,9 +1621,13 @@ fn meta_property_new_target_return_is_not_any() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Miss
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
-/// ```
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: the flow evaluator's call carrier — a `Super` callee
 /// root has no arm, so the base class's member is never reached. The
@@ -1843,7 +1867,7 @@ fn generic_overload_group_callee_degrades_as_unrepresentable() {
 ///
 /// ```text
 /// assertion `left == right` failed: callNew
-///   left: Miss
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
 /// ```
 ///
@@ -1869,8 +1893,12 @@ fn construct_expression_return_is_the_instance_type() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// callCtorSigNew must produce a value, got Miss
-/// ```
+/// expected an object answer, got Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: same as the `new` row above — the construct-signature
 /// group is never consulted. It now FAILS CLOSED rather than publishing
@@ -1891,8 +1919,14 @@ fn construct_signature_call_return_is_the_signature_instance_type() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// callOptional must produce a value, got Miss
-/// ```
+/// assertion `left == right` failed
+///   left: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+///  right: Union([Primitive(Number), Primitive(Undefined)])
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: the OPTIONAL-CALL capability — no arm routes `f?.()`
 /// through the call carrier, so the `| undefined` arm is never
@@ -1919,9 +1953,13 @@ fn optional_chained_call_return_unions_undefined() {
 ///
 /// ```text
 /// assertion `left == right` failed: callTagged
-///   left: Miss
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
-/// ```
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: the TAGGED-TEMPLATE call capability — the tag
 /// function's signature is never consulted. The admission half is
@@ -2002,8 +2040,14 @@ fn async_generator_return_is_wrapped_in_async_generator() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// callAwait must produce a value, got Miss
-/// ```
+/// assertion `left == right` failed
+///   left: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+///  right: Ref { name: "Promise", type_arguments: [Primitive(Number)] }
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: TWO independent capability gaps compose here — the
 /// awaited call is never resolved and never `Promise`-unwrapped, and the
@@ -2283,9 +2327,13 @@ fn member_call_through_the_omit_utility_resolves_path_precisely() {
 ///
 /// ```text
 /// assertion `left == right` failed: tlCallSymKeyed
-///   left: Miss
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
-/// ```
+/// ```///
+/// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
+/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// result is a degraded success and nothing warms — so the row observes a
+/// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
 /// Owning layer: the flow evaluator's computed-member arm — a
 /// `unique symbol` key is a `ComputedMemberExpression`, so the callee
@@ -3019,7 +3067,7 @@ fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
 /// expression FORM, not on whether the shallow pass happened to mint a
 /// call-return carrier.
 ///
-/// `UnmodeledCallPosition` promises that a call the content half could
+/// The call-position gate promises that a call the content half could
 /// not route through its call carrier fails closed. The gate that
 /// delivered it (`embeds_call_return_carrier`) reads the leaf ANSWER, so
 /// it only ever fired when the shared shallow pass produced an unreduced

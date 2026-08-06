@@ -2039,6 +2039,218 @@ import { obj } from './obj'
 /// replay warm-hits — RED. Post-fix the carrier merges the fallthrough
 /// completeness into the gate, refusing admission — GREEN. The runtime node
 /// cache and the legacy mirror also stay empty for the partial.
+/// PUBLIC BOUNDARY — a props type derived from a helper whose return has
+/// ONE unmodelled member publishes the MODELLED members, marks the
+/// unmodelled one, reports partial, and warms NOTHING.
+///
+/// `defineProps<ReturnType<typeof makeProps>>()` over
+/// `{ label: "x", made: new Box() }`. The substrate cannot type
+/// `new Box()` — that is `U6.CALL_RESOLVE` — but `label` is fully known,
+/// and a props surface is a COMPOSITE: routing one unmodelled member to a
+/// whole-frame failure published `[]`, complete and warm, where the
+/// checker publishes `{ label: string; made: Box }`. A wrong value at a
+/// public boundary, entering `ComponentMetaResultDb`.
+///
+/// Four independent assertions, because three of them pass on the wrong
+/// implementation:
+///
+///  1. `label` IS published (fails on the collapse);
+///  2. `made` IS published and is NOT a usable type — it is the typed
+///     unresolved marker, never a fabricated `any` (a fabricated `any` is
+///     indistinguishable from an authored one at every downstream gate,
+///     so this is what discriminates "marked" from "silently guessed");
+///  3. the result is reported PARTIAL;
+///  4. nothing warms `ComponentMetaResultDb` — a replay is cold.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): `ReturnType<typeof makeProps>` is
+/// `{ label: string; made: Box }`.
+///
+/// Mutation recipe: restoring the whole-frame `Err` for a positional
+/// non-modelling drops BOTH props and assertion 1 fails (verbatim: "the
+/// modelled sibling `label` MUST be published … got []" — which is B-F1
+/// reproduced at the boundary); publishing a fabricated `any` for `made`
+/// leaves 1/3/4 green and fails 2.
+///
+/// Assertions 3 and 4 are NOT gated by the consumer-entry cache-read fold
+/// on this fixture — the unresolved marker suppresses admission through
+/// the `FlowReturn` query's own `cache_suppress` regardless. The fold's
+/// discriminator is
+/// [`a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result`],
+/// where the degraded value carries no marker at all.
+/// PUBLIC BOUNDARY — a DEGRADED SUCCESS whose value is fully usable still
+/// gates the ENCLOSING result: partial, and nothing warms.
+///
+/// This is the arm the marker cannot cover. `makeProps` assigns to its
+/// own parameter before returning, so the evaluation carries the typed
+/// `UnappliedWriteEffect` degradation — but its VALUE is a perfectly
+/// ordinary `{ label: string }` with no miss carrier anywhere in it. So
+/// every downstream "is this value known" test passes, the props surface
+/// publishes `label: string`, and the ONLY thing that says the answer is
+/// not complete is the degradation channel itself.
+///
+/// The sealed consumer entry
+/// (`ProjectSemanticDispatch::execute_function_return_source`) is what
+/// carries that fact outward, by folding the cache-read rails. Without
+/// the fold the enclosing composition reports COMPLETE and WARMS around a
+/// degraded interior — which is the defect the fold was landed for, and
+/// which nothing in the suite discriminated until this row.
+///
+/// Mutation recipe: emptying the `consumer_fold` match arms at the sealed
+/// entry leaves the whole rest of the suite green and fails exactly this
+/// test — first on `synthesis_should_suppress`, and on the warm replay if
+/// that assertion is removed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/C2.vue",
+            r#"<script setup lang="ts">
+function makeProps(seed: string) {
+  seed = "y"
+  return { label: seed }
+}
+defineProps<ReturnType<typeof makeProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let canonical = "/src/C2.vue";
+    let meta = get_meta(&project, canonical);
+
+    // The value is USABLE and fully known: `label` publishes normally and
+    // carries NO marker. That is what makes this row discriminating — the
+    // degradation is the only signal there is.
+    let label = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "label")
+        .expect("the `label` prop");
+    let label_type = demand_published_type(host, canonical, label.type_source.present(), "label");
+    assert!(
+        matches!(&label_type, TypeExpr::Primitive(PrimitiveName::String)),
+        "the degraded evaluation's VALUE is ordinary and fully known; got {label_type:?}"
+    );
+
+    // The enclosing result is nevertheless PARTIAL, and warms nothing.
+    let (_, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a degraded flow-return interior makes the ENCLOSING result partial — the sealed \
+         consumer entry's cache-read fold is the only thing that carries that fact outward"
+    );
+
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, canonical);
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a result composed around a degraded interior MUST NOT warm \
+         `ComponentMetaResultDb` (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/C1.vue",
+            r#"<script setup lang="ts">
+class Box { readonly tag = "box" }
+function makeProps() {
+  return { label: "x", made: new Box() }
+}
+defineProps<ReturnType<typeof makeProps>>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let host = project.host();
+    let canonical = "/src/C1.vue";
+    let meta = get_meta(&project, canonical);
+
+    let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    // 1. The MODELLED member survives.
+    assert!(
+        names.contains(&"label"),
+        "the modelled sibling `label` MUST be published — one unmodelled member \
+         never discards the composite; got {names:?}"
+    );
+    // 2. The unmodelled member is present and MARKED, never a fabricated
+    //    `any` and never a silently dropped key.
+    assert!(
+        names.contains(&"made"),
+        "the unmodelled member `made` MUST be published as a marked slot, \
+         never silently dropped; got {names:?}"
+    );
+    let made = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "made")
+        .expect("the `made` prop");
+    // The published slot is a TYPED FAILURE, not a value: the boundary
+    // says "this member's type is not known" rather than handing over a
+    // fabricated `any`, which is indistinguishable from an authored one at
+    // every downstream gate.
+    assert!(
+        made.type_source.present().is_none(),
+        "`made` must NOT publish a usable type source — it carries the typed \
+         unresolved marker; got {:?}",
+        made.type_source
+    );
+    assert_eq!(
+        made.raw_type.as_deref(),
+        Some("semanticMiss"),
+        "`made`'s display passthrough names the unresolved marker, never `any`"
+    );
+
+    // 3. The result is reported PARTIAL: the resolve suppresses synthesis,
+    //    which is the boundary's "this surface is not a complete answer"
+    //    channel.
+    let (_, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("the resolve must still return metadata");
+    assert!(
+        resolved.synthesis_should_suppress,
+        "a props surface carrying an unmodelled member is reported PARTIAL"
+    );
+
+    // 4. Nothing warms: a replay is COLD.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, canonical);
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a props surface carrying an unmodelled member MUST NOT warm \
+         `ComponentMetaResultDb` (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {

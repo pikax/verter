@@ -48,13 +48,65 @@ pub(crate) enum FunctionReturnNode {
     /// A DECLARED locator whose raise missed — the enclosing composition
     /// records the interior failure at its own position.
     DeclaredMiss,
-    /// A degraded body-derived evaluation: the typed `FlowReturnFailure`
-    /// through `ReturnOnly` (never admitted) — the enclosing composition
-    /// marks partial / fails closed.
-    Degraded(FlowReturnFailure),
+    /// A body-derived evaluation with NO VALUE AT ALL: the typed
+    /// `FlowReturnFailure` through `ReturnOnly` (never admitted) — the
+    /// enclosing composition marks partial / fails closed.
+    ///
+    /// NOT the arm a positionally-unmodelled sub-expression takes: that
+    /// one is a degraded SUCCESS through [`Self::Flow`], carrying the
+    /// typed unresolved marker at the position and every modelled sibling
+    /// intact.
+    NoValue(FlowReturnFailure),
     /// No recoverable return carrier (a bodiless overload or a synthesized
     /// signature) — the consumer's absent-position arm.
     Absent,
+}
+
+/// What one [`FunctionReturnNode`] does to the ENCLOSING composition's
+/// admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsumerFold {
+    /// A complete answer: nothing folds.
+    Clean,
+    /// The consumer receives NO VALUE and has its own typed arm for that
+    /// (a recorded interior failure, a typed declaration failure, a
+    /// `miss_node`). The enclosing build must not WARM — a result composed
+    /// around a fabricated miss is not cacheable — but the REQUEST is not
+    /// marked partial: the consumer decides what a contained failure means
+    /// for its own surface, and pre-empting it here discards the whole
+    /// surface for a fact about one member. That is the same collapse the
+    /// positional rule exists to prevent, one level up.
+    NonCacheable,
+    /// The consumer receives a USABLE VALUE with an opaque interior. It
+    /// cannot see the interior and will compose the value into its own
+    /// result, so BOTH rails fold: the request partial sticky (gating
+    /// component-meta / shape / materialize warm) and the build-local
+    /// taint.
+    Partial,
+}
+
+impl FunctionReturnNode {
+    /// How this outcome folds into the enclosing composition's admission.
+    ///
+    /// The exhaustive match is the point: a new arm does not compile until
+    /// it has said what it does to the enclosing result, which is what one
+    /// classification at the ONE sealed consumer entry buys over a
+    /// condition re-spelled at each call site.
+    pub(crate) fn consumer_fold(&self) -> ConsumerFold {
+        match self {
+            // A declared locator that raised, and a body-derived result
+            // with NO degradation, are the two complete answers. An ABSENT
+            // return carrier is a FACT about the signature (a bodiless
+            // overload, a synthesized signature), not a failure to compute
+            // one.
+            Self::Declared(_) | Self::Absent => ConsumerFold::Clean,
+            Self::Flow(result) => match result.degradation() {
+                None => ConsumerFold::Clean,
+                Some(_) => ConsumerFold::Partial,
+            },
+            Self::DeclaredMiss | Self::NoValue(_) => ConsumerFold::NonCacheable,
+        }
+    }
 }
 
 /// The popped root's close outcome.
@@ -70,7 +122,7 @@ enum FlowRootClose {
         crate::semantic_query::demand::MaterializedSet,
     ),
     /// Typed NO-VALUE failure — `ReturnOnly`, never admitted.
-    Degraded(FlowReturnFailure),
+    NoValue(FlowReturnFailure),
 }
 
 /// One flow frame's evaluation result, before the frame closes.
@@ -241,35 +293,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                match self.execute_flow_return(self.flow_return_key_for(identity)) {
-                    FlowReturnStep::Complete(result) => {
-                        // A DEGRADED SUCCESS stays usable — the consumer
-                        // keeps the value (interning a miss would be the
-                        // opposite collapse) — but the degradation MUST
-                        // fold into BOTH enclosing channels HERE, at the
-                        // ONE sealed consumer entry, so no composition can
-                        // launder a degraded interior into a complete,
-                        // warm-admitted enclosing result (C1/SCC-2:
-                        // degraded success defaults ReturnOnly; warm needs
-                        // an explicit admission row, and none exists):
-                        //   - the request partial sticky
-                        //     (`mark_request_result_partial`) gates
-                        //     component-meta / shape / materialize warm;
-                        //   - the build-local taint (`cache_suppress` +
-                        //     `result_is_partial`) marks the enclosing
-                        //     composition partial / ReturnOnly.
-                        if result.degradation().is_some() {
-                            self.fold_cache_read_rails(true, true);
-                        }
-                        FunctionReturnNode::Flow(result)
-                    }
-                    FlowReturnStep::Degraded(failure) => FunctionReturnNode::Degraded(failure),
+                let node = match self.execute_flow_return(self.flow_return_key_for(identity)) {
+                    // A DEGRADED SUCCESS stays usable — the consumer keeps
+                    // the value (interning a miss would be the opposite
+                    // collapse).
+                    FlowReturnStep::Complete(result) => FunctionReturnNode::Flow(result),
+                    FlowReturnStep::NoValue(failure) => FunctionReturnNode::NoValue(failure),
                     // A hold surfacing at a consumer is a demand reentering
                     // its own in-flight component: undecided here, ReturnOnly.
                     FlowReturnStep::Hold(_) => {
-                        FunctionReturnNode::Degraded(FlowReturnFailure::Unresolved)
+                        FunctionReturnNode::NoValue(FlowReturnFailure::Unresolved)
                     }
+                };
+                // THE cache-read fold — ONE call site, EVERY non-clean arm,
+                // no `degradation.is_some()` condition anywhere.
+                //
+                // `build_flow_return` sets `cache_suppress` on the
+                // `FlowReturn` query's OWN output. That says nothing about
+                // the ENCLOSING composition, and the four consumers each
+                // turn a no-value failure into `Opaque(Miss)` / `miss_node`
+                // — two of them with no taint at all. So a failure was
+                // laundered into a warm-admitted enclosing result exactly
+                // as a degraded success was before the success arm was
+                // folded; the asymmetry was never a decision.
+                //
+                // Which RAILS fold is a per-arm FACT, not a per-call-site
+                // condition, so it is decided once by the exhaustive
+                // [`FunctionReturnNode::consumer_fold`] classification.
+                match node.consumer_fold() {
+                    ConsumerFold::Clean => {}
+                    ConsumerFold::NonCacheable => self.fold_cache_read_rails(false, true),
+                    ConsumerFold::Partial => self.fold_cache_read_rails(true, true),
                 }
+                node
             }
             verter_type_expr::facts::FunctionReturnSource::Absent => FunctionReturnNode::Absent,
         }
@@ -547,7 +603,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // (loud, never a fallback, never admitted); the TYPED failure
             // rides the transaction to this caller (`Unresolved` only when
             // the cold build never ran — a torn or refused read).
-            _ => FlowReturnStep::Degraded(
+            _ => FlowReturnStep::NoValue(
                 self.dispatch_txn
                     .borrow_mut()
                     .flow
@@ -636,7 +692,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// machinery root onto the root's carrier.
     fn execute_flow_return_inline(&self, key: FlowReturnKey) -> FlowReturnStep {
         if self.charge_connected_work().is_err() {
-            return FlowReturnStep::Degraded(FlowReturnFailure::Budget(
+            return FlowReturnStep::NoValue(FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             ));
         }
@@ -682,7 +738,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 output
             }
-            FlowRootClose::Degraded(failure) => {
+            FlowRootClose::NoValue(failure) => {
                 let mut output: QueryBuildOutput<SemanticQueryValue> =
                     (QueryResult::Error(QueryError::Miss), fence).into();
                 // ReturnOnly: the failure flows to the caller through the
@@ -726,7 +782,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             FlowFramePop::Provisional(step) => step,
             FlowFramePop::RootClose(close) => match close {
                 FlowRootClose::Complete(result, _, _) => FlowReturnStep::Complete(result),
-                FlowRootClose::Degraded(failure) => FlowReturnStep::Degraded(failure),
+                FlowRootClose::NoValue(failure) => FlowReturnStep::NoValue(failure),
             },
         }
     }
@@ -778,7 +834,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // outcome it replaces may already have observed a degradation —
         // carry it, so the budget failure does not launder it away.
         let outcome = if budget_cap.is_some() {
-            FlowReturnPendingOutcome::Degraded {
+            FlowReturnPendingOutcome::NoValue {
                 failure: FlowReturnFailure::Budget(
                     verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
                 ),
@@ -799,8 +855,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 FlowReturnPendingOutcome::Complete(result) => {
                     FlowReturnStep::Complete(result.clone())
                 }
-                FlowReturnPendingOutcome::Degraded { failure, .. } => {
-                    FlowReturnStep::Degraded(*failure)
+                FlowReturnPendingOutcome::NoValue { failure, .. } => {
+                    FlowReturnStep::NoValue(*failure)
                 }
             };
             let mut txn = self.dispatch_txn.borrow_mut();
@@ -895,10 +951,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Atomic admission: a degraded flow outcome anywhere in the
         // component (the root included) poisons the WHOLE tagged
         // component — nothing publishes, every flight aborts.
-        let component_degraded = matches!(outcome, FlowReturnPendingOutcome::Degraded { .. })
+        let component_degraded = matches!(outcome, FlowReturnPendingOutcome::NoValue { .. })
             || flow_members
                 .iter()
-                .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::Degraded { .. }))
+                .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::NoValue { .. }))
             || relation_members.iter().any(|member| {
                 matches!(
                     member.verdict,
@@ -912,8 +968,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
-            return FlowFramePop::RootClose(FlowRootClose::Degraded(match outcome {
-                FlowReturnPendingOutcome::Degraded { failure, .. } => failure,
+            return FlowFramePop::RootClose(FlowRootClose::NoValue(match outcome {
+                FlowReturnPendingOutcome::NoValue { failure, .. } => failure,
                 _ => {
                     if budget_cap.is_some() {
                         FlowReturnFailure::Budget(
@@ -965,7 +1021,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .is_err()
         {
             self.flow_return_abort_inline_flight(inline_flight.as_ref());
-            return FlowFramePop::RootClose(FlowRootClose::Degraded(FlowReturnFailure::Unresolved));
+            return FlowFramePop::RootClose(FlowRootClose::NoValue(FlowReturnFailure::Unresolved));
         }
         // The root's own outcome: the machinery root publishes through
         // the family singleflight; an inline root batch-publishes with
@@ -1000,7 +1056,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
                 }
             }
-            FlowReturnPendingOutcome::Degraded { .. } => {
+            FlowReturnPendingOutcome::NoValue { .. } => {
                 unreachable!("a degraded root poisons the component above")
             }
         }
@@ -1033,7 +1089,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // degradation is NOT lost with the seed — it is read back
                 // from the entry's own outcome below, so a member the
                 // discharge resurrects carries it into the fixed point.
-                FlowReturnPendingOutcome::Degraded { .. } => None,
+                FlowReturnPendingOutcome::NoValue { .. } => None,
             })
             .collect();
         loop {
@@ -1138,7 +1194,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if !matches!(
                 entry.outcome,
                 FlowReturnPendingOutcome::Complete(_)
-                    | FlowReturnPendingOutcome::Degraded {
+                    | FlowReturnPendingOutcome::NoValue {
                         failure: FlowReturnFailure::EmptyCycle,
                         ..
                     }
@@ -1319,7 +1375,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             |failure: FlowReturnFailure,
              self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>| {
                 FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded {
+                    outcome: FlowReturnPendingOutcome::NoValue {
                         failure,
                         degradation: None,
                     },
@@ -1584,17 +1640,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // nested signature reached through the same slice content; the
         // PARAMETER-LIST half fires in either arm, because a signature's
         // own parameters are not body-locals.
-        if ir
+        //
+        // The verdict is POSITIONAL, per signature slot: a shadowed
+        // parameter annotation contributes the typed unresolved MARKER at
+        // ITS ordinal and degrades the result, while every other parameter
+        // — and the whole body that never reads the shadowed one — keeps
+        // its modelled value. Collapsing the frame here discarded the
+        // modelled positions for a fact about one of them.
+        let mut signature_position_unmodeled = ir
             .type_parameters
             .iter()
             .flat_map(|tp| tp.constraint.iter().chain(tp.default.iter()))
-            .chain(ir.params.iter().map(|param| &param.ty))
-            .any(|gated| signature_answer_is_frame_shadowed(self, &binder_env, gated))
-        {
-            return degraded(FlowReturnFailure::UnmodeledBinding, self_roots);
-        }
+            .any(|gated| signature_answer_is_frame_shadowed(self, &binder_env, gated));
         let mut params: Vec<SemanticNodeId> = Vec::with_capacity(ir.params.len());
         for param in ir.params.iter() {
+            if signature_answer_is_frame_shadowed(self, &binder_env, &param.ty) {
+                signature_position_unmodeled = true;
+                params.push(super::flow_return_callee::unmodeled_position_marker(self));
+                continue;
+            }
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
             let node = self.shallow_lower_type_expr_with_context(
                 param.ty.ty(),
@@ -1624,7 +1688,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             member_filter,
             holds: Vec::new(),
             degradation: unapplied_write_effect
-                .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+                .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect)
+                .or_else(|| {
+                    signature_position_unmodeled
+                        .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
+                }),
             degraded_locals: rustc_hash::FxHashSet::default(),
             var_degraded_locals: rustc_hash::FxHashSet::default(),
             var_conditional_locals: rustc_hash::FxHashSet::default(),
@@ -1651,7 +1719,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Ok(contributors) => contributors,
             Err(failure) => {
                 return FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded {
+                    outcome: FlowReturnPendingOutcome::NoValue {
                         failure,
                         degradation,
                     },
@@ -1672,7 +1740,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Ok(joined) => joined,
             Err(failure) => {
                 return FlowEvaluationOutcome {
-                    outcome: FlowReturnPendingOutcome::Degraded {
+                    outcome: FlowReturnPendingOutcome::NoValue {
                         failure,
                         degradation,
                     },
@@ -2042,6 +2110,32 @@ struct FlowContribution {
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Record a typed degradation (first-observed reason wins,
     /// deterministic in source order).
+    /// Contribute the typed unresolved MARKER at a position whose
+    /// resolver is a named DOWNSTREAM block, and record the positional
+    /// degradation.
+    ///
+    /// THE disposition of positional non-modelling. The class is stated
+    /// over the CLASS, not over calls: an unmodelled CALL form and a
+    /// frame-local binding the flow content does not model take the SAME
+    /// arm, because the fact about them is the same fact — this POSITION
+    /// has no modelled value, and the enclosing structure still does.
+    ///
+    /// A fabricated `any` is forbidden here (indistinguishable from an
+    /// authored one at every downstream gate) and so is discarding the
+    /// composite (an object literal with one unmodelled member HAS a
+    /// value). The result is a DEGRADED SUCCESS: usable, `ReturnOnly`,
+    /// never warm.
+    fn unmodeled_position(&mut self) -> SemanticNodeId {
+        self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition);
+        super::flow_return_callee::unmodeled_position_marker(self.dispatch)
+    }
+
+    /// The [`CallValue`] twin of [`Self::unmodeled_position`].
+    fn unmodeled_call_position(&mut self) -> CallValue {
+        self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition);
+        CallValue::unmodeled_position(self.dispatch)
+    }
+
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
         self.degradation.get_or_insert(degradation);
     }
@@ -2454,10 +2548,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             .iter()
                             .any(|name| self.owner_scope_answers_name(name))
                         {
-                            return (
-                                Err(FlowReturnFailure::UnmodeledBinding),
-                                region.can_fall_through,
-                            );
+                            // POSITIONAL: the DECLARED type of this one
+                            // binding has no modelled value. The binding
+                            // holds the marker, every sibling statement
+                            // keeps evaluating, and a body that never
+                            // reads this binding still publishes its
+                            // return (degraded, never warm).
+                            let marker = self.unmodeled_position();
+                            self.bind_local(name, *kind, marker, false, false);
+                            continue;
                         }
                         let declared_node = self.lower_body_type(declared.ty());
                         let arms = self.dispatch.union_arms_of(declared_node);
@@ -2591,18 +2690,51 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // annotations, its type-parameter constraints / defaults, and
         // its parameter defaults were all gated against that frame; an
         // owner-scope answer for one of those names is the WRONG binding.
-        if type_parameters
-            .iter()
-            .flat_map(|tp| tp.constraint.iter().chain(tp.default.iter()))
-            .chain(nested_params.iter().map(|param| &param.ty))
-            .any(|gated| signature_answer_is_frame_shadowed(self.dispatch, &binder_env, gated))
-        {
-            return Err(FlowReturnFailure::UnmodeledBinding);
+        //
+        // POSITIONAL, per signature slot — same rule as the root
+        // entrance: a shadowed slot carries the marker at ITS ordinal and
+        // degrades the enclosing result; every other slot of the same
+        // signature keeps its modelled value.
+        let mut type_param_decls = binder_env.type_param_decls.clone();
+        for (ordinal, clause_param) in type_parameters.iter().enumerate() {
+            if !clause_param
+                .constraint
+                .iter()
+                .chain(clause_param.default.iter())
+                .any(|gated| signature_answer_is_frame_shadowed(self.dispatch, &binder_env, gated))
+            {
+                continue;
+            }
+            // The shadowed CONSTRAINT / DEFAULT slot carries the marker.
+            // Recording the degradation alone would leave the WRONG
+            // (owner-scope) resolution sitting in the published clause —
+            // the leak these rows exist to catch, now merely annotated.
+            let marker = self.unmodeled_position();
+            if let Some(decl) = type_param_decls.get_mut(ordinal) {
+                if decl.constraint.is_some() {
+                    decl.constraint = Some(marker);
+                }
+                if decl.default.is_some() {
+                    decl.default = Some(marker);
+                }
+            }
         }
         let mut params: Vec<SemanticNodeId> = Vec::with_capacity(nested_params.len());
         let mut signature_params: Vec<crate::semantic_query::FunctionParam> =
             Vec::with_capacity(nested_params.len());
         for param in nested_params.iter() {
+            if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, &param.ty) {
+                let node = self.unmodeled_position();
+                params.push(node);
+                signature_params.push(crate::semantic_query::FunctionParam {
+                    name: param.name.clone(),
+                    ty: node,
+                    optional: param.optional,
+                    rest: param.rest,
+                    span: None,
+                });
+                continue;
+            }
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
             let node = self.dispatch.shallow_lower_type_expr_with_context(
                 param.ty.ty(),
@@ -2688,7 +2820,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             kind: crate::semantic_query::SignatureKind::Call,
             params: Arc::from(signature_params.into_boxed_slice()),
             return_type: result.return_type(),
-            type_parameters: Arc::from(binder_env.type_param_decls.into_boxed_slice()),
+            type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
         }))
@@ -2865,7 +2997,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .iter()
                     .any(|name| self.owner_scope_answers_name(name))
                 {
-                    return Err(FlowReturnFailure::UnmodeledBinding);
+                    return Ok(Some(self.unmodeled_position()));
                 }
                 self.eval_expr(inner)
             }
@@ -2891,8 +3023,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // A CAPTURED binding the seeded snapshot does not
                     // carry has no honest value: it is neither the
                     // same-frame implicit-`any` nor a file-scope name, so
-                    // it fails closed.
-                    None if *captured => Err(FlowReturnFailure::UnmodeledBinding),
+                    // the POSITION carries the marker.
+                    None if *captured => Ok(Some(self.unmodeled_position())),
                     None => Ok(Some(
                         param
                             .and_then(|ordinal| self.params.get(ordinal as usize).copied())
@@ -2988,7 +3120,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // publish: fail closed with the typed no-value failure
             // rather than bind an unrelated same-named declaration.
             crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
-                Err(FlowReturnFailure::UnmodeledBinding)
+                Ok(Some(self.unmodeled_position()))
             }
             // A conditional expression's branch VALUES. Each arm was
             // lowered as a flow expression, so a call in a branch already
@@ -3021,7 +3153,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // Publishing it is a warm-admissible wrong answer with a
             // FOREIGN binder in it, so the evaluation fails closed.
             crate::flow_slice_content::SliceExpr::UnreducedCallValue => {
-                Err(FlowReturnFailure::UnmodeledCallPosition)
+                Ok(Some(self.unmodeled_position()))
             }
             // Content the demand slice did not select: never lowered,
             // never evaluable. Reaching one is a planner/content mismatch
@@ -3283,14 +3415,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     .push(HeldCallee::foreign(*key.clone(), callee_clause));
                                 Ok(None)
                             }
-                            FlowReturnStep::Degraded(FlowReturnFailure::EmptyCycle) => {
+                            FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {
                                 // An empty-cycle callee IS a hold — the SCC
                                 // close discharges it (and its callers) on
                                 // the component's admitted returns.
                                 self.holds.push(HeldCallee::foreign(key, callee_clause));
                                 Ok(None)
                             }
-                            FlowReturnStep::Degraded(failure) => Err(failure),
+                            FlowReturnStep::NoValue(failure) => Err(failure),
                         }
                     }
                     source => match self
@@ -3316,7 +3448,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Err(FlowReturnFailure::Missing)
                         }
                         super::flow_return::FunctionReturnNode::Flow(_)
-                        | super::flow_return::FunctionReturnNode::Degraded(_) => {
+                        | super::flow_return::FunctionReturnNode::NoValue(_) => {
                             unreachable!("a Declared/Absent source never reaches the flow rail")
                         }
                     },
@@ -3342,10 +3474,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
-                    // has no honest value: fail closed rather than take
-                    // the same-frame implicit-`any` call.
+                    // has no honest value: the POSITION carries the marker
+                    // rather than the same-frame implicit-`any` call.
                     if *captured {
-                        return Err(FlowReturnFailure::UnmodeledBinding);
+                        return Ok(Some(self.unmodeled_call_position()));
                     }
                     return Ok(Some(CallValue::modeled_any(self.dispatch)));
                 };
@@ -3420,7 +3552,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     FlowReturnStep::Complete(_) => {
                         unreachable!("a same-slot recursive edge is always a hold in flight")
                     }
-                    FlowReturnStep::Degraded(failure) => Err(failure),
+                    FlowReturnStep::NoValue(failure) => Err(failure),
                 }
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty) => {

@@ -109,6 +109,8 @@ pub(crate) mod flow_return_coverage_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
+pub(crate) mod flow_return_positional_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;

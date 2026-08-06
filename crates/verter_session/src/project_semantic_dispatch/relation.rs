@@ -1204,7 +1204,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (atomic admission: nothing publishes, every flight aborts).
         let flow_degraded = flow_members
             .iter()
-            .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::Degraded { .. }));
+            .any(|member| matches!(member.outcome, FlowReturnPendingOutcome::NoValue { .. }));
         // Row 3 batched poison: ANY Unknown / budget / abandoned-session
         // edge anywhere in the component routes the WHOLE SCC through
         // ReturnOnly — nothing publishes.

@@ -785,7 +785,7 @@ fn inferred_class_members(
                     };
                     (type_text, typeof_paths)
                 }
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Degraded(
+                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
                     crate::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
                     return Err(ClassInferenceFailure::InferenceUnavailable(reason));

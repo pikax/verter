@@ -821,6 +821,19 @@ pub struct ReferencedNames {
     /// two require different name MEANINGS of the same binding, so a
     /// deduplicated set would answer one of the two consumers wrongly.
     pub type_names: Vec<ReferencedTypeName>,
+    /// Whether the answer contains `any` ANYWHERE — at the root or nested
+    /// inside the structure it composed.
+    ///
+    /// It rides this walk rather than a sibling one because the walk is
+    /// already exhaustive over [`TypeExpr`]: a hand-rolled second
+    /// traversal is exactly how one position gets missed, and a MISSED
+    /// `any` is the unsafe direction (it lets a fabricated value publish).
+    ///
+    /// A consumer reads this to distinguish a MODELLED answer from one the
+    /// shallow pass fabricated: the pass answers `any` for every form it
+    /// has no model for, and a fabricated `any` is indistinguishable from
+    /// an authored one at every downstream gate.
+    pub embeds_any: bool,
 }
 
 /// One named type-reference OCCURRENCE, reduced to the single segment
@@ -1019,8 +1032,10 @@ pub fn referenced_names(ty: &TypeExpr) -> ReferencedNames {
                 }
             }
             // Leaves: no name, no recursive child.
-            TypeExpr::Primitive(_)
-            | TypeExpr::Literal(_)
+            TypeExpr::Primitive(name) => {
+                out.embeds_any |= *name == PrimitiveName::Any;
+            }
+            TypeExpr::Literal(_)
             | TypeExpr::Infer { .. }
             | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown(_) => {}

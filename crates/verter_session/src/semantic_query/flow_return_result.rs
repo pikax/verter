@@ -1,22 +1,36 @@
 //! [`FlowReturnResult`] — the SUCCESS carrier of a `FlowReturn` query, and
 //! the derivation of its degradation verdict.
 //!
-//! STRUCTURAL CONFINEMENT. All three fields are PRIVATE to THIS module, so
-//! [`FlowReturnResult::new`] is the only way to obtain one anywhere in the
-//! crate — the parent `semantic_query` module included. That matters
-//! because the constructor does not merely store the caller's degradation:
-//! it walks the RESULT NODE and folds
+//! STRUCTURAL CONFINEMENT. The two DECIDING fields — `return_type` and
+//! `degradation` — are PRIVATE to THIS module, so
+//! [`FlowReturnResult::new`] is the only way to set them anywhere in the
+//! crate, the parent `semantic_query` module included. (`can_fall_through`
+//! is `pub`: it is a plain reachability bit no admission channel reads,
+//! and nothing derives from it.) The confinement matters because the
+//! constructor does not merely store the caller's degradation: it folds
 //! [`FlowReturnDegradation::UnresolvedValue`] in when the value reaches a
-//! semantic-miss carrier. Three independent admission gates (the family
-//! memo's cold publish, the SCC batch publish, and the root build's
-//! `cache_suppress`) decide warm-vs-`ReturnOnly` on that one field alone,
-//! so a struct literal that set it to `None` over an unknown value would
-//! be a warm-admitted lie at all three. A struct literal is
-//! unrepresentable outside this file (`E0451`), and a post-construction
-//! `result.return_type = …` is unrepresentable too (`E0616`) — the one
-//! rebuild, [`FlowReturnResult::with_return_type`], re-derives.
+//! semantic-miss carrier the evaluation could not attribute to a position.
+//!
+//! THREE channels decide warm-vs-`ReturnOnly` on that one field:
+//!
+//! 1. the root build's `cache_suppress`
+//!    (`ProjectSemanticDispatch::build_flow_return`) — the `FlowReturn`
+//!    query's OWN admission;
+//! 2. the SCC batch member publish;
+//! 3. the sealed consumer entry's cache-read fold
+//!    (`ProjectSemanticDispatch::execute_function_return_source`) — the
+//!    ENCLOSING composition's admission, folded on every non-clean arm.
+//!
+//! The family memo's warm READ carries a `debug_assert!` that no degraded
+//! success is ever stored; that assertion compiles out in release and is a
+//! consistency check, NOT a fourth channel.
+//!
+//! A struct literal is unrepresentable outside this file (`E0451`), and a
+//! post-construction `result.return_type = …` is unrepresentable too
+//! (`E0616`) — the one rebuild,
+//! [`FlowReturnResult::with_return_type`], re-derives.
 
-use super::{authored_property_key_child, FlowReturnDegradation, SemanticNodeData, SemanticNodeId};
+use super::{FlowReturnDegradation, SemanticNodeId};
 
 /// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
 /// successes. A no-value failure and a usable degraded value are
@@ -49,9 +63,9 @@ pub struct FlowReturnResult {
     /// value carries an unresolved semantic carrier. `Some` gates the
     /// result to `ReturnOnly`; `None` is the warm-admissible arm.
     ///
-    /// PRIVATE by construction. Every one of the three admission gates
-    /// that reads this channel — the family memo's cold publish, the SCC
-    /// batch publish, and the root build's `cache_suppress` — decides
+    /// PRIVATE by construction. Every one of the three admission channels
+    /// that reads it — the root build's `cache_suppress`, the SCC batch
+    /// publish, and the sealed consumer entry's cache-read fold — decides
     /// warm-vs-`ReturnOnly` on it alone, so a `None` over a value that is
     /// not actually known would be a warm-admitted lie at all three. The
     /// only way to obtain a `FlowReturnResult` is [`Self::new`], which
@@ -71,10 +85,13 @@ impl FlowReturnResult {
     /// ([`flow_return_value_is_unresolved`]). The evaluation's own reason
     /// wins when both apply (first-observed reason, deterministic).
     ///
-    /// This is why the field is private: an evaluation cannot know, from
-    /// the arms it took, whether some leaf lowering silently answered
-    /// `Opaque(Miss)` three composition levels down. The node does know,
-    /// and it is the node that admission publishes.
+    /// The evaluation is the AUTHORITY on its own degradation: a position
+    /// whose resolver is a named downstream block contributes the typed
+    /// unresolved marker and records
+    /// [`FlowReturnDegradation::UnmodeledPosition`] where it stands. This
+    /// fold is the BACKSTOP for the residue — a leaf lowering that answered
+    /// a miss carrier inside the structure it handed back, which no
+    /// position observed.
     #[must_use]
     pub(crate) fn new(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
@@ -120,150 +137,25 @@ impl FlowReturnResult {
 }
 
 /// Whether a flow-return VALUE reaches a semantic-miss carrier — a node
-/// whose payload says "the represented type is not known"
-/// (`QueryError::means_type_is_not_yet_known`).
+/// whose payload says "the represented type is not known".
 ///
-/// A miss carrier is an honest LOCAL answer (the leaf really did resolve
-/// to nothing), but it is not a complete RESULT: publishing it warm hands
-/// an enclosing composition an opaque interior with no partial marker,
-/// which is exactly what the degradation channel exists to prevent. So
-/// the verdict is taken here, once, over the value the admission gates
-/// are about to publish — never per-arm, where rounds of fixes close one
-/// ingress and leave its siblings.
+/// This is the BACKSTOP, not the authority. The authority is the
+/// EVALUATION: every position whose resolver is a named downstream block
+/// contributes the typed unresolved marker and records
+/// [`FlowReturnDegradation::UnmodeledPosition`] at the position, so the
+/// evaluation knows its own degradation without inspecting the value it
+/// produced. What survives here is the case the evaluation genuinely
+/// cannot attribute to a position — a leaf lowering that answered a miss
+/// carrier inside the structure it handed back.
 ///
-/// The walk descends the structure a flow evaluation COMPOSES or lowers
-/// inline, and stops at every SHALLOW CARRIER (`DeclRef`,
-/// `InstantiationRef`'s base, `BareRef`, `ImportType`, `TypeOf`,
-/// `MergedDecl`). Descending a carrier would be materialisation, which
-/// the shallow-by-default rule forbids — and a miss INSIDE a referenced
-/// declaration is that declaration's own admission problem, gated by its
-/// own query. Carrier TYPE ARGUMENTS are locally-supplied structure and
-/// do descend, through the one sanctioned accessor.
-///
-/// The match is exhaustive with no wildcard: a new [`SemanticNodeData`]
-/// variant does not compile until it is dispositioned as descend-or-stop
-/// here.
+/// The verdict itself is
+/// [`SemanticGraphStore::node_reaches_unresolved`](crate::semantic_query_memo::SemanticGraphStore::node_reaches_unresolved):
+/// a memoized inductive bit over the immutable hash-consed graph, decided
+/// once per node id. It carries NO budget, so it cannot report a fully
+/// known value as unresolved.
 fn flow_return_value_is_unresolved(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     root: SemanticNodeId,
 ) -> bool {
-    /// Bound on the structure inspected. A flow-return value is composed
-    /// from shallow carriers, so real answers are orders of magnitude
-    /// under this; exceeding it means cleanliness could NOT be proved,
-    /// and an unproven answer must not warm.
-    const NODE_BUDGET: usize = 4096;
-
-    let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let mut stack: Vec<SemanticNodeId> = vec![root];
-    while let Some(node) = stack.pop() {
-        if !seen.insert(node) {
-            continue;
-        }
-        if seen.len() > NODE_BUDGET {
-            return true;
-        }
-        let Some(data) = graph.node_data(node) else {
-            // A node id the graph cannot resolve is not proof of a known
-            // value.
-            return true;
-        };
-        // The three structural carriers' arguments are locally-supplied
-        // structure: they descend through the ONE sanctioned accessor
-        // (the carriers' own heads do not).
-        stack.extend_from_slice(data.carrier_type_args());
-        match data.as_ref() {
-            SemanticNodeData::Opaque(error) => {
-                if error.means_type_is_not_yet_known() {
-                    return true;
-                }
-            }
-            // ── Composed / inline structure: descend ──────────────────
-            SemanticNodeData::Alias(inner) => stack.push(*inner),
-            SemanticNodeData::Object(surface) => {
-                for member in surface.positive_members() {
-                    stack.extend(authored_property_key_child(&member.key));
-                    stack.push(member.value);
-                }
-                stack.extend_from_slice(&surface.call_signatures);
-                stack.extend_from_slice(&surface.construct_signatures);
-                for index in surface.index_signatures.iter() {
-                    stack.push(index.key_type);
-                    stack.push(index.value_type);
-                }
-                stack.extend(surface.keyspace);
-            }
-            SemanticNodeData::ObjectSpreadProgram(program) => stack.extend(program.child_nodes()),
-            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
-                stack.extend_from_slice(members);
-            }
-            SemanticNodeData::Array { element, .. } => stack.push(*element),
-            SemanticNodeData::Tuple { elements, .. } => {
-                stack.extend(elements.iter().map(|element| element.value));
-            }
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                stack.extend_from_slice(expressions);
-            }
-            SemanticNodeData::KeyOf { base } => stack.push(*base),
-            SemanticNodeData::IndexedAccess { object, index } => {
-                stack.push(*object);
-                stack.extend(authored_property_key_child(index));
-            }
-            SemanticNodeData::Mapped { source, mapper } => {
-                stack.push(*source);
-                stack.push(mapper.key_space);
-                stack.push(mapper.value_expr);
-                stack.extend(mapper.name_remap);
-            }
-            SemanticNodeData::Conditional {
-                check,
-                extends,
-                true_branch_ref,
-                false_branch_ref,
-                ..
-            } => {
-                stack.push(*check);
-                stack.push(*extends);
-                stack.push(*true_branch_ref);
-                stack.push(*false_branch_ref);
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                type_parameters,
-                ..
-            } => {
-                stack.extend(params.iter().map(|param| param.ty));
-                stack.push(*return_type);
-                for parameter in type_parameters.iter() {
-                    stack.extend(parameter.constraint);
-                    stack.extend(parameter.default);
-                }
-            }
-            SemanticNodeData::InstantiationRef { args, .. } => stack.extend_from_slice(args),
-            // ── Settled leaves and SHALLOW CARRIERS: stop ─────────────
-            //
-            // `Primitive` / `Literal` / `Infer` / `InferRef` /
-            // `RawFallback` / `SyntheticBinding` are settled values.
-            // `TypeParam` is a binder, and its constraint / default are
-            // the DECLARATION's meaning, not this value's. `DeclRef`,
-            // `InstantiationRef`'s base, `MergedDecl`, `BareRef`,
-            // `ImportType` and `TypeOf` are shallow carriers: descending
-            // one would materialise a referenced declaration, which the
-            // shallow-by-default rule forbids, and a miss inside it is
-            // that declaration's own admission problem.
-            SemanticNodeData::Primitive(_)
-            | SemanticNodeData::Literal(_)
-            | SemanticNodeData::TypeParam { .. }
-            | SemanticNodeData::Infer { .. }
-            | SemanticNodeData::InferRef { .. }
-            | SemanticNodeData::DeclRef { .. }
-            | SemanticNodeData::MergedDecl { .. }
-            | SemanticNodeData::BareRef(_)
-            | SemanticNodeData::ImportType(_)
-            | SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::RawFallback { .. }
-            | SemanticNodeData::SyntheticBinding { .. } => {}
-        }
-    }
-    false
+    graph.node_reaches_unresolved(root)
 }
