@@ -279,9 +279,9 @@ fn assert_clean_warm(host: &Arc<VerterHost>, name: &str, expected: TypeExpr) {
         else {
             panic!("{name} must produce a value");
         };
-        assert_eq!(result.degradation, None, "{name} must evaluate clean");
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
         let ty = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("a flow return value projects");
         assert_eq!(ty, expected, "{name} return type");
         assert_eq!(
@@ -329,7 +329,7 @@ fn projected(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
         else {
             panic!("{name} must produce a value");
         };
-        host.project_node_to_type_expr_for_test(result.return_type)
+        host.project_node_to_type_expr_for_test(result.return_type())
             .expect("a flow return value projects")
     })
 }
@@ -496,7 +496,7 @@ fn flow_return_nested_self_call_never_holds_the_enclosing_slot() {
             panic!("selfNameCallHoldsNothingOuter must produce a value");
         };
         assert_eq!(
-            result.degradation,
+            result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer),
             "the unrecoverable inner self-call degrades where it is OBSERVED"
         );

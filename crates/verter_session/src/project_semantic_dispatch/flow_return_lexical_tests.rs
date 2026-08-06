@@ -1863,14 +1863,14 @@ fn r5_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             return None;
         };
         let ty = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("a flow return value projects");
         let candidates = dispatch
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
         Some(R5Outcome {
             ty,
-            degradation: result.degradation,
+            degradation: result.degradation(),
             candidates,
         })
     })
@@ -3004,7 +3004,7 @@ fn r5_node<R>(
         else {
             panic!("{name} must produce a value");
         };
-        assert_eq!(result.degradation, None, "{name} must evaluate clean");
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
         assert_eq!(
             dispatch
                 .graph()
@@ -3012,7 +3012,7 @@ fn r5_node<R>(
             1,
             "{name} must warm-admit exactly one candidate"
         );
-        pick(dispatch, result.return_type)
+        pick(dispatch, result.return_type())
     })
 }
 
@@ -3570,16 +3570,41 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
     assert_clean_warm(&host, "paramTypeofCtrl", string_lit("modulePV"));
 
     // CONTROL — a shadowing parameter with NO module twin: nothing can
-    // be mis-bound, so the gate must not fire and the owner scope
-    // genuinely answers nothing.
-    r5_node(
-        &host,
-        "paramTypeofNoTwin",
-        FunctionPartIdentity::DeclarationBody,
-        |dispatch, node| {
-            assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-        },
+    // be mis-bound, so the root-identifier gate must NOT fire (this is
+    // not `UnmodeledBinding`) and the owner scope genuinely answers
+    // nothing. The value is therefore the honest local miss carrier —
+    // and because a miss carrier is not a KNOWN value, it is
+    // `UnresolvedValue` / `ReturnOnly`, never warm. The two verdicts are
+    // separate on purpose: the gate says "the name would bind something
+    // else here", the admission says "this value is not known".
+    assert_eq!(
+        r5_eval(&host, "paramTypeofNoTwin").map(|outcome| outcome.degradation),
+        Some(Some(
+            crate::semantic_query::FlowReturnDegradation::UnresolvedValue
+        )),
+        "an unresolvable owner-scope probe is a miss carrier, not a complete result"
     );
+    assert_eq!(
+        r5_eval(&host, "paramTypeofNoTwin").map(|outcome| outcome.candidates),
+        Some(0),
+        "a miss carrier admits nothing"
+    );
+    with_dispatch(&host, |dispatch| {
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(r5_key(
+            dispatch,
+            "paramTypeofNoTwin",
+        ))))
+        else {
+            panic!("paramTypeofNoTwin must still produce a usable degraded value");
+        };
+        assert_eq!(
+            node_shape(dispatch, result.return_type()),
+            NodeShape::Opaque
+        );
+    });
 
     // CONTROL — a BODY LOCAL stays invisible in the root parameter list,
     // so the module const is still the answer.
@@ -3630,7 +3655,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 ///
 /// Mutation recipes:
 ///
-/// - Returning `result.return_type` (the flow branch) or `hot.node()`
+/// - Returning `result.return_type()` (the flow branch) or `hot.node()`
 ///   (the declared branch) verbatim flips `gcFlow*` / `gcDecl*` /
 ///   `gcBare*` to a warm binder and collapses `viaCall` onto `ownT`'s
 ///   node. Dropping only the DECLARED branch's instantiation leaves
@@ -3896,7 +3921,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
 /// answer is the component's own union — which must contain each
 /// member's OWN binder and no other member's.
 ///
-/// Mutation recipe: joining `result.return_type` instead of
+/// Mutation recipe: joining `result.return_type()` instead of
 /// `hold.discharged(...)` restores `CT` to `cgOne` (and `CO` to
 /// `cgTwo`), leaving both members' own-binder rows green.
 #[test]
@@ -5203,53 +5228,64 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
     assert_fails_closed(&host, "ctRecObjMember");
 }
 
-/// A LEAF-answered call form publishes `any`, not a carrier — and not
-/// the checker's answer either.
+/// Where the leaf `any` still stands, and where the CALL-POSITION
+/// verdict now overrides it.
 ///
-/// `lower_leaf`'s gate refuses a leaf answer that EMBEDS an unreduced
-/// `ReturnType<callee>` carrier, which is what stops a call in an array
-/// element or a spread from publishing the callee's raw return. It is
-/// easy to read that as "every leaf-answered form passes a gate that
-/// fails closed". It is not: the shallow pass's per-expression lowering
-/// ends in `_ => Ok(Primitive(Any))`, and `lower_leaf`'s
-/// `LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any` arm runs
-/// BEFORE the carrier gate. Most leaf forms therefore answer `any` and
-/// never reach the gate at all.
+/// `lower_leaf`'s carrier gate refuses a leaf answer that EMBEDS an
+/// unreduced `ReturnType<callee>` carrier, which is what stops a call in
+/// an array element or a spread from publishing the callee's raw return.
+/// It is easy to read that as "every leaf-answered form passes a gate
+/// that fails closed". It never was: the shallow pass's per-expression
+/// lowering ends in `_ => Ok(Primitive(Any))`, and the `is_any` arm runs
+/// BEFORE the carrier gate, so a form whose leaf answer is a bare `any`
+/// never reached the gate at all.
 ///
-/// The fixtures below were added with the carrier gate and asserted by
-/// nothing, under a header claiming they "must degrade exactly as at a
-/// bare call". They do not degrade. They publish `Primitive(Any)`,
-/// cleanly and warm, and this test says so — so the distinction between
-/// "the gate refused" and "the leaf pass answered `any`" is recorded
-/// rather than implied, and a change that starts routing any of these
-/// through the call sink has to update this table.
+/// That is now split in two, on a line drawn at the FORM:
 ///
-/// `any` is UNDER the checker's answer at every row, never over it, and
-/// never a leaked callee binder — which is why this is a recorded
-/// interim (`U6.CALL_RESOLVE`) and not a defect row.
+///   - the form's OWN value IS a call's return (`new f()`, `` tag`…` ``,
+///     `f?.()`, `await f()`, `(k, f())`, `f()!`, an unrepresentable
+///     callee like `obj[k]()`) — the classifier calls it
+///     [`ValueDescent::UnmodeledCall`] and the content half fails
+///     closed, whatever the shallow pass answered;
+///   - the form's value is a JOIN (`k || f()`, `k ?? f()`) or a
+///     PROJECTION (`f().q`) over a call — the call contributes, but the
+///     form is not itself the call. Those still answer the shallow
+///     pass's `any`, and this test pins that so the boundary is recorded
+///     rather than implied.
+///
+/// The remaining `any` rows are UNDER the checker's answer, never over
+/// it, and never a leaked callee binder. Their durable owners are the
+/// value-JOIN disposition of `LogicalExpression` (the same capability
+/// that would make it `ValueDescent::Branches`) and the member-read
+/// projection (`U6.VALUE_INFERENCE`) — not the call-position gate, which
+/// is why widening the gate to reach them would remove an answer without
+/// adding a capability.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`):
 ///
 /// ```text
 ///                    checker           published here
-/// tnAmbLogical       "TA" | true       any
-/// tnAmbNullish       "TA"              any
-/// tnAmbSequence      "TA"              any
-/// tnAmbNonNull       "TA"              any
-/// tnGenericLogical   string | true     any
-/// tnGenericMember    string            any
-/// tnAmbAs            "TA"              "TA"        ← exact
-/// tnStrTernary       "a" | "b"         "a" | "b"   ← exact
-/// tnGenericBare      string            unknown     ← the recorded
-///                                                    explicit-type-argument
-///                                                    interim
+/// tnAmbLogical       "TA" | true       any          ← join, not a call
+/// tnAmbNullish       "TA"              any          ← join, not a call
+/// tnGenericLogical   string | true     any          ← join, not a call
+/// tnGenericMember    string            any          ← member read
+/// tnAmbSequence      "TA"              fails closed ← call position
+/// tnAmbNonNull       "TA"              fails closed ← call position
+/// tnAmbAs            "TA"              "TA"         ← exact
+/// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
+/// tnGenericBare      string            unknown      ← the recorded
+///                                                     explicit-type-argument
+///                                                     interim
 /// ```
 ///
 /// Mutation recipe: making the shallow pass's fallback arm return
-/// anything other than `any` flips the six `any` rows; dispositioning
+/// anything other than `any` flips the four `any` rows; dispositioning
 /// `LogicalExpression` as `ValueDescent::Branches` flips `tnAmbLogical`
-/// to `UnrepresentableCallee` and `tnGenericLogical` to a union.
+/// to `UnrepresentableCallee` and `tnGenericLogical` to a union;
+/// dropping `SequenceExpression` / the type-carrier recursion from
+/// `value_is_unmodeled_call` flips the two fail-closed rows back to a
+/// warm `any`.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
@@ -5257,13 +5293,16 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     for name in [
         "tnAmbLogical",
         "tnAmbNullish",
-        "tnAmbSequence",
-        "tnAmbNonNull",
         "tnGenericLogical",
         "tnGenericMember",
     ] {
         assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::Any));
     }
+
+    // The CALL POSITIONS: the form's own value is the call's return, and
+    // the substrate has no arm for it. `any` is not published.
+    assert_fails_closed(&host, "tnAmbSequence");
+    assert_fails_closed(&host, "tnAmbNonNull");
 
     // The two rows that ARE exact, and the one recorded interim: they
     // discriminate the `any` rows above from "everything answers `any`".

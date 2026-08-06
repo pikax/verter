@@ -755,7 +755,7 @@ fn inferred_class_members(
                     // projection is fail-closed (every degraded shape
                     // refuses), and a modeled-`any` substitution is a
                     // degraded shape even though it carries a usable value.
-                    if result.degradation.is_some() {
+                    if result.degradation().is_some() {
                         return Err(ClassInferenceFailure::Unsupported(
                             UnsupportedReason::SemanticConstruct,
                         ));
@@ -763,7 +763,7 @@ fn inferred_class_members(
                     let Some((safe, typeof_paths)) =
                         crate::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
                             dispatch,
-                            result.return_type,
+                            result.return_type(),
                         )
                     else {
                         return Err(ClassInferenceFailure::Unsupported(
@@ -777,7 +777,7 @@ fn inferred_class_members(
                     }
                     let Some(type_text) = crate::typeinfo::raise::render_node_display_with_ctx(
                         ctx,
-                        result.return_type,
+                        result.return_type(),
                     ) else {
                         return Err(ClassInferenceFailure::Unsupported(
                             UnsupportedReason::SemanticConstruct,

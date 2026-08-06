@@ -890,7 +890,7 @@ fn flow_return_of(
             value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
             ..
         }) => host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("a flow return value projects"),
         other => panic!("[{stage}] {name} must produce a flow return value, got {other:?}"),
     }

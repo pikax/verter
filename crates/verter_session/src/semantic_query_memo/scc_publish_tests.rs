@@ -126,11 +126,7 @@ fn pending_flow_members_with(
                 .expect("each flow member claims its vacant family flight");
             PendingFlowReturnMember {
                 key: key.clone(),
-                result: FlowReturnResult {
-                    return_type,
-                    can_fall_through: false,
-                    degradation: *degradation,
-                },
+                result: FlowReturnResult::new(store, return_type, false, *degradation),
                 materialized: flow_whole_return_projection(),
                 flight,
             }
@@ -514,11 +510,12 @@ fn run_exact_fit_pressure_batch(
                 FamilyKey::FlowReturn {
                     key: Box::new(flow_keys[0].clone()),
                 },
-                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult {
+                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                    &store,
                     return_type,
-                    can_fall_through: false,
-                    degradation: None,
-                })),
+                    false,
+                    None,
+                ))),
                 flow_whole_return_projection(),
                 crate::fact_signature_helpers::ReadSetSignature::empty(),
                 Arc::from(Vec::<Arc<str>>::new()),

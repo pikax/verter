@@ -369,7 +369,7 @@ fn flow_result(
         panic!("FlowReturn must produce a complete result");
     };
     let expr = host
-        .project_node_to_type_expr_for_test(result.return_type)
+        .project_node_to_type_expr_for_test(result.return_type())
         .expect("return node must project to TypeExpr");
     (expr, result.can_fall_through)
 }
@@ -422,13 +422,25 @@ fn flow_return_symbolic_call_resolves_complete() {
     });
 }
 
+/// `return this.helper()` FAILS CLOSED — it does not publish `any`.
+///
+/// `this` is not a modeled receiver, so the call reaches none of the
+/// content half's structural call arms and the shared shallow pass
+/// answers the whole expression with a bare `any`. That `any` carries no
+/// `ReturnType<callee>` carrier, so the leaf carrier gate never saw it
+/// and it published clean and WARM — a fabricated value at a call
+/// position, under a promise (`UnmodeledCallPosition`) that a call with
+/// no structural arm fails closed. The call-position verdict is now
+/// taken on the expression FORM, so the promise holds here.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, for the record — the answer the
+/// fail-closed arm declines to produce): `number`.
 #[test]
-fn flow_return_this_call_uses_any_fallback() {
+fn flow_return_this_call_fails_closed() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let (expr, _) = flow_result(
+        assert!(flow_is_miss(
             dispatch,
-            &host,
             flow_key(
                 dispatch,
                 "SubThisCall",
@@ -437,11 +449,7 @@ fn flow_return_this_call_uses_any_fallback() {
                 },
                 0,
             ),
-        );
-        assert_eq!(
-            expr,
-            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Any)
-        );
+        ));
     });
 }
 
@@ -819,7 +827,7 @@ fn function_return_helper_flow_arm_builds_the_identical_key() {
             panic!("a Flow source is served by the FlowReturn producer");
         };
         let expr = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node must project to TypeExpr");
         assert_eq!(
             object_prop(&expr, "ok"),
@@ -1051,7 +1059,7 @@ fn flow_return_block_scoped_shadowing_does_not_escape() {
             panic!("the shadowed return evaluates complete");
         };
         let expr = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("return node projects");
         assert_eq!(
             expr,
@@ -1779,12 +1787,12 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
         );
         let result = flow_result_value(dispatch, degraded_key.clone());
         assert_eq!(
-            result.degradation,
+            result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
             "a usable degraded value carries its typed reason on the SUCCESS carrier"
         );
         let projected = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("a degraded success is a USABLE value");
         assert_eq!(
             projected,
@@ -1801,7 +1809,7 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
         );
         // A second demand recomputes (still a value, still not admitted).
         let again = flow_result_value(dispatch, degraded_key.clone());
-        assert_eq!(again.degradation, result.degradation);
+        assert_eq!(again.degradation(), result.degradation());
         assert_eq!(
             dispatch
                 .graph()
@@ -1840,7 +1848,7 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
             0,
         );
         let clean = flow_result_value(dispatch, clean_key.clone());
-        assert_eq!(clean.degradation, None);
+        assert_eq!(clean.degradation(), None);
         assert_eq!(
             dispatch
                 .graph()
@@ -1870,12 +1878,13 @@ fn flow_return_shadowed_outer_initializer_stays_clean_and_admits() {
         );
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
-            result.degradation, None,
+            result.degradation(),
+            None,
             "the shadowed outer initializer is lexically unreachable from the \
              inner read — selecting/lowering it is the defect-D fan-out"
         );
         let projected = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("the clean result projects");
         assert_eq!(
             projected,
@@ -1912,7 +1921,7 @@ fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
         );
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
-            result.degradation,
+            result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             "a slice with an unapplied write effect into a value-selected \
              parameter slot must degrade (fail closed), never publish a \
@@ -1930,7 +1939,7 @@ fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
         // The value is still usable (degraded SUCCESS, not a no-value
         // failure).
         assert!(host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .is_some());
     });
 }
@@ -1954,11 +1963,12 @@ fn flow_return_write_to_unread_slot_stays_clean() {
         );
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
-            result.degradation, None,
+            result.degradation(),
+            None,
             "a write outside the demanded slice cannot degrade the result"
         );
         let projected = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("the clean result projects");
         assert_eq!(
             projected,
@@ -1995,7 +2005,7 @@ fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
         );
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
-            result.degradation,
+            result.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             "a preceding whole-slot parameter write is an unapplied effect: \
              evaluating past it would publish a type tsc narrows (oracle: `string`)"
@@ -2011,7 +2021,7 @@ fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
         );
         // Still a USABLE degraded value, not a no-value failure.
         assert!(host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .is_some());
     });
 }
@@ -2035,12 +2045,13 @@ fn flow_return_block_let_write_stays_clean_for_root_read_of_outer_const() {
         );
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
-            result.degradation, None,
+            result.degradation(),
+            None,
             "the block-scoped `let q` is lexically unreachable from the root \
              read — a kind-blind hoisting fallback spuriously degrades this"
         );
         let projected = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("the clean result projects");
         assert_eq!(
             projected,
@@ -2073,9 +2084,9 @@ fn flow_return_block_var_binding_hoists_to_the_function_scope() {
             0,
         );
         let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation, None, "a hoisted var read is clean");
+        assert_eq!(result.degradation(), None, "a hoisted var read is clean");
         let projected = host
-            .project_node_to_type_expr_for_test(result.return_type)
+            .project_node_to_type_expr_for_test(result.return_type())
             .expect("the clean result projects");
         assert_eq!(
             projected,
@@ -2110,7 +2121,7 @@ fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
             ),
         );
         assert_eq!(
-            observed.degradation,
+            observed.degradation(),
             Some(crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer)
         );
 
@@ -2122,7 +2133,8 @@ fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
         );
         let ignored = flow_result_value(dispatch, ignored_key.clone());
         assert_eq!(
-            ignored.degradation, None,
+            ignored.degradation(),
+            None,
             "an unobserved failed binding degrades nothing"
         );
         assert_eq!(
@@ -2191,7 +2203,7 @@ pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
             .flow_slice()
             .set_budget_for_test(FlowSliceBudget::default());
         let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation, None);
+        assert_eq!(result.degradation(), None);
         assert_eq!(
             dispatch
                 .graph()
@@ -2691,7 +2703,7 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
         );
         // Cold: the ONLY producing route is `execute` on the dispatch.
         let dispatched = flow_result_value(dispatch, key.clone());
-        assert_eq!(dispatched.degradation, None);
+        assert_eq!(dispatched.degradation(), None);
         (key, dispatched)
     });
 
@@ -2731,9 +2743,9 @@ fn assert_clean_warm(
 ) {
     let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
     let result = flow_result_value(dispatch, key.clone());
-    assert_eq!(result.degradation, None, "{name} must stay clean");
+    assert_eq!(result.degradation(), None, "{name} must stay clean");
     let projected = host
-        .project_node_to_type_expr_for_test(result.return_type)
+        .project_node_to_type_expr_for_test(result.return_type())
         .unwrap_or_else(|| panic!("{name} must project"));
     assert_eq!(&projected, expected, "{name} return type");
     assert_eq!(
@@ -2755,7 +2767,7 @@ fn assert_degraded_return_only(
 ) {
     let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
     let result = flow_result_value(dispatch, key.clone());
-    assert_eq!(result.degradation, Some(reason), "{name} must degrade");
+    assert_eq!(result.degradation(), Some(reason), "{name} must degrade");
     assert_eq!(
         dispatch
             .graph()
@@ -2764,7 +2776,7 @@ fn assert_degraded_return_only(
         "{name} degraded success is ReturnOnly: zero memo entries"
     );
     assert!(
-        host.project_node_to_type_expr_for_test(result.return_type)
+        host.project_node_to_type_expr_for_test(result.return_type())
             .is_some(),
         "{name} degraded success still carries a usable value"
     );
@@ -3070,7 +3082,8 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
 
         let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
         assert_eq!(
-            first_result.degradation, None,
+            first_result.degradation(),
+            None,
             "{first} closes its component cleanly"
         );
         assert_eq!(
@@ -3098,7 +3111,8 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
             panic!("{second} must answer through the public API");
         };
         assert_eq!(
-            second_result.degradation, None,
+            second_result.degradation(),
+            None,
             "{second} closes its component cleanly"
         );
         assert_eq!(
@@ -3117,7 +3131,7 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
         for name in ["scCleanA", "scCleanB"] {
             let (result, _, _) = scc_expect_value(&host, name);
             let projected = host
-                .project_node_to_type_expr_for_test(result.return_type)
+                .project_node_to_type_expr_for_test(result.return_type())
                 .expect("a component member projects");
             let verter_type_expr::TypeExpr::Union(arms) = &projected else {
                 panic!("{name} publishes the component union, got {projected:?}");
@@ -3150,7 +3164,7 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
 
         let (first_result, first_candidates, first_retained) = scc_expect_value(&host, first);
         assert!(
-            first_result.degradation.is_some(),
+            first_result.degradation().is_some(),
             "{first} carries the component's typed degradation"
         );
         assert_eq!(
@@ -3175,7 +3189,7 @@ fn flow_return_public_execute_releases_drained_members_both_orders() {
             panic!("{second} must answer through the public API");
         };
         assert!(
-            second_result.degradation.is_some(),
+            second_result.degradation().is_some(),
             "{second} carries the component's typed degradation"
         );
         assert_eq!(
@@ -3269,7 +3283,8 @@ fn flow_return_resurrected_member_publishes_a_readable_entry() {
         let host = make_scc_host();
         let (first_result, _, _) = scc_expect_value(&host, first);
         assert_eq!(
-            first_result.degradation, None,
+            first_result.degradation(),
+            None,
             "{first} closes its component cleanly"
         );
 

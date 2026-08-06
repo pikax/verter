@@ -146,7 +146,7 @@ impl SemanticGraphStore {
         match hit.result {
             QueryResult::Value(SemanticQueryValue::FlowReturn(result)) => {
                 debug_assert!(
-                    result.degradation.is_none(),
+                    result.degradation().is_none(),
                     "the FlowReturn memo never stores a degraded success (ReturnOnly by contract)"
                 );
                 Some((*result).clone())

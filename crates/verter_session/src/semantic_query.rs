@@ -111,6 +111,8 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
+mod flow_return_result;
+pub use flow_return_result::FlowReturnResult;
 
 /// The ONE owner of the legacy compatibility-spelling family (exact
 /// spellings + parameterised prefixes) and the shared display-family
@@ -1536,32 +1538,6 @@ pub struct FlowReturnKey {
     pub input: FlowInputContext,
 }
 
-/// The SUCCESS carrier of a `FlowReturn` query — including DEGRADED
-/// successes. A no-value failure and a usable degraded value are
-/// different public outcomes: a degraded success (a usable result whose
-/// evaluation substituted a modeled-`any` for something it could not
-/// model) returns through THIS carrier with its typed
-/// [`FlowReturnDegradation`] reason and defaults to `ReturnOnly` — it
-/// never warms the family memo (a later explicit fact-rooted
-/// admission-table row is the only thing that could change that; none
-/// exists). Only a COMPLETE, non-degraded evaluation is admitted warm;
-/// unsupported, missing, budgeted, cyclic-empty, torn, or otherwise
-/// NO-VALUE results are typed [`FlowReturnFailure`]s through
-/// `ReturnOnly`. The whole-return node is canonical and
-/// carrier-preserving; consumers project or publish it afterward under
-/// their own mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowReturnResult {
-    /// The whole-function return type (widened join of every contributor).
-    pub return_type: SemanticNodeId,
-    /// Whether execution can reach the end of the body without a return.
-    pub can_fall_through: bool,
-    /// The typed degradation reason, when the evaluation produced a
-    /// USABLE result through a modeled-`any` substitution. `Some` gates
-    /// the result to `ReturnOnly`; `None` is the warm-admissible arm.
-    pub degradation: Option<FlowReturnDegradation>,
-}
-
 /// A typed degradation reason riding a USABLE [`FlowReturnResult`] — the
 /// evaluation completed but substituted `any` for a value it could not
 /// model. NEVER a failure substitute: a no-value outcome is a
@@ -1603,6 +1579,19 @@ pub enum FlowReturnDegradation {
     /// initializer's own (fresh or widened) type — and the result fails
     /// closed as a degraded success.
     UnreducedDeclaredUnion,
+    /// The evaluated value REACHES a semantic-miss carrier — a leaf whose
+    /// own resolution answered "not known" (a member read off a
+    /// frame-bound annotated binding, a genuinely unresolvable free name),
+    /// at the top level or nested inside the structure the evaluation
+    /// composed around it.
+    ///
+    /// The carrier is an honest LOCAL answer; it is not a complete
+    /// RESULT. Publishing it warm and clean hands an enclosing
+    /// composition an opaque interior with no partial marker, so the
+    /// value still returns (a consumer that can use a partially-opaque
+    /// answer keeps it) but admission is refused. Derived from the value
+    /// node by [`FlowReturnResult::new`], never recorded per-arm.
+    UnresolvedValue,
 }
 
 /// A typed `FlowReturn` failure — carried through `ReturnOnly` (never
@@ -8724,11 +8713,12 @@ mod tests {
                 SemanticQueryValueTag::MaterializationCycleGate,
             ),
             (
-                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult {
-                    return_type: node,
-                    can_fall_through: false,
-                    degradation: None,
-                })),
+                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                    &crate::semantic_query_memo::SemanticGraphStore::new(),
+                    node,
+                    false,
+                    None,
+                ))),
                 SemanticQueryValueTag::FlowReturn,
             ),
             (

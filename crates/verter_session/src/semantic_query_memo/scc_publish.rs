@@ -203,7 +203,7 @@ impl SemanticGraphStore {
         let inadmissible = footprint > self.memo_budget.cap()
             || flow_members
                 .iter()
-                .any(|member| member.result.degradation.is_some())
+                .any(|member| member.result.degradation().is_some())
             || relation_members.iter().any(|member| {
                 !matches!(
                     member.payload.outcome,

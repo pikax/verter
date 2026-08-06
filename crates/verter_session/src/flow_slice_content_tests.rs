@@ -433,10 +433,11 @@ fn symbolic_and_unrepresentable_calls() {
     assert_eq!(
         node.body.statements.as_ref(),
         &[SliceStatement::Return {
-            argument: Some(SliceExpr::Any),
+            argument: Some(SliceExpr::UnreducedCallValue),
             widening_literal: false,
         }],
-        "an unrepresentable callee falls back to any"
+        "a `this` receiver is not modeled, so the call has no structural \
+         arm and fails closed rather than fabricating `any`"
     );
 }
 

@@ -499,7 +499,7 @@ impl FlowReturnPendingOutcome {
     /// The outcome's OWN degradation, whichever arm carries it.
     pub(crate) fn degradation(&self) -> Option<crate::semantic_query::FlowReturnDegradation> {
         match self {
-            Self::Complete(result) => result.degradation,
+            Self::Complete(result) => result.degradation(),
             Self::Degraded { degradation, .. } => *degradation,
         }
     }

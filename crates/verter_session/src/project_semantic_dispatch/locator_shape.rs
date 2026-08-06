@@ -1167,7 +1167,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                         scope_canonical.as_ref(),
                     ) {
-                        super::flow_return::FunctionReturnNode::Flow(result) => result.return_type,
+                        super::flow_return::FunctionReturnNode::Flow(result) => {
+                            result.return_type()
+                        }
                         _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
                     },
                     None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),

@@ -205,6 +205,11 @@ export declare const ctorSig: { new (a: number): { q: string } };
 export function callCtorSigNew() {
   return new ctorSig(1);
 }
+
+export declare const maybeObj: { b: string } | undefined;
+export function callOptionalMemberRead() {
+  return maybeObj?.b;
+}
 "#;
 
 const TL: &str = "/ws/cov/tlevel.ts";
@@ -282,6 +287,26 @@ export function tlCallThroughOmit() {
 
 export function tlObjReturn() {
   return { m: "mv", n: { deep: true } };
+}
+
+export function tlFreeUnresolvedRead() {
+  return noSuchGlobalValue;
+}
+
+export function tlMissingParamAnnotation(x: NoSuchTypeName) {
+  return x;
+}
+
+export function tlMissCarrierInObjectMember(x: HasQ) {
+  return { q: x.q };
+}
+
+export function tlMissCarrierInArray(x: HasQ) {
+  return [x.q];
+}
+
+export function tlMissCarrierInNestedFunction(x: HasQ) {
+  return () => x.q;
 }
 "#;
 
@@ -594,7 +619,7 @@ fn eval_key_on(
             value: SemanticQueryValue::FlowReturn(result),
             ..
         }) => {
-            let Some(ty) = host.project_node_to_type_expr_for_test(result.return_type) else {
+            let Some(ty) = host.project_node_to_type_expr_for_test(result.return_type()) else {
                 return Outcome::Other("the value did not project".to_string());
             };
             let candidates = dispatch
@@ -602,7 +627,7 @@ fn eval_key_on(
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             Outcome::Value {
                 ty,
-                degradation: result.degradation,
+                degradation: result.degradation(),
                 candidates,
             }
         }
@@ -771,7 +796,7 @@ fn flow_node<R>(
         else {
             panic!("{name} must produce a value");
         };
-        assert_eq!(result.degradation, None, "{name} must evaluate clean");
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
         assert_eq!(
             dispatch
                 .graph()
@@ -779,7 +804,7 @@ fn flow_node<R>(
             1,
             "{name} must warm-admit exactly one candidate"
         );
-        pick(dispatch, result.return_type)
+        pick(dispatch, result.return_type())
     })
 }
 
@@ -981,7 +1006,7 @@ fn svelte_script_functions_serve_under_the_instance_owner_not_the_module_owner()
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: None, candidates: 1 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```
 ///
@@ -993,11 +1018,11 @@ fn svelte_script_functions_serve_under_the_instance_owner_not_the_module_owner()
 /// identical `Opaque(Miss)` lands for a plain `.ts` member read off an
 /// annotated parameter (see
 /// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`).
-/// Note `candidates: 1`: the opaque miss is admitted WARM with
-/// `degradation: None`, so nothing downstream marks the enclosing result
-/// partial.
+/// Note `candidates: 0`: the opaque miss is a REFUSED value, not a warm
+/// one — `a_value_reaching_a_miss_carrier_is_never_admitted_warm` owns
+/// that half, and this canary owns the missing capability.
 #[test]
-#[ignore = "a member read off an annotated binding evaluates to Opaque(Miss) and is admitted warm: the flow evaluator has no member projection over a frame-bound leaf root"]
+#[ignore = "a member read off an annotated binding evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no member projection over a frame-bound leaf root"]
 fn vue_define_props_member_read_resolves_to_the_payload_member_type() {
     let host = carrier_host();
     assert_eq!(
@@ -1021,7 +1046,7 @@ fn vue_define_props_member_read_resolves_to_the_payload_member_type() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: None, candidates: 1 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```
 ///
@@ -1030,7 +1055,7 @@ fn vue_define_props_member_read_resolves_to_the_payload_member_type() {
 /// the evaluator answers with an opaque miss rather than the
 /// annotation's member.
 #[test]
-#[ignore = "a `$props()`-destructured binding read evaluates to Opaque(Miss) and is admitted warm: the flow evaluator has no destructuring-element arm for a carrier-scope binding"]
+#[ignore = "a `$props()`-destructured binding read evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no destructuring-element arm for a carrier-scope binding"]
 fn svelte_runes_props_binding_read_resolves_to_its_annotation() {
     let host = carrier_host();
     assert_eq!(
@@ -1316,7 +1341,7 @@ fn imported_generic_callee_infers_its_type_argument_from_the_call_site() {
 ///
 /// ```text
 /// assertion `left == right` failed: xfAugmentedMember
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: None, candidates: 1 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
 ///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
 /// ```
 ///
@@ -1327,7 +1352,7 @@ fn imported_generic_callee_infers_its_type_argument_from_the_call_site() {
 /// that point a passing un-augmented read plus a failing augmented read
 /// isolates the stitch.
 #[test]
-#[ignore = "blocked behind the member-read arm: `widget.b` evaluates to Opaque(Miss) before the augmentation stitch is ever consulted"]
+#[ignore = "blocked behind the member-read arm: `widget.b` evaluates to Opaque(Miss) (ReturnOnly) before the augmentation stitch is ever consulted"]
 fn cross_file_module_augmentation_member_is_readable_from_the_flow_rail() {
     let host = ts_host();
     assert_clean_warm(&host, XF_MAIN, "xfAugmentedMember", number());
@@ -1576,15 +1601,17 @@ fn meta_property_new_target_return_is_not_any() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
+///   left: Miss
 ///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
 /// ```
 ///
 /// Owning layer: the flow evaluator's call carrier — a `Super` callee
-/// root has no arm, so the shallow leaf's `any` is published warm rather
-/// than routed to the base class's member.
+/// root has no arm, so the base class's member is never reached. The
+/// admission half is settled: a call whose callee cannot be represented
+/// at all fails closed rather than publishing the shallow leaf's `any`
+/// warm.
 #[test]
-#[ignore = "a `super.m()` callee root has no arm: the call evaluates to `any` and is admitted warm"]
+#[ignore = "a `super.m()` callee root has no arm: the call fails closed instead of resolving the base member"]
 fn super_method_call_return_resolves_to_the_base_member() {
     let host = ts_host();
     assert_eq!(
@@ -1707,13 +1734,20 @@ fn generator_return_is_wrapped_in_generator() {
 /// ```
 ///
 /// Owning layer: `flow_slice_content::lower_leaf` — `JSXElement` and
-/// `JSXFragment` are in the leaf fall-through set. The third case is the
-/// interesting one: `jsxAttrCall` embeds a CALL inside a JSX attribute,
-/// and that call is swallowed by the same `any` rather than reaching the
-/// `UnmodeledCallPosition` fail-closed rail the call-carrier gate
-/// promises for a call with no structural arm.
+/// `JSXFragment` are in the leaf fall-through set, so the shallow pass's
+/// fallback `any` is published warm. All THREE rows are that one gap.
+///
+/// `jsxAttrCall` is deliberately NOT routed through the call-position
+/// fail-closed rail, even though it does embed a call: a JSX element's
+/// value is `JSX.Element` and does not depend on any attribute's value,
+/// so the attribute's call is not a value provider of the return and
+/// failing the element closed on account of it would be wrong for a
+/// reason unrelated to the call. What is wrong here is the element's own
+/// unmodeled `any` — which is the shallow pass's `_ => Primitive(Any)`
+/// row, the same one `leafNewTarget` / `leafClassExpr` /
+/// `leafImportExpr` sit on.
 #[test]
-#[ignore = "JSXElement / JSXFragment have no leaf rule: they evaluate to `any` and are admitted warm, and a call embedded in a JSX attribute never reaches the call-carrier gate"]
+#[ignore = "JSXElement / JSXFragment have no leaf rule: they evaluate to the shallow pass's fallback `any` and are admitted warm"]
 fn jsx_element_fragment_and_attribute_call_returns_are_not_any() {
     let host = ts_host();
     for name in ["jsxElem", "jsxFrag", "jsxAttrCall"] {
@@ -1809,17 +1843,18 @@ fn generic_overload_group_callee_degrades_as_unrepresentable() {
 ///
 /// ```text
 /// assertion `left == right` failed: callNew
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
+///   left: Miss
 ///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
 /// ```
 ///
-/// Owning layer: `flow_slice_content::lower_leaf` — `NewExpression` is in
-/// the leaf fall-through set. Critically it is admitted WARM: the
-/// call-carrier gate's `UnreducedCallValue` → `UnmodeledCallPosition`
-/// fail-closed rail is never reached, because the shallow leaf answers a
-/// plain `any` that carries no call-return carrier to detect.
+/// Owning layer: the CONSTRUCT-CALL capability — there is no arm that
+/// resolves a class's construct signature to its instance type. The
+/// ADMISSION half is settled: `NewExpression` is a
+/// `ValueDescent::UnmodeledCall`, so it fails closed rather than
+/// publishing the shallow pass's `any` warm (see
+/// `an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered`).
 #[test]
-#[ignore = "NewExpression has no construct-call arm: it evaluates to `any` and is admitted warm instead of failing closed as an unmodeled call position"]
+#[ignore = "NewExpression has no construct-call arm: it fails closed as an unmodeled call position instead of resolving the instance type"]
 fn construct_expression_return_is_the_instance_type() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callNew", type_ref("CtorC"));
@@ -1834,22 +1869,18 @@ fn construct_expression_return_is_the_instance_type() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// assertion `left != right` failed: callCtorSigNew must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
+/// callCtorSigNew must produce a value, got Miss
 /// ```
 ///
 /// Owning layer: same as the `new` row above — the construct-signature
-/// group is never consulted.
+/// group is never consulted. It now FAILS CLOSED rather than publishing
+/// `any` warm, so the canary asserts the value it should produce.
 #[test]
-#[ignore = "construct signatures are never consulted: `new ctorSig(1)` evaluates to `any` and is admitted warm"]
+#[ignore = "construct signatures are never consulted: `new ctorSig(1)` fails closed as an unmodeled call position"]
 fn construct_signature_call_return_is_the_signature_instance_type() {
     let host = ts_host();
-    assert_ne!(
-        value_of(&host, CALLS, "callCtorSigNew"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "callCtorSigNew must not be `any`"
-    );
+    let value = value_of(&host, CALLS, "callCtorSigNew");
+    assert_eq!(projected_member(&value, "q"), &string());
 }
 
 /// CANARY — an OPTIONAL-CHAINED call (`maybeFn?.()`) returns the callee's
@@ -1860,22 +1891,23 @@ fn construct_signature_call_return_is_the_signature_instance_type() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// assertion `left != right` failed: callOptional must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
+/// callOptional must produce a value, got Miss
 /// ```
 ///
-/// Owning layer: `flow_slice_content::lower_leaf` — `ChainExpression` is
-/// in the leaf fall-through set, so the optional call never reaches the
-/// call carrier and the `| undefined` arm is never synthesised.
+/// Owning layer: the OPTIONAL-CALL capability — no arm routes `f?.()`
+/// through the call carrier, so the `| undefined` arm is never
+/// synthesised. The admission half is settled: the chain is a
+/// `ValueDescent::UnmodeledCall` and fails closed instead of publishing
+/// `any` warm.
 #[test]
-#[ignore = "ChainExpression has no optional-call arm: `f?.()` evaluates to `any` and is admitted warm"]
+#[ignore = "ChainExpression has no optional-call arm: `f?.()` fails closed as an unmodeled call position"]
 fn optional_chained_call_return_unions_undefined() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callOptional"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "callOptional must not be `any`"
+        TypeExpr::Union(Arc::from(
+            vec![number(), TypeExpr::Primitive(PrimitiveName::Undefined),].into_boxed_slice(),
+        )),
     );
 }
 
@@ -1887,16 +1919,16 @@ fn optional_chained_call_return_unions_undefined() {
 ///
 /// ```text
 /// assertion `left == right` failed: callTagged
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
+///   left: Miss
 ///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
 /// ```
 ///
-/// Owning layer: `flow_slice_content::lower_leaf` —
-/// `TaggedTemplateExpression` is in the leaf fall-through set, and (like
-/// `NewExpression`) the `any` it produces is admitted WARM rather than
-/// routed to the call-carrier fail-closed rail.
+/// Owning layer: the TAGGED-TEMPLATE call capability — the tag
+/// function's signature is never consulted. The admission half is
+/// settled: it fails closed as a `ValueDescent::UnmodeledCall` rather
+/// than publishing `any` warm.
 #[test]
-#[ignore = "TaggedTemplateExpression has no call arm: the tag call evaluates to `any` and is admitted warm"]
+#[ignore = "TaggedTemplateExpression has no call arm: the tag call fails closed as an unmodeled call position"]
 fn tagged_template_call_return_is_the_tag_return() {
     let host = ts_host();
     assert_clean_warm(&host, CALLS, "callTagged", boolean());
@@ -1970,24 +2002,25 @@ fn async_generator_return_is_wrapped_in_async_generator() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// assertion `left != right` failed: callAwait must not be `any`
-///   left: Primitive(Any)
-///  right: Primitive(Any)
+/// callAwait must produce a value, got Miss
 /// ```
 ///
-/// Owning layer: TWO independent gaps compose here — `AwaitExpression` is
-/// in `lower_leaf`'s fall-through set (so the awaited call never reaches
-/// the call carrier and never unwraps its `Promise`), and the enclosing
-/// `async` is never re-wrapped. Fixing only the async wrapping would turn
-/// this into `Promise<any>`, still wrong.
+/// Owning layer: TWO independent capability gaps compose here — the
+/// awaited call is never resolved and never `Promise`-unwrapped, and the
+/// enclosing `async` is never re-wrapped. Fixing only the async wrapping
+/// would turn this into `Promise<any>`, still wrong. The admission half
+/// is settled: `await f()` is a `ValueDescent::UnmodeledCall`, so it
+/// fails closed rather than publishing `any` warm.
 #[test]
-#[ignore = "AwaitExpression has no leaf rule and the enclosing async is not wrapped: the awaited call evaluates to `any` and is admitted warm"]
+#[ignore = "an awaited call is not resolved and the enclosing async is not wrapped: it fails closed as an unmodeled call position"]
 fn awaited_call_return_is_the_awaited_value_wrapped_again() {
     let host = ts_host();
-    assert_ne!(
+    assert_eq!(
         value_of(&host, CALLS, "callAwait"),
-        TypeExpr::Primitive(PrimitiveName::Any),
-        "callAwait must not be `any`"
+        TypeExpr::Ref {
+            name: Arc::from("Promise"),
+            type_arguments: Arc::from(vec![number()].into_boxed_slice()),
+        },
     );
 }
 
@@ -2250,16 +2283,17 @@ fn member_call_through_the_omit_utility_resolves_path_precisely() {
 ///
 /// ```text
 /// assertion `left == right` failed: tlCallSymKeyed
-///   left: Value { ty: Primitive(Any), degradation: None, candidates: 1 }
+///   left: Miss
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```
 ///
 /// Owning layer: the flow evaluator's computed-member arm — a
-/// `unique symbol` key is a `ComputedMemberExpression`, which falls into
-/// `lower_leaf` with no key-resolution rule, and the resulting `any` is
-/// admitted warm rather than routed through the call-carrier gate.
+/// `unique symbol` key is a `ComputedMemberExpression`, so the callee
+/// cannot be represented and the member's own return is never reached.
+/// The admission half is settled: an unrepresentable callee fails closed
+/// rather than publishing the shallow leaf's `any` warm.
 #[test]
-#[ignore = "a `unique symbol` computed member key has no resolution rule: the member call evaluates to `any` and is admitted warm"]
+#[ignore = "a `unique symbol` computed member key has no resolution rule: the member call fails closed as an unrepresentable callee"]
 fn symbol_keyed_member_call_resolves_to_the_member_return() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlCallSymKeyed", string());
@@ -2278,14 +2312,15 @@ fn symbol_keyed_member_call_resolves_to_the_member_return() {
 ///
 /// ```text
 /// assertion `left == right` failed: tlPlainMember
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: None, candidates: 1 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```
 ///
-/// The graph node is `Opaque(Miss)` and the candidate count is 1: the
-/// miss is admitted WARM with `degradation: None`, so no consumer
-/// downstream sees a partial. `CLAUDE.md`'s Stub Prevention section names
-/// exactly this shape ("an always-`Opaque(Miss)` resolve is a nop").
+/// The graph node is `Opaque(Miss)` and the candidate count is 0: the
+/// miss now carries `UnresolvedValue` and admits nothing, so every
+/// enclosing composition sees the partial. Only the ADMISSION half was
+/// fixed — the value is still a miss, and producing the member's real
+/// type is the capability this canary is waiting on.
 ///
 /// Owning layer: the `SliceExpr::FrameShadowed` arm of
 /// `project_semantic_dispatch::flow_return`'s evaluator. `x.q` lowers
@@ -2297,12 +2332,14 @@ fn symbol_keyed_member_call_resolves_to_the_member_return() {
 /// guard passes and the inner leaf evaluates unchanged — resolving
 /// `typeof x` in owner scope, where nothing answers, to `Opaque(Miss)`.
 /// The arm's own comment calls that "its own typed miss carrier is the
-/// honest answer"; the defect is not the value but the ADMISSION — a
-/// complete, `degradation: None`, warm-admitted result, so
-/// `execute_function_return_source` never folds the cache-read rails and
-/// an enclosing composition warms with an opaque interior.
+/// honest answer", and as a LOCAL answer it is. It was never a complete
+/// RESULT, and it used to publish as one: `degradation: None`,
+/// warm-admitted, so `execute_function_return_source` never folded the
+/// cache-read rails and an enclosing composition warmed with an opaque
+/// interior. That admission half is fixed and separately guarded; what
+/// this canary still owns is the missing member projection itself.
 #[test]
-#[ignore = "a member read off an annotated parameter evaluates to Opaque(Miss) and is admitted warm: the flow evaluator has no member projection over a frame-bound leaf root"]
+#[ignore = "a member read off an annotated parameter evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no member projection over a frame-bound leaf root"]
 fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
@@ -2323,13 +2360,14 @@ fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
 ///
 /// ```text
 /// assertion `left == right` failed: tlConstrainedMember
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: None, candidates: 1 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnresolvedValue), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```
 ///
 /// Owning layer: the same member arm as the unconstrained row — the
 /// constraint is never reached, so this row does not yet discriminate
-/// constraint resolution specifically.
+/// constraint resolution specifically. The miss is `ReturnOnly`, so
+/// nothing warms on it.
 #[test]
 #[ignore = "blocked behind the member-read arm: `x.q` over a constrained binder evaluates to Opaque(Miss) before the constraint is consulted"]
 fn constrained_clause_parameter_member_read_resolves_through_the_constraint() {
@@ -2783,5 +2821,274 @@ fn removing_the_owning_file_evicts_the_flow_answer() {
         eval(&host, TL, "tlObjReturn"),
         Outcome::Miss,
         "a removed file serves no flow answer"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// PRIORITY 8 — the two admission invariants
+//
+// Both are about what may be published WARM, not about what value the
+// substrate can compute. Each pins the graph node, the degradation, and
+// the candidate count on every row.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Assert one function produces a USABLE value that carries the
+/// `UnresolvedValue` verdict and admits NOTHING, and that the value's
+/// graph node is the one `probe` expects.
+#[track_caller]
+fn assert_unresolved_value(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+    name: &str,
+    probe: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId),
+) {
+    match eval(host, canonical, name) {
+        Outcome::Value {
+            degradation,
+            candidates,
+            ..
+        } => {
+            assert_eq!(
+                degradation,
+                Some(FlowReturnDegradation::UnresolvedValue),
+                "{name} must carry the unresolved-value verdict"
+            );
+            assert_eq!(candidates, 0, "{name} must admit nothing");
+        }
+        other => panic!("{name} must produce a degraded value, got {other:?}"),
+    }
+    with_dispatch(host, |dispatch| {
+        let key = key_of(dispatch, canonical, name);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+        else {
+            panic!("{name} must produce a value");
+        };
+        probe(dispatch, result.return_type());
+    });
+}
+
+/// A value that REACHES a semantic-miss carrier is never admitted warm as
+/// a complete result — at the top level, and at every nesting depth the
+/// evaluation composes.
+///
+/// A miss carrier is an honest LOCAL answer: the leaf really did resolve
+/// to nothing. It is not a complete RESULT. Published warm with
+/// `degradation: None` it hands an enclosing composition an opaque
+/// interior with NO partial marker —
+/// `execute_function_return_source` never folds the cache-read rails, so
+/// a `get_component_meta` / shape / materialize result built on top warms
+/// with the opacity inside it. That is precisely what the degradation
+/// channel exists to prevent, and `CLAUDE.md`'s Stub Prevention section
+/// names the shape ("an always-`Opaque(Miss)` resolve is a nop").
+///
+/// The rows below are FOUR DIFFERENT INGRESS PATHS, which is the point:
+/// a per-arm fix closes one and leaves the rest.
+///
+/// ```text
+/// tlPlainMember                  the FrameShadowed arm (`x.q`, owner
+///                                scope answers nothing, leaf evaluates
+///                                unchanged to a miss)
+/// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
+///                                carrier is involved at all
+/// tlMissCarrierInObjectMember    nested one level down, in an object
+///                                member value the evaluator composed
+/// tlMissCarrierInArray           nested inside ONE leaf lowering's own
+///                                answer (`Array{element}`), which no
+///                                shallow ingress check could see
+/// tlMissCarrierInNestedFunction  nested in a composed signature's
+///                                return position
+/// ```
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`) — the answers the substrate declines to produce:
+/// `string` for `tlPlainMember`, `{ q: string }` for the object row,
+/// `string[]` for the array row, `() => string` for the nested-function
+/// row. `tlFreeUnresolvedRead` is a program tsgo REJECTS
+/// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
+/// to publish for it at all.
+///
+/// Mutation recipe: returning `false` unconditionally from
+/// `flow_return_value_is_unresolved` flips every row to a warm
+/// `candidates: 1`; dropping any one of the `Object` / `Array` /
+/// `Signature` descent arms flips exactly its own row.
+#[test]
+fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
+    let host = ts_host();
+
+    // Top-level miss, reached through the FrameShadowed arm.
+    assert_unresolved_value(&host, TL, "tlPlainMember", |dispatch, node| {
+        assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
+    });
+    // Top-level miss, reached through the FREE-leaf arm.
+    assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
+        assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
+    });
+    // Nested in an object member value the evaluator composed.
+    assert_unresolved_value(
+        &host,
+        TL,
+        "tlMissCarrierInObjectMember",
+        |dispatch, node| {
+            let data = dispatch.graph().node_data(node);
+            let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+                panic!("the object row must still produce an Object node");
+            };
+            let [member] = surface.positive_members() else {
+                panic!("exactly one member");
+            };
+            let value = member.value;
+            drop(data);
+            assert_eq!(node_shape(dispatch, value), NodeShape::Opaque);
+        },
+    );
+    // Nested inside ONE leaf lowering's own composite answer.
+    assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
+        let data = dispatch.graph().node_data(node);
+        let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
+            panic!("the array row must still produce an Array node");
+        };
+        let element = *element;
+        drop(data);
+        assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
+    });
+    // Nested in a composed signature's return position.
+    assert_unresolved_value(
+        &host,
+        TL,
+        "tlMissCarrierInNestedFunction",
+        |dispatch, node| {
+            let data = dispatch.graph().node_data(node);
+            let Some(SemanticNodeData::Signature { return_type, .. }) = data.as_deref() else {
+                panic!("the nested-function row must still produce a Signature node");
+            };
+            let return_type = *return_type;
+            drop(data);
+            assert_eq!(node_shape(dispatch, return_type), NodeShape::Opaque);
+        },
+    );
+}
+
+/// The DISCRIMINATOR for the row above: a deferred CARRIER is not a miss,
+/// and a fully-resolved composition is not either.
+///
+/// Without this, "everything degrades" would pass the test above just as
+/// well as the rule does.
+///
+/// `tlMissingParamAnnotation(x: NoSuchTypeName)` is the sharp case: tsgo
+/// REJECTS the program (`Cannot find name 'NoSuchTypeName'.`), yet the
+/// parameter lowers to a `BareRef` carrier — an addressable, deferred
+/// reference — not to `Opaque(Miss)`. The verdict is taken on the NODE,
+/// so it stays clean and warm: unresolved-at-lowering-time is not the
+/// same fact as not-known, and the walk must not conflate them. The
+/// carrier's own re-resolution is where that program's error surfaces.
+#[test]
+fn a_deferred_carrier_and_a_resolved_composition_still_admit_warm() {
+    let host = ts_host();
+
+    assert_eq!(
+        eval(&host, TL, "tlMissingParamAnnotation"),
+        Outcome::Value {
+            ty: type_ref("NoSuchTypeName"),
+            degradation: None,
+            candidates: 1,
+        },
+        "a deferred BareRef carrier is not a miss"
+    );
+    flow_node(&host, TL, "tlMissingParamAnnotation", |dispatch, node| {
+        assert_eq!(
+            node_shape(dispatch, node),
+            NodeShape::BareRef("NoSuchTypeName".to_string())
+        );
+    });
+
+    // A fully-resolved nested composition of exactly the shapes the walk
+    // descends (object → object → primitive) stays clean and warm.
+    let value = value_of(&host, TL, "tlObjReturn");
+    assert_eq!(projected_member(&value, "m"), &string());
+    assert_eq!(
+        projected_member(projected_member(&value, "n"), "deep"),
+        &boolean()
+    );
+    flow_node(&host, TL, "tlObjReturn", |_, _| {});
+}
+
+/// A CALL POSITION with no structural arm fails closed — decided on the
+/// expression FORM, not on whether the shallow pass happened to mint a
+/// call-return carrier.
+///
+/// `UnmodeledCallPosition` promises that a call the content half could
+/// not route through its call carrier fails closed. The gate that
+/// delivered it (`embeds_call_return_carrier`) reads the leaf ANSWER, so
+/// it only ever fired when the shared shallow pass produced an unreduced
+/// `ReturnType<callee>` carrier. For every form below that pass answers a
+/// bare `any` instead — no carrier, no gate, and the fabricated `any`
+/// published clean and WARM with `candidates: 1`. The promise was
+/// therefore broader than the mechanism, which is the defect.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`) — the answers the fail-closed arm declines to
+/// produce, every one of them different from `any`:
+///
+/// ```text
+/// callNew         new CtorC(1)                    CtorC
+/// callCtorSigNew  new ctorSig(1)                  { q: string; }
+/// callOptional    maybeFn?.()                     number | undefined
+/// callTagged      tag`a${1}b`                     boolean
+/// callAwait       await asyncSrc()                Promise<number>
+/// ```
+///
+/// Mutation recipe: `value_is_unmodeled_call` is the single authority
+/// (both `value_descent`'s guarded arm and the content half's residual
+/// type-carrier check delegate to it), so flipping one of its arms flips
+/// exactly the matching rows — `NewExpression` /
+/// `TaggedTemplateExpression` to `false` flips `callNew` /
+/// `callCtorSigNew` / `callTagged` back to a warm `any`,
+/// `ChainElement::CallExpression` to `false` flips `callOptional`, and
+/// the `AwaitExpression` arm flips `callAwait`.
+#[test]
+fn an_unmodeled_call_position_fails_closed_whatever_the_shallow_pass_answered() {
+    let host = ts_host();
+    for name in [
+        "callNew",
+        "callCtorSigNew",
+        "callOptional",
+        "callTagged",
+        "callAwait",
+    ] {
+        assert_fails_closed(&host, CALLS, name);
+    }
+}
+
+/// The DISCRIMINATOR for the call-position rule: the forms that are NOT
+/// call positions keep answering, and the modeled call arms are
+/// untouched.
+///
+/// `a?.b` is an optional MEMBER read, not an optional call — the chain
+/// guard must look at the chain element, not at the `?.` token.
+/// `restFn(1, 2, 3)` is a plain call with a direct-call arm.
+/// `geoIifeInside` is an IIFE, whose value is the nested function's
+/// evaluated return. None of the three may be swept up.
+#[test]
+fn non_call_forms_and_modeled_call_arms_are_untouched_by_the_call_position_gate() {
+    let host = ts_host();
+    // A modeled direct call still resolves.
+    assert_clean_warm(&host, CALLS, "callRest", string_lit("rest"));
+    // An IIFE still resolves through the nested-function arm (its lone
+    // fresh literal contributor widens, exactly as a plain body's does).
+    assert_clean_warm(&host, GEO, "geoIifeInside", string());
+    // An optional MEMBER read is not a call position: it still takes the
+    // leaf lowering (whose own answer is the shallow pass's `any` — the
+    // separately-owned fallback row, not this gate's business).
+    assert_eq!(
+        eval(&host, CALLS, "callOptionalMemberRead"),
+        Outcome::Value {
+            ty: TypeExpr::Primitive(PrimitiveName::Any),
+            degradation: None,
+            candidates: 1,
+        },
+        "`a?.b` is a member read, not a call position"
     );
 }

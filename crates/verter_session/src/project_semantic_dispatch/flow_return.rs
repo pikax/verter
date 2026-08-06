@@ -258,7 +258,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         //   - the build-local taint (`cache_suppress` +
                         //     `result_is_partial`) marks the enclosing
                         //     composition partial / ReturnOnly.
-                        if result.degradation.is_some() {
+                        if result.degradation().is_some() {
                             self.fold_cache_read_rails(true, true);
                         }
                         FunctionReturnNode::Flow(result)
@@ -390,7 +390,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let key = self.flow_return_key_with_demand(&identity, demand);
         match self.execute_flow_return(key) {
-            FlowReturnStep::Complete(result) if result.degradation.is_none() => {
+            FlowReturnStep::Complete(result) if result.degradation().is_none() => {
                 // `ReturnType<…>` is a signature UTILITY, not a call: it
                 // has no call site to be argument-free at, so every free
                 // clause parameter instantiates at `unknown` and a
@@ -412,7 +412,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // whole-signature composition here would materialise
                 // exactly the sibling members this rail exists to leave
                 // cold.
-                self.instantiate_callee_clause_at_unknown(&identity, result.return_type)
+                self.instantiate_callee_clause_at_unknown(&identity, result.return_type())
             }
             // Degraded success / typed failure / in-flight hold: the
             // generic unwrap route decides (it already owns these
@@ -662,7 +662,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evaluated = self.evaluate_flow_return(key);
         match self.flow_frame_close_root(idx, evaluated) {
             FlowRootClose::Complete(result, scc_self_roots, materialized) => {
-                let degraded = result.degradation.is_some();
+                let degraded = result.degradation().is_some();
                 let mut output: QueryBuildOutput<SemanticQueryValue> = QueryBuildOutput::from((
                     QueryResult::Value(SemanticQueryValue::FlowReturn(Arc::new(result))),
                     fence,
@@ -1051,7 +1051,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // exactly the degradation the resurrection path needs.
                 let mut degradation = entries[i].outcome.degradation();
                 if let Some(result) = &current[i] {
-                    arms.push(result.return_type);
+                    arms.push(result.return_type());
                 }
                 let mut ready = true;
                 for hold in &entries[i].holds {
@@ -1061,15 +1061,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // it applies the SAME rule: a hold target is a
                             // CALLEE, and its admitted return is expressed
                             // in the CALLEE's binders. Joining
-                            // `result.return_type` raw here re-published
+                            // `result.return_type()` raw here re-published
                             // exactly the binder the call arm had already
                             // instantiated away — the fixed point ran the
                             // transfer a second time, around the gate. The
                             // hold's own accessor is now the only way to
                             // reach a node from a target's result.
-                            arms.push(hold.discharged(self, result.return_type).into_node());
+                            arms.push(hold.discharged(self, result.return_type()).into_node());
                             if degradation.is_none() {
-                                degradation = result.degradation;
+                                degradation = result.degradation();
                             }
                         }
                         // A target outside this component, or one that has
@@ -1097,13 +1097,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         _ => flat.push(arm),
                     }
                 }
-                let next = FlowReturnResult {
-                    return_type: self.intern_normalized_union_or_intersection(&flat, true),
-                    can_fall_through: current[i]
+                let next = FlowReturnResult::new(
+                    graph,
+                    self.intern_normalized_union_or_intersection(&flat, true),
+                    current[i]
                         .as_ref()
                         .is_some_and(|result| result.can_fall_through),
                     degradation,
-                };
+                );
                 if current[i].as_ref() != Some(&next) {
                     current[i] = Some(next);
                     progressed = true;
@@ -1124,7 +1125,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // const`, an annotated binding, a bare return) pins the result.
         let component_is_fresh = entries.iter().all(|entry| entry.fresh_seed);
         for (entry, discharged) in entries.iter_mut().zip(current) {
-            let Some(mut result) = discharged else {
+            let Some(result) = discharged else {
                 continue;
             };
             // ONLY a hold-only empty cycle is resurrectable. Its "failure"
@@ -1144,9 +1145,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ) {
                 continue;
             }
-            if component_is_fresh {
-                result.return_type = widen_literal_node(self, result.return_type);
-            }
+            // The widened value is a NEW value, so its verdict is
+            // re-derived rather than copied: `with_return_type` routes
+            // back through the one constructor.
+            let result = if component_is_fresh {
+                result
+                    .with_return_type(self.graph(), widen_literal_node(self, result.return_type()))
+            } else {
+                result
+            };
             entry.outcome = FlowReturnPendingOutcome::Complete(result);
         }
     }
@@ -1776,11 +1783,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let return_type =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
                 return Ok((
-                    FlowReturnResult {
-                        return_type,
-                        can_fall_through,
-                        degradation,
-                    },
+                    FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
                     false,
                 ));
             }
@@ -1801,11 +1804,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let return_type = self.intern_normalized_union_or_intersection(&arms, true);
         Ok((
-            FlowReturnResult {
-                return_type,
-                can_fall_through,
-                degradation,
-            },
+            FlowReturnResult::new(graph, return_type, can_fall_through, degradation),
             fresh_seed,
         ))
     }
@@ -2688,7 +2687,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         Ok(graph.intern_node(SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
             params: Arc::from(signature_params.into_boxed_slice()),
-            return_type: result.return_type,
+            return_type: result.return_type(),
             type_parameters: Arc::from(binder_env.type_param_decls.into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -3247,7 +3246,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 // A degraded callee value degrades every
                                 // consumer of that value: absorb the
                                 // callee's typed reason into this frame.
-                                if let Some(degradation) = result.degradation {
+                                if let Some(degradation) = result.degradation() {
                                     self.record_degradation(degradation);
                                 }
                                 // A callee that pops as a PROVISIONAL
@@ -3275,7 +3274,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 Ok(Some(CallValue::of_served_return(
                                     self.dispatch,
                                     &callee_clause,
-                                    result.return_type,
+                                    result.return_type(),
                                     ReturnOrigin::ClauseScoped,
                                 )))
                             }

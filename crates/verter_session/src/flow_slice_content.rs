@@ -2147,7 +2147,14 @@ impl Lowerer<'_> {
                 // bare read would, so it is gated here too.
                 match self.leaf_type(expr, mode) {
                     LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
-                    LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
+                    // The callee could not be represented at all (an
+                    // `obj[k]()` computed-member callee, say): the leaf
+                    // answered a bare `any`. This IS a call with no
+                    // structural arm, so it takes the same fail-closed
+                    // verdict the classifier gives every other one —
+                    // publishing the `any` was a fabricated value at a
+                    // call position, warm and clean.
+                    LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::UnreducedCallValue,
                     LeafLowering::Free(ty) => {
                         SliceExpr::Call(SliceCall::Symbolic(ty), call_site(call))
                     }
@@ -2197,15 +2204,26 @@ impl Lowerer<'_> {
                         arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
                     }
                 }
+                // A CALL POSITION with no structural arm (`new f()`,
+                // `` tag`…` ``, `f?.()`, `await f()`, `(0, f())`). The
+                // fail-closed verdict is the CLASSIFIER's, taken on the
+                // expression FORM — not on whether the shallow pass
+                // happened to mint a `ReturnType<callee>` carrier the
+                // leaf gate could recognise. For every form here it does
+                // not: it answers a bare `any`, which reaches
+                // `SliceExpr::Any` BEFORE the carrier gate and publishes
+                // warm and clean. That is the hole this arm closes.
+                ValueDescent::UnmodeledCall => SliceExpr::UnreducedCallValue,
                 // A leaf-answered form takes the shared shallow-pass
                 // leaf lowering THROUGH `lower_leaf`, whose gate refuses
                 // a leaf answer that embeds an unreduced call-return
-                // carrier. A form here therefore either contains no call
-                // whose return would ride out as a raw `ReturnType<…>`
-                // carrier, or fails closed. It does NOT follow that every
-                // leaf form is call-exact: most answer the shallow pass's
-                // `any`, which is reached BEFORE the carrier gate and is
-                // never a carrier — see `lower_leaf`.
+                // carrier AND refuses a bare `any` answer at a call
+                // position. A form here therefore either contains no
+                // call in value position, or fails closed. It does NOT
+                // follow that every leaf form is modeled: several answer
+                // the shallow pass's fallback `any` for reasons that have
+                // nothing to do with calls (`JSXElement`, `Super`,
+                // `await x` over a non-call) — see `lower_leaf`.
                 ValueDescent::Leaf => self.lower_leaf(other, mode),
             },
         }
@@ -2465,6 +2483,20 @@ impl Lowerer<'_> {
     fn lower_leaf(&mut self, expr: &Expression<'_>, mode: ExprMode) -> SliceExpr {
         match self.leaf_type(expr, mode) {
             LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
+            // A bare `any` answer at a CALL POSITION is a fabricated
+            // value, not a modeled one. The classifier already routed
+            // every unmodeled call form to `UnreducedCallValue` before
+            // this function is reached; what survives to here is a call
+            // wrapped in a TYPE CARRIER whose own answer came out `any`
+            // (`f()!`), where the carrier was supposed to pin the type
+            // and did not. Same verdict — the shared predicate is the
+            // one authority for the question.
+            LeafLowering::Free(ty)
+                if is_any(&ty)
+                    && verter_semantic::analysis::flow::value_is_unmodeled_call(expr) =>
+            {
+                SliceExpr::UnreducedCallValue
+            }
             LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
             // THE call-carrier gate. The shallow pass answers a CALL it
             // meets with an unreduced `ReturnType<callee>` carrier —

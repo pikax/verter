@@ -131,12 +131,21 @@ fn flow_surface_return_free_loop_stays_fallthrough_transparent() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+/// A `this.helper()` call FAILS CLOSED at the flow surface.
+///
+/// `this` is not modeled (the receiver capability is separate work), so
+/// the call has no structural arm: the shared shallow pass answers it
+/// with a bare `any` that carries no call-return carrier. Publishing
+/// that `any` was a fabricated value at a call position — clean, warm,
+/// and wrong (tsgo `7.0.0-dev.20260526.1` types `SubThisCall#run` as
+/// `number`). The classifier now decides the call position on the FORM,
+/// so this joins the return-bearing-loop / `switch` rows above.
 #[test]
-fn flow_surface_this_call_return_uses_any_fallback() {
+fn flow_surface_this_call_return_fails_closed() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_primitive(&expr, PrimitiveName::Any);
+    assert_semantic_miss(&expr);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -232,11 +241,11 @@ fn flow_return_substrate_serves_symbolic_call_return_complete() {
 }
 
 #[test]
-fn flow_return_substrate_serves_this_call_any_fallback() {
+fn flow_return_substrate_fails_closed_on_a_this_call() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_primitive(&expr, PrimitiveName::Any);
+    assert_semantic_miss(&expr);
     assert_flow_return_dispatched(&record, "SubThisCallRun");
 }
 

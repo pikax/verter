@@ -2235,7 +2235,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 scope_canonical.as_ref(),
                             ) {
                                 super::flow_return::FunctionReturnNode::Flow(result) => {
-                                    result.return_type
+                                    result.return_type()
                                 }
                                 _ => self.opaque(QueryError::Miss),
                             },

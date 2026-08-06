@@ -48,7 +48,7 @@ pub mod lower;
 pub mod peeker;
 pub mod value_descent;
 
-pub use value_descent::{value_descent, ValueDescent};
+pub use value_descent::{value_descent, value_is_unmodeled_call, ValueDescent};
 
 #[cfg(test)]
 #[path = "skeleton_tests.rs"]
@@ -1096,7 +1096,12 @@ impl SkeletonBuilder {
             }
             ValueDescent::Object(object) => self.open_object_site(object, parent, span),
             ValueDescent::Branches(conditional) => self.open_branch_site(conditional, parent, span),
-            ValueDescent::Leaf => {
+            // An unmodeled CALL POSITION has no value-providing child
+            // either — a call's arguments do not provide its value — so
+            // it takes the leaf disposition here. Its sub-expressions are
+            // still visited for their evaluation effects; the CONTENT
+            // half is where the verdict differs (it fails closed).
+            ValueDescent::Leaf | ValueDescent::UnmodeledCall => {
                 let id = self.alloc_site(span, parent);
                 self.site_stack.push(id.index());
                 self.visit_expression(expression);
