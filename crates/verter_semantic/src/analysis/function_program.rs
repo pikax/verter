@@ -331,7 +331,15 @@ pub struct FunctionProgramEntry {
     /// nor any anchor-relative position, so the untouched function's
     /// artifacts stay warm — which is the whole point of not keying on
     /// the file's content hash.
-    pub flow_body_exact_hash: Hash16,
+    ///
+    /// `None` when the recorded function span does not lie within the
+    /// source that produced this entry — a typed MISS, not a hash. It was
+    /// a `unwrap_or_default()` over an out-of-range slice, which hashed
+    /// the EMPTY string: every entry whose span fell out of range then
+    /// shared one constant, collapsing exactly the axis this field exists
+    /// to be. A consumer that cannot address the body's own bytes must
+    /// not build a content-addressed key at all.
+    pub flow_body_exact_hash: Option<Hash16>,
 }
 
 /// The per-file function program index.
@@ -1320,6 +1328,24 @@ impl<'a> Visit<'a> for ReferencedTypeNames {
             walk::walk_ts_method_signature(visitor, signature);
         });
     }
+
+    fn visit_ts_call_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSCallSignatureDeclaration<'a>,
+    ) {
+        self.with_clause(signature.type_parameters.as_deref(), |visitor| {
+            walk::walk_ts_call_signature_declaration(visitor, signature);
+        });
+    }
+
+    fn visit_ts_construct_signature_declaration(
+        &mut self,
+        signature: &oxc_ast::ast::TSConstructSignatureDeclaration<'a>,
+    ) {
+        self.with_clause(signature.type_parameters.as_deref(), |visitor| {
+            walk::walk_ts_construct_signature_declaration(visitor, signature);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,12 +1417,12 @@ fn build_entry(
         function_start,
         node,
     );
-    let exact_hash = crate::analysis::types::hash_16(
-        source
-            .get(function_span.start as usize..function_span.end as usize)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
+    // A span outside the source is a MISS, never the empty string's hash:
+    // hashing `b""` gives every out-of-range entry the same constant and
+    // silently retires the exact-content axis for all of them.
+    let exact_hash = source
+        .get(function_span.start as usize..function_span.end as usize)
+        .map(|text| crate::analysis::types::hash_16(text.as_bytes()));
 
     FunctionProgramEntry {
         key,

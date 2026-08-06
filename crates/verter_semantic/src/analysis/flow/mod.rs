@@ -38,8 +38,11 @@ use verter_no_typeexpr::NoTypeExpr;
 
 use crate::analysis::function_program::static_property_key_name;
 
+pub use frame_span::FrameSpan;
+
 pub mod flow_graph;
 pub mod flow_ir;
+pub mod frame_span;
 pub mod hashing;
 pub mod lower;
 pub mod peeker;
@@ -175,7 +178,7 @@ pub struct SkeletonRegion {
     /// function (nested function bodies never contribute).
     pub has_return: bool,
     /// The region statement's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +313,7 @@ pub struct SkeletonBinding {
     /// The region the binding is declared in.
     pub region: SkeletonRegionId,
     /// The binding identifier's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
     /// The declarator initializer / parameter default site, when present.
     pub initializer: Option<SkeletonExprSiteId>,
     /// Whether the identifier is bound by a DESTRUCTURING pattern (an
@@ -332,9 +335,10 @@ pub struct SkeletonBinding {
 pub struct SkeletonRead {
     /// The read name (a local slot when the name binds in this frame,
     /// otherwise a free / captured name).
+    ///
+    /// A read carries NO span: the reference position has no consumer, and
+    /// dead state is exactly where a stale coordinate hides.
     pub name: FlowNameId,
-    /// The reference span.
-    pub span: verter_span::Span,
 }
 
 /// The callee shape of one call / construct site.
@@ -357,7 +361,7 @@ pub struct SkeletonCall {
     /// Whether this is a `new` construct site.
     pub new_construct: bool,
     /// The call expression's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
 }
 
 /// The key of one object-literal property entry.
@@ -420,7 +424,7 @@ pub enum SkeletonExprShape {
 #[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
 pub struct SkeletonExprSite {
     /// The expression's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
     /// The region the site evaluates in.
     pub region: SkeletonRegionId,
     /// The containing site (`None` for a root site owned by a statement,
@@ -484,7 +488,7 @@ pub struct SkeletonWrite {
     /// The region the write evaluates in.
     pub region: SkeletonRegionId,
     /// The write expression's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +508,7 @@ pub struct SkeletonReturnSite {
     /// arrow.
     pub implicit: bool,
     /// The return statement's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
 }
 
 // ---------------------------------------------------------------------------
@@ -520,13 +524,14 @@ pub struct SkeletonReturnSite {
 /// snapshot; never rebuilt per query or demand. Stores NO lowered type —
 /// every leaf is an interned name, ordinal, span, or id.
 ///
-/// **Every span here is RELATIVE to the function's own start**
-/// ([`FunctionBodySource::anchor`]), never an absolute file offset. The
-/// skeleton is content-addressed and reused across every file content
-/// its key admits, and an absolute offset is not a property of that
-/// content: a blank line above the function moves all of them while
-/// changing nothing the key can see. Consumers rebase a live position
-/// onto the same anchor before comparing.
+/// **Every span here is a [`FrameSpan`]**, relative to the function's own
+/// start ([`FunctionBodySource::anchor`]) — an absolute file offset cannot
+/// be stored here because it does not have the type. The skeleton is
+/// content-addressed and reused across every file content its key admits,
+/// and an absolute offset is not a property of that content: a blank line
+/// above the function moves all of them while changing nothing the key can
+/// see. Consumers rebase a live position through [`FrameSpan::rebase`]
+/// before comparing.
 #[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
 pub struct FunctionBodySkeleton {
     /// The interned name table.
@@ -599,14 +604,14 @@ impl FunctionBodySkeleton {
     /// region is unique; a position outside every nested region (the
     /// body's own top level) resolves to the function-body root.
     #[must_use]
-    pub fn innermost_region_containing(&self, span: verter_span::Span) -> SkeletonRegionId {
+    pub fn innermost_region_containing(&self, span: FrameSpan) -> SkeletonRegionId {
         let mut best = SkeletonRegionId(0);
         let mut best_width = u32::MAX;
         for (index, region) in self.regions.iter().enumerate() {
-            if region.span.start > span.start || region.span.end < span.end {
+            if !region.span.contains(span) {
                 continue;
             }
-            let width = region.span.end.saturating_sub(region.span.start);
+            let width = region.span.width();
             if width <= best_width {
                 best_width = width;
                 best = SkeletonRegionId(u32::try_from(index).unwrap_or(u32::MAX));
@@ -773,8 +778,8 @@ pub struct FunctionBodySource<'a, 'ast> {
     pub expression_body: bool,
     /// The body span.
     pub body_span: verter_span::Span,
-    /// The FUNCTION's own start offset — the anchor every span the
-    /// skeleton records is stored RELATIVE to.
+    /// The FUNCTION's own start offset — the anchor every [`FrameSpan`]
+    /// the skeleton records is stored RELATIVE to.
     ///
     /// The skeleton is a CONTENT-ADDRESSED artifact: it is memoized per
     /// function content version and reused for any file content its key
@@ -886,7 +891,7 @@ pub fn build_function_body_skeleton(source: &FunctionBodySource<'_, '_>) -> Func
 // ---------------------------------------------------------------------------
 
 struct SiteDraft {
-    span: verter_span::Span,
+    span: FrameSpan,
     region: SkeletonRegionId,
     parent: Option<SkeletonExprSiteId>,
     shape: SkeletonExprShape,
@@ -895,8 +900,10 @@ struct SiteDraft {
 }
 
 struct SkeletonBuilder {
-    /// The function's own start offset; every recorded span is rebased
-    /// onto it at `finish`.
+    /// The function's own start offset — the anchor [`Self::frame_span`]
+    /// rebases every OXC position onto, at ingress. Nothing downstream of
+    /// that one call can hold an absolute offset: the record fields are
+    /// typed [`FrameSpan`].
     anchor: u32,
     names: Vec<Arc<str>>,
     name_lookup: FxHashMap<Arc<str>, FlowNameId>,
@@ -916,7 +923,7 @@ impl SkeletonBuilder {
             parent: None,
             control_input: None,
             has_return: false,
-            span: body_span,
+            span: FrameSpan::rebase(anchor, body_span),
         };
         Self {
             anchor,
@@ -930,6 +937,12 @@ impl SkeletonBuilder {
             return_sites: Vec::new(),
             writes: Vec::new(),
         }
+    }
+
+    /// THE ingress crossing: every OXC position this builder ever sees
+    /// becomes a [`FrameSpan`] here and nowhere else.
+    fn frame_span(&self, span: verter_span::Span) -> FrameSpan {
+        FrameSpan::rebase(self.anchor, span)
     }
 
     fn intern(&mut self, text: &str) -> FlowNameId {
@@ -963,6 +976,7 @@ impl SkeletonBuilder {
     ) -> usize {
         let parent = self.current_region();
         let index = self.regions.len();
+        let span = self.frame_span(span);
         self.regions.push(SkeletonRegion {
             kind,
             parent: Some(parent),
@@ -984,6 +998,7 @@ impl SkeletonBuilder {
         parent: Option<SkeletonExprSiteId>,
     ) -> SkeletonExprSiteId {
         let id = SkeletonExprSiteId(u32::try_from(self.sites.len()).unwrap_or(u32::MAX));
+        let span = self.frame_span(span);
         self.sites.push(SiteDraft {
             span,
             region: self.current_region(),
@@ -1092,15 +1107,20 @@ impl SkeletonBuilder {
 
     fn push_read(&mut self, name: FlowNameId, span: verter_span::Span) {
         let site = self.footprint_site(span);
-        self.sites[site.index()]
-            .reads
-            .push(SkeletonRead { name, span });
+        self.sites[site.index()].reads.push(SkeletonRead { name });
     }
 
-    fn push_call(&mut self, call: SkeletonCall) {
-        let span = call.span;
+    /// `span` is the call expression's ABSOLUTE position; the recorded
+    /// [`SkeletonCall::span`] is its frame-relative twin, so a call effect
+    /// and a write effect are ordered in the SAME coordinate system.
+    fn push_call(&mut self, callee: SkeletonCallee, new_construct: bool, span: verter_span::Span) {
         let site = self.footprint_site(span);
-        self.sites[site.index()].calls.push(call);
+        let span = self.frame_span(span);
+        self.sites[site.index()].calls.push(SkeletonCall {
+            callee,
+            new_construct,
+            span,
+        });
     }
 
     fn push_write(
@@ -1113,6 +1133,7 @@ impl SkeletonBuilder {
     ) {
         let site = self.footprint_site(span);
         let region = self.current_region();
+        let span = self.frame_span(span);
         self.writes.push(SkeletonWrite {
             target,
             path,
@@ -1134,6 +1155,7 @@ impl SkeletonBuilder {
     ) {
         let name = self.intern(name);
         let region = self.current_region();
+        let span = self.frame_span(span);
         self.bindings.push(SkeletonBinding {
             name,
             kind,
@@ -1148,6 +1170,7 @@ impl SkeletonBuilder {
         for index in &self.region_stack {
             self.regions[*index].has_return = true;
         }
+        let span = self.frame_span(span);
         self.return_sites.push(SkeletonReturnSite {
             ordinal: u32::try_from(self.return_sites.len()).unwrap_or(u32::MAX),
             region: self.current_region(),
@@ -1472,43 +1495,23 @@ impl SkeletonBuilder {
         }
     }
 
-    /// Rebase one absolute source span onto the skeleton's own anchor.
-    fn rebase(anchor: u32, span: verter_span::Span) -> verter_span::Span {
-        verter_span::Span::new(
-            span.start.saturating_sub(anchor),
-            span.end.saturating_sub(anchor),
-        )
-    }
-
+    /// Publish the skeleton.
+    ///
+    /// A plain MOVE, deliberately: there is no per-record-family span
+    /// mapping here to apply to five families and forget on two. Every span
+    /// crossed into [`FrameSpan`] at ingress ([`Self::frame_span`]), and a
+    /// draft field that still held an absolute offset would not have the
+    /// type its published counterpart needs.
     fn finish(self) -> FunctionBodySkeleton {
-        let anchor = self.anchor;
         FunctionBodySkeleton {
             names: Arc::from(self.names.into_boxed_slice()),
-            regions: Arc::from(
-                self.regions
-                    .into_iter()
-                    .map(|region| SkeletonRegion {
-                        span: Self::rebase(anchor, region.span),
-                        ..region
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-            bindings: Arc::from(
-                self.bindings
-                    .into_iter()
-                    .map(|binding| SkeletonBinding {
-                        span: Self::rebase(anchor, binding.span),
-                        ..binding
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
+            regions: Arc::from(self.regions.into_boxed_slice()),
+            bindings: Arc::from(self.bindings.into_boxed_slice()),
             expr_sites: Arc::from(
                 self.sites
                     .into_iter()
                     .map(|draft| SkeletonExprSite {
-                        span: Self::rebase(anchor, draft.span),
+                        span: draft.span,
                         region: draft.region,
                         parent: draft.parent,
                         shape: draft.shape,
@@ -1518,26 +1521,8 @@ impl SkeletonBuilder {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ),
-            return_sites: Arc::from(
-                self.return_sites
-                    .into_iter()
-                    .map(|site| SkeletonReturnSite {
-                        span: Self::rebase(anchor, site.span),
-                        ..site
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
-            writes: Arc::from(
-                self.writes
-                    .into_iter()
-                    .map(|write| SkeletonWrite {
-                        span: Self::rebase(anchor, write.span),
-                        ..write
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            ),
+            return_sites: Arc::from(self.return_sites.into_boxed_slice()),
+            writes: Arc::from(self.writes.into_boxed_slice()),
         }
     }
 }
@@ -1796,12 +1781,13 @@ impl<'a> Visit<'a> for SkeletonBuilder {
             .argument
             .as_ref()
             .map(|argument| self.open_root_site(argument));
+        let span = self.frame_span(it.span.into());
         self.return_sites.push(SkeletonReturnSite {
             ordinal: u32::try_from(self.return_sites.len()).unwrap_or(u32::MAX),
             region: self.current_region(),
             argument,
             implicit: false,
-            span: it.span.into(),
+            span,
         });
     }
 
@@ -1927,21 +1913,13 @@ impl<'a> Visit<'a> for SkeletonBuilder {
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
         let callee = self.extract_callee(&it.callee);
-        self.push_call(SkeletonCall {
-            callee,
-            new_construct: false,
-            span: it.span.into(),
-        });
+        self.push_call(callee, false, it.span.into());
         walk::walk_call_expression(self, it);
     }
 
     fn visit_new_expression(&mut self, it: &oxc_ast::ast::NewExpression<'a>) {
         let callee = self.extract_callee(&it.callee);
-        self.push_call(SkeletonCall {
-            callee,
-            new_construct: true,
-            span: it.span.into(),
-        });
+        self.push_call(callee, true, it.span.into());
         walk::walk_new_expression(self, it);
     }
 }
@@ -1965,13 +1943,15 @@ impl SkeletonBuilder {
                     for (name, span, destructured) in identifiers {
                         let interned = self.intern(&name);
                         self.push_binding(&name, kind, span, None, destructured);
+                        let region = self.current_region();
+                        let span = self.frame_span(span);
                         self.writes.push(SkeletonWrite {
                             target: SkeletonWriteTarget::Named(interned),
                             path: Arc::from(Vec::new().into_boxed_slice()),
                             certainty: SkeletonWriteCertainty::Optional,
                             value: Some(source),
                             site: source,
-                            region: self.current_region(),
+                            region,
                             span,
                         });
                     }

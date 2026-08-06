@@ -25,8 +25,7 @@ use super::dispatch_txn::{
     ObligationFrameDomain, ObligationIdentity, PendingObligation, PendingObligationDomain,
 };
 use super::flow_return_callee::{
-    CallValue, CalleeClause, CalleeClauseLookup, CalleeClauseParam, ClauseParamInference,
-    ClauseParamOutcome, HeldCallee, ReturnOrigin, SignatureCall,
+    CallValue, CalleeClause, CalleeClauseLookup, HeldCallee, ReturnOrigin, SignatureCall,
 };
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -413,7 +412,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // whole-signature composition here would materialise
                 // exactly the sibling members this rail exists to leave
                 // cold.
-                Some(self.instantiate_callee_clause_at_unknown(&identity, result.return_type))
+                self.instantiate_callee_clause_at_unknown(&identity, result.return_type)
             }
             // Degraded success / typed failure / in-flight hold: the
             // generic unwrap route decides (it already owns these
@@ -426,40 +425,45 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `unknown` over a value taken from its body-derived return — the
     /// signature-UTILITY policy, applied without composing a signature.
     ///
-    /// A callee whose clause cannot be read instantiates nothing, which
-    /// is correct here for the one reason it is not correct at a CALL
-    /// site: the value is already a body-derived flow return of a
-    /// position this file serves, so a clause miss can only mean the
-    /// callee declares none.
+    /// A clause the route could not READ is a MISS (`None`), never "the
+    /// callee declares none". The two were the same value here — a
+    /// failed read returned the callee's return UNTOUCHED, its own
+    /// binders intact and warm-admissible — while the CALL-site route
+    /// degraded on the identical miss. The clause reader is now shared
+    /// (both take a `FunctionProgramEntry` witness) and both states are
+    /// distinct, so the asymmetry has no spelling.
     fn instantiate_callee_clause_at_unknown(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         node: SemanticNodeId,
-    ) -> SemanticNodeId {
-        let Some(names) = self.served_callee_clause_names(identity) else {
-            return node;
-        };
-        if names.is_empty() {
-            return node;
+    ) -> Option<SemanticNodeId> {
+        let clause = self.served_callee_clause(identity)?;
+        if clause.is_empty() {
+            return Some(node);
         }
         // A body-derived return is evaluated with the callee's clause
         // BOUND, so its parameters spell as binders (and, for a
         // still-deferred head, as a bare name) — never as a resolved
         // same-named file-scope declaration, which would be a different
         // symbol.
-        self.instantiate_named_params_at_unknown(
-            names.iter().map(std::convert::AsRef::as_ref),
+        Some(self.instantiate_named_params_at_unknown(
+            clause.param_names(),
             node,
             crate::semantic_query::ClauseSpelling::WithDeferredHeads,
-        )
+        ))
     }
 
-    /// The type-parameter NAMES of a served function position, from the
+    /// The OWN clause of a served function position, read from the
     /// shallow per-file function-program index.
-    fn served_callee_clause_names(
+    ///
+    /// `None` is a READ FAILURE (the file is not served at this version,
+    /// or the position is not indexed) — never an empty clause. The
+    /// clause itself is built by its owning module from the index entry,
+    /// so this route cannot assemble one either.
+    fn served_callee_clause(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
-    ) -> Option<Vec<Arc<str>>> {
+    ) -> Option<CalleeClause> {
         let canonical = identity.anchor.canonical_id.as_ref();
         let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
@@ -474,13 +478,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let index = decl_bodies.function_program_index();
         let entry = index.get(&key)?;
-        Some(
-            entry
-                .type_parameters
-                .iter()
-                .map(|param| Arc::clone(&param.name))
-                .collect(),
-        )
+        Some(CalleeClause::read_from_program_entry_at_unknown(entry))
     }
 
     /// The whole-function `FlowReturn` authority. Every whole-function
@@ -1386,11 +1384,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // memo refuses (`ReturnOnly` — the fourth non-admission layer,
         // on top of the planner's typed refusal, the hash node's
         // `ReturnOnly`, and the unaddressable lowered store).
+        // A body whose own bytes could not be read has no exact-content
+        // axis, so no content-addressed key can be built for it: fail
+        // closed rather than key on a constant every unreadable body
+        // shares.
+        let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
+            return degraded(FlowReturnFailure::Unresolved, self_roots);
+        };
         let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
-            flow_body_exact_hash: entry.flow_body_exact_hash,
+            flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
             parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
         };
@@ -2690,10 +2695,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// one authority that answers for every position it serves, the
     /// value registry included, a namespace-scoped function included.
     ///
-    /// Three outcomes, not two: a clause that was READ and found empty
-    /// is [`CalleeClause::non_generic`] — a statement about the callee —
-    /// while a clause that could not be read at all is
-    /// [`CalleeClauseLookup::Unavailable`], which degrades. Collapsing
+    /// Three outcomes, not two: a clause that was READ and found empty is
+    /// an EMPTY clause — a statement about the callee, which only
+    /// [`CalleeClause::read_from_program_entry`] can make because only it
+    /// is handed the callee's index entry — while a clause that could not
+    /// be read at all is [`CalleeClauseLookup::Unavailable`]. Collapsing
     /// the second into the first is how a serve miss becomes "the callee
     /// is not generic": the callee's return is handed back verbatim,
     /// binders and all, with no degradation and full warm admission —
@@ -2720,50 +2726,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(entry) = decl_bodies.function_program_index().get(target).cloned() else {
             return CalleeClauseLookup::Unavailable;
         };
-        if entry.type_parameters.is_empty() {
-            return CalleeClauseLookup::non_generic();
-        }
         // The lowered clause is demanded lazily and at most once, and
         // only when some parameter's default is actually needed.
         let mut lowered: Option<Option<Vec<crate::flow_slice_content::SliceTypeParam>>> = None;
-        let mut params = Vec::with_capacity(entry.type_parameters.len());
-        for (ordinal, param) in entry.type_parameters.iter().enumerate() {
-            if !param.has_default {
-                params.push(CalleeClauseParam::bare(Arc::clone(&param.name)));
-                continue;
+        // The clause is BUILT by its owning module, from the entry the
+        // index answered with. This route reads the authority and hands
+        // it over; it cannot assemble a clause out of nothing, because
+        // the constructors that would let it are private there.
+        CalleeClause::read_from_program_entry(&entry, site, |ordinal, param| {
+            let clause =
+                lowered.get_or_insert_with(|| decl_bodies.function_type_param_clause(&entry));
+            // Matched by ORDINAL, with the name as a cross-check: the
+            // shallow index and the lowered clause both walk the SAME
+            // authored clause in declaration order, so the ordinal is the
+            // identity and the name is not (a duplicate spelling would
+            // silently take the first slot's default). A disagreement
+            // means the two views are not the same clause, which is a
+            // miss, not a best guess.
+            let slice = clause.as_ref()?.get(ordinal)?;
+            if slice.name != param.name {
+                return None;
             }
-            let inference = ClauseParamInference::at_call(site, param.first_parameter_occurrence);
-            let outcome =
-                CalleeClauseParam::with_default(Arc::clone(&param.name), site, inference, || {
-                    let clause = lowered
-                        .get_or_insert_with(|| decl_bodies.function_type_param_clause(&entry));
-                    // Matched by ORDINAL, with the name as a
-                    // cross-check: the shallow index and the lowered
-                    // clause both walk the SAME authored clause in
-                    // declaration order, so the ordinal is the identity
-                    // and the name is not (a duplicate spelling would
-                    // silently take the first slot's default). A
-                    // disagreement means the two views are not the same
-                    // clause, which is a miss, not a best guess.
-                    let slice = clause.as_ref()?.get(ordinal)?;
-                    if slice.name != param.name {
-                        return None;
-                    }
-                    slice.default.as_ref().and_then(|gated| {
-                        self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.canonical,
-                            target.declaration.owner,
-                            gated.ty(),
-                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                        )
-                    })
-                });
-            match outcome {
-                ClauseParamOutcome::Param(param) => params.push(param),
-                ClauseParamOutcome::DefaultUnavailable => return CalleeClauseLookup::Unavailable,
-            }
-        }
-        CalleeClauseLookup::Clause(CalleeClause::new(params))
+            slice.default.as_ref().and_then(|gated| {
+                self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                    self.canonical,
+                    target.declaration.owner,
+                    gated.ty(),
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )
+            })
+        })
     }
 
     /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
@@ -2990,6 +2982,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // rather than bind an unrelated same-named declaration.
             crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
                 Err(FlowReturnFailure::UnmodeledBinding)
+            }
+            // A conditional expression's branch VALUES. Each arm was
+            // lowered as a flow expression, so a call in a branch already
+            // took the one call sink above — the union here only joins
+            // the results, through the same normalizing interner the
+            // `if` / `return` twin's contributor join uses, so the two
+            // spellings of one branch answer alike.
+            crate::flow_slice_content::SliceExpr::Union { arms } => {
+                let mut nodes = Vec::with_capacity(arms.len());
+                for arm in arms.iter() {
+                    // A coinductive HOLD inside a branch cannot be
+                    // represented as a partial union arm — the SCC
+                    // discharge joins whole contributions, not fragments
+                    // of one. Fail closed rather than drop the held arm
+                    // and publish the rest as if it were the whole value.
+                    let Some(node) = self.eval_expr(arm)? else {
+                        return Err(FlowReturnFailure::Unresolved);
+                    };
+                    nodes.push(node);
+                }
+                Ok(Some(
+                    self.dispatch
+                        .intern_normalized_union_or_intersection(&nodes, true),
+                ))
+            }
+            // A call the content half could not route through the call
+            // carrier: the only answer available was the shallow pass's
+            // UNREDUCED `ReturnType<callee>`, which carries the callee's
+            // own binders and skipped its overload group entirely.
+            // Publishing it is a warm-admissible wrong answer with a
+            // FOREIGN binder in it, so the evaluation fails closed.
+            crate::flow_slice_content::SliceExpr::UnreducedCallValue => {
+                Err(FlowReturnFailure::UnmodeledCallPosition)
             }
             // Content the demand slice did not select: never lowered,
             // never evaluable. Reaching one is a planner/content mismatch
@@ -3325,22 +3350,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // callee: nothing about "the callee happens to be a local"
                 // makes its binders this frame's to publish.
                 // A binding's value is either a nested function value's
-                // COMPOSED signature (clause-scoped) or a lowered
-                // annotation. A function-TYPE annotation
-                // (`<T>(x: T) => T`) lowers with its clause in scope, so
-                // it spells its parameters as binders; a `typeof
-                // declaredFn` annotation — the one shape that could
-                // carry the owner-scope misresolution — does not reach a
-                // `Signature` node here at all (it resolves to a
-                // non-callable surface and degrades). The owner-scope
-                // spelling is therefore kept for safety rather than for
-                // a reachable shape, and no fixture in the suite
-                // distinguishes the two here.
+                // COMPOSED signature or a lowered function-TYPE
+                // annotation, and BOTH are clause-scoped: the composed
+                // signature is built in the callee's own frame, and a
+                // `<T>(x: T) => T` annotation lowers with its clause in
+                // scope, so both spell the clause as binders. The one
+                // shape that could carry an owner-scope misresolution —
+                // `typeof declaredFn` — does not reach a `Signature`
+                // node here at all (it resolves to a non-callable
+                // surface and degrades), so nothing on this route needs
+                // the owner-scope claim while claiming it destroys a
+                // correct arm: a same-named FOREIGN declaration reached
+                // through the callee's body is a different symbol, and
+                // the IIFE route — the same body, invoked directly —
+                // already keeps it.
                 match CallValue::of_signature_node(
                     self.dispatch,
                     node,
                     site,
-                    ReturnOrigin::OwnerScopeDeclared,
+                    ReturnOrigin::ClauseScoped,
                 ) {
                     SignatureCall::Value(value) => Ok(Some(value)),
                     SignatureCall::ReturnMiss | SignatureCall::ClauseUnavailable => {

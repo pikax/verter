@@ -1376,6 +1376,164 @@ export function iifeForeign() {
   return (<QQ,>(f: boolean) => (f ? qqValue : null))(true);
 }
 
+// ── ONE callee, TWO routes: the binding and the IIFE ──────────────────
+// `nbUse` and `nbIife` have the SAME callee body; only the route to it
+// differs (a local `const` binding vs. an immediate invocation). Both
+// reach a signature COMPOSED from that body, so both must answer alike.
+// `ncUse` is the control: the identical body with the clause RENAMED,
+// which removes the name collision without changing anything else.
+export interface NB {
+  nb: string;
+}
+
+export declare const nbValue: NB;
+
+export function nbUse(k: boolean) {
+  const g = <NB,>(j: boolean) => (j ? nbValue : null);
+  return g(true);
+}
+
+export function nbIife(k: boolean) {
+  return (<NB,>(j: boolean) => (j ? nbValue : null))(true);
+}
+
+export function ncUse(k: boolean) {
+  const g = <ZZ,>(j: boolean) => (j ? nbValue : null);
+  return g(true);
+}
+
+// ── Call forms reached through a COMPOSITE expression ─────────────────
+// A call inside a ternary arm / logical operand / member base is still a
+// call: its callee's clause must be instantiated, and an overload group
+// reached through one must degrade exactly as it does at a bare call.
+export declare function tnAmb(x: string): "TA";
+export declare function tnAmb(x: number): "TB";
+
+export function tnAmbBare(k: boolean) {
+  return tnAmb("a");
+}
+
+export function tnAmbIf(k: boolean) {
+  if (k) return tnAmb("a");
+  return tnAmb(1);
+}
+
+export function tnAmbTernary(k: boolean) {
+  return k ? tnAmb("a") : tnAmb(1);
+}
+
+export function tnAmbLogical(k: boolean) {
+  return k || tnAmb("a");
+}
+
+export function tnAmbNullish(k: null) {
+  return k ?? tnAmb("a");
+}
+
+export function tnAmbSequence(k: boolean) {
+  return (k, tnAmb("a"));
+}
+
+export function tnAmbAwait(k: boolean) {
+  return tnAmb("a")!;
+}
+
+export function tnAmbArray(k: boolean) {
+  return [tnAmb("a")];
+}
+
+export function tnAmbAs(k: boolean) {
+  return tnAmb("a") as "TA";
+}
+
+export function tnGeneric<TNG>(x?: TNG): TNG {
+  return null as unknown as TNG;
+}
+
+export function tnGenericBare() {
+  return tnGeneric<string>("s");
+}
+
+export function tnGenericTernary(k: boolean) {
+  return k ? tnGeneric<string>("s") : tnGeneric<number>(1);
+}
+
+export function tnGenericLogical(k: boolean) {
+  return k || tnGeneric<string>("s");
+}
+
+export function tnGenericArray() {
+  return [tnGeneric<string>("s")];
+}
+
+export function tnLitTernary(k: boolean) {
+  return k ? 1 : 2;
+}
+
+export function tnLitIf(k: boolean) {
+  if (k) return 1;
+  return 2;
+}
+
+export function tnStrTernary(k: boolean) {
+  return k ? "a" : "b";
+}
+
+export function tnGenericMember() {
+  return tnGeneric<{ q: string }>({ q: "a" }).q;
+}
+
+// ── METHOD-position overload groups ───────────────────────────────────
+// An overload SET in method position retains every contributor on the
+// surface, but a member projection is first-wins — so the call rail saw
+// ONE signature and published the FIRST overload's return warm.
+export declare class OvClass {
+  m(x: string): "MA";
+  m(x: number): "MB";
+}
+export declare const ovClassValue: OvClass;
+
+export function ovClassMethodCall() {
+  return ovClassValue.m(1);
+}
+
+export declare const ovObjValue: { m(x: string): "PA"; m(x: number): "PB" };
+
+export function ovObjMethodCall() {
+  return ovObjValue.m(1);
+}
+
+export interface OvIface {
+  m(x: string): "IA";
+  m(x: number): "IB";
+}
+export declare const ovIfaceValue: OvIface;
+
+export function ovIfaceMethodCall() {
+  return ovIfaceValue.m(1);
+}
+
+export declare const ovIntersectValue: OvClass & { z: 1 };
+
+export function ovIntersectMethodCall() {
+  return ovIntersectValue.m(1);
+}
+
+// CONTROL — a LONE method is not an overload group and must keep its
+// exact answer.
+export declare const ovSoloValue: { only(x: number): "SOLO" };
+
+export function ovSoloMethodCall() {
+  return ovSoloValue.only(1);
+}
+
+// CONTROL — a plain PROPERTY is projected first-wins as before.
+export declare const ovPropValue: { p: "PROP" };
+
+export function ovPropRead() {
+  return ovPropValue.p;
+}
+
 // ── The OWNER-SCOPE routes' clause shadowing ──────────────────────────
 // `SymItem` names both a file-scope interface and a clause parameter of
 // a DECLARED function TYPE. Both routes below take their value from a
@@ -2173,7 +2331,8 @@ fn flow_return_type_space_names_are_not_classified_against_the_value_inventory()
 /// separate scope lookups. So when the frame declares `QE`, the whole
 /// reference belongs to the frame and the owner-scope answer is wrong.
 ///
-/// tsgo 7.0.2 `--strict --declaration --emitDeclarationOnly`, on exactly
+/// tsgo `7.0.0-dev.20260526.1` `--strict --declaration
+/// --emitDeclarationOnly`, on exactly
 /// these bodies:
 ///
 /// ```text
@@ -2259,7 +2418,7 @@ fn nested_return(host: &Arc<VerterHost>, name: &str) -> TypeExpr {
 /// | `class` + `namespace`  | yes          | yes                    |
 /// | `function` + `namespace` | NO         | yes                    |
 ///
-/// Oracle (tsgo 7.0.2, checker not emitter — `const c: "outerNs" =
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, checker not emitter — `const c: "outerNs" =
 /// qClassHead(0)` and friends): every row below assigns cleanly exactly
 /// when the module declaration is the answer, and reports TS2322 exactly
 /// when the local one is.
@@ -3786,8 +3945,20 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
 /// - otherwise (no candidate is possible at all) ⇒ its declared default
 ///   when it has one, else `unknown`.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read through
-/// deliberate `const x: null = …` assignment errors):
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`), read as the WRAPPER's return type through
+/// `declare const w: ReturnType<typeof zzMismACall>; const p: null = w;`.
+///
+/// The probe form is load-bearing and the one-step
+/// `const p: null = <call>` is NOT a sound reading here: for a generic
+/// call whose parameter reaches the return type the contextual `null`
+/// FEEDS return-type inference, and the one-step probe reports NO ERROR
+/// AT ALL for `rvDefaultedCall` / `rvDefaultedFlowFreeCall` /
+/// `zpUnusedTPCall` / `zpNotSuppliedCall` / `gcBareInferred`. Binding the
+/// raw call to a `const` is not sound either: it reads the UNWIDENED
+/// `1` / `true` where the wrapper's return type is `number` / `boolean`.
+/// The values below are the wrapper readings; they were re-derived
+/// through this form and all nine are correct.
 ///
 /// ```text
 /// zzMismACall():             number             ← default `string` LOSES to inference
@@ -3818,8 +3989,12 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
 /// - dropping the explicit-type-arguments bit flips only
 ///   `zpExplicitCall`;
 /// - dropping the supplied-ordinal test (treating ANY occurrence in a
-///   parameter type as inferable) flips `zpUnusedTPCall` and
-///   `zpNotSuppliedCall` to `unknown`.
+///   parameter type as inferable) flips `zpNotSuppliedCall` ALONE to
+///   `unknown`. `zpUnusedTPCall`'s `ZE` occurs in NO parameter type at
+///   all, so `first_parameter_occurrence == None` already decides it and
+///   that row does not discriminate this refinement — it discriminates
+///   the COARSER "any argument-bearing call infers" mutation. An earlier
+///   record naming both rows was wrong.
 #[test]
 fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate() {
     let host = make_r5_host();
@@ -4027,6 +4202,70 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
     );
 }
 
+/// ONE callee, reached two ways, answers ONE thing.
+///
+/// `nbUse` binds an arrow to a local `const` and calls the binding
+/// (`SliceCall::OnBinding`); `nbIife` invokes the SAME arrow body
+/// immediately (`SliceCall::Nested`). Both callee values are a signature
+/// COMPOSED from that body, so both are [`ReturnOrigin::ClauseScoped`]:
+/// the interface `NB` reached through the body is a FOREIGN symbol the
+/// arrow's same-named clause parameter never shadows.
+///
+/// Spelling the binding route owner-scope-declared claims that interface
+/// BY NAME and republishes the arm as `unknown` — cleanly, warm, and in
+/// disagreement with the IIFE route about a single callee. `ncUse` is
+/// the control that isolates it: the identical body with the clause
+/// renamed keeps the arm, so the erasure is purely the name collision.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`,
+/// read through the TWO-STEP probe `const v = f(…); const p: null = v;`
+/// — a one-step `const p: null = f(…)` contextually types the call and
+/// is not a sound reading here):
+///
+/// ```text
+/// nbUse(true):  NB | null
+/// nbIife(true): NB | null
+/// ncUse(true):  NB | null
+/// ```
+///
+/// Mutation recipe: restoring `ReturnOrigin::OwnerScopeDeclared` at the
+/// `SliceCall::OnBinding` arm flips `nbUse` alone to
+/// `Union([Unknown, Null])` while `nbIife` and `ncUse` stay green —
+/// which is precisely the two-routes-disagree state.
+#[test]
+fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
+    let host = make_r5_host();
+
+    for name in ["nbUse", "nbIife", "ncUse"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                    .iter()
+                    .map(|arm| node_shape(dispatch, *arm))
+                    .collect();
+                assert!(
+                    shapes.contains(&decl_ref("NB")),
+                    "{name}: the callee's body-derived arm is the file-scope \
+                     interface `NB`, a symbol the callee's own clause never \
+                     shadows — got {shapes:?}"
+                );
+                assert!(
+                    shapes.contains(&NodeShape::Primitive(PrimitiveKind::Null)),
+                    "{name}: the `null` arm survives — got {shapes:?}"
+                );
+                assert!(
+                    !shapes.contains(&NodeShape::Primitive(PrimitiveKind::Unknown)),
+                    "{name}: nothing in this answer is the instantiation interim \
+                     — got {shapes:?}"
+                );
+            },
+        );
+    }
+}
+
 /// An AMBIENT overload group is no more answerable than a bodied one.
 ///
 /// The per-file function-program index carries ONE entry per overload
@@ -4162,4 +4401,179 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
             );
         },
     );
+}
+
+/// A CALL reached through a COMPOSITE expression is still a call.
+///
+/// `lower_expr` used to end in a `_ => self.lower_leaf(…)` wildcard, so
+/// every expression form without its own arm folded through the shared
+/// SHALLOW pass — which has no frame and no resolver, and answers a call
+/// it meets with an UNREDUCED `ReturnType<callee>` carrier. Published as
+/// a value that carrier hands out the callee's own type-parameter binders
+/// and skips its overload group entirely, cleanly and warm:
+///
+/// ```text
+/// tnAmbTernary   deg=None cands=1  Union([ReturnType<…>, ×2])   ← the size gate BYPASSED
+/// tnGenericTernary                 Union([ReturnType<Fn<…TNG…>>, ×2])
+/// tnAmbArray                       Array{ element: ReturnType<…> }
+/// ```
+///
+/// while the `if` / `return` twin of the same body went through
+/// `SliceExpr::Call` and degraded correctly. Two spellings of one body,
+/// two answers.
+///
+/// Two halves close it. A CONDITIONAL now has a structural arm: both
+/// branches lower as flow expressions, so their calls ride the one call
+/// sink and join through the same normalizing interner the contributor
+/// join uses. Every remaining form goes through `lower_leaf`'s
+/// call-carrier gate and FAILS CLOSED rather than publishing the carrier.
+/// And the match is exhaustive — no `_` arm — so a new `Expression`
+/// variant does not compile until it is dispositioned.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`, read as the wrapper's `ReturnType` through
+/// `declare const w: ReturnType<typeof f>; const p: null = w;`):
+///
+/// ```text
+/// tnAmbTernary:     "TA" | "TB"      tnAmbIf:      "TA" | "TB"
+/// tnAmbArray:       "TA"[]           tnGenericTernary: string | number
+/// tnGenericArray:   string[]         tnLitTernary: 1 | 2
+/// ```
+///
+/// The overload rows are the DEGRADATION assertion (the substrate does
+/// not resolve an overload group at a call site — `UnrepresentableCallee`
+/// is the modeled refusal, `ReturnOnly`); the generic rows assert the
+/// recorded `U6.CALL_RESOLVE` interim (`unknown` for an explicit type
+/// argument) and, discriminatingly, that NO callee binder survives in the
+/// published node.
+///
+/// Mutation recipe: restoring `_ => self.lower_leaf(expr, mode)` and
+/// deleting the `ConditionalExpression` arm flips `tnAmbTernary` back to
+/// `deg=None cands=1` and puts a `ReturnType` `InstantiationRef` inside
+/// every generic row; deleting only the `lower_leaf` gate flips the two
+/// array rows back to a published carrier.
+#[test]
+fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
+    let host = make_r5_host();
+
+    // An overload group degrades identically at a bare call, in an `if`
+    // arm, and in a TERNARY arm — one callee, one answer.
+    for name in ["tnAmbBare", "tnAmbIf", "tnAmbTernary"] {
+        assert_degraded(
+            &host,
+            name,
+            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        );
+    }
+
+    // A generic callee in a ternary arm publishes the recorded interim,
+    // never the callee's own binder.
+    r5_node(
+        &host,
+        "tnGenericTernary",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "the ternary's arms take the same interim a bare call takes"
+            );
+        },
+    );
+
+    // A form with NO structural arm fails CLOSED rather than publishing
+    // the carrier.
+    for name in ["tnAmbArray", "tnGenericArray"] {
+        assert_fails_closed(&host, name);
+    }
+
+    // CONTROL — a call-free ternary is untouched: same answer as its
+    // `if` / `return` twin, and the checker's own `1 | 2` (NOT widened).
+    for name in ["tnLitTernary", "tnLitIf"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                    .iter()
+                    .map(|arm| node_shape(dispatch, *arm))
+                    .collect();
+                assert_eq!(
+                    shapes,
+                    vec![
+                        NodeShape::Other("Literal(Number(1.0))".to_string()),
+                        NodeShape::Other("Literal(Number(2.0))".to_string()),
+                    ],
+                    "{name}: a call-free ternary keeps its literal arms unwidened"
+                );
+            },
+        );
+    }
+}
+
+/// A METHOD-position overload GROUP is an overload group.
+///
+/// Every same-name method contributor is retained on the surface, but a
+/// member projection is first-wins by design — right for a property,
+/// silently truncating for an overload set. So `ovObjValue.m(1)` reached
+/// the call rail as ONE signature and published the FIRST overload's
+/// return, cleanly and warm, while the identical group written as bare
+/// CALL SIGNATURES (`{ (x: string): "A"; (x: number): "B" }`) degraded
+/// correctly. Four shapes were affected — class method, object-type
+/// method, interface method, and a method reached through an
+/// INTERSECTION arm.
+///
+/// The group now projects as the canonical overload-group carrier — an
+/// object whose CALL SIGNATURES are the contributors, the same shape
+/// `build_typeof` mints for a top-level function overload group — so the
+/// existing size gate (`signature_bucket_arity(.., Call) > 1`) sees the
+/// real arity and `select_signature_function` keeps reading the LAST
+/// overload for the signature utilities, exactly as it does for `f`.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`, read as the wrapper's `ReturnType` through
+/// `declare const w: ReturnType<typeof f>; const p: null = w;`):
+///
+/// ```text
+/// ovClassMethodCall():     "MB"      ← the SECOND overload, not the first
+/// ovObjMethodCall():       "PB"
+/// ovIfaceMethodCall():     "IB"
+/// ovIntersectMethodCall(): "MB"
+/// ovSoloMethodCall():      "SOLO"    ← a LONE method is not a group
+/// ```
+///
+/// Picking the right overload needs argument-driven overload resolution
+/// (`U6.CALL_RESOLVE`); until then `UnrepresentableCallee` is the modeled
+/// refusal — usable `any`, `ReturnOnly`, never warm — which is the same
+/// answer every other overload-group shape already gives.
+///
+/// Mutation recipe: returning `None` unconditionally from
+/// `SurfaceView::project_known_key_overload_group` restores first-wins
+/// and flips all four group rows to `deg=None cands=1` naming the FIRST
+/// overload's literal (`"MA"` / `"PA"` / `"IA"` / `"MA"`), while leaving
+/// both controls green; gating the group on `>= 1` rather than `>= 2`
+/// collisions flips `ovSoloMethodCall`; dropping the all-methods test
+/// flips `ovPropRead`.
+#[test]
+fn flow_return_method_position_overload_groups_reach_the_size_gate() {
+    let host = make_r5_host();
+
+    for name in [
+        "ovClassMethodCall",
+        "ovObjMethodCall",
+        "ovIfaceMethodCall",
+        "ovIntersectMethodCall",
+    ] {
+        assert_degraded(
+            &host,
+            name,
+            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        );
+    }
+
+    // CONTROLS — a LONE method and a plain PROPERTY keep their exact
+    // first-wins answer: the gate must not over-fire on either.
+    assert_clean_warm(&host, "ovSoloMethodCall", string_lit("SOLO"));
+    assert_clean_warm(&host, "ovPropRead", string_lit("PROP"));
 }

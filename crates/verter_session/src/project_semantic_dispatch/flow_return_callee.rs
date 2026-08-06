@@ -19,7 +19,15 @@
 //! - the flow evaluator's call sink is typed [`CallValue`], reached
 //!   through one exhaustive match over the closed
 //!   [`SliceCall`](crate::flow_slice_content::SliceCall) vocabulary, so
-//!   a new call form must pick a constructor at its own arm;
+//!   a new call form must pick a constructor at its own arm. That closes
+//!   the CALL vocabulary; it says nothing about whether a call REACHES
+//!   it, which is the content lowering's obligation and was separately
+//!   open — a call in a ternary arm or an array element folded through
+//!   the frame-less shallow pass into an unreduced `ReturnType<callee>`
+//!   carrier and never entered this module at all. `lower_expr`'s match
+//!   over `Expression` is exhaustive now, and a leaf answer that embeds
+//!   that carrier fails CLOSED, so "a call that is not a `SliceCall`"
+//!   publishes nothing;
 //! - a hold target's contribution to the SCC fixed point is reachable
 //!   only through [`HeldCallee::discharged`], so the equation's join
 //!   cannot route around the rule either;
@@ -28,8 +36,16 @@
 //!   read and found empty — or a list of parameters each of which came
 //!   through [`CalleeClauseParam`]'s constructors. There is no `Default`,
 //!   so "no clause" cannot be reached by omission, and a route that
-//!   FAILS to read the clause cannot produce one at all (it returns
-//!   [`CalleeClauseLookup::Unavailable`] and degrades).
+//!   FAILS to read the clause cannot produce one at all — not by
+//!   convention but because every constructor is PRIVATE to this module.
+//!   The two entrances both demand the callee's own authority as an
+//!   argument: [`CalleeClause::read_from_program_entry`] /
+//!   [`CalleeClause::read_from_program_entry_at_unknown`] take a
+//!   `FunctionProgramEntry` (obtainable only by looking the callee up and
+//!   finding it), and [`CallValue::of_signature_node`] reads the clause
+//!   off a resolved `Signature` node. A serve or index miss has nothing
+//!   to hand over, returns [`CalleeClauseLookup::Unavailable`], and
+//!   degrades. Minting a clause from a miss used to COMPILE.
 //!
 //! Exactly one hold is deliberately UNINSTANTIATED
 //! ([`HeldCallee::own_frame`]) — the direct self-call, whose "callee" IS
@@ -72,6 +88,7 @@ use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
     ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
 };
+use verter_semantic::analysis::function_program::{FunctionProgramEntry, FunctionProgramTypeParam};
 
 /// Where the node a clause instantiates into was LOWERED, which decides
 /// which SPELLINGS of a clause parameter that node can contain.
@@ -168,7 +185,7 @@ pub(super) struct CalleeClauseParam {
 
 impl CalleeClauseParam {
     /// A clause parameter with no declared default: `unknown`, always.
-    pub(super) fn bare(name: Arc<str>) -> Self {
+    fn bare(name: Arc<str>) -> Self {
         Self {
             name,
             substitution: None,
@@ -187,7 +204,7 @@ impl CalleeClauseParam {
     /// rather than silently degrading to `unknown` — an `unknown` there
     /// is indistinguishable from the honest interim and would be warm
     /// admitted.
-    pub(super) fn with_default(
+    fn with_default(
         name: Arc<str>,
         site: SliceCallSite,
         inference: ClauseParamInference,
@@ -210,7 +227,7 @@ impl CalleeClauseParam {
 }
 
 /// The outcome of resolving one defaulted clause parameter.
-pub(super) enum ClauseParamOutcome {
+enum ClauseParamOutcome {
     /// The parameter, resolved.
     Param(CalleeClauseParam),
     /// The declared default was NEEDED by the call-site rule and could
@@ -235,21 +252,98 @@ pub(super) struct CalleeClause {
 impl CalleeClause {
     /// A NON-GENERIC callee: its clause was read and found empty, so
     /// there is nothing to instantiate. The name is the point — a route
-    /// that could not read the clause must not reach this constructor.
-    pub(super) fn non_generic() -> Self {
+    /// that could not read the clause must not reach this constructor,
+    /// and now CANNOT: this is private to the module, reachable only
+    /// through a reader that was handed the callee's own authority.
+    fn non_generic() -> Self {
         Self {
             params: Arc::from(Vec::new().into_boxed_slice()),
         }
     }
 
-    /// A clause from its ordered parameters.
-    pub(super) fn new(params: impl IntoIterator<Item = CalleeClauseParam>) -> Self {
+    /// A clause from its ordered parameters. Private for the same
+    /// reason [`Self::non_generic`] is.
+    fn new(params: impl IntoIterator<Item = CalleeClauseParam>) -> Self {
         Self {
             params: params.into_iter().collect(),
         }
     }
 
-    fn is_empty(&self) -> bool {
+    /// READ a callee's own clause from the shallow function-program
+    /// ENTRY the index answered with — the one producer on the direct
+    /// rail, and the reason that rail cannot fabricate a clause.
+    ///
+    /// The `entry` reference IS the witness. There is no way to obtain a
+    /// [`FunctionProgramEntry`] except by looking the callee up in the
+    /// per-file index and finding it, so a serve miss or an index miss
+    /// has nothing to pass here and returns
+    /// [`CalleeClauseLookup::Unavailable`] by calling nothing at all.
+    /// Before this, the caller assembled the clause itself out of
+    /// `non_generic()` / `new(…)` / `bare(…)`, every one of which was
+    /// reachable from a MISS — the module's claim that "a route that
+    /// fails to read the clause cannot produce one" described the one
+    /// existing caller rather than an enforced invariant.
+    ///
+    /// `default_of` lowers ONE declared default, by ordinal, and is
+    /// called only for a parameter whose default the call-site rule
+    /// actually needs.
+    pub(super) fn read_from_program_entry(
+        entry: &FunctionProgramEntry,
+        site: SliceCallSite,
+        mut default_of: impl FnMut(usize, &FunctionProgramTypeParam) -> Option<SemanticNodeId>,
+    ) -> CalleeClauseLookup {
+        if entry.type_parameters.is_empty() {
+            return CalleeClauseLookup::Clause(Self::non_generic());
+        }
+        let mut params = Vec::with_capacity(entry.type_parameters.len());
+        for (ordinal, param) in entry.type_parameters.iter().enumerate() {
+            if !param.has_default {
+                params.push(CalleeClauseParam::bare(Arc::clone(&param.name)));
+                continue;
+            }
+            let inference = ClauseParamInference::at_call(site, param.first_parameter_occurrence);
+            match CalleeClauseParam::with_default(Arc::clone(&param.name), site, inference, || {
+                default_of(ordinal, param)
+            }) {
+                ClauseParamOutcome::Param(param) => params.push(param),
+                ClauseParamOutcome::DefaultUnavailable => return CalleeClauseLookup::Unavailable,
+            }
+        }
+        CalleeClauseLookup::Clause(Self::new(params))
+    }
+
+    /// READ a callee's clause for the signature-UTILITY policy, from the
+    /// same [`FunctionProgramEntry`] witness the call-site reader takes.
+    ///
+    /// The utility policy is `unknown` for EVERY declared parameter,
+    /// defaults included (`ReturnType<typeof f>` for `f<T = number>(): T`
+    /// is `unknown`), so this reader states that by naming
+    /// [`CalleeClauseParam::bare`] for each — it is not the call-site
+    /// rule with the defaults switched off.
+    ///
+    /// It exists so the utility route cannot express the asymmetry it
+    /// used to: a clause it FAILED to read left the callee's return
+    /// untouched — the callee's own binder, published warm — while the
+    /// call-site route degraded on the identical miss.
+    pub(super) fn read_from_program_entry_at_unknown(entry: &FunctionProgramEntry) -> Self {
+        Self::new(
+            entry
+                .type_parameters
+                .iter()
+                .map(|param| CalleeClauseParam::bare(Arc::clone(&param.name))),
+        )
+    }
+
+    /// The clause parameter NAMES, in declaration order — the read-only
+    /// projection the signature-UTILITY policy instantiates at `unknown`.
+    pub(super) fn param_names(&self) -> impl Iterator<Item = &str> {
+        self.params.iter().map(|param| param.name.as_ref())
+    }
+
+    /// Whether the callee declares NO parameters — a statement about the
+    /// callee, distinct from "the clause could not be read", which has no
+    /// `CalleeClause` at all.
+    pub(super) fn is_empty(&self) -> bool {
         self.params.is_empty()
     }
 
@@ -261,8 +355,8 @@ impl CalleeClause {
     /// can contain — see [`ReturnOrigin`].
     ///
     /// A default that itself names a sibling clause parameter is
-    /// instantiated in turn — `<A, B = A>` answers `unknown` for both,
-    /// which is what TypeScript answers, and never leaks `A`.
+    /// instantiated in turn — see [`Self::instantiate_default`] for what
+    /// that claims and what it deliberately does not.
     fn instantiate(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
@@ -287,12 +381,26 @@ impl CalleeClause {
     }
 
     /// A DEFAULT is authored in the callee's own clause scope, so it can
-    /// name sibling parameters. Those siblings are just as unbound at
-    /// this call as the parameter being instantiated, so they collapse
-    /// the same way — never escape as the callee's binders.
+    /// name sibling parameters, and every such sibling collapses to
+    /// `unknown` here rather than escaping as the callee's binder.
     ///
     /// The default itself lowered in the callee's OWNER scope, where the
     /// clause is invisible, so every spelling is claimed here.
+    ///
+    /// The collapse is UNCONDITIONAL, which is exact for a sibling that
+    /// is itself unresolved and an OVER-collapse for one that is not.
+    /// `<A, B = A>` called with nothing answers `unknown` for both, which
+    /// is TypeScript's own answer; `<SA = string, SB = SA>` answers
+    /// `string` in TypeScript and `unknown` here, because `SA`'s own
+    /// resolved default is not consulted. Substituting each sibling's
+    /// DECIDED substitution instead is not a local change: the
+    /// substitution of a sibling whose default names a further sibling is
+    /// itself a fixed point, and a mutually-defaulted clause
+    /// (`<A = B, B = A>`) resolves to a sibling BINDER under any depth-
+    /// bounded version — the exact leak this module exists to prevent.
+    /// The interim is the honest over-collapse, never a leaked binder.
+    /// Owned by `U6.CALL_RESOLVE`, which owns clause resolution
+    /// generally.
     fn instantiate_default(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
@@ -321,13 +429,6 @@ pub(super) enum CalleeClauseLookup {
     /// not be recovered). The caller degrades; it cannot proceed with a
     /// clause it does not have.
     Unavailable,
-}
-
-impl CalleeClauseLookup {
-    /// The callee's clause was READ and found empty.
-    pub(super) fn non_generic() -> Self {
-        Self::Clause(CalleeClause::non_generic())
-    }
 }
 
 /// The value of a CALL expression inside a flow frame.

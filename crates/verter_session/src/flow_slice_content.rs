@@ -52,7 +52,7 @@ use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, NameMeaning,
+    build_function_body_skeleton, FrameSpan, FunctionBodySkeleton, FunctionBodySource, NameMeaning,
     SkeletonBindingKind,
 };
 use verter_semantic::analysis::function_program::{
@@ -60,7 +60,7 @@ use verter_semantic::analysis::function_program::{
     FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
-    infer_declaration_expression_type, TopLevelLiteralPolicy,
+    embeds_call_return_carrier, infer_declaration_expression_type, TopLevelLiteralPolicy,
 };
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::lower_ts_type;
@@ -72,13 +72,14 @@ use verter_type_expr_oxc::lower_ts_type;
 /// transports the selection into the lease-only run.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowSliceSelection {
-    /// Spans of the slice's VALUE-selected expression records.
-    value_spans: FxHashSet<verter_span::Span>,
+    /// Spans of the slice's VALUE-selected expression records, in the
+    /// frame's own coordinates — the only coordinates the plan speaks.
+    value_spans: FxHashSet<FrameSpan>,
     /// Binding-identifier spans of the slice's VALUE-selected slots —
     /// DECLARATION-precise identity, so a shadowed same-named sibling
     /// declarator the plan kept out never lowers (name identity would
     /// re-conflate what the plan's lexical resolution separated).
-    value_slot_spans: FxHashSet<verter_span::Span>,
+    value_slot_spans: FxHashSet<FrameSpan>,
 }
 
 impl FlowSliceSelection {
@@ -100,11 +101,11 @@ impl FlowSliceSelection {
         }
     }
 
-    fn value_span(&self, span: verter_span::Span) -> bool {
+    fn value_span(&self, span: FrameSpan) -> bool {
         self.value_spans.contains(&span)
     }
 
-    fn value_slot_span(&self, span: verter_span::Span) -> bool {
+    fn value_slot_span(&self, span: FrameSpan) -> bool {
         self.value_slot_spans.contains(&span)
     }
 }
@@ -393,6 +394,28 @@ pub enum SliceExpr {
     /// unrelated module-scope (or cross-file imported) value of the same
     /// name, cleanly and warm. Fails closed at the evaluator instead.
     UnmodeledBinding,
+    /// A VALUE UNION of lowered arms — a conditional expression's two
+    /// branches.
+    ///
+    /// The arms are lowered flow expressions, not a leaf answer, which is
+    /// the whole point: a call in a ternary arm is a CALL, and rides
+    /// [`SliceExpr::Call`] to the evaluator's one call sink exactly as
+    /// the `if` / `return` twin's does. Folding the ternary through the
+    /// shared shallow-pass leaf lowering instead published the callee's
+    /// UNREDUCED return carrier — binders and overload group intact.
+    Union {
+        /// The branch values in source order.
+        arms: Arc<[SliceExpr]>,
+    },
+    /// An expression whose leaf answer EMBEDS an unreduced call-return
+    /// carrier: a call reached through a form with no structural arm.
+    ///
+    /// The shared shallow pass has no frame and no resolver, so a CALL it
+    /// meets answers as `ReturnType<callee>` with nothing instantiated.
+    /// Publishing that as this frame's value hands out the callee's own
+    /// type-parameter binders and skips its overload group, warm. There
+    /// is no honest value here, so the evaluator fails closed.
+    UnreducedCallValue,
     /// Content the demand slice did NOT select: never lowered, never
     /// evaluable. Observing an elided value is a planner/content mismatch
     /// and fails closed at the evaluator — it is never a fabricated
@@ -1096,22 +1119,19 @@ fn signature_parameter_bindings(
         .map(|binding| {
             (
                 Arc::from(skeleton.name(binding.name)),
-                // The skeleton is anchor-relative; the offsets these
-                // spans are compared against (a default initializer's
-                // start) are live and absolute.
-                verter_span::Span::new(binding.span.start + anchor, binding.span.end + anchor),
+                // The skeleton is anchor-relative; the offsets these spans
+                // are compared against (a default initializer's start) are
+                // live and absolute, so this is the crossing OUT — the
+                // only one, and it has to name the anchor to happen.
+                binding.span.to_absolute(anchor),
             )
         })
         .collect()
 }
 
 /// Rebase a LIVE source span onto a function's own anchor.
-fn rebase_span(anchor: u32, span: oxc_span::Span) -> verter_span::Span {
-    let span: verter_span::Span = span.into();
-    verter_span::Span::new(
-        span.start.saturating_sub(anchor),
-        span.end.saturating_sub(anchor),
-    )
+fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
+    FrameSpan::rebase(anchor, span.into())
 }
 
 /// The parameter names one signature answer references — the
@@ -1407,10 +1427,17 @@ struct Lowerer<'a> {
 }
 
 impl Lowerer<'_> {
-    /// Rebase a LIVE source span onto this frame's anchor — the ONE
-    /// crossing between absolute file positions and the content-
-    /// addressed artifacts' anchor-relative ones.
-    fn rebase(&self, span: oxc_span::Span) -> verter_span::Span {
+    /// Rebase a LIVE source span onto this frame's anchor.
+    ///
+    /// The two coordinate systems are different TYPES
+    /// ([`FrameSpan`] vs. [`verter_span::Span`]), so this is not the only
+    /// crossing by convention — it is the only crossing on this side that
+    /// TYPECHECKS, and comparing a live position against a stored one
+    /// without it does not compile. (The inverse crossing —
+    /// [`FrameSpan::to_absolute`] — has exactly one caller, the parameter
+    /// inventory that compares stored binding positions against live
+    /// default-initializer offsets.)
+    fn rebase(&self, span: oxc_span::Span) -> FrameSpan {
         rebase_span(self.anchor, span)
     }
 
@@ -2240,7 +2267,71 @@ impl Lowerer<'_> {
                     },
                 }
             }
-            _ => self.lower_leaf(expr, mode),
+            // A CONDITIONAL's value is the union of its branch values,
+            // and each branch is lowered as a flow expression — so a call
+            // in a branch rides `SliceExpr::Call` to the evaluator's one
+            // call sink, exactly as the `if` / `return` twin's does.
+            // Folding the whole ternary through the leaf lowering instead
+            // published the callee's UNREDUCED return carrier: its own
+            // binders intact, its overload group unconsulted, warm.
+            Expression::ConditionalExpression(conditional) => {
+                let consequent = self.lower_expr(&conditional.consequent, mode);
+                let alternate = self.lower_expr(&conditional.alternate, mode);
+                SliceExpr::Union {
+                    arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+                }
+            }
+            // ── Leaf-answered forms ──────────────────────────────────
+            //
+            // Everything below takes the shared shallow-pass leaf
+            // lowering THROUGH `lower_leaf`, whose gate refuses a leaf
+            // answer that embeds an unreduced call-return carrier. So a
+            // form here either contains no call in a value position, or
+            // fails closed — it never publishes a callee's raw return.
+            //
+            // The match is EXHAUSTIVE by construction: there is no `_`
+            // arm, so a new `Expression` variant does not compile until
+            // someone decides which of the three dispositions it takes
+            // (a structural arm above, this leaf list, or a fail-closed
+            // carrier). The wildcard is what let a conditional expression
+            // sit silently in the leaf list for the whole life of the
+            // substrate.
+            Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::TemplateLiteral(_)
+            | Expression::MetaProperty(_)
+            | Expression::Super(_)
+            | Expression::ArrayExpression(_)
+            | Expression::AssignmentExpression(_)
+            | Expression::AwaitExpression(_)
+            | Expression::BinaryExpression(_)
+            | Expression::ChainExpression(_)
+            | Expression::ClassExpression(_)
+            | Expression::ImportExpression(_)
+            | Expression::LogicalExpression(_)
+            | Expression::NewExpression(_)
+            | Expression::SequenceExpression(_)
+            | Expression::TaggedTemplateExpression(_)
+            | Expression::ThisExpression(_)
+            | Expression::UnaryExpression(_)
+            | Expression::UpdateExpression(_)
+            | Expression::YieldExpression(_)
+            | Expression::PrivateInExpression(_)
+            | Expression::JSXElement(_)
+            | Expression::JSXFragment(_)
+            | Expression::TSAsExpression(_)
+            | Expression::TSSatisfiesExpression(_)
+            | Expression::TSTypeAssertion(_)
+            | Expression::TSNonNullExpression(_)
+            | Expression::TSInstantiationExpression(_)
+            | Expression::V8IntrinsicExpression(_)
+            | Expression::ComputedMemberExpression(_)
+            | Expression::StaticMemberExpression(_)
+            | Expression::PrivateFieldExpression(_) => self.lower_leaf(expr, mode),
         }
     }
 
@@ -2379,6 +2470,19 @@ impl Lowerer<'_> {
         match self.leaf_type(expr, mode) {
             LeafLowering::FrameShadowedRoot => SliceExpr::UnmodeledBinding,
             LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::Any,
+            // THE call-carrier gate. The shallow pass answers a CALL it
+            // meets with an unreduced `ReturnType<callee>` carrier —
+            // honest for a declaration initializer that is re-resolved
+            // later, and a foreign binder for a consumer that PUBLISHES
+            // the answer. Every call form with a structural arm was
+            // routed above; a call reached through any remaining form
+            // has no honest leaf value, so it fails closed here rather
+            // than at each form that might contain one.
+            LeafLowering::Free(ty) | LeafLowering::FrameShadowed { ty, .. }
+                if embeds_call_return_carrier(&ty) =>
+            {
+                SliceExpr::UnreducedCallValue
+            }
             LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty)),
             LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
                 inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),

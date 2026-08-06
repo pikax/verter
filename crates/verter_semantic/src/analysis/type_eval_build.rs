@@ -3036,10 +3036,7 @@ fn infer_svelte_rune_initializer_with_budget(
             if let TypeExpr::Function(function) = &callback_type {
                 Ok(function.return_type.as_deref().cloned())
             } else if !matches!(callback_type, TypeExpr::Primitive(PrimitiveName::Any)) {
-                Ok(Some(TypeExpr::Ref {
-                    name: Arc::from("ReturnType"),
-                    type_arguments: Arc::from(vec![callback_type]),
-                }))
+                Ok(Some(call_return_carrier(callback_type)))
             } else {
                 Ok(None)
             }
@@ -3733,6 +3730,46 @@ pub enum TopLevelLiteralPolicy {
     Widen,
 }
 
+/// The shallow pass's carrier for a CALL's VALUE — `ReturnType<callee>`.
+///
+/// Minted here and nowhere else, so the shape has ONE producer and one
+/// name; [`embeds_call_return_carrier`] is the matching reader.
+fn call_return_carrier(callee: TypeExpr) -> TypeExpr {
+    TypeExpr::Ref {
+        name: Arc::from(CALL_RETURN_CARRIER),
+        type_arguments: Arc::from(vec![callee]),
+    }
+}
+
+/// The name [`call_return_carrier`] mints. Private: the identity of this
+/// pass's own carrier is not a string other modules may spell.
+const CALL_RETURN_CARRIER: &str = "ReturnType";
+
+/// Whether `ty` EMBEDS a call-return carrier this pass minted.
+///
+/// The shallow pass has no frame and no resolver: when it meets a CALL it
+/// answers with an UNREDUCED `ReturnType<callee>` carrier. That carrier is
+/// an honest answer for a declaration initializer, which is re-resolved
+/// through the shared engine later — and a WRONG one for any consumer that
+/// publishes the leaf answer as a value, because nothing has instantiated
+/// the callee's own type-parameter clause and nothing has consulted the
+/// callee's overload group. The demand-sliced flow content asks here so a
+/// call reached through a COMPOSITE expression (a ternary arm, an array
+/// element, a member base) fails closed instead of publishing the callee's
+/// binders warm.
+///
+/// The read is the shared exhaustive `referenced_names` walk, not a
+/// hand-rolled traversal: a partial walk is exactly how one carrier
+/// position gets missed. A userland `ReturnType` alias reads as a hit; the
+/// consequence is a conservative fail-close, never a wrong answer.
+#[must_use]
+pub fn embeds_call_return_carrier(ty: &TypeExpr) -> bool {
+    verter_type_expr::referenced_names(ty)
+        .type_names
+        .iter()
+        .any(|reference| !reference.qualified && reference.head == CALL_RETURN_CARRIER)
+}
+
 /// Infer the type of a declaration-position expression with a FRESH
 /// inference budget — the ONE shared shallow-pass per-expression lowering
 /// entry. Also the expression lowering the demand-sliced flow content
@@ -4134,10 +4171,7 @@ fn infer_expression_type_ctx(
             if matches!(callee_type, TypeExpr::Primitive(PrimitiveName::Any)) {
                 Ok(TypeExpr::Primitive(PrimitiveName::Any))
             } else {
-                Ok(TypeExpr::Ref {
-                    name: Arc::from("ReturnType"),
-                    type_arguments: Arc::from(vec![callee_type]),
-                })
+                Ok(call_return_carrier(callee_type))
             }
         }
         _ => Ok(TypeExpr::Primitive(PrimitiveName::Any)),

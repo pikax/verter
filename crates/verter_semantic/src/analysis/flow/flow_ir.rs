@@ -15,7 +15,9 @@ use verter_no_typeexpr::NoTypeExpr;
 
 use super::flow_graph::FlowNodeId;
 use super::peeker::{DemandSegment, SliceOrigin};
-use super::{SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId, SkeletonWriteCertainty};
+use super::{
+    FrameSpan, SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId, SkeletonWriteCertainty,
+};
 
 // ---------------------------------------------------------------------------
 // The slice plan
@@ -149,7 +151,7 @@ pub struct FlowSlot {
     /// re-conflate shadowing same-named bindings the plan kept
     /// distinct). Never folded into the slice hash (the hash covers the
     /// plan's selected subgraph and is span-free).
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
     /// Whether the slot's value contributes to the demand (`false` =
     /// effect-only: mutated, never value-read by the selected path).
     pub value_selected: bool,
@@ -240,8 +242,8 @@ pub struct FlowExpr {
     /// The skeleton site this record lowers.
     pub site: SkeletonExprSiteId,
     /// The expression's span — the retained-snapshot locator its content
-    /// evaluates through on demand.
-    pub span: verter_span::Span,
+    /// evaluates through on demand, in this frame's own coordinates.
+    pub span: FrameSpan,
     /// Why the record is in the slice.
     pub role: FlowExprRole,
     /// The lowered shape.
@@ -293,7 +295,7 @@ pub enum FlowEffect {
         /// The written value's expression, when selected.
         value: Option<FlowExprId>,
         /// The write expression's span.
-        span: verter_span::Span,
+        span: FrameSpan,
     },
     /// A call / construct performed by a selected expression.
     Call {
@@ -304,7 +306,7 @@ pub enum FlowEffect {
         /// Whether this is a `new` construct site.
         new_construct: bool,
         /// The call expression's span.
-        span: verter_span::Span,
+        span: FrameSpan,
     },
 }
 
@@ -323,7 +325,7 @@ pub struct FlowReturnEntry {
     /// The returned value's expression (`None` for bare `return;`).
     pub argument: Option<FlowExprId>,
     /// The return statement's span.
-    pub span: verter_span::Span,
+    pub span: FrameSpan,
 }
 
 /// The ordered return contributors of the slice.

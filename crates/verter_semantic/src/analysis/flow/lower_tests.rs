@@ -14,7 +14,8 @@ use crate::analysis::flow::flow_ir::{
 };
 use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonWriteCertainty,
+    build_function_body_skeleton, FrameSpan, FunctionBodySkeleton, FunctionBodySource,
+    SkeletonWriteCertainty,
 };
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
@@ -93,9 +94,19 @@ fn lower_slice_plan_lowers_only_selected_nodes() {
     // No expression record covers `new Mytype()` — nothing outside the
     // plan lowers.
     let source = "function myType() { const a = new Mytype(); const b = 1; return { a, b } }";
-    let mytype_at = source.find("new Mytype()").expect("fixture") as u32;
+    // The function starts at offset 0 here, so the authored offset IS the
+    // frame offset; `FrameSpan::rebase` states that rather than assuming it.
+    let mytype_at = FrameSpan::rebase(
+        0,
+        verter_span::Span::new(
+            source.find("new Mytype()").expect("fixture") as u32,
+            source.find("new Mytype()").expect("fixture") as u32,
+        ),
+    );
     assert!(
-        ir.exprs.iter().all(|expr| expr.span.start != mytype_at),
+        ir.exprs
+            .iter()
+            .all(|expr| expr.span.start() != mytype_at.start()),
         "the unselected initializer must not produce an expression record"
     );
 
@@ -187,35 +198,71 @@ fn lower_preserves_effect_obligations_for_value_dead_siblings() {
     assert!(x_slot.defs[0].path.is_empty());
 }
 
-/// Effects lower in source order — interleaving CALL and WRITE
-/// obligations by source position, not by obligation family.
-#[test]
-fn lower_orders_effects_by_source_position() {
-    let ir = lowered(
-        "function f(x: number) { return { a: g(x), b: (x = 1), c: x } }",
-        &["c"],
-    );
-    let spans: Vec<u32> = ir
+/// The effect kind sequence of one body, at anchor 0 and at a non-zero
+/// anchor.
+fn effect_kinds(source: &str) -> Vec<&'static str> {
+    lowered(source, &["c"])
         .effects
         .iter()
         .map(|effect| match effect {
-            FlowEffect::Write { span, .. } | FlowEffect::Call { span, .. } => span.start,
+            FlowEffect::Call { .. } => "call",
+            FlowEffect::Write { .. } => "write",
         })
-        .collect();
-    let mut sorted = spans.clone();
-    sorted.sort_unstable();
-    assert_eq!(spans, sorted, "effects are source-ordered");
-    assert!(
-        ir.effects
-            .iter()
-            .any(|effect| matches!(effect, FlowEffect::Call { .. })),
-        "the earlier sibling's call lowers"
+        .collect()
+}
+
+const INTERLEAVED_BODY: &str = "function f(x: number) { return { a: g(x), b: (x = 1), c: x } }";
+const PADDED_INTERLEAVED_BODY: &str =
+    "const pad = 0;\nfunction f(x: number) { return { a: g(x), b: (x = 1), c: x } }";
+
+/// Effects lower in AUTHORED order — interleaving CALL and WRITE
+/// obligations by source position, not by obligation family and not by
+/// coordinate system.
+///
+/// The expected order is derived from the fixture TEXT (`g(x)` is written
+/// before `(x = 1)`), never from the spans the lowering sorted on. Its
+/// predecessor read `span.start` back off the result and asserted the
+/// vector ascended — the same key `lower_slice_plan` had sorted on one
+/// line earlier, so it held by construction under any coordinate system,
+/// and its single fixture sat at offset 0 where the two systems coincide.
+/// It passed while the invariant was violated.
+///
+/// The discriminating half is the PADDED fixture: one statement above the
+/// function, so its anchor is non-zero. A call span left ABSOLUTE inside
+/// an otherwise anchor-relative artifact keys larger than every relative
+/// write span, and every call sorts after every write regardless of what
+/// was authored.
+#[test]
+fn lower_orders_effects_by_authored_position_at_any_anchor() {
+    assert_eq!(
+        effect_kinds(INTERLEAVED_BODY),
+        ["call", "write"],
+        "`g(x)` is authored before `(x = 1)`"
     );
-    assert!(
-        ir.effects
-            .iter()
-            .any(|effect| matches!(effect, FlowEffect::Write { .. })),
-        "the later sibling's write lowers"
+    assert_eq!(
+        effect_kinds(PADDED_INTERLEAVED_BODY),
+        ["call", "write"],
+        "the same body one statement lower is the same body"
+    );
+}
+
+/// The lowered IR is a pure function of the FUNCTION's content — moving
+/// the whole function through the file changes nothing in it.
+///
+/// This is the property the flow artifacts' cache key already assumes:
+/// the IR is memoized per function content version and reused for any
+/// file content that key admits, so an absolute offset stored anywhere
+/// inside it makes the cached value depend on something the key cannot
+/// see. Asserting whole-IR equality covers every span-bearing family at
+/// once — expression locators, slot identities, return sites, and both
+/// effect families — rather than the five a hand-written rebase pass
+/// remembered.
+#[test]
+fn lowered_ir_is_invariant_under_the_function_position() {
+    assert_eq!(
+        lowered(INTERLEAVED_BODY, &["c"]),
+        lowered(PADDED_INTERLEAVED_BODY, &["c"]),
+        "the same function body lowers identically wherever it sits"
     );
 }
 

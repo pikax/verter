@@ -362,6 +362,13 @@ fn string_lit(value: &str) -> TypeExpr {
 /// was `(() => "OUTERNEST")[]`, and `{ ...spreadBait, x: 1 }` was
 /// `{ a: "OUTERSPREAD"; x: number }` (tsgo: `{ a: number; x: number }`).
 ///
+/// A CONDITIONAL expression is no longer one of the fail-closed rows: it
+/// has a structural arm now, so each branch resolves through the frame's
+/// own lexical authority and `c ? condBait : 2` is the checker's `1 | 2`
+/// — the local, exactly. It stays in this suite as the row that proves
+/// the frame binding WINS rather than merely blocking an answer: an
+/// owner-scope resolution of the same name reads `"OUTERCOND" | 2`.
+///
 /// Mutation recipe: dropping the gate's answer half republishes every one
 /// of these as the bait value, cleanly and warm.
 #[test]
@@ -371,7 +378,6 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
         "gateStaticMemberOnLocalClass",
         "gateMethodCallOnLocal",
         "gateStaticMemberOnParam",
-        "gateConditionalArm",
         "gateArrayElement",
         "gateNestedArrowInArray",
         "gateObjectSpread",
@@ -379,6 +385,14 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
     ] {
         assert_fails_closed(&host, name);
     }
+
+    // The conditional arm RESOLVES — to the frame's own binding, never
+    // the owner-scope bait.
+    assert_clean_warm(
+        &host,
+        "gateConditionalArm",
+        TypeExpr::Union(std::sync::Arc::from(vec![number_lit(1.0), number_lit(2.0)])),
+    );
 }
 
 /// The other face: a form the leaf cannot model AT ALL answers a bare

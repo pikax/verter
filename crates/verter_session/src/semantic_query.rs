@@ -1640,6 +1640,18 @@ pub enum FlowReturnFailure {
     /// resolution of the same name) would be a warm-admissible wrong
     /// answer, so the evaluation fails closed.
     UnmodeledBinding,
+    /// A CALL the flow content could not route through its call carrier:
+    /// the expression form containing it has no structural arm, so the
+    /// only answer available was the shared shallow pass's UNREDUCED
+    /// call-return carrier.
+    ///
+    /// That carrier is the callee's return with nothing instantiated —
+    /// its own type-parameter binders intact and its overload group
+    /// unconsulted — so publishing it hands a foreign binder to this
+    /// frame's consumer, cleanly and warm. The evaluation fails closed
+    /// instead; a call whose form DOES have a structural arm never
+    /// reaches here.
+    UnmodeledCallPosition,
 }
 
 /// The control surface a `FlowReturn` evaluation does not model.
@@ -3483,6 +3495,46 @@ impl SurfaceView {
             return SurfaceKeyProjection::Exact(known);
         }
         SurfaceKeyProjection::AbsentProven
+    }
+
+    /// Every PUBLIC member colliding with `key` when they form a METHOD
+    /// OVERLOAD GROUP — two or more same-named method members.
+    ///
+    /// [`Self::project_known_key`] is first-wins by design (one key, one
+    /// member value), which is exactly right for a property and silently
+    /// truncating for a method overload set: `{ m(x: string): "PA";
+    /// m(x: number): "PB" }` retains BOTH members here, and projecting
+    /// `.m` handed back the first — so `objOv2.m(1)` answered `"PA"`
+    /// where the language answers `"PB"`, cleanly and warm, and the call
+    /// rail's overload-group SIZE gate saw one signature where there are
+    /// two.
+    ///
+    /// `None` for zero or one collision, and for a collision set that is
+    /// not wholly methods (a property colliding with a method is a merge
+    /// artifact, not an overload group — first-wins still rules there).
+    pub fn project_known_key_overload_group(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let group: Vec<&SurfaceMember> = self
+            .members
+            .iter()
+            .filter(|member| {
+                member.visibility.is_public()
+                    && member
+                        .key
+                        .as_known()
+                        .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+            })
+            .collect();
+        if group.len() < 2
+            || !group.iter().all(|member| {
+                member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+            })
+        {
+            return None;
+        }
+        Some(group.into_iter().map(|member| member.value).collect())
     }
 
     /// Project an ordinary string key supplied by a string-only external

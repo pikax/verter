@@ -492,7 +492,9 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
-            flow_body_exact_hash: entry.flow_body_exact_hash,
+            flow_body_exact_hash: entry
+                .flow_body_exact_hash
+                .expect("a served function position addresses its own bytes"),
             parse_env_hash: env.parse_env_hash,
             parser_version: crate::file_artifact_store::CURRENT_PARSER_VERSION,
         },

@@ -451,9 +451,17 @@ fn flow_body_hash_walks_nested_function_structure() {
 /// from an argument supplied at a parameter position whose type names
 /// the parameter.
 ///
-/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`, read
-/// through deliberate `const x: null = …` assignment errors), over
-/// calls whose default is DIFFERENT from what inference produces:
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`), read through a TWO-STEP assignment error —
+/// `const v = <call>; const p: null = v;` — over calls whose default is
+/// DIFFERENT from what inference produces.
+///
+/// The two-step form is load-bearing. A one-step `const p: null = <call>`
+/// lets the contextual `null` FEED return-type inference, and reports NO
+/// ERROR AT ALL for `occursSecond` / `occursNowhere` / `occursRest()` /
+/// `occursShadowed` — five of the seven rows below are unreadable through
+/// it. The values were re-derived through the two-step form and all seven
+/// are correct.
 ///
 /// ```text
 /// occursFirst<T = string>(x: T)                  called (1)   : 1       ← INFERRED, not the `string` default
@@ -462,6 +470,8 @@ fn flow_body_hash_walks_nested_function_structure() {
 /// occursRest<T = number>(...xs: T[])             called ()    : number  ← DEFAULT (ordinal 0 unsupplied)
 /// occursRest<T = number>(...xs: T[])             called ("a") : "a"     ← INFERRED
 /// occursShadowed<T = number>(cb: <T>(y: T) => T) called (…)   : number  ← DEFAULT (the inner clause shadows)
+/// occursShadowedCall<T = number>(cb: { <T>(y: T): T })         : number  ← DEFAULT (same, as a call signature)
+/// occursShadowedNew<T = number>(cb: { new <T>(y: T): T })      : number  ← DEFAULT (same, as a construct signature)
 /// ```
 ///
 /// (The literal rows read `1` / `"a"` rather than `number` / `string`
@@ -470,7 +480,11 @@ fn flow_body_hash_walks_nested_function_structure() {
 ///
 /// Mutation recipes: dropping the shadow stack makes `occursShadowed`
 /// record ordinal 0 (the substrate would then answer the interim
-/// `unknown` where the checker answers the default); recording only the
+/// `unknown` where the checker answers the default); dropping either the
+/// `TSCallSignatureDeclaration` or the `TSConstructSignatureDeclaration`
+/// override flips exactly its own row — a clause declared on a signature
+/// inside a type literal masked nothing, so the outer parameter looked
+/// like it occurred; recording only the
 /// LAST occurrence rather than the smallest flips `occursTwice`;
 /// skipping the rest parameter makes `occursRest` record `None`, which
 /// would take the default at an argument-BEARING call the checker
@@ -484,6 +498,8 @@ export function occursSecond<T = number>(a: string, b?: T): T { return b!; }
 export function occursNowhere<T = number>(x: string): T { return null as any; }
 export function occursRest<T = number>(...xs: T[]): T { return xs[0]; }
 export function occursShadowed<T = number>(cb: <T>(y: T) => T): T { return null as any; }
+export function occursShadowedCall<T = number>(cb: { <T>(y: T): T }): T { return null as any; }
+export function occursShadowedNew<T = number>(cb: { new <T>(y: T): T }): T { return null as any; }
 export function occursTwice<T = number>(a: string, b: T, c: T): T { return b; }
 export function occursNested<T = number>(a: string, b: { k: T }): T { return b.k; }
 "#,
@@ -516,6 +532,15 @@ export function occursNested<T = number>(a: string, b: { k: T }): T { return b.k
         "a nested clause re-declaring the name owns its own subtree — the OUTER T \
          occurs in no parameter type, which is what the checker answers too"
     );
+    for name in ["occursShadowedCall", "occursShadowedNew"] {
+        assert_eq!(
+            occurrence(name),
+            None,
+            "{name}: a CALL / CONSTRUCT signature inside a type literal declares its \
+             own clause exactly as a bare function type does — the outer `T` occurs \
+             in no parameter type, and the checker answers the declared `number`"
+        );
+    }
     assert_eq!(
         occurrence("occursTwice"),
         Some(1),

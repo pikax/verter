@@ -1675,29 +1675,62 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // therefore treated as a miss (the member is not on the
                     // public surface this walker projects).
                     //
-                    let member = match surface.project_known_key(&known_key) {
-                        crate::semantic_query::SurfaceKeyProjection::Exact(member)
-                            if member.visibility.is_public() =>
-                        {
-                            Some(member.value)
-                        }
-                        _ => {
-                            // Element access coerces a numeric key to its
-                            // canonical string spelling and vice versa (JS
-                            // property identity); `keyof` keeps the authored
-                            // variant.
-                            match known_key.element_access_equivalent() {
-                                Some(equivalent) => match surface.project_known_key(&equivalent) {
-                                    crate::semantic_query::SurfaceKeyProjection::Exact(member)
-                                        if member.visibility.is_public() =>
-                                    {
-                                        Some(member.value)
-                                    }
-                                    _ => None,
-                                },
-                                None => None,
+                    // A METHOD OVERLOAD GROUP is not one member. The
+                    // surface retains every same-named method contributor,
+                    // and first-wins projection handed back the FIRST — so
+                    // `obj.m(1)` over `{ m(x: string): "PA"; m(x: number):
+                    // "PB" }` answered `"PA"` where the language answers
+                    // `"PB"`, warm, and every consumer that asks the group's
+                    // SIZE (the call rail's overload gate) saw one. The
+                    // group projects as the canonical overload-group
+                    // carrier — an object whose CALL SIGNATURES are the
+                    // contributors — which is byte-identical in shape to
+                    // what `build_typeof` already mints for a top-level
+                    // function overload group, so `obj.m` and a same-shaped
+                    // `f` answer alike from here on.
+                    let first_wins = |needle: &crate::semantic_query::PropertyKey| {
+                        match surface.project_known_key(needle) {
+                            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                                if member.visibility.is_public() =>
+                            {
+                                Some(member.value)
                             }
+                            _ => None,
                         }
+                    };
+                    // Element access coerces a numeric key to its canonical
+                    // string spelling and vice versa (JS property identity);
+                    // `keyof` keeps the authored variant. Both projections
+                    // retry through the equivalent spelling.
+                    let equivalent = known_key.element_access_equivalent();
+                    let overload_group = surface
+                        .project_known_key_overload_group(&known_key)
+                        .or_else(|| {
+                            equivalent.as_ref().and_then(|equivalent| {
+                                surface.project_known_key_overload_group(equivalent)
+                            })
+                        });
+                    let member = match overload_group {
+                        Some(signatures) => Some(self.dispatch.graph().intern_node(
+                            crate::semantic_query::SemanticNodeData::Object(
+                                crate::semantic_query::surface_view! {
+                                    members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                                    call_signatures: std::sync::Arc::from(
+                                        signatures.into_boxed_slice(),
+                                    ),
+                                    construct_signatures: std::sync::Arc::from(
+                                        Vec::new().into_boxed_slice(),
+                                    ),
+                                    index_signatures: std::sync::Arc::from(
+                                        Vec::new().into_boxed_slice(),
+                                    ),
+                                    keyspace: None,
+                                    has_index_signature: false,
+                                },
+                            ),
+                        )),
+                        None => first_wins(&known_key)
+                            .or_else(|| equivalent.as_ref().and_then(first_wins)),
                     };
                     match member {
                         Some(member_value) => {

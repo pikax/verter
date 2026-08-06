@@ -253,8 +253,11 @@ pub fn lower_slice_plan(
             });
         }
     }
+    // Both families' spans are `FrameSpan`s — the SAME coordinate system —
+    // so this key is source order. It could not be anything else: a mixed
+    // comparison against an absolute offset does not typecheck.
     effects.sort_by_key(|effect| match effect {
-        FlowEffect::Write { span, .. } | FlowEffect::Call { span, .. } => span.start,
+        FlowEffect::Write { span, .. } | FlowEffect::Call { span, .. } => *span,
     });
 
     // ── Returns + expression origins ────────────────────────────────

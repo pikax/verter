@@ -184,8 +184,12 @@ impl FlowBodySkeletonSource for RetainedSnapshotSkeletonSource {
         let decl_bodies = serve.indexed.shallow_state.decl_bodies();
         let index = decl_bodies.function_program_index();
         let entry = index.get(&key.function)?;
+        // `None` on the ENTRY is a typed miss (its own bytes could not be
+        // read), and a miss serves nothing: `Some(k) != None` holds, so the
+        // comparison already refuses — stated here because the two sides
+        // are deliberately different types.
         if entry.flow_body_stable_hash != key.flow_body_stable_hash
-            || entry.flow_body_exact_hash != key.flow_body_exact_hash
+            || entry.flow_body_exact_hash != Some(key.flow_body_exact_hash)
         {
             // The live content version is not the pinned one: the
             // content-addressed key can only be served by its own

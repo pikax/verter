@@ -398,3 +398,40 @@ function d(a: number, b: string) {
     let second = skeleton_of(source);
     assert_eq!(first, second);
 }
+
+/// The skeleton is a pure function of the FUNCTION's content: moving the
+/// whole function through the file changes NOTHING in it.
+///
+/// The skeleton is memoized per function content version and reused for
+/// any file content that key admits, so an absolute file offset stored
+/// anywhere inside it makes the cached artifact depend on something the
+/// key cannot see — a blank line above the function is invisible to the
+/// key and moves every absolute offset. Whole-artifact equality covers
+/// EVERY span-bearing family at once (regions, bindings, expression
+/// sites, return sites, writes, and the call footprint), rather than the
+/// five a hand-written per-family rebase pass remembered; the read
+/// footprint carries no span at all, because a coordinate with no
+/// consumer is exactly where a stale one hides.
+///
+/// Mutation recipe: storing the call footprint's ABSOLUTE span
+/// (`FrameSpan::rebase(0, span)` in `SkeletonBuilder::push_call`) flips
+/// this and both `lower_tests` anchor rows, and leaves every other
+/// skeleton row green.
+#[test]
+fn skeleton_is_invariant_under_the_function_position() {
+    let body = r#"
+function d(a: number, b: string) {
+  let out = { first: a, second: b.length };
+  if (a) { out = { first: a + 1, second: 0 }; }
+  for (const item of [a]) { out.first = item; }
+  g(a);
+  return out;
+}
+"#;
+    let padded = format!("const pad = 0;\nconst pad2 = \"a longer padding statement\";\n{body}");
+    assert_eq!(
+        skeleton_of(body),
+        skeleton_of(&padded),
+        "the same function body indexes identically wherever it sits"
+    );
+}
