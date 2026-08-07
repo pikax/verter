@@ -114,7 +114,7 @@
 //!    [`Demand::Narrowing`] with its owning `U6.NARROW_*` block. A shape that
 //!    exists only as a framework shape sets [`Subject::FrameworkOnly`] and
 //!    joins `FRAMEWORK_ONLY_WORKLIST`.
-//! 7. **Run the suite and commit the row.** Eleven tests, about five seconds
+//! 7. **Run the suite and commit the row.** Thirteen tests, about five seconds
 //!    once the crate is built. No other crate and no other suite is involved.
 
 use std::sync::Arc;
@@ -265,6 +265,83 @@ pub(crate) enum Svelte {
     Props(&'static [&'static str]),
 }
 
+/// The block that OWNS a row — the team the row's answer is attributed to.
+///
+/// Every row has an owner, not only the failing ones, because the conformance
+/// number is `matching ÷ total` PER OWNER and a denominator built only from
+/// failures is meaningless. Merging this branch back to `main` is gated on
+/// every PARKED row (every [`Verdict::KnownOwed`]) being green, so this
+/// attribution is the go/no-go signal and shows which owner is blocking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Owner {
+    U2IndexedAccess,
+    U2MappedTemplate,
+    U6CallResolve,
+    U6ValueInference,
+    U6ContextualCore,
+    U6FlowReturnSubstrate,
+    U6NarrowTypeof,
+    U6NarrowLattice,
+    U6NarrowSubstitution,
+    U6NarrowInvalidation,
+    /// **NO U-BLOCK.** The shared surface reducer (intersection / heritage
+    /// arms, PathWalker hops) — reusable type-resolution machinery that no
+    /// `U*` block is scheduled to touch. Rows here have nobody assigned and
+    /// will otherwise be the last thing blocking the merge.
+    SharedTypeResolution,
+    /// **NO U-BLOCK.** The compile / virtual-file pipeline: the TSX (IDE) lane
+    /// deleting a file's type-check surface. Same warning as above.
+    SharedCompilePipeline,
+    /// Framework-specific POLICY, scoped to the project owner's post-merge
+    /// pass. Not a semantic debt.
+    FrameworkOnly,
+}
+
+impl Owner {
+    pub(crate) const ALL: &'static [Owner] = &[
+        Owner::U2IndexedAccess,
+        Owner::U2MappedTemplate,
+        Owner::U6CallResolve,
+        Owner::U6ValueInference,
+        Owner::U6ContextualCore,
+        Owner::U6FlowReturnSubstrate,
+        Owner::U6NarrowTypeof,
+        Owner::U6NarrowLattice,
+        Owner::U6NarrowSubstitution,
+        Owner::U6NarrowInvalidation,
+        Owner::SharedTypeResolution,
+        Owner::SharedCompilePipeline,
+        Owner::FrameworkOnly,
+    ];
+
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::U2IndexedAccess => "U2.INDEXED_ACCESS",
+            Self::U2MappedTemplate => "U2.MAPPED_TEMPLATE",
+            Self::U6CallResolve => "U6.CALL_RESOLVE",
+            Self::U6ValueInference => "U6.VALUE_INFERENCE",
+            Self::U6ContextualCore => "U6.CONTEXTUAL_CORE",
+            Self::U6FlowReturnSubstrate => "U6.FLOW_RETURN_SUBSTRATE",
+            Self::U6NarrowTypeof => "U6.NARROW_TYPEOF",
+            Self::U6NarrowLattice => "U6.NARROW_LATTICE",
+            Self::U6NarrowSubstitution => "U6.NARROW_SUBSTITUTION",
+            Self::U6NarrowInvalidation => "U6.NARROW_INVALIDATION",
+            Self::SharedTypeResolution => "SHARED.TYPE_RESOLUTION  (no U-block)",
+            Self::SharedCompilePipeline => "SHARED.COMPILE_PIPELINE (no U-block)",
+            Self::FrameworkOnly => "FRAMEWORK_ONLY          (owner post-merge)",
+        }
+    }
+
+    /// Whether the owner is a scheduled `U*` block. `false` means nobody is
+    /// assigned, which is exactly the class that silently blocks a merge.
+    pub(crate) const fn is_scheduled_block(self) -> bool {
+        !matches!(
+            self,
+            Self::SharedTypeResolution | Self::SharedCompilePipeline | Self::FrameworkOnly
+        )
+    }
+}
+
 /// WHO owns a row.
 ///
 /// The corpus is a **TypeScript semantics** corpus first. A row's identity is
@@ -393,10 +470,10 @@ pub(crate) enum Verdict {
     /// owner's fix ALSO fails the row — visibly, at the moment it lands,
     /// rather than silently.
     KnownOwed {
-        owner: &'static str,
         /// Needles that must stay ABSENT while the debt is open. When the
         /// owner fixes the shape, one of these appears and the row fails,
-        /// which is the intended signal to re-pin the row.
+        /// which is the intended signal to re-pin the row. A row with no
+        /// framework column pins its [`Flow::Result::members`] instead.
         owed_absent: &'static [&'static str],
         note: &'static str,
     },
@@ -429,6 +506,9 @@ pub(crate) struct Row {
     /// (`type IsAny<T> = 0 extends 1 & T ? true : false`). A row that is
     /// `any` to the checker is a fail-closed row for us by construction.
     pub(crate) checker_is_any: bool,
+    /// The BLOCK this row is attributed to. Drives the per-owner
+    /// conformance number, which is the merge go/no-go.
+    pub(crate) owner: Owner,
     /// WHO owns this row — TypeScript semantics, or a framework-only shape.
     pub(crate) subject: Subject,
     /// WHAT this row demands. Defaults to [`Demand::MacroSurface`]; a
@@ -453,6 +533,7 @@ impl Row {
         probe: "ReturnType<typeof makeProps>",
         checker: "",
         checker_is_any: false,
+        owner: Owner::U6FlowReturnSubstrate,
         subject: Subject::TypeScript,
         demand: Demand::MacroSurface,
         runtime: Runtime::Skip,
@@ -917,11 +998,11 @@ mod corpus_suite {
     /// corpus exists to end.
     fn report(row: &Row, lane: &str, expected: &str, actual: &str, what: &str) -> String {
         let (verdict, owner) = match row.verdict {
-            Verdict::MatchesChecker => ("MatchesChecker".to_owned(), "—".to_owned()),
-            Verdict::FailsClosed => ("FailsClosed".to_owned(), "—".to_owned()),
-            Verdict::Degraded(reason) => (format!("Degraded({reason})"), "—".to_owned()),
-            Verdict::KnownOwed { owner, note, .. } => {
-                (format!("KnownOwed — {note}"), owner.to_owned())
+            Verdict::MatchesChecker => ("MatchesChecker".to_owned(), row.owner.id().to_owned()),
+            Verdict::FailsClosed => ("FailsClosed".to_owned(), row.owner.id().to_owned()),
+            Verdict::Degraded(reason) => (format!("Degraded({reason})"), row.owner.id().to_owned()),
+            Verdict::KnownOwed { note, .. } => {
+                (format!("KnownOwed — {note}"), row.owner.id().to_owned())
             }
         };
         format!(
@@ -978,8 +1059,8 @@ mod corpus_suite {
             );
         }
         assert!(
-            CORPUS.len() >= 85,
-            "the corpus is APPEND-ONLY: it landed with 85 rows, and a change that shrinks it is \
+            CORPUS.len() >= 86,
+            "the corpus is APPEND-ONLY: it landed with 86 rows, and a change that shrinks it is \
              deleting measured coverage, not refactoring it (got {})",
             CORPUS.len()
         );
@@ -1677,13 +1758,9 @@ mod verdict_consistency {
                         ));
                     }
                 }
-                Verdict::KnownOwed {
-                    owner,
-                    owed_absent,
-                    note,
-                } => {
-                    if owner.is_empty() || note.is_empty() {
-                        failures.push(format!("{}: KnownOwed with no owner or no note", row.id));
+                Verdict::KnownOwed { owed_absent, note } => {
+                    if note.is_empty() {
+                        failures.push(format!("{}: KnownOwed with no note", row.id));
                     }
                     // The debt must be OBSERVABLE from this row, otherwise the
                     // label is decorative: either the lane refuses, or the TSX
@@ -1780,10 +1857,10 @@ mod programme_ledgers {
                 row.id
             );
             match row.verdict {
-                Verdict::KnownOwed { owner, .. } => assert_eq!(
-                    owner,
+                Verdict::KnownOwed { .. } => assert_eq!(
+                    row.owner.id(),
                     block.id(),
-                    "{}: a narrowing row's owner must be its block id",
+                    "{}: a narrowing row's owner column must be its block",
                     row.id
                 ),
                 Verdict::MatchesChecker => {}
@@ -1936,4 +2013,165 @@ const OPEN_DEBTS: &[&str] = &[
     "N10_assertion_signature",
     "N11_narrow_survives_call",
     "N12_literal_union_narrow",
+    "N13_nested_property_guard",
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// PER-OWNER CONFORMANCE — the merge go/no-go
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Per-owner conformance, pinned.
+///
+/// `(owner, total, matching, parked)` — `matching` is the number of rows whose
+/// computed answer EQUALS the checker's; `parked` is the number of
+/// [`Verdict::KnownOwed`] rows. **Merging this branch back to `main` is gated
+/// on every parked row being green**, so `parked == 0` across every owner is
+/// the go/no-go and this table shows which owner is blocking.
+///
+/// Pinned rather than merely printed: a passing gate that quietly PRINTS a
+/// worse number is not a gate. Any movement — an owner improving OR regressing
+/// — fails [`corpus_conformance_by_owner`] with the full table in the failure
+/// message, which is the signal to re-pin the rows and this ledger together.
+#[cfg(test)]
+const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
+    (Owner::U2IndexedAccess, 1, 1, 0),
+    (Owner::U2MappedTemplate, 2, 0, 2),
+    (Owner::U6CallResolve, 2, 0, 2),
+    (Owner::U6ValueInference, 9, 0, 9),
+    (Owner::U6ContextualCore, 0, 0, 0),
+    (Owner::U6FlowReturnSubstrate, 37, 29, 0),
+    (Owner::U6NarrowTypeof, 6, 0, 6),
+    (Owner::U6NarrowLattice, 3, 1, 2),
+    (Owner::U6NarrowSubstitution, 2, 0, 2),
+    (Owner::U6NarrowInvalidation, 2, 0, 2),
+    (Owner::SharedTypeResolution, 9, 4, 3),
+    (Owner::SharedCompilePipeline, 6, 0, 6),
+    (Owner::FrameworkOnly, 7, 5, 0),
+];
+
+#[cfg(test)]
+mod conformance {
+    use super::*;
+
+    fn tally() -> Vec<(Owner, usize, usize, usize)> {
+        Owner::ALL
+            .iter()
+            .map(|owner| {
+                let rows: Vec<&Row> = CORPUS.iter().filter(|r| r.owner == *owner).collect();
+                let matching = rows
+                    .iter()
+                    .filter(|r| matches!(r.verdict, Verdict::MatchesChecker))
+                    .count();
+                let parked = rows
+                    .iter()
+                    .filter(|r| matches!(r.verdict, Verdict::KnownOwed { .. }))
+                    .count();
+                (*owner, rows.len(), matching, parked)
+            })
+            .collect()
+    }
+
+    fn render(tally: &[(Owner, usize, usize, usize)]) -> String {
+        let mut out = String::from(
+            "\n╔═══ U6 SHAPE CORPUS — CONFORMANCE AGAINST tsgo 7.0.0-dev.20260526.1 ═══\n\
+             ║ owner                                    rows  match   conf   PARKED\n\
+             ╟───────────────────────────────────────────────────────────────────────\n",
+        );
+        let (mut t, mut m, mut p) = (0usize, 0usize, 0usize);
+        for (owner, total, matching, parked) in tally {
+            t += total;
+            m += matching;
+            p += parked;
+            let conf = if *total == 0 {
+                "   —  ".to_owned()
+            } else {
+                format!("{:5.1}%", 100.0 * *matching as f64 / *total as f64)
+            };
+            let note = if *total == 0 {
+                "   ← NO ROWS SEEDED: this block has no fence"
+            } else if *parked > 0 && !owner.is_scheduled_block() {
+                "   ← NO U-BLOCK ASSIGNED"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "║ {:<40} {total:>4}  {matching:>5}  {conf}  {parked:>6}{note}\n",
+                owner.id()
+            ));
+        }
+        let conf = format!("{:5.1}%", 100.0 * m as f64 / t as f64);
+        out.push_str(&format!(
+            "╟───────────────────────────────────────────────────────────────────────\n\
+             ║ {:<40} {t:>4}  {m:>5}  {conf}  {p:>6}\n\
+             ╚═══ MERGE GATE: parked must reach 0 (currently {p}) ═══\n",
+            "TOTAL"
+        ));
+        out
+    }
+
+    /// The per-owner conformance number, pinned and reported.
+    #[test]
+    fn corpus_conformance_by_owner() {
+        let measured = tally();
+        let table = render(&measured);
+        // Visible with `--nocapture`, and written where a gate operator can
+        // read it without re-running anything.
+        println!("{table}");
+        let report = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/u6-corpus-conformance.txt");
+        if let Some(dir) = report.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&report, &table);
+
+        assert_eq!(
+            measured, CONFORMANCE,
+            "the per-owner conformance number MOVED.\n{table}\n\
+             This is the merge go/no-go, so it is pinned rather than merely printed. If an owner \
+             IMPROVED, re-pin the affected rows and this CONFORMANCE ledger in the same change. \
+             If an owner REGRESSED, that is the finding."
+        );
+    }
+
+    /// Rows owned by NO scheduled `U*` block, called out by name.
+    ///
+    /// These have nobody assigned to fix them and will otherwise be the last
+    /// thing blocking the merge.
+    #[test]
+    fn unassigned_parked_rows_are_named() {
+        let mut unassigned: Vec<&str> = CORPUS
+            .iter()
+            .filter(|r| {
+                !r.owner.is_scheduled_block() && matches!(r.verdict, Verdict::KnownOwed { .. })
+            })
+            .map(|r| r.id)
+            .collect();
+        // Compared as a SET: the corpus is append-only, so row order tracks
+        // when a shape was measured, not what it means.
+        unassigned.sort_unstable();
+        assert_eq!(
+            unassigned, UNASSIGNED_PARKED_ROWS,
+            "the set of parked rows owned by no scheduled U-block changed. Keep this list exact: \
+             it is the only place these rows are visible as a scheduling gap rather than as \
+             generic debt."
+        );
+    }
+}
+
+/// Parked rows that belong to NO `U*` block. Nobody is scheduled to fix these.
+#[cfg(test)]
+const UNASSIGNED_PARKED_ROWS: &[&str] = &[
+    // SHARED.TYPE_RESOLUTION — the intersection / heritage surface reducer
+    // drops an arm whose flow return is wholly unmodelled.
+    "C04_emits_intersection_degraded",
+    "C11_props_intersection_unmodelled_arm",
+    "C12_heritage_unmodelled_clause",
+    // SHARED.COMPILE_PIPELINE — the TSX (IDE) lane deletes the file's whole
+    // type-check surface for programs the checker types without difficulty.
+    "D10_callee_new_spread_only",
+    "D11_callee_new_spread_key",
+    "E01_spread_any",
+    "E02_spread_index_signature",
+    "E03_spread_array",
+    "H02_union_spread_source",
 ];
