@@ -3684,7 +3684,7 @@ pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub struct PartialReasonSet(u16);
+pub struct PartialReasonSet(u32);
 
 impl PartialReasonSet {
     /// An armed runaway fuse tripped mid-compute (`QueryError::BudgetExceeded`).
@@ -3784,9 +3784,34 @@ impl PartialReasonSet {
     /// is complete by definition, and refusing over it deleted every byte
     /// of the module for parameter reassignment and conditional `var`.
     pub const FLOW_RETURN_UNVERIFIED: Self = Self(1 << 15);
+    /// A body-derived (`FlowReturn`) demand produced NO VALUE AT ALL: a
+    /// typed `FlowReturnFailure` (an unmodelled control construct, a
+    /// missing body, a raise that missed) through `ReturnOnly`.
+    ///
+    /// Distinct from the two DEGRADED-SUCCESS classes above because the
+    /// difference is not a matter of degree: those two describe a surface
+    /// the substrate DID produce, and this one says there is no surface.
+    /// One bit cannot carry both, and sharing one is not an economy — it
+    /// is the bug. A consumer that contains the unverified class because
+    /// "the member set is complete by definition" contains this one too,
+    /// and then publishes a surface assembled WITHOUT the members this
+    /// producer was asked for. When such a producer is the macro's only
+    /// one the assembled surface is empty and a structural emptiness
+    /// check catches it; compose it with ONE authored arm and the check
+    /// is defeated while the missing members stay missing.
+    ///
+    /// So the containment axis is the CONSUMER, and this class sits on
+    /// the other side of it from the degraded-success pair: a consumer
+    /// that splices the AUTHORED declaration for an external checker (the
+    /// Vue macro TSC projection) is unaffected — the declaration rides
+    /// verbatim whatever the substrate could not compute — and every
+    /// consumer that derives its output FROM the value (the runtime
+    /// `props: {…}` / `emits: […]` option objects, `get_component_meta`)
+    /// is missing members it cannot name and must fail closed.
+    pub const FLOW_RETURN_NO_SURFACE: Self = Self(1 << 16);
 
-    /// Both flow-return degradation classes — the partials that leave the
-    /// resolved SHAPE intact.
+    /// Both flow-return DEGRADED-SUCCESS classes — the partials that leave
+    /// the resolved SHAPE intact.
     ///
     /// Every other class is a statement about the DEMAND (a budget, a
     /// cancellation, a superseded generation, a torn view, a recursion, a
@@ -3795,6 +3820,11 @@ impl PartialReasonSet {
     /// structure the substrate did produce, so a consumer addressing one
     /// MEMBER of that structure may still select it and judge it on its
     /// own node.
+    ///
+    /// [`FLOW_RETURN_NO_SURFACE`](Self::FLOW_RETURN_NO_SURFACE) is
+    /// deliberately NOT a member: there is no structure to address a
+    /// member of, so a consumer reading this set to decide "may I still
+    /// select a member" must get `false` for it.
     pub const FLOW_RETURN_DEGRADED: Self =
         Self::FLOW_RETURN_UNINFERRED.union(Self::FLOW_RETURN_UNVERIFIED);
 

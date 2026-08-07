@@ -52,7 +52,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
                     return false;
                 }
                 if resolved != node {
@@ -72,7 +72,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
                     return false;
                 }
                 if resolved != node {
@@ -89,7 +89,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
                     return false;
                 }
                 if resolved != node {
@@ -357,7 +357,7 @@ pub(super) fn classify_runtime(
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
     let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
-    if macro_projection_faulted() {
+    if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
         return Err(partial_failure());
     }
     let classification = match result {
@@ -372,7 +372,9 @@ pub(super) fn classify_runtime(
         QueryResult::Recursive(_) => {
             return Err(ProjectionFailure::Partial(MacroPartialReason::Recursion))
         }
-        QueryResult::Error(_) => return Err(runtime_resolution_failure()),
+        QueryResult::Error(_) => {
+            return Err(resolution_failure(MacroProjectionLane::RuntimeMemberValue))
+        }
     };
 
     let skip_check = classification.kinds().contains(&BroadRuntimeKind::Unknown)
@@ -618,54 +620,148 @@ fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool 
     })
 }
 
-/// The macro codegen CONTAINED partial classes — the classes whose
-/// observation does not, on its own, make either projection's output an
-/// incomplete surface.
+/// WHICH macro codegen consumer is asking whether an observed partial
+/// faults it.
 ///
-/// The TSC projection emits the AUTHORED declarations verbatim into the
-/// generated TSX and splices the AUTHORED type argument; the external
-/// checker then computes the member types itself. So a body-derived return
-/// THIS substrate could not infer, and one it inferred but could not
-/// verify, both say nothing about whether the TSX is the full surface —
-/// and faulting on them deleted the WHOLE props projection over one class
-/// member's return type, for programs the checker types without
-/// difficulty.
+/// The consumers read the same observation and are broken by different
+/// parts of it, so the containment set is a property of the CONSUMER and
+/// cannot be a single shared constant. Naming the consumer at every fault
+/// site is the point: a new site does not compile until it has said which
+/// output it is protecting.
 ///
-/// The RUNTIME projection does read the value, but it reads it PER MEMBER
-/// and degrades per member: a member carrying the positional marker, and
-/// every member of an unverified frame, publish with `type: null`
-/// (validation and casting off), while a member the substrate typed
-/// exactly keeps its real constructor. Its protection against a surface it
-/// must not publish at all is STRUCTURAL and lives at the projection —
-/// an empty derived surface under an observed degradation is refused,
-/// because a root-position degradation leaves no member set to publish.
-/// A reason-set difference could not have expressed that: the class is
-/// identical whether the untyped position was the root or an interior
-/// member, and only the derived surface tells them apart.
-///
-/// Every OTHER reason class still faults on BOTH lanes: a budget edge, a
-/// cancellation, a superseded generation, an unstable view, a recursion
-/// limit, a missing dependency, a semantic-query fault, and the
-/// boolean-bridge `PROPAGATED` are all statements about the REQUEST rather
-/// than about one declaration's inference. A declaration-local budget the
-/// class-member inference records precisely still reaches the FILE-level
-/// aggregate through its own rail, so a budget-truncated class member keeps
-/// the entry `Complete` (the authored splice is intact) while the file
-/// result reports `BUDGET_EXCEEDED` and warms nothing.
-const MACRO_CODEGEN_CONTAINED: PartialReasonSet = PartialReasonSet::FLOW_RETURN_DEGRADED;
-
-/// Whether the observed completeness FAULTS a macro projection.
-pub(super) fn macro_projection_faulted() -> bool {
-    !macro_projection_residual(crate::request_context::current_cold_compute_completeness())
-        .is_empty()
+/// The axis is not "TSC vs runtime" — it is whether the consumer DERIVES
+/// its output from the resolved value. A names-only runtime demand does
+/// not, which is why it sits beside the TSC lane rather than beside the
+/// option-rendering one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MacroProjectionLane {
+    /// The TSC projection: it emits the AUTHORED declarations verbatim
+    /// into the generated TSX and splices the AUTHORED type argument, and
+    /// the external checker computes the member types itself.
+    Tsc,
+    /// A RUNTIME demand that RENDERS the option objects, asked at the
+    /// point that derives the MEMBER SET: it DERIVES `props: {…}` /
+    /// `emits: […]` from the resolved value, so a producer that yielded
+    /// no member set leaves members the module Vue executes does not
+    /// declare.
+    RuntimeOptions,
+    /// The SAME option-rendering demand, asked while classifying ONE
+    /// member's constructors.
+    ///
+    /// The class means something different here, and reading it the same
+    /// way is an over-degradation with teeth. At the member-SET point a
+    /// no-surface observation says members are missing; at THIS point it
+    /// says one member's TYPE is unknown, and the lane already has an
+    /// exact encoding for that — `type: null`, on that member alone. The
+    /// observed completeness is STICKY for the scope, so faulting here
+    /// would let the FIRST member whose value has no surface collapse
+    /// every LATER member's constructor too: `defineProps<{ a:
+    /// ReturnType<typeof unmodelled>; b: string }>()` publishes
+    /// `b: { type: null }` instead of `b: { type: String }`, for a `b` the
+    /// same tree types exactly.
+    RuntimeMemberValue,
+    /// A NAMES-ONLY runtime demand (the TSX / IDE compile). It renders no
+    /// option object at all, and the TSX it feeds splices the AUTHORED
+    /// macro call for the external checker — so it sits on the TSC side
+    /// of the containment axis, and faulting it would delete the whole
+    /// file's type-check surface to prevent an option object this demand
+    /// never emits.
+    RuntimeNames,
+    /// The FILE-level aggregate — the producer's own `completeness`,
+    /// which governs warm admission of the whole codegen artifact rather
+    /// than the content of either lane's output.
+    ///
+    /// It contains everything BOTH lanes contain between them, because a
+    /// lane that refused recorded the refusal IN its entry: the artifact
+    /// is a faithful, deterministic record of that refusal and re-deriving
+    /// it would produce the identical bytes. Faulting the file here
+    /// instead would make every module carrying one unmodelled helper
+    /// recompute its whole macro codegen on every touch, forever, to
+    /// re-derive a refusal it already holds.
+    File,
 }
 
-/// The reasons of `completeness` that FAULT a macro projection — the
-/// observed set minus [`MACRO_CODEGEN_CONTAINED`].
+impl MacroProjectionLane {
+    /// The partial classes whose observation does NOT, on its own, make
+    /// this lane's output an incomplete surface.
+    ///
+    /// The two DEGRADED-SUCCESS classes are contained by BOTH lanes. The
+    /// TSC projection is unaffected by construction (the declarations
+    /// ride verbatim), and faulting on them deleted the WHOLE props
+    /// projection over one class member's return type for programs the
+    /// checker types without difficulty. The RUNTIME projection does read
+    /// the value, but it reads it PER MEMBER and degrades per member: a
+    /// member carrying the positional marker, and every member of an
+    /// unverified frame, publish with `type: null` (validation and casting
+    /// off), while a member the substrate typed exactly keeps its real
+    /// constructor. Both classes leave a COMPLETE member set, which is
+    /// what makes containing them sound.
+    ///
+    /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`] is where the lanes
+    /// part. It says the producer yielded no member set at all, so the
+    /// TSC splice is still whole and a derived option object is missing
+    /// members it cannot name. Containing it on the runtime lane and
+    /// relying on a structural "is the assembled surface empty" check
+    /// instead asks a per-SURFACE question of a per-CONTRIBUTION
+    /// invariant: one authored intersection arm, or one `interface …
+    /// extends` heritage clause, makes the surface non-empty and the
+    /// missing members disappear without a diagnostic.
+    ///
+    /// The runtime lane still ALSO keeps the structural check, and it is
+    /// not redundant with this one: a DEGRADED SUCCESS whose marker sits
+    /// at the ROOT position (`{ ...new Box(), n: 1 }` — the literal fails
+    /// closed on a spread source it cannot evaluate) is a contained class
+    /// that nonetheless leaves no members. The class says the surface is
+    /// faithful; only the surface says it is empty.
+    ///
+    /// Every OTHER reason class still faults on BOTH lanes: a budget edge,
+    /// a cancellation, a superseded generation, an unstable view, a
+    /// recursion limit, a missing dependency, a semantic-query fault, and
+    /// the boolean-bridge `PROPAGATED` are all statements about the
+    /// REQUEST rather than about one declaration's inference. A
+    /// declaration-local budget the class-member inference records
+    /// precisely still reaches the FILE-level aggregate through its own
+    /// rail, so a budget-truncated class member keeps the entry `Complete`
+    /// (the authored splice is intact) while the file result reports
+    /// `BUDGET_EXCEEDED` and warms nothing.
+    const fn contained(self) -> PartialReasonSet {
+        match self {
+            Self::RuntimeOptions => PartialReasonSet::FLOW_RETURN_DEGRADED,
+            Self::Tsc | Self::RuntimeNames | Self::RuntimeMemberValue | Self::File => {
+                PartialReasonSet::FLOW_RETURN_DEGRADED
+                    .union(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
+            }
+        }
+    }
+
+    /// The runtime lane for a demand that does (or does not) render the
+    /// option objects — the ONE derivation of that distinction, taken
+    /// from `VueMacroCodegenDemand::wants_runtime_constructors`.
+    pub(super) const fn runtime(renders_options: bool) -> Self {
+        if renders_options {
+            Self::RuntimeOptions
+        } else {
+            Self::RuntimeNames
+        }
+    }
+}
+
+/// Whether the observed completeness FAULTS `lane`'s projection.
+pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
+    !macro_projection_residual(
+        crate::request_context::current_cold_compute_completeness(),
+        lane,
+    )
+    .is_empty()
+}
+
+/// The reasons of `completeness` that FAULT `lane` — the observed set
+/// minus [`MacroProjectionLane::contained`].
 pub(super) fn macro_projection_residual(
     completeness: crate::semantic_query::ResultCompleteness,
+    lane: MacroProjectionLane,
 ) -> PartialReasonSet {
-    completeness.reasons().without(MACRO_CODEGEN_CONTAINED)
+    completeness.reasons().without(lane.contained())
 }
 
 /// Whether a DEGRADED flow return was observed while deriving this
@@ -677,6 +773,10 @@ pub(super) fn macro_projection_residual(
 /// same empty surface means the substrate could not type the ROOT, so
 /// there is no member set at all and publishing one declares a props-less
 /// component for a component that declares props.
+///
+/// Scoped to the two DEGRADED-SUCCESS classes, which are exactly the ones
+/// the runtime lane CONTAINS: a no-surface observation already faulted the
+/// lane through [`macro_projection_faulted`] and never reaches here.
 pub(super) fn flow_return_degradation_observed() -> bool {
     let reasons = crate::request_context::current_cold_compute_completeness().reasons();
     reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED)
@@ -700,17 +800,11 @@ pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {
     }
 }
 
-pub(super) fn resolution_failure() -> ProjectionFailure {
-    if macro_projection_faulted() {
-        partial_failure()
-    } else {
-        ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)
-    }
-}
-
-/// [`resolution_failure`] for the RUNTIME lane.
-pub(super) fn runtime_resolution_failure() -> ProjectionFailure {
-    if macro_projection_faulted() {
+/// An absent declaration, reported as `lane` sees it: a partial when the
+/// observation already faults that lane, a plain missing declaration
+/// otherwise.
+pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure {
+    if macro_projection_faulted(lane) {
         partial_failure()
     } else {
         ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)
@@ -764,4 +858,150 @@ pub(super) fn fact_footprint(finalise: FactReadSetFinalise) -> (Vec<String>, boo
         }
     }
     (canonicals.into_iter().collect(), cacheable)
+}
+
+#[cfg(test)]
+mod lane_containment_tests {
+    use super::{macro_projection_residual, MacroProjectionLane};
+    use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+    fn residual(reason: PartialReasonSet, lane: MacroProjectionLane) -> PartialReasonSet {
+        macro_projection_residual(ResultCompleteness::Partial(reason), lane)
+    }
+
+    /// The lanes disagree on EXACTLY one class, and the disagreement is
+    /// the whole point of parameterising the predicate.
+    ///
+    /// A no-surface producer contributed no member set, so a lane that
+    /// DERIVES its output from the value is missing members it cannot
+    /// name and must fault; a lane that splices the AUTHORED declaration
+    /// for an external checker is unaffected.
+    ///
+    /// Mutation recipe: giving `Runtime` the same set as `Tsc` (a single
+    /// shared containment constant — which is exactly what this predicate
+    /// replaced) passes every degraded-success row here and fails the
+    /// no-surface row, and at the public boundary republishes every row of
+    /// `a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes`.
+    #[test]
+    fn only_the_no_surface_class_separates_the_two_macro_codegen_lanes() {
+        // The DEGRADED-SUCCESS pair: a complete member set, contained by
+        // BOTH lanes.
+        for degraded in [
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+        ] {
+            assert!(
+                residual(degraded, MacroProjectionLane::Tsc).is_empty(),
+                "the authored splice is intact under {degraded:?}"
+            );
+            assert!(
+                residual(degraded, MacroProjectionLane::RuntimeOptions).is_empty(),
+                "{degraded:?} leaves a COMPLETE member set, so the runtime lane publishes it \
+                 with the affected members' validation off rather than deleting the module"
+            );
+        }
+
+        // The NO-SURFACE class: the lanes part, and they part on whether
+        // the demand RENDERS an option object rather than on whether it is
+        // nominally "runtime".
+        let no_surface = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+        assert!(
+            residual(no_surface, MacroProjectionLane::Tsc).is_empty(),
+            "the TSC lane splices the AUTHORED declaration, which rides verbatim whatever the \
+             substrate could not compute"
+        );
+        assert_eq!(
+            residual(no_surface, MacroProjectionLane::RuntimeOptions),
+            no_surface,
+            "an option-rendering demand DERIVES its output from the value: a producer that \
+             yielded no member set leaves it missing members it cannot name, and no \
+             structural check on the ASSEMBLED surface can see that once a sibling arm \
+             contributed"
+        );
+        assert!(
+            residual(no_surface, MacroProjectionLane::RuntimeNames).is_empty(),
+            "a NAMES-ONLY (TSX / IDE) demand emits no option object, and the TSX it feeds \
+             splices the AUTHORED macro call — faulting it would delete the whole file's \
+             type-check surface to prevent bytes this demand never writes"
+        );
+        assert!(
+            residual(no_surface, MacroProjectionLane::RuntimeMemberValue).is_empty(),
+            "and at ONE MEMBER's classification the same class says that member's TYPE is \
+             unknown, which the lane encodes as `type: null` on that member — the observation \
+             is STICKY for the scope, so faulting here collapses every LATER member's \
+             constructor too"
+        );
+
+        // The FILE aggregate contains both lanes' sets: a lane that
+        // refused recorded the refusal IN its entry, and warming that
+        // faithful record is correct.
+        for contained in [
+            PartialReasonSet::FLOW_RETURN_UNINFERRED,
+            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            PartialReasonSet::FLOW_RETURN_NO_SURFACE,
+        ] {
+            assert!(
+                residual(contained, MacroProjectionLane::File).is_empty(),
+                "{contained:?} must not make the whole codegen artifact recompute forever to \
+                 re-derive a refusal it already holds"
+            );
+        }
+
+        // CONTROL — every class that is a statement about the REQUEST
+        // faults all three, and a mixed observation is governed by its
+        // worst class.
+        for request_class in [
+            PartialReasonSet::BUDGET_EXCEEDED,
+            PartialReasonSet::CANCELLED,
+            PartialReasonSet::SUPERSEDED_GENERATION,
+            PartialReasonSet::UNSTABLE_STATE,
+            PartialReasonSet::SAME_PATH_RECURSION,
+            PartialReasonSet::MISSING_DEPENDENCY,
+            PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            PartialReasonSet::PROPAGATED,
+        ] {
+            for lane in [
+                MacroProjectionLane::Tsc,
+                MacroProjectionLane::RuntimeOptions,
+                MacroProjectionLane::RuntimeNames,
+                MacroProjectionLane::RuntimeMemberValue,
+                MacroProjectionLane::File,
+            ] {
+                assert_eq!(
+                    residual(request_class, lane),
+                    request_class,
+                    "{request_class:?} is a statement about the DEMAND and faults {lane:?}"
+                );
+                assert_eq!(
+                    residual(
+                        request_class.union(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+                        lane
+                    ),
+                    request_class,
+                    "a mixed observation keeps its faulting class on {lane:?}"
+                );
+            }
+        }
+    }
+
+    /// The two flow-return NO-VALUE and DEGRADED-SUCCESS classes are
+    /// DISTINCT bits, not one bit read two ways.
+    ///
+    /// Mutation recipe: aliasing `FLOW_RETURN_NO_SURFACE` back onto
+    /// `FLOW_RETURN_UNVERIFIED` makes both `contains` assertions here fire
+    /// and silently restores the per-surface guard's blind spot.
+    #[test]
+    fn the_no_surface_class_is_not_a_degraded_success_class() {
+        assert!(
+            !PartialReasonSet::FLOW_RETURN_DEGRADED
+                .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "there is no structure to address a member of, so the set a consumer reads to ask \
+             'may I still select a member' must exclude it"
+        );
+        assert!(
+            !PartialReasonSet::FLOW_RETURN_NO_SURFACE
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "and the two must not alias"
+        );
+    }
 }

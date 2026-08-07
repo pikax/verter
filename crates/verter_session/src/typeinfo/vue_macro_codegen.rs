@@ -656,13 +656,14 @@ impl VerterHost {
                 // classification the class-member inference records
                 // precisely on its own rail.
                 //
-                // ONE containment set serves both lanes. The runtime lane's
-                // extra protection is not a narrower class set — it is
-                // structural, at the projection: a member degrades per
-                // member, and an empty derived surface under an observed
-                // degradation refuses.
+                // The FILE-level aggregate contains everything the two
+                // lanes contain BETWEEN them: a lane that refused recorded
+                // the refusal IN its entry, so the artifact is a faithful,
+                // deterministic record of it and warming that record is
+                // correct. The per-lane sets are what the two projections
+                // read, and they differ — see `MacroProjectionLane`.
                 let observed = crate::request_context::current_cold_compute_completeness();
-                let residual = macro_projection_residual(observed);
+                let residual = macro_projection_residual(observed, MacroProjectionLane::File);
                 state.completeness = if residual.is_empty() {
                     crate::semantic_query::ResultCompleteness::Complete
                 } else {
@@ -796,23 +797,26 @@ impl VerterHost {
                         }),
                 );
             }
-            // PER-LANE payload failure. The contained CLASS set is shared,
-            // but the two lanes still differ on an ABSENT payload: the TSC
-            // lane splices the authored declaration and reports a
-            // resolution failure, while the runtime lane has nothing to
-            // derive a `props` option object from. They are computed
-            // separately and never merged.
-            let tsc_payload_failure = if macro_projection_faulted() {
+            // PER-LANE payload failure, over the PER-LANE contained class
+            // set: the runtime lane derives its output from the value, so
+            // a producer that yielded no surface faults it while the TSC
+            // lane's authored splice rides on. The two lanes also differ
+            // on an ABSENT payload — the TSC lane splices the authored
+            // declaration and reports a resolution failure, while the
+            // runtime lane has nothing to derive a `props` option object
+            // from. They are computed separately and never merged.
+            let runtime_lane = MacroProjectionLane::runtime(demand.wants_runtime_constructors());
+            let tsc_payload_failure = if macro_projection_faulted(MacroProjectionLane::Tsc) {
                 Some(partial_failure())
             } else if payload.is_none() {
-                Some(resolution_failure())
+                Some(resolution_failure(MacroProjectionLane::Tsc))
             } else {
                 None
             };
-            let runtime_payload_failure = if macro_projection_faulted() {
+            let runtime_payload_failure = if macro_projection_faulted(runtime_lane) {
                 Some(partial_failure())
             } else if payload.is_none() {
-                Some(runtime_resolution_failure())
+                Some(resolution_failure(runtime_lane))
             } else {
                 None
             };
@@ -971,7 +975,7 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted() {
+                if macro_projection_faulted(MacroProjectionLane::Tsc) {
                     return partial_failure().tsc();
                 }
                 let Some(surface) = surface else {
@@ -1044,7 +1048,7 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if macro_projection_faulted() {
+                if macro_projection_faulted(MacroProjectionLane::Tsc) {
                     return partial_failure().tsc();
                 }
                 let Some(surface) = surface else {
@@ -1151,6 +1155,7 @@ impl VerterHost {
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
+        let lane = MacroProjectionLane::runtime(classify_constructors);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1166,7 +1171,7 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted() {
+        if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1277,6 +1282,7 @@ impl VerterHost {
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
+        let lane = MacroProjectionLane::runtime(renders_runtime_options);
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
@@ -1293,7 +1299,7 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted() {
+        if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1311,7 +1317,7 @@ impl VerterHost {
             effective_index,
             runtime_context,
         );
-        if macro_projection_faulted() {
+        if macro_projection_faulted(lane) {
             return partial_failure().runtime();
         }
         // The `props` twin of this refusal, for the same reason and with

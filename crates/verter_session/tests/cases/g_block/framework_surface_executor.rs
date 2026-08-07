@@ -816,3 +816,130 @@ fn nonexistent_named_export_is_a_malformed_payload() {
         error.kind
     );
 }
+
+/// SECONDARY evidence, framework surface — an object return's ENTRY FORM
+/// no longer costs a CALL-sourced spread its reduction, and the corrected
+/// substrate answer reaches the Svelte props surface.
+///
+/// The thing under test is the substrate, asserted against tsgo in
+/// `typeinfo_tests::value_inference::
+/// object_return_entry_forms_lower_structurally_over_a_call_spread`. This
+/// row set proves the answer survives the framework-surface encoder, and
+/// that the encoder does not quietly turn a corrected surface into an
+/// empty SUPPORTED one.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`),
+/// `Eq<…>`-probed with a rejected negative control: the computed-key row is
+/// `{ label: string; z: number }`, the `as const` row `{ readonly label:
+/// string; readonly n: 1 }`, the `satisfies` row `{ label: string; n:
+/// number }`.
+///
+/// Discrimination: restoring the whole-literal bail returns every row to
+/// PARTIAL with zero members; the OPEN-key control fails under a change
+/// that starts trusting a key the substrate cannot name.
+#[test]
+fn an_entry_form_over_a_call_spread_reaches_the_framework_surface_intact() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest};
+
+    const PRELUDE: &str = "function base() { return { label: \"x\" } }\nconst k = \"z\"\n";
+
+    /// `(row, makeProps body, expected member names — empty means the
+    /// surface must fail closed)`.
+    const ROWS: &[(&str, &str, &[&str])] = &[
+        (
+            "computed",
+            "function makeProps() { return { ...base(), [k]: 1 } }\n",
+            &["label", "z"],
+        ),
+        (
+            "asconst",
+            "function makeProps() { return { ...base(), n: 1 } as const }\n",
+            &["label", "n"],
+        ),
+        (
+            "asconstonly",
+            "function makeProps() { return { ...base() } as const }\n",
+            &["label"],
+        ),
+        (
+            "satisfies",
+            "function makeProps() { return { ...base(), n: 1 } satisfies object }\n",
+            &["label", "n"],
+        ),
+        (
+            "clean",
+            "function makeProps() { return { ...base(), n: 1 } }\n",
+            &["label", "n"],
+        ),
+        // CONTROL — an OPEN key domain still fails CLOSED. A key whose
+        // value is not a literal provisions a property the surface cannot
+        // name, so publishing the modelled siblings alone would declare a
+        // member set missing a key the authored value has.
+        (
+            "openkey",
+            "function makeProps(key: string) { return { ...base(), [key]: 1 } }\n",
+            &[],
+        ),
+    ];
+
+    for (row, body, expected) in ROWS {
+        let canonical = format!("/EntryForm_{row}.svelte");
+        let source = format!(
+            "<script lang=\"ts\">\n{PRELUDE}{body}\
+             let props: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{{props}}</p>\n"
+        );
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.clone()),
+                input_id: canonical.clone(),
+                source: Arc::from(source.as_str()),
+                file_language: FileLanguage::svelte(),
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
+
+        let result =
+            host.resolve_framework_surface_with_audit(framework_envelope(&canonical, "svelte"));
+        let response = result.as_result().expect("structural response");
+        let payload = expect_payload(response);
+        let entries = entries_by_kind(payload);
+        let props = entries
+            .get(&(FrameworkSurfaceKind::Props as i32))
+            .unwrap_or_else(|| panic!("{canonical}: a PROPS entry"));
+        let status = props
+            .status
+            .as_ref()
+            .unwrap_or_else(|| panic!("{canonical}: PROPS carries a status"));
+        let mut members = member_keys(payload, props);
+        members.sort();
+        let mut want: Vec<String> = expected.iter().map(|m| (*m).to_owned()).collect();
+        want.sort();
+
+        if expected.is_empty() {
+            assert_ne!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the surface's key SET is unknown — claiming SUPPORTED would \
+                 publish a props surface missing a key the authored value has \
+                 (members={members:?})"
+            );
+            assert!(
+                members.is_empty(),
+                "{canonical}: fail-closed means NO members, not the modelled siblings alone; \
+                 got {members:?}"
+            );
+        } else {
+            assert_eq!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the literal lowers structurally and its spread reduces \
+                 (members={members:?})"
+            );
+            assert_eq!(
+                members, want,
+                "{canonical}: the complete member set must reach the framework surface"
+            );
+        }
+    }
+}

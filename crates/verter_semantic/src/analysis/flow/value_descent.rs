@@ -245,6 +245,20 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
 /// So the entry classification is ONE function with ONE exhaustive match,
 /// exactly like [`value_descent`]: a form dispositioned here is
 /// dispositioned for both halves in the same change.
+///
+/// SCOPE of "single authority", stated so it is not read wider than it
+/// holds: this is the authority for the entry SHAPE and for the KEY, over
+/// the TWO halves named above (the skeleton's `open_object_site` and the
+/// content half's `lower_object_literal`). It is NOT the only place an
+/// entry's KIND is decided in the tree —
+/// `crate::analysis::type_eval_build`'s object-literal extraction (the
+/// shared shallow-pass leaf lowering the content half FALLS BACK to) and
+/// `crate::analysis::function_program`'s property-footprint indexing each
+/// carry their own `PropertyKind` match. Those sites answer a different
+/// question for a different consumer (a whole-literal type, and a
+/// per-property footprint keyed by authored ordinal), no behavioural
+/// divergence between the precedences is measured, and unifying them is
+/// not this classifier's boundary.
 #[derive(Debug)]
 pub enum ObjectEntryDescent<'a, 'ast> {
     /// An entry provisioning exactly ONE key: [`Self::Property::value`]

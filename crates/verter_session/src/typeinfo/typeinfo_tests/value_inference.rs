@@ -269,3 +269,191 @@ fn value_inference_computed_block_callback_value_resolves_local_return_shape() {
     assert_primitive(&props["count"].ty, PrimitiveName::Number);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
+
+/// PRIMARY, SEMANTIC — an object return's ENTRY FORM never costs the
+/// literal its structural lowering, so a CALL-sourced spread inside it
+/// still reduces.
+///
+/// The structural lowering handles each entry of an object return
+/// separately: a spread whose source is a call rides the evaluator's one
+/// call sink and reduces there. THREE entry forms used to abandon that
+/// lowering for the WHOLE literal — a computed key (`[k]`), a numeric key
+/// (`{ 1: x }`, whose authored text is not its property name), and a type
+/// carrier (`as const` / `satisfies`) — and fold every sibling into one
+/// shallow-pass leaf answer instead. That answer embeds the spread
+/// callee's unreduced `ReturnType<…>` carrier, which the leaf's
+/// fabricated-value gate refuses, so ONE unmodellable entry failed the
+/// whole RETURN closed for values the checker types without difficulty.
+///
+/// The fix is at the lowering, not at the gate: a key whose property name
+/// is not its authored text is its OWN lowered value position
+/// (`SliceObjectKey::Computed`), and a type carrier over an object literal
+/// contributes a MEMBER POLICY (`ObjectMemberPolicy`) rather than
+/// swallowing the literal. The gate keeps refusing exactly what it
+/// refused; nothing reaches it any more for these shapes.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`),
+/// every row `Eq<…>`-probed with a negative control the checker REJECTS
+/// (and the `Eq` probe is separately proven `readonly`-discriminating by
+/// `Eq<{ readonly a: 1 }, { a: 1 }>` erroring).
+///
+/// Discrimination: restoring the whole-literal bail makes every
+/// spread-bearing row resolve to the unmodelled-position marker instead of
+/// an object; the OPEN-key row is the control that the computed-key
+/// lowering did not simply start trusting keys it cannot name.
+#[test]
+fn object_return_entry_forms_lower_structurally_over_a_call_spread() {
+    const SRC: &str = r#"
+export function base() { return { label: "x" } }
+export const k = "z";
+export function mComputed() { return { ...base(), [k]: 1 } }
+export function mNumeric() { return { ...base(), 1: 2 } }
+export function mAsConst() { return { ...base(), n: 1 } as const }
+export function mAsConstOnly() { return { ...base() } as const }
+export function mSatisfies() { return { ...base(), n: 1 } satisfies object }
+export function mBareComputed() { return { [k]: 1, a: 2 } }
+export function mOpenComputed(key: string) { return { ...base(), [key]: 1 } }
+export type TComputed = ReturnType<typeof mComputed>;
+export type TNumeric = ReturnType<typeof mNumeric>;
+export type TAsConst = ReturnType<typeof mAsConst>;
+export type TAsConstOnly = ReturnType<typeof mAsConstOnly>;
+export type TSatisfies = ReturnType<typeof mSatisfies>;
+export type TBareComputed = ReturnType<typeof mBareComputed>;
+export type TOpenComputed = ReturnType<typeof mOpenComputed>;
+"#;
+    let host = make_host_with_footprint();
+    upsert_ts(&host, "/fixtures/entry-forms.ts", SRC);
+
+    let resolve = |name: &str| {
+        resolve_expr(
+            &host,
+            "/fixtures/entry-forms.ts",
+            name,
+            &[],
+            ProjectionMode::Expanded,
+        )
+        .0
+    };
+
+    // A COMPUTED key resolves through its own value: `k` is `"z"`, so the
+    // member is `z`. The spread reduced, so `label` is present and exact.
+    // Checker: `{ label: string; z: number }`.
+    let computed = object_props(&resolve("TComputed"));
+    assert_eq!(
+        computed.keys().collect::<Vec<_>>(),
+        vec!["label", "z"],
+        "the spread's member and the computed-key member both survive"
+    );
+    assert_primitive(&computed["label"].ty, PrimitiveName::String);
+    assert_primitive(&computed["z"].ty, PrimitiveName::Number);
+
+    // A NUMERIC key takes the SHARED canonical numeric spelling, so it is
+    // the number `1` rather than the string `"1"`. Checker:
+    // `{ 1: number; label: string }`.
+    let numeric = resolve("TNumeric");
+    let TypeExpr::Object(numeric_object) = &numeric else {
+        panic!("a numeric key does not stop the literal lowering structurally: {numeric:?}");
+    };
+    let numeric_keys: Vec<_> = numeric_object
+        .properties
+        .iter()
+        .filter_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(property) => Some(property.key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        numeric_keys.iter().any(|key| matches!(
+            key,
+            verter_type_expr::AuthoredPropertyKey::Number(index) if index.get() == 1
+        )),
+        "`{{ 1: 2 }}` names the NUMBER 1, not the string \"1\": {numeric_keys:?}"
+    );
+    assert!(
+        numeric_keys.iter().any(|key| matches!(
+            key,
+            verter_type_expr::AuthoredPropertyKey::String(name) if name.as_ref() == "label"
+        )),
+        "and the spread's member survives beside it: {numeric_keys:?}"
+    );
+
+    // `as const` pins the literal AND marks the literal's own members
+    // `readonly`. Checker: `{ readonly label: string; readonly n: 1 }`.
+    let as_const = object_props(&resolve("TAsConst"));
+    assert_eq!(as_const.keys().collect::<Vec<_>>(), vec!["label", "n"]);
+    assert_primitive(&as_const["label"].ty, PrimitiveName::String);
+    assert_eq!(
+        as_const["n"].ty,
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+        "`as const` pins the member literal instead of widening it to `number`"
+    );
+    assert!(
+        as_const["n"].readonly,
+        "and marks the literal's own member `readonly`"
+    );
+    // KNOWN DIVERGENCE, asserted so it cannot drift unnoticed: the checker
+    // marks the SPREAD-contributed member `readonly` too, and this
+    // substrate does not — the spread program merges the source's members
+    // with the source's own modifiers. That is the existing
+    // spread-path `readonly` gap reached by one more shape, not a new
+    // class; the member set and every member TYPE are exact.
+    assert!(
+        !as_const["label"].readonly,
+        "the spread-contributed member does NOT yet take the enclosing `as const`'s \
+         `readonly` (checker: `readonly label: string`) — flip this assertion when the \
+         spread path carries the modifier"
+    );
+
+    let as_const_only = object_props(&resolve("TAsConstOnly"));
+    assert_eq!(as_const_only.keys().collect::<Vec<_>>(), vec!["label"]);
+    assert_primitive(&as_const_only["label"].ty, PrimitiveName::String);
+
+    // `satisfies T` keeps the operand's SOURCE type. Whether a fresh
+    // member literal survives in that source type depends on whether the
+    // TARGET contextually types it, and this substrate performs no
+    // contextual typing — so it takes the PRESERVING side uniformly,
+    // which is the shared shallow pass's own long-standing choice (a
+    // carrier that lowers structurally and one that reaches the leaf
+    // lowering must not disagree about the same literal). The member SET
+    // and the spread's reduction — the things this test is about — are
+    // exact either way.
+    //
+    // RECORDED DIVERGENCE: the checker widens here (`{ ...base(), n: 1 }
+    // satisfies object` is `{ label: string; n: number }`, because
+    // `object` contextually types nothing) and pins where the target does
+    // (`{ mode: "dark" } satisfies { mode: "dark" | "light" }` is
+    // `{ mode: "dark" }`, which `flow_return_catalog::
+    // flow_return_ob05_satisfies_preserves_value_shape` pins). Closing the
+    // split is the deferred contextual-widening contract, and it moves
+    // BOTH rows together.
+    let satisfies = object_props(&resolve("TSatisfies"));
+    assert_eq!(satisfies.keys().collect::<Vec<_>>(), vec!["label", "n"]);
+    assert_primitive(&satisfies["label"].ty, PrimitiveName::String);
+    assert_eq!(
+        satisfies["n"].ty,
+        TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0)),
+        "`satisfies` preserves the member literal uniformly — the target-driven half of \
+         tsc's rule is the deferred contextual-widening contract"
+    );
+    assert!(
+        !satisfies["n"].readonly,
+        "`satisfies` is not a const assertion and mints no `readonly`"
+    );
+
+    // A computed key with NO spread is the same rule without the spread —
+    // proving the key lowering is not a spread-specific patch.
+    let bare = object_props(&resolve("TBareComputed"));
+    assert_eq!(bare.keys().collect::<Vec<_>>(), vec!["a", "z"]);
+
+    // CONTROL — an OPEN key domain still fails the literal CLOSED. A key
+    // whose value is not a literal provisions a property the surface
+    // cannot name, and an object surface has no way to say "these keys,
+    // plus one more I cannot name"; publishing the modelled siblings alone
+    // would declare a member set missing a key the authored value has.
+    let open = resolve("TOpenComputed");
+    assert!(
+        matches!(&open, TypeExpr::Unknown(value) if value.raw() == "unmodeledPosition"),
+        "a key whose value is not a literal leaves the surface's key SET unknown and must \
+         fail closed, not publish `{{ label }}` as if the literal had one member: {open:?}"
+    );
+}

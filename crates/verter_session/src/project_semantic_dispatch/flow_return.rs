@@ -100,8 +100,8 @@ pub(crate) enum ConsumerFold {
 }
 
 /// The partial class EVERY typed NO-VALUE [`FlowReturnFailure`] carries:
-/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`], the TSC-lane-contained
-/// class.
+/// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`], the class contained by
+/// the TSC lane ALONE.
 ///
 /// One rule rather than a per-variant match, because the classification
 /// axis is the CONSUMER, not the cause, and every no-value cause lands on
@@ -112,7 +112,19 @@ pub(crate) enum ConsumerFold {
 /// a torn view. A consumer that derives its output FROM the value (the
 /// runtime `props: {...}` projection, `get_component_meta`) is broken by
 /// all of them alike: there is no surface, so publishing around it emits
-/// an empty props object for a component that declares props.
+/// a member set missing every member this producer was asked for.
+///
+/// It is a DISTINCT bit from the degraded-success
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] rather than a shared one,
+/// and the distinction is load-bearing rather than descriptive. Sharing
+/// one bit forces every consumer that contains the unverified class —
+/// which it must, because that class's member set is complete by
+/// definition — to contain this one too, and the only remaining defence
+/// is a structural "is the assembled surface empty" check at the
+/// projection. That check is per-SURFACE where the invariant is
+/// per-CONTRIBUTION: one authored intersection arm, or one `interface …
+/// extends` heritage clause, makes the surface non-empty and the
+/// no-surface producer's members vanish with no diagnostic at all.
 ///
 /// A per-variant match here would be a constant-returning stub. The
 /// distinctions that DO matter are recorded elsewhere and survive: the
@@ -121,7 +133,7 @@ pub(crate) enum ConsumerFold {
 /// `tsc_class_inference_budget_is_exact_partial_and_non_cacheable`), and
 /// the typed `FlowReturnFailure` itself is what the flow-return consumers
 /// branch on.
-const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
+const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
 
 /// The partial class a DEGRADED SUCCESS's typed
 /// [`FlowReturnDegradation`] carries.
@@ -2418,11 +2430,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // widened (or stayed pinned under a const assertion) at IR
             // lowering.
             let value = self.widen_if_widening_local_read(&member.value, value);
+            // A non-static key is its own evaluated position. It names
+            // the member only if it settles to a LITERAL; anything else
+            // leaves the surface's key SET unknown, which an object
+            // surface cannot express — the same fail-closed verdict a
+            // spread source this frame cannot evaluate takes, and for the
+            // same reason.
+            let Some(key) = self.eval_object_member_key(&member.key) else {
+                return Positional::Unmodeled;
+            };
             surface_members.push(crate::semantic_query::SurfaceMember {
-                key: crate::semantic_query::AuthoredPropertyKey::string(member.key.as_ref()),
+                key,
                 value,
                 optional: false,
-                readonly: false,
+                readonly: member.readonly,
                 method_kind: member.method_kind,
                 has_implementation_body: member.method_kind.is_some(),
                 visibility: verter_type_expr::MemberVisibility::Public,
@@ -2454,6 +2475,89 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 has_index_signature: false,
             },
         )))
+    }
+
+    /// The property key one structurally lowered member names, or `None`
+    /// when a non-static key does not settle to a literal.
+    ///
+    /// The literal requirement is the whole contract. A computed key
+    /// whose value is a string or number literal names exactly one
+    /// property, so the surface's key set stays known; a key whose value
+    /// is anything else (a `string`-typed binding, an unresolved read)
+    /// makes the literal provision an UNKNOWN key, and an object surface
+    /// has no way to say "these keys, plus one more I cannot name".
+    /// Publishing the modelled siblings alone would declare a member set
+    /// missing a key the authored value has.
+    fn eval_object_member_key(
+        &mut self,
+        key: &crate::flow_slice_content::SliceObjectKey,
+    ) -> Option<crate::semantic_query::AuthoredPropertyKey> {
+        let (expression, authored) = match key {
+            crate::flow_slice_content::SliceObjectKey::Static(name) => {
+                return Some(crate::semantic_query::AuthoredPropertyKey::string(
+                    name.as_ref(),
+                ))
+            }
+            crate::flow_slice_content::SliceObjectKey::Computed { value, authored } => {
+                (value.as_ref(), authored)
+            }
+        };
+        // A hold inside a KEY is not this object's value any more than a
+        // hold inside a spread source is: drop it and read the outcome.
+        let holds_before = self.holds.len();
+        let outcome = self.eval_expr(expression);
+        self.holds.truncate(holds_before);
+        let Positional::Value(node) = outcome else {
+            return None;
+        };
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
+                Some(crate::semantic_query::AuthoredPropertyKey::string(
+                    value.as_str(),
+                ))
+            }
+            // The canonical numeric-key spelling is the SHARED authority's
+            // (`{ 1: x }` is `1`, `{ 1.5: x }` is `"1.5"`, `{ 0x10: x }`
+            // is `16`) — the same one the authored-key lowering uses, so
+            // a numeric key never has two spellings.
+            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(value))) => {
+                Some(crate::semantic_query::AuthoredPropertyKey::from_known(
+                    crate::semantic_query::PropertyKey::from_js_number(*value),
+                ))
+            }
+            // A SYMBOL-valued key is the one nameable form the value
+            // channel cannot carry: a `unique symbol` names exactly one
+            // nominal property, and the evaluator flattens its value to
+            // the bare `symbol` primitive, losing the identity that IS
+            // the name. So the AUTHORED key names it — the same carrier
+            // the whole-literal leaf answer produced, resolved by the
+            // same downstream reader.
+            //
+            // A NON-unique `symbol` key genuinely provisions an index
+            // signature rather than one property, and is over-named here.
+            // That is not a new divergence: it is exactly what the leaf
+            // answer this replaces already did, and telling the two apart
+            // needs the symbol's uniqueness on the value channel, which
+            // is the same missing fact.
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => {
+                match authored.cloned_known() {
+                    Some(known) => Some(crate::semantic_query::AuthoredPropertyKey::from_known(
+                        known,
+                    )),
+                    None => match authored {
+                        verter_type_expr::AuthoredPropertyKey::Computed(ty) => {
+                            Some(crate::semantic_query::AuthoredPropertyKey::Computed(
+                                self.lower_key_type(ty),
+                            ))
+                        }
+                        _ => None,
+                    },
+                }
+            }
+            // Anything else — an OPEN `string` / `number` key, an
+            // unresolved read — leaves the surface's key SET unknown.
+            _ => None,
+        }
     }
 
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
@@ -2641,7 +2745,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             match entry {
                 crate::flow_slice_content::SliceObjectEntry::Spread { .. } => break,
                 crate::flow_slice_content::SliceObjectEntry::Member(candidate) => {
-                    if candidate.key.as_ref() == member_name.as_ref() {
+                    // A COMPUTED key may name the demanded member and may
+                    // not, and deciding that needs its value. A later
+                    // entry that MIGHT provision the key is the same hard
+                    // stop a later spread is: anything before it may have
+                    // been overridden.
+                    let Some(name) = candidate.key.static_name() else {
+                        break;
+                    };
+                    if name == member_name.as_ref() {
                         member = Some(candidate);
                         break;
                     }
@@ -2688,6 +2800,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// leaf or a declarator's authored annotation) under the function's
     /// OWN binder environment — a body type referencing a root binder
     /// keeps the binder, never an outer same-name resolution.
+    /// Lower an AUTHORED computed-key type CARRIER-PRESERVINGLY.
+    ///
+    /// A computed key's nominal identity lives in the carrier
+    /// (`typeof ob12Key`), and the structural-transit lowering
+    /// [`Self::lower_body_type`] uses reduces it to the bare `symbol`
+    /// primitive — which names no property. `Navigate` keeps the carrier
+    /// for the downstream key reader to resolve, which is exactly what
+    /// the whole-literal leaf answer handed it.
+    fn lower_key_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        self.dispatch.shallow_lower_type_expr_with_context(
+            ty,
+            &self.binder_env.env,
+            &self.binder_env.scope,
+            &self.binder_env.name_resolution,
+            self.binder_env.scope_payload.as_ref(),
+            &self.binder_env.shadowing,
+            &mut substitutions,
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
+    }
+
     fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
         self.dispatch.shallow_lower_type_expr_with_context(

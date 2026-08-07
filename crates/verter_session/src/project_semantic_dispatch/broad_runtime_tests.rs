@@ -676,10 +676,11 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
 /// entry point — not the generic query fault.
 ///
 /// The distinction is a publish/refuse boundary downstream:
-/// `FLOW_RETURN_UNINFERRED` is inside `MACRO_CODEGEN_CONTAINED`, so a
-/// component one of whose members is unmodelled still emits its member
-/// set with that member's validation off; `SEMANTIC_QUERY_FAULT` is not,
-/// so the same component's module is deleted instead.
+/// `FLOW_RETURN_UNINFERRED` is contained by BOTH macro codegen lanes, so
+/// a component one of whose members is unmodelled still emits its member
+/// set with that member's validation off; `SEMANTIC_QUERY_FAULT` is
+/// contained by neither, so the same component's module is deleted
+/// instead.
 ///
 /// This test exists because the class choice is invisible to every
 /// SURFACE-level fixture: `runtime_props_derive_each_member_from_that_

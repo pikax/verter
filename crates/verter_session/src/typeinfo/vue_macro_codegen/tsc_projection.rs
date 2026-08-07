@@ -5,7 +5,7 @@
 
 use super::runtime::{
     authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
-    resolution_failure,
+    resolution_failure, MacroProjectionLane,
 };
 use super::*;
 
@@ -16,7 +16,7 @@ pub(super) fn render_tsc_node(
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
     let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
-    if macro_projection_faulted() {
+    if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
     rendered
@@ -888,7 +888,7 @@ fn collect_local_declaration_closure(
         .shallow_state
         .type_deps_in(declaration_owner, name)
     else {
-        return Err(resolution_failure());
+        return Err(resolution_failure(MacroProjectionLane::Tsc));
     };
     if !deps.unroutable_declaration_dependencies.is_empty() || deps.has_unroutable_value_position {
         return Err(ProjectionFailure::Unsupported(
@@ -1176,7 +1176,7 @@ pub(super) fn tsc_emit_rows(
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
 
-    if macro_projection_faulted() {
+    if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
     Ok(rows)
@@ -1212,10 +1212,10 @@ fn render_emit_payload_parameters(
         .normalize_node_for_structural_fact_demand(node, context)
         .into_complete_node()
     else {
-        return Err(if macro_projection_faulted() {
+        return Err(if macro_projection_faulted(MacroProjectionLane::Tsc) {
             partial_failure()
         } else {
-            resolution_failure()
+            resolution_failure(MacroProjectionLane::Tsc)
         });
     };
     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {

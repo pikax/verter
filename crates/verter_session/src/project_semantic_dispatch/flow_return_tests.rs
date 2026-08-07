@@ -1502,7 +1502,13 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
              FAITHFUL class, which both macro lanes contain; got {reasons:?}"
         );
         assert!(
-            reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            !reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "nor the degraded-success class whose member set is COMPLETE by definition — \
+             the runtime lane contains that one, so riding it would let a no-surface \
+             producer publish through any sibling contribution; got {reasons:?}"
+        );
+        assert!(
+            reasons.contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
             "it rides the TSC-only class instead, so the runtime `props` projection still \
              refuses while the authored TSC splice stays intact; got {reasons:?}"
         );

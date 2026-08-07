@@ -2410,12 +2410,16 @@ fn emitted_runtime_option(code: &str, option_key: &str) -> String {
         panic!("the rendered module declares no `{option_key}` option:\n{code}");
     };
     let open = key + option_key.len();
-    let (opener, closer) = match code.as_bytes()[open] {
-        b'{' => (b'{', b'}'),
-        b'[' => (b'[', b']'),
-        other => {
+    // The option key is the LAST thing in the module only if the render
+    // truncated: index rather than slice-index so a truncated render is a
+    // named failure instead of a bounds panic pointing at this helper.
+    let (opener, closer) = match code.as_bytes().get(open) {
+        Some(b'{') => (b'{', b'}'),
+        Some(b'[') => (b'[', b']'),
+        Some(other) => {
             panic!("`{option_key}` is neither an object nor an array (got {other:?}):\n{code}")
         }
+        None => panic!("the rendered module ends at its `{option_key}` option:\n{code}"),
     };
     let mut depth = 0usize;
     for (offset, byte) in code.as_bytes()[open..].iter().enumerate() {
@@ -32653,4 +32657,404 @@ defineProps<{
              instance object, got {other:?}"
         ),
     }
+}
+
+/// Render `script` as a `<script setup lang="ts">` body under an ARBITRARY
+/// macro call, on the RUNTIME (bundler) lane.
+///
+/// [`render_runtime_props`] pins the single-argument
+/// `defineProps<ReturnType<typeof makeProps>>()` shape. A surface assembled
+/// from SEVERAL producers — an intersection arm, a heritage clause, a
+/// `withDefaults` wrapper — needs the macro call spelled per row, because
+/// the defect those rows exist to catch is invisible when the degraded
+/// producer is the only one.
+#[cfg(not(target_arch = "wasm32"))]
+fn render_runtime_composed(
+    canonical: &str,
+    script: &str,
+    macro_call: &str,
+    option_key: &str,
+) -> RenderedRuntime {
+    render_runtime_macro(canonical, script, macro_call, option_key)
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — a producer that yielded NO SURFACE
+/// refuses the module even when a SIBLING producer contributed members.
+///
+/// The refusal that protects the runtime lane has to be asked
+/// per-CONTRIBUTION, not per-SURFACE. A no-value flow return
+/// (`for (…) { return … }` — a return-bearing loop the substrate does not
+/// model) produces no member set at all; when it is the macro's ONLY
+/// producer the assembled surface is empty and a structural "is the surface
+/// empty" check catches it. Compose it with ONE authored arm and that check
+/// is defeated: the surface is non-empty, so the module publishes the
+/// sibling's members alone and the no-value producer's members vanish.
+///
+/// That failure is quieter than the `props: {}` case it replaced, and
+/// strictly worse. The IDE/TSX lane splices the AUTHORED macro call, so the
+/// external checker types `props.label` as `string` and reports nothing,
+/// while the runtime module Vue actually executes declares no `label` prop
+/// at all — every `:label` binding falls through to `$attrs`. Types and
+/// runtime disagree, silently, on two mainstream Vue idioms (an
+/// intersection type argument and an `interface … extends` heritage
+/// clause).
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// for every row here the composed type is an ordinary object type whose
+/// keys are `"label" | "extra"` (`"evA" | "evB"` for the emits row) —
+/// verified with an `Eq<keyof T, …>` probe plus a negative control asserting
+/// `Eq<keyof T, "extra">` which the checker REJECTS. So publishing the
+/// sibling arm alone is a surface missing a declared member, not a
+/// conservative answer.
+///
+/// Discrimination: restoring the per-surface `props.is_empty()` predicate
+/// republishes every row here (the sibling arm makes the surface non-empty),
+/// and the `PUBLISHES` control block below fails under a blanket "any
+/// observed flow degradation refuses" regression — a FAITHFUL degraded
+/// surface composed with an authored arm must still publish every one of its
+/// members.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes() {
+    /// A helper whose return the substrate cannot produce a surface for:
+    /// a return-bearing loop.
+    const NO_SURFACE_PROPS: &str =
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
+         return { label: \"y\" } }";
+    const NO_SURFACE_EMITS: &str =
+        "function makeEmits() { for (let i = 0; i < 1; i++) { return { evA: (p: string) => true } } \
+         return { evA: (p: string) => true } }";
+
+    /// `(canonical, script, macro call, option key)` — the runtime lane must
+    /// REFUSE, because one of the composed producers has no member set.
+    const REFUSES: &[(&str, &str, &str, &str)] = &[
+        // An INTERSECTION type argument: the authored arm contributes
+        // `extra`, the no-surface arm contributes nothing.
+        (
+            "/src/X1InterProps.vue",
+            NO_SURFACE_PROPS,
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+        ),
+        // The same composition on `defineEmits`: publishing `["evB"]` sends
+        // every `@evA` listener silently through to `$attrs`.
+        (
+            "/src/X2InterEmits.vue",
+            NO_SURFACE_EMITS,
+            "defineEmits<ReturnType<typeof makeEmits> & { evB: (n: number) => void }>()",
+            "emits: ",
+        ),
+        // `withDefaults` reaches the same projection through a wrapper, and
+        // the defaults association must not make the incomplete surface look
+        // deliberate.
+        (
+            "/src/X3WithDefaults.vue",
+            NO_SURFACE_PROPS,
+            "withDefaults(defineProps<ReturnType<typeof makeProps> & { extra?: string }>(), \
+             { extra: \"z\" })",
+            "props: ",
+        ),
+        // A HERITAGE clause composes the same two producers through a
+        // declared interface rather than a type-argument intersection.
+        (
+            "/src/X4Heritage.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } \
+             return { label: \"y\" } }\n\
+             interface Props extends ReturnType<typeof makeProps> { extra: string }",
+            "defineProps<Props>()",
+            "props: ",
+        ),
+    ];
+
+    for (canonical, script, macro_call, option_key) in REFUSES {
+        match render_runtime_composed(canonical, script, macro_call, option_key) {
+            RenderedRuntime::Refused => {}
+            RenderedRuntime::Props(emitted) => panic!(
+                "{canonical}: one composed producer yielded NO member set, so the assembled \
+                 surface is missing declared members — the runtime lane must refuse rather \
+                 than publish the sibling arm alone as `{emitted}`"
+            ),
+        }
+    }
+
+    /// `(canonical, script, macro call, option key, needles)` — a composed
+    /// surface whose flow arm degraded FAITHFULLY (a marker at one position,
+    /// every sibling exact) still has a complete member set, so it must
+    /// publish it.
+    const PUBLISHES: &[(&str, &str, &str, &str, &[&str])] = &[
+        (
+            "/src/X5FaithfulInter.vue",
+            "class Box { readonly tag = \"box\" }\n\
+             function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+            &[
+                "label: { type: String",
+                "made: { type: null",
+                "extra: { type: String",
+            ],
+        ),
+        (
+            "/src/X6ModelledInter.vue",
+            "function makeProps() { return { label: \"x\" } }",
+            "defineProps<ReturnType<typeof makeProps> & { extra: string }>()",
+            "props: ",
+            &["label: { type: String", "extra: { type: String"],
+        ),
+    ];
+
+    for (canonical, script, macro_call, option_key, expected) in PUBLISHES {
+        let RenderedRuntime::Props(emitted) =
+            render_runtime_composed(canonical, script, macro_call, option_key)
+        else {
+            panic!(
+                "{canonical}: every composed producer left a member set — refusing here would \
+                 delete the module over a degradation that named no missing member"
+            );
+        };
+        for needle in *expected {
+            assert!(
+                emitted.contains(needle),
+                "{canonical}: expected `{needle}` in the emitted option:\n{emitted}"
+            );
+        }
+    }
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — a no-surface producer at a MEMBER
+/// VALUE position degrades that member, and only that member.
+///
+/// The no-surface class faults the option-rendering runtime lane, and the
+/// precision of that fault is the whole claim: it says "a producer this
+/// derivation asked for yielded no member set", and the member SET is what
+/// the fault protects. A producer that yielded no value for ONE member's
+/// TYPE has not removed that member from the surface — the name is
+/// authored right there in the macro's own type argument — so the honest
+/// emit is the complete name set with that member's validation off, the
+/// same encoding the lane already uses for any member it could not
+/// resolve.
+///
+/// This is the discrimination between "the class faults the lane" and "the
+/// class deletes the module". Faulting the whole projection here would
+/// delete every byte over one member's return type, for a component whose
+/// other props the same tree resolves exactly.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// the type argument's keys are `"a" | "b"`, and `b` is `string`.
+///
+/// Discrimination: refusing fails the `Props` destructure; a fabricated
+/// constructor for `a` fails the `type: null` assertion; collapsing every
+/// member on the frame-level observation fails the `b: { type: String`
+/// assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_no_surface_producer_at_a_member_value_degrades_only_that_member() {
+    let RenderedRuntime::Props(props) = render_runtime_composed(
+        "/src/X7MemberNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineProps<{ a: ReturnType<typeof makeProps>; b: string }>()",
+        "props: ",
+    ) else {
+        panic!(
+            "/src/X7MemberNoSurface.vue: the member SET is authored in the macro's own type \
+             argument and is complete — a producer that could not type ONE member's value has \
+             not removed a member, so the lane must publish rather than delete the module"
+        );
+    };
+    assert!(
+        props.contains("a: { type: null"),
+        "the member whose value has no surface publishes with validation off:\n{props}"
+    );
+    assert!(
+        props.contains("b: { type: String"),
+        "its exactly-typed sibling keeps its real constructor:\n{props}"
+    );
+
+    // `defineModel` reaches the classifier with the WHOLE model type as
+    // its subject. The binding is authored, so the honest emit is the
+    // binding with validation off — not a deleted module.
+    let RenderedRuntime::Props(model) = render_runtime_composed(
+        "/src/X8ModelNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineModel<ReturnType<typeof makeProps>>()",
+        "props: ",
+    ) else {
+        panic!("/src/X8ModelNoSurface.vue: the model binding is authored and present");
+    };
+    assert!(
+        model.contains("modelValue: { type: null"),
+        "the model binding publishes with validation off:\n{model}"
+    );
+
+    // `defineEmits` carries NAMES, not member types, so a member-value
+    // position that has no surface cannot shorten the event set — and
+    // must not be read as if it had.
+    let RenderedRuntime::Props(emits) = render_runtime_composed(
+        "/src/X9EmitsMemberNoSurface.vue",
+        "function makeProps() { for (let i = 0; i < 1; i++) { return { q: \"x\" } } \
+         return { q: \"y\" } }",
+        "defineEmits<{ evA: [p: ReturnType<typeof makeProps>]; evB: [n: number] }>()",
+        "emits: ",
+    ) else {
+        panic!("/src/X9EmitsMemberNoSurface.vue: the event NAMES are authored and complete");
+    };
+    assert!(
+        emits.contains("\"evA\"") && emits.contains("\"evB\""),
+        "both authored events survive a member-value position with no surface:\n{emits}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — the `defineEmits` twin of the
+/// spread-source refusal.
+///
+/// A spread source the evaluator cannot produce a surface for is a fact
+/// about the literal's KEY SET, so the literal fails closed and the emits
+/// projection has no member set. The previous implementation published
+/// `["evB"]` for this program — silently dropping `evA`, which routes every
+/// `@evA` listener to `$attrs` instead of the declared emit. Refusing is the
+/// block's deliberate trade and it needs a landed assertion of its own: the
+/// props side is pinned by
+/// `a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props`,
+/// and nothing pinned the emits side.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// `ReturnType<typeof makeEmits>` is `{ evA: (p: string) => boolean; evB:
+/// (n: number) => boolean }`, so `["evB"]` is a member-missing surface
+/// rather than a conservative one.
+///
+/// Discrimination: publishing `["evB"]` again fails the `Refused` match;
+/// the control row (a MODELLED spread source) fails under a blanket
+/// "any spread refuses" regression.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_unevaluable_emits_spread_source_refuses_rather_than_dropping_the_event() {
+    match render_runtime_emits(
+        "/src/E3NewSpread.vue",
+        "class Box { readonly evA = (p: string) => true }\n\
+         function makeEmits() { return { ...new Box(), evB: (n: number) => true } }",
+    ) {
+        RenderedRuntime::Refused => {}
+        RenderedRuntime::Props(emitted) => panic!(
+            "/src/E3NewSpread.vue: the spread source has no evaluable surface, so the event \
+             set is incomplete — publishing `{emitted}` drops `evA` and routes its listeners \
+             to `$attrs`"
+        ),
+    }
+
+    // CONTROL — a MODELLED spread source leaves a complete event set and
+    // must still publish both events.
+    let RenderedRuntime::Props(emitted) = render_runtime_emits(
+        "/src/E4ModelledSpread.vue",
+        "function base() { return { evA: (p: string) => true } }\n\
+         function makeEmits() { return { ...base(), evB: (n: number) => true } }",
+    ) else {
+        panic!("/src/E4ModelledSpread.vue: a modelled spread source leaves a complete event set");
+    };
+    assert!(
+        emitted.contains("\"evA\"") && emitted.contains("\"evB\""),
+        "/src/E4ModelledSpread.vue: both events must survive:\n{emitted}"
+    );
+}
+
+/// PUBLIC BOUNDARY, RENDERED BYTES — an object return whose ENTRY FORM
+/// the substrate once could not lower structurally reaches the runtime
+/// lane intact, over a CALL-sourced spread.
+///
+/// SECONDARY evidence. The thing under test is the substrate's answer for
+/// these shapes, asserted against tsgo in
+/// `typeinfo_tests::value_inference::
+/// object_return_entry_forms_lower_structurally_over_a_call_spread`. This
+/// row set exists to prove that answer reaches a consumer that DERIVES
+/// bytes from it, rather than being correct only at the graph.
+///
+/// The regression it pins: three entry forms — a computed key, a numeric
+/// key, and a type carrier — bailed the WHOLE literal to the shared
+/// shallow-pass leaf answer, and that answer embeds a call-sourced
+/// spread's unreduced `ReturnType<callee>` carrier, which the leaf's
+/// fabricated-value gate refuses. One unmodellable ENTRY therefore failed
+/// the whole RETURN closed, and every module built on it lost every byte.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
+/// the computed-key row is `{ label: string; z: number }`, the `as const`
+/// row `{ readonly label: string; readonly n: 1 }`, the `as const`-only row
+/// `{ readonly label: string }`, and the `satisfies` row `{ label: string;
+/// n: number }`.
+///
+/// Discrimination: restoring the whole-literal bail refuses every row and
+/// fails the `Props` destructure; dropping the spread's contribution fails
+/// the `label` assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_entry_form_over_a_call_spread_reaches_the_runtime_lane_intact() {
+    const PRELUDE: &str = "function base() { return { label: \"x\" } }\nconst k = \"z\"";
+
+    /// `(canonical, makeProps body, needles)`.
+    const ROWS: &[(&str, &str, &[&str])] = &[
+        (
+            "/src/F1ComputedKey.vue",
+            "function makeProps() { return { ...base(), [k]: 1 } }",
+            &["label: { type: String", "z: { type: Number"],
+        ),
+        (
+            "/src/F3AsConst.vue",
+            "function makeProps() { return { ...base(), n: 1 } as const }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/F4AsConstOnly.vue",
+            "function makeProps() { return { ...base() } as const }",
+            &["label: { type: String"],
+        ),
+        (
+            "/src/F5Satisfies.vue",
+            "function makeProps() { return { ...base(), n: 1 } satisfies object }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+    ];
+
+    for (canonical, body, expected) in ROWS {
+        let RenderedRuntime::Props(emitted) =
+            render_runtime_props(canonical, &format!("{PRELUDE}\n{body}"))
+        else {
+            panic!(
+                "{canonical}: the literal lowers structurally, so the call-sourced spread rides \
+                 the evaluator's call sink and reduces — there is a complete member set to \
+                 publish"
+            );
+        };
+        for needle in *expected {
+            assert!(
+                emitted.contains(needle),
+                "{canonical}: expected `{needle}` in the emitted props object:\n{emitted}"
+            );
+        }
+        assert!(
+            !emitted.contains("type: null"),
+            "{canonical}: every member here has a real constructor:\n{emitted}"
+        );
+    }
+
+    // A NUMERIC-named member reaches the substrate exactly (the semantic
+    // test pins `{ label: string; 1: number }`) but does NOT reach this
+    // option object: the runtime projection names members through their
+    // STRING name and skips a numeric key. The row is here so the gap is
+    // an asserted fact rather than an unnoticed one — a Vue projection
+    // question, not a substrate one.
+    let RenderedRuntime::Props(numeric) = render_runtime_props(
+        "/src/F2NumericKey.vue",
+        &format!("{PRELUDE}\nfunction makeProps() {{ return {{ ...base(), 1: 2 }} }}"),
+    ) else {
+        panic!("/src/F2NumericKey.vue: the spread's member is modelled and must publish");
+    };
+    assert!(
+        numeric.contains("label: { type: String"),
+        "/src/F2NumericKey.vue: the spread-contributed member survives:\n{numeric}"
+    );
+    assert!(
+        !numeric.contains("1:"),
+        "/src/F2NumericKey.vue: the numeric-named member does not reach the runtime props \
+         option today — if it starts to, this assertion is the place that says so:\n{numeric}"
+    );
 }

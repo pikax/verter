@@ -278,13 +278,18 @@ pub(crate) fn mark_request_result_inference_budget_exceeded() {
 /// Mark the active result partial under an EXPLICIT reason set — the
 /// classifying producers' entry.
 ///
-/// The flow-return consumer entry is the caller: a degraded success whose
-/// published surface is FAITHFUL rides
-/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`] (contained by both Vue
-/// macro codegen lanes), while a value the substrate could not verify and
-/// every no-value outcome ride
-/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] (contained by the TSC lane
-/// only, since it splices the authored declaration).
+/// The flow-return consumer entry is the caller, over three classes that
+/// differ in what a value-reading consumer can still do with the result. A
+/// degraded success whose published surface is FAITHFUL rides
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`], and one whose member set
+/// is complete but whose member types may be wrong rides
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — both leave a COMPLETE
+/// member set, so both are contained by every Vue macro codegen consumer.
+/// Every NO-VALUE outcome rides
+/// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`], which has no member set
+/// at all: contained only by the consumers that splice the AUTHORED
+/// declaration for an external checker, and faulting for the ones that
+/// DERIVE an option object from the value.
 pub(crate) fn mark_request_result_partial_with_reasons(reasons: PartialReasonSet) {
     mark_request_result_partial_with(reasons);
 }

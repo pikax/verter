@@ -491,7 +491,7 @@ fn object_return_lowers_a_spread_entry_structurally() {
         matches!(source, SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
         "a FREE spread operand takes the owner-scope leaf lowering: {source:?}"
     );
-    assert_eq!(member.key.as_ref(), "x");
+    assert_eq!(member.key.static_name(), Some("x"));
     assert!(
         matches!(member.value, SliceExpr::Type(_)),
         "the direct member keeps its own lowered value: {:?}",
@@ -547,7 +547,7 @@ fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
         "a demand for `a` reaches the SPREAD source (the only entry that can \
          provision it): {spread:?}"
     );
-    assert_eq!(member.key.as_ref(), "x");
+    assert_eq!(member.key.static_name(), Some("x"));
     assert!(
         matches!(member.value, SliceExpr::Elided),
         "the statically-unrelated sibling `x` stays elided: {:?}",
@@ -624,7 +624,7 @@ fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
         &SliceExpr::Param { ordinal: 0 },
         "the frame-owned spread operand IS the parameter"
     );
-    assert_eq!(member.key.as_ref(), "x");
+    assert_eq!(member.key.static_name(), Some("x"));
 }
 
 /// @ai-generated - arrow expression body lowers to a single return of the expression
@@ -706,13 +706,13 @@ fn member_demand_elides_sibling_member_values() {
     };
     let members = object_members(entries);
     assert_eq!(members.len(), 2, "the member LIST stays complete");
-    assert_eq!(members[0].key.as_ref(), "a");
+    assert_eq!(members[0].key.static_name(), Some("a"));
     assert!(
         matches!(members[0].value, SliceExpr::Elided),
         "the sibling's value is the typed Elided carrier: {:?}",
         members[0].value
     );
-    assert_eq!(members[1].key.as_ref(), "b");
+    assert_eq!(members[1].key.static_name(), Some("b"));
     assert!(
         matches!(members[1].value, SliceExpr::Type(_)),
         "the demanded member's value lowers: {:?}",

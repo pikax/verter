@@ -709,15 +709,156 @@ pub enum SliceObjectEntry {
     },
 }
 
+/// How one structurally lowered object-literal member NAMES its key.
+///
+/// A key spelling whose property name is not the authored text —
+/// `{ [k]: 1 }`, `{ 1: 2 }` — is not a reason to abandon the structural
+/// lowering of the WHOLE literal. Doing that folds every sibling,
+/// spreads included, into one shallow-pass leaf answer, and a leaf answer
+/// over a CALL-sourced spread embeds the callee's unreduced
+/// `ReturnType<…>` carrier — which the leaf's fabricated-value gate
+/// refuses, failing the whole return closed for a value the checker types
+/// without difficulty (`{ ...base(), [k]: 1 }` is `{ label: string;
+/// z: number }`).
+///
+/// So a non-static key becomes its own lowered VALUE position instead.
+/// The evaluator resolves it exactly as far as it resolves any other
+/// value: to a literal, which names the key, or to something else, which
+/// fails the literal closed — the same verdict the whole-literal fallback
+/// reached, now without taking the siblings down with it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceObjectKey {
+    /// A statically-known key: an identifier or string-literal spelling,
+    /// whose authored text IS the property name.
+    ///
+    /// Note for readers reaching for this in a comparison: a
+    /// [`Self::Computed`] key MAY name the same property, and only its
+    /// VALUE says so. A `matches!(key, Static(n) if n == wanted)` test is
+    /// therefore "this member definitely names `wanted`", never "no
+    /// member does".
+    Static(Arc<str>),
+    /// A key whose property name is the VALUE of an expression — a
+    /// computed key (`[k]`) or a numeric-literal key (`1`), whose
+    /// authored text is not its name.
+    Computed {
+        /// The key expression, lowered as an ordinary value position.
+        /// Its evaluated LITERAL names the property.
+        value: Box<SliceExpr>,
+        /// The AUTHORED key, through the shared property-key lowering.
+        ///
+        /// The value channel cannot carry every nameable key: a `unique
+        /// symbol` key names exactly one nominal property, and the
+        /// evaluator flattens its value to the bare `symbol` primitive,
+        /// losing the identity the name IS. The authored channel keeps
+        /// it (`typeof ob12Key`), and is the same carrier the
+        /// whole-literal leaf answer used to produce — so a symbol key
+        /// names its property exactly as before, without the literal
+        /// having to abandon its structural lowering to get there.
+        authored: verter_type_expr::TypeAuthoredPropertyKey,
+    },
+}
+
+impl SliceObjectKey {
+    /// The statically-known property name, when there is one.
+    #[must_use]
+    pub fn static_name(&self) -> Option<&str> {
+        match self {
+            Self::Static(name) => Some(name.as_ref()),
+            Self::Computed { .. } => None,
+        }
+    }
+}
+
+/// The member-literal policy an enclosing TYPE CARRIER imposes on an
+/// object literal it wraps.
+///
+/// A carrier over an object literal does not change the literal's SHAPE —
+/// it changes how each member's fresh literal is published. Carrying that
+/// as a policy is what lets the carrier keep the structural lowering
+/// instead of folding the whole literal (spreads included) into one leaf
+/// answer.
+///
+/// The three states mirror the shared shallow pass's own object-literal
+/// widening contexts exactly, because they answer the same question about
+/// the same literal — a carrier that lowers structurally here and one
+/// that reaches the leaf lowering must not disagree about whether
+/// `{ mode: "dark" }` keeps its literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectMemberPolicy {
+    /// The bare-literal rule: every fresh member literal widens to its
+    /// primitive, because the member slot is mutable. A per-member `as
+    /// const` still pins that one member.
+    Widen,
+    /// Under `satisfies T`: members keep their literals and are NOT
+    /// `readonly`.
+    ///
+    /// `satisfies` keeps the operand's SOURCE type, and whether a fresh
+    /// member literal survives in that source type depends on whether the
+    /// TARGET contextually types it — `{ mode: "dark" } satisfies { mode:
+    /// "dark" | "light" }` is `{ mode: "dark" }`, while `{ n: 1 }
+    /// satisfies object` is `{ n: number }` (both pinned against tsgo
+    /// `7.0.0-dev.20260526.1`). This substrate performs no contextual
+    /// typing, so it takes the PRESERVING side of that split uniformly,
+    /// which is the shallow pass's own long-standing choice; the
+    /// target-driven half is the separate deferred contextual-widening
+    /// contract.
+    Preserve,
+    /// Under an enclosing `as const`: every member keeps its literal AND
+    /// is `readonly`.
+    ConstAssert,
+}
+
+impl ObjectMemberPolicy {
+    /// Whether a fresh member literal widens to its primitive.
+    const fn widens_member_literals(self) -> bool {
+        matches!(self, Self::Widen)
+    }
+
+    /// Whether members are `readonly`.
+    const fn readonly(self) -> bool {
+        matches!(self, Self::ConstAssert)
+    }
+}
+
+/// The member policy a TYPE CARRIER over an object literal imposes, or
+/// `None` when the carrier's type is genuinely its own rather than its
+/// operand's.
+///
+/// Only the two carriers that PRESERVE the operand's own member set
+/// qualify. `x as const` pins every member; `x satisfies T` keeps the
+/// operand's source type (see [`ObjectMemberPolicy`]). A non-const `as T`
+/// / `<T>x` REPLACES the type with `T`, a `!` non-null assertion and a
+/// `<T>`-instantiation say nothing about members — every one of those
+/// keeps the whole-carrier leaf lowering, where the carrier's own answer
+/// is the honest one.
+fn member_literal_policy(expression: &Expression<'_>, source: &str) -> Option<ObjectMemberPolicy> {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => {
+            member_literal_policy(&paren.expression, source)
+        }
+        Expression::TSSatisfiesExpression(_) => Some(ObjectMemberPolicy::Preserve),
+        // The SHARED const-assertion authority decides, so `as const`
+        // and a non-const `as T` are never told apart twice.
+        Expression::TSAsExpression(_) => {
+            verter_semantic::analysis::type_eval_build::expr_is_const_asserted(expression, source)
+                .then_some(ObjectMemberPolicy::ConstAssert)
+        }
+        _ => None,
+    }
+}
+
 /// One member of a structurally lowered object-literal return.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceObjectMember {
-    /// The static string key.
-    pub key: Arc<str>,
+    /// How the member names its key.
+    pub key: SliceObjectKey,
     /// The member value.
     pub value: SliceExpr,
     /// The authored method / accessor kind (`None` for a plain property).
     pub method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// Whether the member is `readonly` — true exactly under an enclosing
+    /// `as const`, which is the only object-literal form that mints one.
+    pub readonly: bool,
     /// The authored member spans (declaration / name) — they keep two
     /// same-shaped return objects at distinct source sites distinct at
     /// interning.
@@ -2213,12 +2354,38 @@ impl Lowerer<'_> {
             other => match value_descent(other) {
                 ValueDescent::Transparent(inner) => self.lower_expr(inner, mode),
                 // A TYPE carrier decides the published type (`x as
-                // const` pins what a bare literal would widen), so the
-                // whole carrier lowers as ONE leaf here while the
-                // planner descends through it. Over-selection, by
-                // design — see [`ValueDescent::TypeCarrier`].
-                ValueDescent::TypeCarrier(_) => self.lower_leaf(other, mode),
-                ValueDescent::Object(object) => self.lower_object_literal(object, other, mode),
+                // const` pins what a bare literal would widen). That is
+                // a statement about the MEMBER POLICY, not a reason to
+                // abandon the structural lowering: folding the carrier
+                // into one leaf answer takes every sibling with it, and
+                // a leaf answer over a CALL-sourced spread embeds the
+                // callee's unreduced `ReturnType<…>` carrier, which the
+                // fabricated-value gate refuses. `{ ...base(), n: 1 } as
+                // const` failed its whole return closed for a value the
+                // checker calls `{ readonly label: string; readonly n: 1
+                // }`.
+                //
+                // So a carrier over an OBJECT LITERAL lowers the literal
+                // structurally under the carrier's own member policy,
+                // and every other carrier keeps the whole-carrier leaf
+                // lowering (its type is genuinely the carrier's, not its
+                // operand's).
+                ValueDescent::TypeCarrier(inner) => match member_literal_policy(other, self.source)
+                {
+                    Some(policy) => match value_descent(inner) {
+                        ValueDescent::Object(object) => {
+                            self.lower_object_literal_with_policy(object, other, mode, policy)
+                        }
+                        _ => self.lower_leaf(other, mode),
+                    },
+                    None => self.lower_leaf(other, mode),
+                },
+                ValueDescent::Object(object) => self.lower_object_literal_with_policy(
+                    object,
+                    other,
+                    mode,
+                    ObjectMemberPolicy::Widen,
+                ),
                 // A CONDITIONAL's value is the union of its branch
                 // values, and each branch is lowered as a flow
                 // expression — so a call in a branch rides
@@ -2260,22 +2427,35 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower one object literal STRUCTURALLY: each entry's contributing
-    /// expression is a flow expression, gated by the demand selection. A
-    /// literal this half cannot model structurally (a computed key, a
-    /// non-function method value) falls back to the whole-literal leaf
-    /// lowering of `whole`.
+    /// Lower one object literal STRUCTURALLY under `policy`: each entry's
+    /// contributing expression is a flow expression, gated by the demand
+    /// selection. A literal this half cannot model structurally (a
+    /// private-name key, a non-function method value) falls back to the
+    /// whole-literal leaf lowering of `whole`.
     ///
     /// Entry dispositions come from the ONE shared classifier
     /// (`object_entry_descent`), the same one the skeleton's
     /// `open_object_site` opens child sites from: a SPREAD is a value
     /// provider on both sides, so its source lowers here exactly as a
     /// member value does and rides whatever arm its own form takes.
-    fn lower_object_literal(
+    ///
+    /// The fallback is the LAST resort and deliberately narrow, because
+    /// it is not local: it folds every sibling — spreads included — into
+    /// one shallow-pass leaf answer, and a leaf answer over a
+    /// CALL-sourced spread embeds the callee's unreduced `ReturnType<…>`
+    /// carrier, which the leaf's fabricated-value gate refuses. One
+    /// unmodellable ENTRY therefore used to fail the whole RETURN closed.
+    /// A key whose property name is not its authored text is no longer
+    /// such an entry: it lowers as its own value position
+    /// ([`SliceObjectKey::Computed`]) and the evaluator names the key from
+    /// that value, or fails the literal closed if it cannot — the same
+    /// verdict, without the siblings.
+    fn lower_object_literal_with_policy(
         &mut self,
         object: &oxc_ast::ast::ObjectExpression<'_>,
         whole: &Expression<'_>,
         mode: ExprMode,
+        policy: ObjectMemberPolicy,
     ) -> SliceExpr {
         let mut entries = Vec::with_capacity(object.properties.len());
         let mut structural = true;
@@ -2302,9 +2482,22 @@ impl Lowerer<'_> {
                     property,
                 } => (key, value, kind, property),
             };
-            let key: Arc<str> = match key {
-                ObjectEntryKey::Static(name) => Arc::from(name),
-                ObjectEntryKey::Computed(_) | ObjectEntryKey::Unmodeled => {
+            let key = match key {
+                ObjectEntryKey::Static(name) => SliceObjectKey::Static(Arc::from(name)),
+                // The key expression is its OWN evaluated position — the
+                // planner already tracks it as a child site for exactly
+                // that reason — so it lowers through the same
+                // `lower_expr` every value position takes. A numeric
+                // literal key lands here too: `{ 1: x }`'s authored text
+                // is not its property name, and the canonical name is its
+                // NUMBER's, which only the value knows.
+                ObjectEntryKey::Computed(expression) => SliceObjectKey::Computed {
+                    value: Box::new(self.lower_expr(expression, mode)),
+                    authored: verter_type_expr_oxc::lower_property_key(&p.key, self.source),
+                },
+                // A private name is a key form neither half models, and
+                // unlike a computed key it has no value to resolve.
+                ObjectEntryKey::Unmodeled => {
                     structural = false;
                     break;
                 }
@@ -2329,6 +2522,7 @@ impl Lowerer<'_> {
                     key,
                     value: SliceExpr::Elided,
                     method_kind,
+                    readonly: policy.readonly(),
                     spans,
                 }));
                 continue;
@@ -2354,6 +2548,10 @@ impl Lowerer<'_> {
                     key,
                     value,
                     method_kind,
+                    // A method / accessor member is never `readonly`,
+                    // under `as const` or otherwise: the modifier applies
+                    // to data properties.
+                    readonly: false,
                     spans,
                 }));
                 continue;
@@ -2361,12 +2559,15 @@ impl Lowerer<'_> {
             // An object-literal member's fresh literal ALWAYS
             // widens to its primitive (the member slot is
             // mutable), in every enclosing position — tsc's
-            // object-literal property widening rule. An `as
-            // const` member keeps its literal.
-            let widen_member = !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                value_expression,
-                self.source,
-            );
+            // object-literal property widening rule. A per-member
+            // `as const` (`{ tag: "x" as const }`) pins that one
+            // member's literal, and an ENCLOSING `as const` pins
+            // every member's — which is what `policy` carries.
+            let widen_member = policy.widens_member_literals()
+                && !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
+                    value_expression,
+                    self.source,
+                );
             let value = self.lower_expr(value_expression, mode);
             let value = match (widen_member, value) {
                 (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
@@ -2378,6 +2579,7 @@ impl Lowerer<'_> {
                 key,
                 value,
                 method_kind,
+                readonly: policy.readonly(),
                 spans,
             }));
         }

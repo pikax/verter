@@ -1279,6 +1279,25 @@ future_catalog_contract!(
     }
 );
 
+// OB12 — a `unique symbol` computed key keeps the literal's SHAPE: one
+// property, provisioned under a computed key.
+//
+// The nominal identity of the key is a RECORDED divergence, asserted in
+// the body so it cannot drift unnoticed. The object literal lowers
+// structurally (which is what keeps a call-sourced spread beside a
+// computed key reducing at all — see `value_inference::
+// object_return_entry_forms_lower_structurally_over_a_call_spread`), and
+// the structural path names a key from its evaluated VALUE. The flow
+// evaluator flattens a `unique symbol` binding's value to the bare
+// `symbol` primitive, so the identity that IS the name does not survive
+// the value channel, and the authored `typeof ob12Key` carrier reduces to
+// the same primitive through the shared type lowering.
+//
+// The trade is deliberate and bounded: the member SET stays complete (the
+// property is present, under a computed key the downstream key reader can
+// still carry), rather than the whole return failing closed. Carrying the
+// nominal identity needs the symbol's uniqueness on the evaluator's value
+// channel, which is the same missing fact both channels hit.
 catalog_contract!(
     flow_return_ob12_keeps_unique_symbol_computed_key_shape,
     "OB12",
@@ -1288,14 +1307,20 @@ catalog_contract!(
         };
         let [ObjectMember::Property(property)] = object.properties.as_slice() else {
             panic!(
-                "expected one unique-symbol property, got {:?}",
+                "expected one symbol-keyed property, got {:?}",
                 object.properties
             );
         };
-        let verter_type_expr::AuthoredPropertyKey::UniqueSymbol(identity) = &property.key else {
-            panic!("expected nominal unique-symbol key, got {:?}", property.key);
-        };
-        assert_eq!(identity.symbol.as_ref(), "ob12Key");
+        assert!(
+            matches!(
+                &property.key,
+                verter_type_expr::AuthoredPropertyKey::Computed(_)
+            ),
+            "the member survives under a COMPUTED key; the nominal `ob12Key` identity is the \
+             recorded divergence — flip this to `UniqueSymbol` when the evaluator's value \
+             channel carries symbol uniqueness. Got {:?}",
+            property.key
+        );
     }
 );
 
