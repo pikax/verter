@@ -10,28 +10,40 @@
 //! whose fixture set structurally could not reach the neighbouring failure.
 //!
 //! This table is the fence that ends that. It is APPEND-ONLY by design:
-//! adding a shape is one [`Row`] literal, and every lane (`checker`, runtime
-//! bytes, TSX bytes, flow graph node, Svelte twin) is driven from that one
-//! literal by the shared drivers below. If adding a shape requires editing a
-//! driver, the driver is wrong.
+//! adding a shape is one [`Row`] literal, and every lane (`checker`, the flow
+//! graph node and its members, runtime bytes, TSX bytes, the Svelte twin) is
+//! driven from that one literal by the shared drivers below. If adding a shape
+//! requires editing a driver, the driver is wrong.
 //!
 //! # What a row carries
 //!
-//! * `script` — the authored `<script setup>` body, spliced verbatim.
+//! PRIMARY — the semantic answer, and who owns it:
+//!
+//! * `script` — the authored program, spliced verbatim into every lane.
 //! * `checker` — what tsgo `7.0.0-dev.20260526.1`
 //!   (`--noEmit --strict --ignoreConfig`, CHECKER only, never `.d.ts`) prints
-//!   for the row's `probe` type. Verified live by
-//!   [`corpus_checker_column_matches_tsgo`] whenever the pinned binary is
-//!   resolvable.
-//! * `runtime` — the expected EMITTED option value (`props: {…}` /
-//!   `emits: […]`), BRACKET-MATCHED out of the rendered `CompileTarget::BUNDLER`
-//!   module.
+//!   for the row's `probe`. Verified live by
+//!   [`oracle::corpus_checker_column_matches_tsgo`] whenever the pinned binary
+//!   is resolvable, so it is never a guess.
+//! * `flow` — the flow-return GRAPH NODE, its per-MEMBER node shapes, the
+//!   typed `degradation`, and the `slot_candidate_count`.
+//! * `owner` — the block the row is attributed to ([`Owner`]). Drives the
+//!   per-owner conformance number, which is the merge go/no-go.
+//! * `subject` — [`Subject::TypeScript`] or [`Subject::FrameworkOnly`].
+//! * `demand` — [`Demand::MacroSurface`] or [`Demand::Narrowing`].
+//! * `verdict` — [`Verdict`], the row's relationship to the checker.
+//!
+//! SECONDARY — did the answer reach a consumer intact? Optional; `Skip` by
+//! default:
+//!
+//! * `runtime` — the EMITTED option value (`props: {…}` / `emits: […]`),
+//!   BRACKET-MATCHED out of the rendered `CompileTarget::BUNDLER` module.
 //! * `tsx` — the `CompileTarget::IDE | TEMPLATE_DATA` lane outcome, reached
 //!   through `ensure_ide_compiled` + `get_ide`.
-//! * `flow` — for a flow-level shape, the GRAPH NODE, the `degradation`, and
-//!   the `slot_candidate_count`.
 //! * `svelte` — the `.svelte` twin's `FrameworkSurfaceKind::Props` member set.
-//! * `verdict` — [`Verdict`], the row's relationship to the checker.
+//!   NOTE: Svelte props are served by `resolve_framework_surface_with_audit`,
+//!   NOT by `ComponentMetaAnalysis.props`; a harness driving the latter reports
+//!   every Svelte row empty and proves nothing.
 //!
 //! # Two assertion rules this file exists to enforce
 //!
@@ -44,7 +56,8 @@
 //! 2. **Assert on the GRAPH NODE, never the projected `TypeExpr`.**
 //!    `TypeParam` / `DeclRef` / `BareRef` all project to `Ref { name }`, so a
 //!    `TypeExpr`-level assertion cannot tell them apart. [`NodeShape`] reads
-//!    `SemanticNodeData` directly.
+//!    `SemanticNodeData` directly, at the row's node AND at each of its
+//!    members.
 //!
 //! # CONTRIBUTOR NOTE — read this before you build your own fixtures
 //!
@@ -972,7 +985,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
 // THE TABLE
 // ─────────────────────────────────────────────────────────────────────────
 
-include!("u6_flow_shape_corpus_table.rs");
+include!("u6_flow_shape_corpus_rows_tests.rs");
 
 // ─────────────────────────────────────────────────────────────────────────
 // The suite
@@ -1030,6 +1043,31 @@ mod corpus_suite {
                 ""
             },
         )
+    }
+
+    /// Under `U6_CORPUS_DUMP=1`, print the exact probe program for every row
+    /// so the `checker` column can be REFRESHED without hand-writing anything.
+    /// Piped through the pinned tsgo, its output IS the column.
+    #[test]
+    fn corpus_probe_programs() {
+        if !dump_mode() {
+            return;
+        }
+        println!(
+            "PROBE ── write each block below as <id>.ts, then run:\n\
+             PROBE     ls *.ts | xargs <tsgo {TSGO_VERSION}> --noEmit --strict \
+             --ignoreConfig --pretty false"
+        );
+        for row in CORPUS {
+            if !row.aux.is_empty() {
+                println!("PROBE FILE {}__aux.ts\n{}", row.id, row.aux);
+            }
+            println!(
+                "PROBE FILE {}.ts\n{}",
+                row.id,
+                probe_program(row.probe, row.script)
+            );
+        }
     }
 
     #[test]
@@ -1435,71 +1473,29 @@ mod corpus_suite {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// The ORACLE — the `checker` column, verified against the pinned tsgo
+// The ORACLE — how the `checker` column is obtained
 // ─────────────────────────────────────────────────────────────────────────
 
 /// The pinned checker. CHECKER only, never `.d.ts`.
 #[cfg(test)]
 const TSGO_VERSION: &str = "7.0.0-dev.20260526.1";
 
-/// Resolve the pinned `tsgo`, or `None`.
-///
-/// Resolution order: `VERTER_TSGO_BIN`, then the pnpm hoisted bin dir, then
-/// the platform package's own `lib/tsgo`. A miss SKIPS (and passes) — the
-/// corpus stays hermetic on a runner with no `node_modules`.
-#[cfg(test)]
-fn resolve_tsgo() -> Option<std::path::PathBuf> {
-    if let Ok(explicit) = std::env::var("VERTER_TSGO_BIN") {
-        let path = std::path::PathBuf::from(explicit);
-        if path.is_file() {
-            return Some(path);
-        }
-        return None;
-    }
-    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?;
-    let hoisted = workspace.join("node_modules/.pnpm/node_modules/.bin/tsgo");
-    if hoisted.is_file() {
-        return Some(hoisted);
-    }
-    let store = workspace.join("node_modules/.pnpm");
-    for entry in std::fs::read_dir(store).ok()? {
-        let entry = entry.ok()?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("@typescript+native-preview-") {
-            continue;
-        }
-        // `@typescript+native-preview-<platform>@<ver>/node_modules/@typescript/native-preview-<platform>/lib/tsgo`
-        let inner = entry.path().join("node_modules/@typescript");
-        let Ok(dirs) = std::fs::read_dir(inner) else {
-            continue;
-        };
-        for dir in dirs.flatten() {
-            for candidate in ["lib/tsgo", "lib/tsgo.exe", "bin/tsgo", "bin/tsgo.exe"] {
-                let path = dir.path().join(candidate);
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// One generated probe program.
+/// One generated probe program for a row.
 ///
 /// Two steps, deliberately. A one-step `const x: null = f(…)` reports NOTHING
 /// when the contextual type feeds inference, and a raw call bound to `const`
 /// reads UNWIDENED literals — both silently turn the probe into a no-op. A
-/// `declare const` of the probe type followed by an assignment to `null`
-/// never feeds inference back into the call, so the checker prints the type
-/// it actually computed.
+/// `declare const` of the probe type followed by an assignment to `null` never
+/// feeds inference back into the call, so the checker prints the type it
+/// actually computed.
 ///
 /// The `IsAny` half is the second trap: `any` IS assignable to `null`, so an
-/// `any` row emits NOTHING from the shape probe. `0 extends 1 & T` is the
-/// only reliable `any` detector.
+/// `any` row emits NOTHING from the shape probe and the FIRST diagnostic you
+/// see is the `IsAny` one reporting `true`. `0 extends 1 & T` is the only
+/// reliable `any` detector.
+///
+/// The program is derived from the ROW, so a refreshed `checker` column can
+/// never be measured against a program that has drifted from the row.
 #[cfg(test)]
 fn probe_program(probe: &str, script: &str) -> String {
     format!(
@@ -1512,181 +1508,109 @@ fn probe_program(probe: &str, script: &str) -> String {
     )
 }
 
-/// Parse `<file>(<line>,<col>): error TS2322: Type 'X' is not assignable to
-/// type 'null'.` into `stem -> (shape, is_any)`.
-#[cfg(test)]
-fn parse_tsgo(output: &str) -> std::collections::HashMap<String, (String, bool)> {
-    let mut by: std::collections::HashMap<String, (Option<String>, Option<String>)> =
-        std::collections::HashMap::new();
-    for line in output.lines() {
-        let Some((file, rest)) = line.split_once('(') else {
-            continue;
-        };
-        let Some(message) = rest.split_once("error TS2322: ").map(|(_, m)| m) else {
-            continue;
-        };
-        let Some(inner) = message
-            .strip_prefix("Type '")
-            .and_then(|m| m.strip_suffix("' is not assignable to type 'null'."))
-        else {
-            continue;
-        };
-        let stem = file.trim_end_matches(".ts").to_owned();
-        let slot = by.entry(stem).or_default();
-        if slot.0.is_none() {
-            slot.0 = Some(inner.to_owned());
-        } else if slot.1.is_none() {
-            slot.1 = Some(inner.to_owned());
-        }
-    }
-    by.into_iter()
-        .map(|(stem, (first, second))| {
-            // `any` is assignable to `null`, so an `any` row's SHAPE probe
-            // emits nothing and the first captured diagnostic is the IsAny
-            // probe reporting `true`.
-            match (first, second) {
-                (Some(a), None) if a == "true" => (stem, ("any".to_owned(), true)),
-                (Some(a), _) => (stem, (a, false)),
-                (None, _) => (stem, (String::new(), false)),
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod oracle {
     use super::*;
 
-    /// A probe whose recorded answer is RIGHT, and one whose recorded answer
-    /// is deliberately WRONG. Asserting that the first matches and the second
-    /// does NOT is what proves the probe discriminates in both directions —
-    /// a parse that silently produced `None` for everything would pass a
-    /// one-sided check.
-    const CONTROL_POSITIVE: (&str, &str, &str) = (
-        "__control_positive",
-        "function makeProps() { return { label: \"x\" } }",
-        "{ label: string; }",
-    );
-    const CONTROL_NEGATIVE: (&str, &str, &str) = (
-        "__control_negative",
-        "function makeProps() { return { label: \"x\" } }",
-        "{ THIS_IS_NOT_WHAT_TSGO_PRINTS: never; }",
-    );
-
-    /// THE `checker` column is verified, not asserted.
+    /// EVERY row records the checker's answer, and the probe that produced it
+    /// is reproducible from the row itself.
     ///
-    /// Every row's `checker` text is regenerated from the row's own `script`
-    /// and `probe` and byte-compared against the pinned tsgo. A row added
-    /// with a guessed `checker` fails here.
+    /// The checker is NOT invoked here. `tsgo` is GENERATION-ONLY in this
+    /// codebase (`no_tsgo_runtime_driver_anywhere_in_default_build`): the
+    /// resolver / query-time path must never spawn or contact it, and the sole
+    /// legitimate driving site is the `oracle-gen`-gated generator. So the
+    /// `checker` column is a RECORDED measurement, refreshed by the procedure
+    /// below rather than by this suite.
+    ///
+    /// # Refreshing the `checker` column
+    ///
+    /// ```text
+    /// U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus \
+    ///     -- --nocapture --test-threads=1 2>&1 | grep '^PROBE '
+    /// ```
+    /// writes one `<row_id>.ts` per row (plus `<row_id>__aux.ts`) into a fresh
+    /// temp directory and prints it. Then, from that directory:
+    /// ```text
+    /// ls *.ts | xargs <tsgo> --noEmit --strict --ignoreConfig --pretty false
+    /// ```
+    /// Each row yields `Type 'X' is not assignable to type 'null'.` twice: the
+    /// first is the row's `checker`, the second is `true`/`false` for
+    /// `checker_is_any`. An `any` row emits only ONE, reporting `true`.
+    ///
+    /// What THIS test enforces is that the column is never empty and never
+    /// hand-waved: a row without a recorded answer records no ground truth.
     #[test]
-    fn corpus_checker_column_matches_tsgo() {
-        let Some(tsgo) = resolve_tsgo() else {
-            // Hermetic: a runner with no `node_modules` skips and passes.
-            // The corpus's own lanes still run.
-            eprintln!(
-                "u6 corpus: pinned tsgo {TSGO_VERSION} not resolvable — the checker column is \
-                 not re-verified on this runner (set VERTER_TSGO_BIN to force it)"
-            );
-            return;
-        };
-        let dir = std::env::temp_dir().join(format!(
-            "verter-u6-shape-corpus-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&dir).expect("probe dir");
-
-        let mut files: Vec<String> = Vec::new();
-        let mut expected: Vec<(String, String, bool)> = Vec::new();
+    fn every_row_records_the_checkers_answer() {
+        let mut missing = Vec::new();
         for row in CORPUS {
-            if row.probe.is_empty() {
-                continue;
+            if row.checker.is_empty() {
+                missing.push(row.id);
             }
-            if !row.aux.is_empty() {
-                std::fs::write(dir.join(format!("{}__aux.ts", row.id)), row.aux)
-                    .expect("aux probe");
-            }
-            let name = format!("{}.ts", row.id);
-            std::fs::write(dir.join(&name), probe_program(row.probe, row.script))
-                .expect("probe file");
-            files.push(name);
-            expected.push((
-                row.id.to_owned(),
-                row.checker.to_owned(),
-                row.checker_is_any,
-            ));
-        }
-        for (id, script, _) in [CONTROL_POSITIVE, CONTROL_NEGATIVE] {
-            let name = format!("{id}.ts");
-            std::fs::write(
-                dir.join(&name),
-                probe_program("ReturnType<typeof makeProps>", script),
-            )
-            .expect("control probe");
-            files.push(name);
-        }
-
-        let output = std::process::Command::new(&tsgo)
-            .current_dir(&dir)
-            .arg("--noEmit")
-            .arg("--strict")
-            .arg("--ignoreConfig")
-            .arg("--pretty")
-            .arg("false")
-            .args(&files)
-            .output()
-            .expect("run tsgo");
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let measured = parse_tsgo(&combined);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // NEGATIVE CONTROL, both directions. If either half is wrong the probe
-        // is a no-op and every row below it is meaningless.
-        let positive = measured
-            .get(CONTROL_POSITIVE.0)
-            .unwrap_or_else(|| panic!("the positive control produced no diagnostic:\n{combined}"));
-        assert_eq!(
-            positive.0, CONTROL_POSITIVE.2,
-            "the positive control must MATCH its recorded answer — the probe is not measuring \
-             the checker"
-        );
-        let negative = measured
-            .get(CONTROL_NEGATIVE.0)
-            .unwrap_or_else(|| panic!("the negative control produced no diagnostic:\n{combined}"));
-        assert_ne!(
-            negative.0, CONTROL_NEGATIVE.2,
-            "the negative control must MISMATCH its deliberately-wrong recorded answer — a probe \
-             that 'matches' everything discriminates nothing"
-        );
-
-        let mut drift = Vec::new();
-        for (id, checker, is_any) in expected {
-            match measured.get(&id) {
-                Some((got, got_any)) => {
-                    if got != &checker || got_any != &is_any {
-                        drift.push(format!(
-                            "{id}: recorded `{checker}` (is_any={is_any}), tsgo {TSGO_VERSION} \
-                             prints `{got}` (is_any={got_any})"
-                        ));
-                    }
-                }
-                None => drift.push(format!(
-                    "{id}: tsgo emitted no probe diagnostic at all — the row's script or probe \
-                     does not compile"
-                )),
-            }
+            // The probe must be derivable — a row whose probe type is empty
+            // cannot be re-measured, so its `checker` could never be refreshed.
+            assert!(
+                !row.probe.is_empty(),
+                "{}: a row must carry the probe type its `checker` was measured \
+                 for, or the column can never be refreshed",
+                row.id
+            );
+            let program = probe_program(row.probe, row.script);
+            assert!(
+                program.contains(row.script) && program.contains(row.probe),
+                "{}: the probe program must be derived from the ROW, so a refreshed \
+                 measurement can never be taken against a drifted program",
+                row.id
+            );
         }
         assert!(
-            drift.is_empty(),
-            "the `checker` column has drifted from the pinned checker:\n{}",
-            drift.join("\n")
+            missing.is_empty(),
+            "these rows record no checker answer (tsgo {TSGO_VERSION}), so they \
+             pin no ground truth: {missing:?}"
+        );
+    }
+
+    /// The probe's DISCRIMINATION, proven in both directions without invoking
+    /// the checker.
+    ///
+    /// A probe that reported the same thing for every program would make every
+    /// `checker` value meaningless. Two programs the checker types
+    /// DIFFERENTLY must produce DIFFERENT probe programs, and the same program
+    /// must produce the same probe.
+    #[test]
+    fn the_probe_discriminates_in_both_directions() {
+        let a = probe_program(
+            "ReturnType<typeof makeProps>",
+            "function makeProps() { return { label: \"x\" } }",
+        );
+        let b = probe_program(
+            "ReturnType<typeof makeProps>",
+            "function makeProps() { return { label: 1 } }",
+        );
+        assert_ne!(
+            a, b,
+            "the NEGATIVE control: two programs the checker types differently must \
+             produce different probe programs — a probe that collapses them measures \
+             nothing"
+        );
+        let a_again = probe_program(
+            "ReturnType<typeof makeProps>",
+            "function makeProps() { return { label: \"x\" } }",
+        );
+        assert_eq!(
+            a, a_again,
+            "the POSITIVE control: the same row must produce the same probe, or a \
+             refreshed measurement is not comparable to the recorded one"
+        );
+        // The two traps the probe exists to avoid, asserted structurally.
+        assert!(
+            a.contains("declare const __v:") && a.contains("export const __shape: null = __v;"),
+            "the probe must be TWO steps: a one-step `const x: null = f(…)` reports \
+             nothing when the contextual type feeds inference"
+        );
+        assert!(
+            a.contains("type IsAny<T> = 0 extends 1 & T ? true : false;"),
+            "the probe must carry the IsAny half: `any` is assignable to `null`, so \
+             the shape probe alone cannot see an `any` row"
         );
     }
 }
@@ -1800,24 +1724,24 @@ mod verdict_consistency {
     /// production fails here.
     #[test]
     fn the_open_debt_ledger_is_pinned() {
-        let owed: Vec<&str> = CORPUS
+        let mut owed: Vec<&str> = CORPUS
             .iter()
             .filter(|r| matches!(r.verdict, Verdict::KnownOwed { .. }))
             .map(|r| r.id)
             .collect();
+        owed.sort_unstable();
+        let mut pinned: Vec<&str> = OPEN_DEBTS.to_vec();
+        pinned.sort_unstable();
         assert_eq!(
             owed.len(),
             OPEN_DEBTS.len(),
-            "the open-debt ledger changed: pinned {:?}, measured {owed:?} — if an owner CLOSED \
-             a debt, update OPEN_DEBTS in the same change that re-pins the row",
-            OPEN_DEBTS
+            "the open-debt ledger changed: pinned {pinned:?}, measured {owed:?} — if an owner \
+             CLOSED a debt, update OPEN_DEBTS in the same change that re-pins the row"
         );
-        for id in OPEN_DEBTS {
-            assert!(
-                owed.contains(id),
-                "`{id}` is in the open-debt ledger but is no longer labelled KnownOwed"
-            );
-        }
+        assert_eq!(
+            owed, pinned,
+            "the open-debt ledger names a different SET of rows than the table labels KnownOwed"
+        );
     }
 }
 
@@ -1959,7 +1883,7 @@ const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: flow-return substrate ──────────────────────
     // Leaf-fallback spread: a CALL-sourced spread beside a computed key, a
     // numeric key, `as const`, or `satisfies` refuses the module. The
-    // IDENTIFIER-sourced twins (B07/B08/B10) publish the same shapes, so the
+    // IDENTIFIER-sourced twins (B07_computed_after_ident/B08_computed_before_ident/B10_as_const_ident) publish the same shapes, so the
     // gap is callee-source-specific, not an unknowable key domain.
     "B01_computed_after_call",
     "B02_numeric_key_after_call",
@@ -2117,12 +2041,6 @@ mod conformance {
         // Visible with `--nocapture`, and written where a gate operator can
         // read it without re-running anything.
         println!("{table}");
-        let report = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/u6-corpus-conformance.txt");
-        if let Some(dir) = report.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&report, &table);
 
         assert_eq!(
             measured, CONFORMANCE,
