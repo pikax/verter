@@ -415,9 +415,7 @@ pub use verter_language::{
     LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 
-// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation).
-// through the `#[track_caller]` rail from the warm-hit validator
-// down to `HostStoreView::from_host`.
+// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation.
 // The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
 pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
@@ -446,8 +444,9 @@ use shared::Shared;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
-/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is designed to be long-lived (one per Vite dev server or
-/// WASM session) and provides the full upsert-resolve-load lifecycle:
+/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is
+/// designed to be long-lived (one per Vite dev server or WASM session) and provides the full
+/// upsert-resolve-load lifecycle:
 ///
 /// 1. [`upsert`](Self::upsert) â€” parse and store a file, returning change info
 /// 2. [`resolve`](Self::resolve) â€” map a raw import ID to canonical + virtual IDs
@@ -457,15 +456,8 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
-    pub(crate) registered_source_authority: carrier_publication_store::SourceAuthorityHandle,
-    pub(crate) carrier_grammar_authority: carrier_publication_store::GrammarAuthorityHandle,
-    pub(crate) carrier_publication_store: carrier_publication_store::PublicationStoreHandle,
-    pub(crate) block_content_state: Shared<crate::block_content::BlockContentState>,
-    pub(crate) block_content_admission_fence: parking_lot::Mutex<()>,
-    pub(crate) block_content_correlation_counter: std::sync::atomic::AtomicU64,
-    #[cfg(test)]
-    pub(crate) block_content_admission_seam_hook:
-        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) carrier_publication: carrier_publication_store::CarrierPublicationHostHandles,
+    pub(crate) block_content: crate::block_content::BlockContentHostLane,
     /// The single host-level language classification authority:
     /// composes the static `LanguageRegistry` with the project
     /// capability snapshot (empty until a capability producer lands).
@@ -518,7 +510,6 @@ pub struct VerterHost {
     /// Scheduler for async per-file staging and blocker management.
     /// Upsert delegates coherent source transitions to it.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
-    pub(crate) registered_envelope_ingest: carrier_publication_store::RegisteredEnvelopeIngest,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,

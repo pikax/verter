@@ -10,7 +10,7 @@ import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 describe("decodeTypedComponentMetaPayload", () => {
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(8);
+    expect(current.schemaVersion).toBe(9);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
@@ -18,7 +18,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 8, found 7/);
+    ).toThrow(/expected 9, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -368,12 +368,12 @@ describe("object-literal spread member wire decode", () => {
   });
 });
 
-describe("schema-5 typed property keys", () => {
+describe("typed property keys", () => {
   const MEMBER_PROPERTY = 1;
 
   function payloadWithMembers(members: unknown[]) {
     return {
-      schemaVersion: 5,
+      schemaVersion: 9,
       typeGraph: {
         strings: ["/x.ts", "alpha", "tag", "Obj"],
         nodes: [
@@ -400,6 +400,13 @@ describe("schema-5 typed property keys", () => {
         acceptedSurfaceCompleteness: 1,
         rootReachability: { kind: 1, reason: 5, branches: [] },
         fallthroughSurface: { kind: 1, reason: 5, branches: [] },
+        orderedSfcStructure: { schemaVersion: 1, artifactToken: "", blocks: [], markupNodes: [] },
+        componentPublicContract: {
+          availability: {
+            case: "unsupported",
+            value: { adapterId: 1, reason: 1, diagnostics: [] },
+          },
+        },
         models: [],
         exposed: [],
         components: [],
@@ -429,7 +436,7 @@ describe("schema-5 typed property keys", () => {
     };
   }
 
-  it("decodes every property-key kind from a schema-5 payload", async () => {
+  it("decodes every property-key kind", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
     const { ComponentMetaPayloadSchema } = await import("@verter/proto");
     const payload = create(
@@ -510,6 +517,6 @@ describe("schema-5 typed property keys", () => {
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 5, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 9, found 4/);
   });
 });

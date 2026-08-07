@@ -23,7 +23,7 @@ describe("ComponentMetaPayloadSchema", () => {
     const graph = decoded.typeGraph;
     const body = decoded.body;
 
-    expect(decoded.schemaVersion).toBe(8);
+    expect(decoded.schemaVersion).toBe(9);
     expect(decoded.body?.componentPublicContract?.availability.case).toBe("supported");
     expect(graph?.strings[(body?.filePathId ?? 0) - 1]).toBe("/src/Tree.vue");
     expect(decoded.typeRegistry).toHaveLength(1);

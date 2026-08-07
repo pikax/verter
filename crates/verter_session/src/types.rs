@@ -12,6 +12,21 @@ pub use verter_language::FileLanguage;
 /// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
 pub type Hash16 = [u8; 16];
 
+/// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
+/// The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on
+/// per-request hot paths (e.g. the `ensure_indexed_ready_fast_hit` trace,
+/// emitted once per warm cache serve) that inflated encoding dominates the
+/// serialized audit footprint. Hex carries the same 16-byte identity
+/// losslessly in exactly 32 chars.
+pub(crate) fn format_hash16_hex(hash: &Hash16) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in hash {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 /// Content identity of the EXACT source bytes an analysis observed.
 ///
 /// Pairs a [`FileAnalysisSnapshot`] with the buffer its spans and edit anchors

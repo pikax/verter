@@ -2064,7 +2064,7 @@ impl VerterHost {
     /// (which clears the workspace's per-owner state and reverse-axis
     /// entries via `EdgeStore::remove_file`).
     pub fn remove(&self, canonical_or_alias: &str) -> Option<HostRemoveResult> {
-        let _block_content_fence = self.block_content_admission_fence.lock();
+        let _block_content_fence = self.block_content.admission_fence.lock();
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         // Read aliases from DependencyState (D48 split — aliases live
@@ -2109,7 +2109,7 @@ impl VerterHost {
         // File deletion drops all three D48 sub-states at once.
         self.drop_all_per_canonical_compile_caches(&canonical);
         self.scheduler.remove(&canonical);
-        write_lock(&self.block_content_state).close_owner(&canonical);
+        write_lock(&self.block_content.state).close_owner(&canonical);
         // Evict all resolver caches so that untracked-file acceptance in
         // the store view's `validates` method does not return stale facts
         // for a deleted file.

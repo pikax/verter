@@ -423,14 +423,13 @@ impl VerterHost {
         Self {
             instance_id,
             config,
-            registered_source_authority,
-            carrier_grammar_authority,
-            carrier_publication_store,
-            block_content_state: default_shared(crate::block_content::BlockContentState::default()),
-            block_content_admission_fence: parking_lot::Mutex::new(()),
-            block_content_correlation_counter: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(test)]
-            block_content_admission_seam_hook: parking_lot::Mutex::new(None),
+            carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
+                source_authority: registered_source_authority,
+                grammar_authority: carrier_grammar_authority,
+                publication_store: carrier_publication_store,
+                envelope_ingest: registered_envelope_ingest,
+            },
+            block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
@@ -442,7 +441,6 @@ impl VerterHost {
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
-            registered_envelope_ingest,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),

@@ -70,7 +70,7 @@ const BLOCK_CONTENT_ARTIFACT_SCHEMA_VERSION: BlockContentArtifactSchemaVersion =
     BlockContentArtifactSchemaVersion(1);
 const QUALIFIED_SOURCE_MAP_SCHEMA_VERSION: QualifiedSourceMapSchemaVersion =
     QualifiedSourceMapSchemaVersion(1);
-const CACHE_CLUSTER_SCHEMA_VERSION: CacheClusterSchemaVersion = CacheClusterSchemaVersion(8);
+const CACHE_CLUSTER_SCHEMA_VERSION: CacheClusterSchemaVersion = CacheClusterSchemaVersion(9);
 const STRUCTURE_PROTOCOL_VERSION: StructureProtocolVersion = StructureProtocolVersion(1);
 const PROVIDER_PROTOCOL_VERSION: ProviderProtocolVersion = ProviderProtocolVersion(12);
 const NAPI_SCHEMA_VERSION: NapiSchemaVersion = NapiSchemaVersion(1);
@@ -136,8 +136,8 @@ mod tests {
         assert!(PublicHashV1::new("sha256:ABC").is_err());
         assert!(CacheClusterSchemaVersion::new(0).is_none());
         let manifest = current_consumer_compatibility_manifest();
-        assert_eq!(manifest.cache_cluster_schema_version.get(), 8);
-        assert_eq!(manifest.component_meta_schema_version.get(), 8);
+        assert_eq!(manifest.cache_cluster_schema_version.get(), 9);
+        assert_eq!(manifest.component_meta_schema_version.get(), 9);
         assert_eq!(manifest.provider_protocol_version.get(), 12);
     }
 }

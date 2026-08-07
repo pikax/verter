@@ -11,9 +11,39 @@ use verter_language::parse_artifact::carrier_inventory::{
 
 use crate::hash::compile_profile_hash;
 use crate::host_executor::HostSourceData;
-use crate::shared::{read_lock, write_lock};
+use crate::shared::{default_shared, read_lock, write_lock, Shared};
 use crate::types::*;
 use crate::VerterHost;
+
+/// Host-owned block-content lane: the admission state, the fence that
+/// serializes validation and atomic admission after asynchronous provider
+/// work (docs/arch/scanners-replacement-preprocessor-interim.md §Sealed
+/// handoff), the correlation counter, and the test-only admission seam
+/// hook, grouped so the root `VerterHost` struct stays thin. NOT a cache;
+/// admitted artifacts live in [`BlockContentState`].
+pub(crate) struct BlockContentHostLane {
+    pub(crate) state: Shared<BlockContentState>,
+    pub(crate) admission_fence: parking_lot::Mutex<()>,
+    pub(crate) correlation_counter: std::sync::atomic::AtomicU64,
+    /// Test-only seam fired after validation and before publication for
+    /// deterministic owner-publication races. **Compiled out in
+    /// production builds.**
+    #[cfg(test)]
+    pub(crate) admission_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl Default for BlockContentHostLane {
+    fn default() -> Self {
+        Self {
+            state: default_shared(BlockContentState::default()),
+            admission_fence: parking_lot::Mutex::new(()),
+            correlation_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            admission_seam_hook: parking_lot::Mutex::new(None),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCorrelation {
@@ -571,7 +601,7 @@ impl VerterHost {
         canonical_id: &str,
         profile_hash: u64,
     ) -> bool {
-        let candidates = read_lock(&self.block_content_state)
+        let candidates = read_lock(&self.block_content.state)
             .supplied
             .iter()
             .filter(|((owner, profile, _), _)| owner == canonical_id && *profile == profile_hash)
@@ -865,7 +895,7 @@ impl VerterHost {
         }
 
         let profile_hash = compile_profile_hash(&query.compile_profile);
-        let supplied = read_lock(&self.block_content_state)
+        let supplied = read_lock(&self.block_content.state)
             .supplied
             .get(&(canonical_id, profile_hash, selected.block_token.clone()))
             .cloned();
@@ -1065,7 +1095,7 @@ impl VerterHost {
     }
 
     /// Capture the classifier bit and exact compiler projection as one
-    /// stampable unit. Callers hold `block_content_admission_fence` while
+    /// stampable unit. Callers hold `block_content.admission_fence` while
     /// invoking this method, so owner/external publication and supplied
     /// admission cannot tear the two reads.
     pub(crate) fn capture_compiler_block_content(
@@ -1085,7 +1115,7 @@ impl VerterHost {
     }
 
     /// Revalidate a cold compile's full owner + block-content capture before
-    /// observable publication. The caller holds `block_content_admission_fence`
+    /// observable publication. The caller holds `block_content.admission_fence`
     /// through both this check and the corresponding cache/artifact writes.
     pub(crate) fn compiler_block_content_capture_is_current(
         &self,
@@ -1262,7 +1292,7 @@ impl VerterHost {
             // A byte-identical no-op upsert reuses the already-issued live
             // correlation. This keeps repeated transforms stable and avoids
             // growing pending state merely because a bundler asks again.
-            let reusable = read_lock(&self.block_content_state)
+            let reusable = read_lock(&self.block_content.state)
                 .pending
                 .iter()
                 .find(|(_, pending)| {
@@ -1277,7 +1307,8 @@ impl VerterHost {
                 .map(|(token, _)| token.clone());
             let correlation_token = reusable.unwrap_or_else(|| loop {
                 let sequence = self
-                    .block_content_correlation_counter
+                    .block_content
+                    .correlation_counter
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
                 let token = BlockContentCorrelationToken::mint(hash_parts(&[
@@ -1286,7 +1317,7 @@ impl VerterHost {
                     &sequence.to_le_bytes(),
                     snapshot.basis_token.as_bytes(),
                 ]));
-                let mut state = write_lock(&self.block_content_state);
+                let mut state = write_lock(&self.block_content.state);
                 if state.pending.contains_key(&token) || state.terminal.contains_key(&token) {
                     continue;
                 }
@@ -1358,7 +1389,7 @@ impl VerterHost {
         &self,
         req: BlockOverrideRequest,
     ) -> Result<HostUpdateResult, HostError> {
-        let _fence = self.block_content_admission_fence.lock();
+        let _fence = self.block_content.admission_fence.lock();
         let canonical_id = self.resolve_alias_or_canonical(&req.canonical_id);
         let profile_hash = compile_profile_hash(&req.compile_profile);
         let mut unique = HashSet::new();
@@ -1369,7 +1400,7 @@ impl VerterHost {
             // post-capture terminal. Do the minimal correlation lookup before
             // inspecting any other untrusted field.
             let pending = {
-                let state = read_lock(&self.block_content_state);
+                let state = read_lock(&self.block_content.state);
                 if let Some(terminal) = state.terminal.get(&entry.correlation_token) {
                     return Err(HostError::BlockContentRefused(terminal_refusal(terminal)));
                 }
@@ -1379,7 +1410,7 @@ impl VerterHost {
                 BlockContentRefusal::CorrelationMismatch,
             ))?;
             let terminal_on_error = |reason: BlockContentRefusal| {
-                let mut state = write_lock(&self.block_content_state);
+                let mut state = write_lock(&self.block_content.state);
                 state.remove_pending(&entry.correlation_token);
                 let outcome = if reason == BlockContentRefusal::Stale {
                     BlockContentPostCaptureTerminal::StaleNeedsRecapture
@@ -1538,7 +1569,7 @@ impl VerterHost {
             };
             #[cfg(test)]
             {
-                let hook = self.block_content_admission_seam_hook.lock().clone();
+                let hook = self.block_content.admission_seam_hook.lock().clone();
                 if let Some(hook) = hook {
                     hook();
                 }
@@ -1564,7 +1595,7 @@ impl VerterHost {
                 },
             ));
         }
-        let mut state = write_lock(&self.block_content_state);
+        let mut state = write_lock(&self.block_content.state);
         for (correlation, block_token, captured_echo, artifact) in admitted {
             state.remove_pending(&correlation);
             state.mark_terminal(
@@ -1803,7 +1834,7 @@ mod tests {
             HostError::BlockContentRefused(BlockContentRefusal::MalformedToken)
         ));
 
-        let state = read_lock(&host.block_content_state);
+        let state = read_lock(&host.block_content.state);
         assert!(!state.pending.contains_key(&request.correlation_token));
         assert_eq!(
             state.terminal.get(&request.correlation_token),
@@ -1842,7 +1873,7 @@ mod tests {
             HostError::BlockContentRefused(BlockContentRefusal::PayloadTooLarge)
         ));
         assert_eq!(
-            read_lock(&provenance_host.block_content_state)
+            read_lock(&provenance_host.block_content.state)
                 .terminal
                 .get(&provenance_request.correlation_token),
             Some(&BlockContentResolveTerminal::PostCapture {
@@ -1874,7 +1905,7 @@ mod tests {
         request: &PreprocessorRequest,
         outcome: BlockContentPostCaptureTerminal,
     ) {
-        let state = read_lock(&host.block_content_state);
+        let state = read_lock(&host.block_content.state);
         assert!(!state.pending.contains_key(&request.correlation_token));
         assert_eq!(
             state.terminal.get(&request.correlation_token),
@@ -1952,7 +1983,7 @@ mod tests {
             &duplicate_request,
             BlockContentPostCaptureTerminal::Failed(BlockContentRefusal::DuplicateBlock),
         );
-        assert!(read_lock(&duplicate_host.block_content_state)
+        assert!(read_lock(&duplicate_host.block_content.state)
             .supplied
             .is_empty());
 
@@ -1993,7 +2024,7 @@ mod tests {
         {
             let entered = Arc::clone(&entered);
             let release = Arc::clone(&release);
-            *host.block_content_admission_seam_hook.lock() = Some(Arc::new(move || {
+            *host.block_content.admission_seam_hook.lock() = Some(Arc::new(move || {
                 entered.wait();
                 release.wait();
             }));
@@ -2037,7 +2068,7 @@ mod tests {
         if publication_was_blocked {
             done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         }
-        *host.block_content_admission_seam_hook.lock() = None;
+        *host.block_content.admission_seam_hook.lock() = None;
         assert!(
             publication_was_blocked,
             "owner publication crossed the block-content admission fence"
@@ -2093,7 +2124,7 @@ mod tests {
             BlockContentCorrelationToken::mint("compile-race-second".to_string());
         let mut second_echo = first_request.captured_echo.clone();
         second_echo.request.correlation_token = second_correlation.clone();
-        write_lock(&host.block_content_state).insert_pending(
+        write_lock(&host.block_content.state).insert_pending(
             second_correlation.clone(),
             PendingCorrelation {
                 canonical_id: first.canonical_id.clone(),

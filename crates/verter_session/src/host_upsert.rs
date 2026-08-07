@@ -207,11 +207,12 @@ impl VerterHost {
             return Err(HostError::InvalidQuery);
         }
         let expected_artifact = Arc::clone(structure.artifact());
-        self.registered_envelope_ingest
+        self.carrier_publication
+            .envelope_ingest
             .lock()
             .insert(canonical_id.clone(), structure);
         let result = self.upsert(req);
-        let mut pending = self.registered_envelope_ingest.lock();
+        let mut pending = self.carrier_publication.envelope_ingest.lock();
         if pending
             .get(&canonical_id)
             .is_some_and(|value| Arc::ptr_eq(value.artifact(), &expected_artifact))
@@ -306,7 +307,7 @@ impl VerterHost {
         // one fence. The lock covers scheduler commit plus host publication,
         // so no owner revision can land between an override's current-stamp
         // validation and its atomic admission.
-        let _block_content_fence = self.block_content_admission_fence.lock();
+        let _block_content_fence = self.block_content.admission_fence.lock();
         verter_workspace::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
@@ -862,7 +863,7 @@ impl VerterHost {
         crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
 
         // ── Build result data from parse ──
-        write_lock(&self.block_content_state).supersede_owner(&canonical_id);
+        write_lock(&self.block_content.state).supersede_owner(&canonical_id);
         let result_data = UpsertResultData {
             new_meta: parse.meta.clone(),
             parse_diagnostics: parse.parse_diagnostics.clone(),

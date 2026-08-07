@@ -572,7 +572,7 @@ impl VerterHost {
     /// hosts don't keep the Node.js process alive waiting for GC
     /// finalisation.
     pub fn close(&self) {
-        let _block_content_fence = self.block_content_admission_fence.lock();
+        let _block_content_fence = self.block_content.admission_fence.lock();
         // Notify the workspace for each tracked file so overlays AND
         // edge store are cleared before scheduler nodes are removed.
         // Use notify_delete (not notify_close) to clear the VFS edge
@@ -591,7 +591,7 @@ impl VerterHost {
 
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
-        write_lock(&self.block_content_state).close_all();
+        write_lock(&self.block_content.state).close_all();
 
         // AUTHORITY-RESET cascade: close() is a full teardown, one of
         // the two reserved `bump_project_generation_and_evict` callers

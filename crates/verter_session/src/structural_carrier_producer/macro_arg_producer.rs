@@ -126,7 +126,7 @@ use crate::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, FunctionParam, HotTypeRef, IndexKey, IndexSignature,
     MacroOwnBodyStamp, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
     QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SignatureKind,
-    SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -569,26 +569,31 @@ fn lower_node(
         TypeExpr::Object(obj) => {
             let declaration_origin = scope.canonical_file();
             let value_ctx = ctx.structural_provenance();
-            let mut members: Vec<SurfaceMember> = Vec::new();
-            let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-            let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-            let mut index_signatures: Vec<IndexSignature> = Vec::new();
+            // The resolver's ordered surface entries are the sole membership
+            // and ordering authority (vue_exec/normalize.rs): the entry
+            // stream preserves AUTHORED declaration order — a mixed
+            // call-signature + property surface publishes signature rows and
+            // member rows in the order the author wrote them. The grouped
+            // kind indexes are derived alongside.
+            let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(obj.properties.len());
             for member in &obj.properties {
                 match member {
-                    ObjectMember::Property(prop) => members.push(SurfaceMember {
-                        key: lower_authored_property_key(graph, &prop.key, scope, &value_ctx)?,
-                        value: lower_node(graph, &prop.ty, scope, &value_ctx)?,
-                        optional: prop.optional,
-                        readonly: prop.readonly,
-                        method_kind: None,
-                        has_implementation_body: false,
-                        visibility: prop.visibility,
-                        excess_origin: prop.excess_origin,
-                        spans: prop.spans,
-                        declaration_origin: declaration_origin.clone(),
-                        declared_in_macro_type_arg: ctx.macro_own_body,
-                        merge_role: ctx.merge_role,
-                    }),
+                    ObjectMember::Property(prop) => {
+                        entries.push(SurfaceEntry::Member(SurfaceMember {
+                            key: lower_authored_property_key(graph, &prop.key, scope, &value_ctx)?,
+                            value: lower_node(graph, &prop.ty, scope, &value_ctx)?,
+                            optional: prop.optional,
+                            readonly: prop.readonly,
+                            method_kind: None,
+                            has_implementation_body: false,
+                            visibility: prop.visibility,
+                            excess_origin: prop.excess_origin,
+                            spans: prop.spans,
+                            declaration_origin: declaration_origin.clone(),
+                            declared_in_macro_type_arg: ctx.macro_own_body,
+                            merge_role: ctx.merge_role,
+                        }))
+                    }
                     ObjectMember::Method(method) => {
                         let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
                         register_structural_function_alias(
@@ -597,7 +602,7 @@ fn lower_node(
                             &function_expr,
                             &method.function,
                         );
-                        members.push(SurfaceMember {
+                        entries.push(SurfaceEntry::Member(SurfaceMember {
                             key: lower_authored_property_key(
                                 graph,
                                 &method.key,
@@ -615,7 +620,7 @@ fn lower_node(
                             declaration_origin: declaration_origin.clone(),
                             declared_in_macro_type_arg: ctx.macro_own_body,
                             merge_role: ctx.merge_role,
-                        });
+                        }));
                     }
                     ObjectMember::CallSignature(func) => {
                         let function_expr = TypeExpr::Function(Arc::new(func.clone()));
@@ -625,7 +630,12 @@ fn lower_node(
                             &function_expr,
                             func,
                         );
-                        call_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
+                        entries.push(SurfaceEntry::CallSignature(lower_node(
+                            graph,
+                            &function_expr,
+                            scope,
+                            ctx,
+                        )?));
                     }
                     ObjectMember::ConstructSignature(func) => {
                         let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
@@ -635,15 +645,22 @@ fn lower_node(
                             &function_expr,
                             func,
                         );
-                        construct_signatures.push(lower_node(graph, &function_expr, scope, ctx)?);
+                        entries.push(SurfaceEntry::ConstructSignature(lower_node(
+                            graph,
+                            &function_expr,
+                            scope,
+                            ctx,
+                        )?));
                     }
-                    ObjectMember::IndexSignature(sig) => index_signatures.push(IndexSignature {
-                        key_type: lower_node(graph, &sig.key_type, scope, ctx)?,
-                        value_type: lower_node(graph, &sig.value_type, scope, ctx)?,
-                        readonly: sig.readonly,
-                        spans: sig.spans,
-                        declaration_origin: declaration_origin.clone(),
-                    }),
+                    ObjectMember::IndexSignature(sig) => {
+                        entries.push(SurfaceEntry::IndexSignature(IndexSignature {
+                            key_type: lower_node(graph, &sig.key_type, scope, ctx)?,
+                            value_type: lower_node(graph, &sig.value_type, scope, ctx)?,
+                            readonly: sig.readonly,
+                            spans: sig.spans,
+                            declaration_origin: declaration_origin.clone(),
+                        }))
+                    }
                     // A spread-bearing literal needs the dispatch-owned
                     // spread materializer's fold; this query-free lowerer
                     // fails closed — never a silently spread-less surface.
@@ -654,16 +671,14 @@ fn lower_node(
                     }
                 }
             }
-            let has_index_signature = !index_signatures.is_empty();
-            let view = crate::semantic_query::SurfaceView::from_init(
-                crate::semantic_query::SurfaceViewInit {
-                    members: Arc::from(members.into_boxed_slice()),
-                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature,
-                },
+            let has_index_signature = entries.iter().any(|entry| match entry {
+                SurfaceEntry::IndexSignature(_) => true,
+                _ => false,
+            });
+            let view = crate::semantic_query::SurfaceView::from_entries(
+                entries,
+                None,
+                has_index_signature,
             );
             Ok(graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone()))
         }

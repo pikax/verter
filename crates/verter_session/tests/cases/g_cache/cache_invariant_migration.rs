@@ -574,7 +574,7 @@ fn pre_call_signature_span_schema_v6_artifacts_are_rejected_by_v7() {
 
 // @ai-generated - Pins rejection of cached import targets carrying a resolved canonical.
 #[test]
-fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v8() {
+fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v9() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
     const RESOLVED_IMPORT_TARGET_SCHEMA: u32 = 7;

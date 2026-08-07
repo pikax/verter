@@ -2921,10 +2921,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
-        (
-            "registered_envelope_ingest",
-            "T-B R5 §2: one-shot validated cross-host envelope handoff into the scheduled Source stage. NOT a cache; entries are removed on intake.",
-        ),
         // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
         // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
         // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
@@ -3087,14 +3083,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
         (
             "typeinfo_scratch_cache",
             "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
-        ),
-        (
-            "block_content_admission_fence",
-            "docs/arch/scanners-replacement-preprocessor-interim.md §Sealed handoff: a mutex serializes validation and atomic admission after asynchronous provider work. NOT a cache; admitted artifacts live in block_content_state.",
-        ),
-        (
-            "block_content_admission_seam_hook",
-            "Block-content admission-fence regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after validation and before publication for deterministic owner-publication races. Compiled out in production builds. NOT a cache.",
         ),
     ]
     .into_iter()

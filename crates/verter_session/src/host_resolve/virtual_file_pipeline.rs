@@ -931,7 +931,7 @@ impl VerterHost {
         // override-aware effective state — otherwise it compiles the RAW
         // (un-preprocessed) block content.
         let profile_hash = compile_profile_hash(profile);
-        let block_content_capture_fence = self.block_content_admission_fence.lock();
+        let block_content_capture_fence = self.block_content.admission_fence.lock();
 
         // ── ONE coherent source snapshot ──
         // Every content-determined input derives from this single read
@@ -1136,7 +1136,7 @@ impl VerterHost {
         // state; the capture and its post-compile currentness check provide
         // the atomicity boundary.
         self.hydrate_compile_blockers(&canonical_id);
-        let block_content_capture_fence = self.block_content_admission_fence.lock();
+        let block_content_capture_fence = self.block_content.admission_fence.lock();
 
         // Cache hit check and compile input extraction under a single read lock.
         // This avoids cloning the full file entry and its compile slots.
@@ -1711,7 +1711,7 @@ impl VerterHost {
                 refused,
             ),
             Err(diagnostics) => {
-                let publication_fence = self.block_content_admission_fence.lock();
+                let publication_fence = self.block_content.admission_fence.lock();
                 if self.compiler_block_content_capture_is_current(
                     &canonical_id,
                     profile,
@@ -1822,7 +1822,7 @@ impl VerterHost {
             }
         }
 
-        let block_content_publication_fence = self.block_content_admission_fence.lock();
+        let block_content_publication_fence = self.block_content.admission_fence.lock();
         let compile_capture_is_current = self.compiler_block_content_capture_is_current(
             &canonical_id,
             profile,

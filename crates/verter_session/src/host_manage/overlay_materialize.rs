@@ -238,7 +238,8 @@ impl VerterHost {
         let generation = u64::from_le_bytes(content_hash[..8].try_into().ok()?).max(1);
         let incarnation = fingerprint | (1_u64 << 63);
         let registered = self
-            .registered_source_authority
+            .carrier_publication
+            .source_authority
             .register_source(
                 CanonicalFileId::new(canonical_id),
                 FileIncarnation::new(incarnation),
@@ -253,8 +254,13 @@ impl VerterHost {
             CarrierGrammarConfig::Svelte
         };
         let accepted = self
-            .carrier_grammar_authority
-            .accept_registered_source(&self.registered_source_authority, &registered, &grammar)
+            .carrier_publication
+            .grammar_authority
+            .accept_registered_source(
+                &self.carrier_publication.source_authority,
+                &registered,
+                &grammar,
+            )
             .ok()?;
         let request = crate::carrier_publication_store::PublicationRequestContext::new(
             crate::carrier_publication_store::AuditRequestId::new(self.next_request_id()),
@@ -263,7 +269,8 @@ impl VerterHost {
             registered.snapshot_id().clone(),
         );
         let envelope = self
-            .carrier_publication_store
+            .carrier_publication
+            .publication_store
             .publish_or_get(&accepted, request)
             .into_envelope()?;
         Some(crate::carrier_publication_store::RegisteredFileStructure::new(envelope))

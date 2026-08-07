@@ -1909,7 +1909,11 @@ impl VerterHost {
                 if self.indexed_surface_is_current(canonical_id, &indexed) {
                     component_meta_trace_custom!(
                         "ensure_indexed_ready_fast_hit",
-                        format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
+                        format!(
+                            "owner={} whole_hash={}",
+                            canonical_id,
+                            crate::types::format_hash16_hex(&indexed.whole_hash)
+                        ),
                     );
                     return Some(IndexedReadyServe {
                         indexed,
@@ -1940,7 +1944,11 @@ impl VerterHost {
             // (which itself calls `ensure_indexed_ready_serve` on edge-stale).
             component_meta_trace_custom!(
                 "ensure_indexed_ready_fast_hit",
-                format!("owner={} whole_hash={:?}", canonical_id, indexed.whole_hash),
+                format!(
+                    "owner={} whole_hash={}",
+                    canonical_id,
+                    crate::types::format_hash16_hex(&indexed.whole_hash)
+                ),
             );
             return Some(IndexedReadyServe {
                 indexed,
