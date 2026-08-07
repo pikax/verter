@@ -1097,8 +1097,8 @@ mod corpus_suite {
             );
         }
         assert!(
-            CORPUS.len() >= 86,
-            "the corpus is APPEND-ONLY: it landed with 86 rows, and a change that shrinks it is \
+            CORPUS.len() >= 87,
+            "the corpus is APPEND-ONLY: it landed with 87 rows, and a change that shrinks it is \
              deleting measured coverage, not refactoring it (got {})",
             CORPUS.len()
         );
@@ -1938,6 +1938,7 @@ const OPEN_DEBTS: &[&str] = &[
     "N11_narrow_survives_call",
     "N12_literal_union_narrow",
     "N13_nested_property_guard",
+    "N14_negated_typeof_guard",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1964,7 +1965,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6ValueInference, 9, 0, 9),
     (Owner::U6ContextualCore, 0, 0, 0),
     (Owner::U6FlowReturnSubstrate, 37, 29, 0),
-    (Owner::U6NarrowTypeof, 6, 0, 6),
+    (Owner::U6NarrowTypeof, 7, 0, 7),
     (Owner::U6NarrowLattice, 3, 1, 2),
     (Owner::U6NarrowSubstitution, 2, 0, 2),
     (Owner::U6NarrowInvalidation, 2, 0, 2),
