@@ -19,13 +19,24 @@ use verter_semantic::analysis::function_program::{
     FunctionDescentStep, FunctionProgramEntry, FunctionProgramIndex,
 };
 use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr};
+use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceStatement, SliceUnsupported,
+    SliceObjectEntry, SliceObjectMember, SliceStatement, SliceUnsupported,
 };
+
+/// The MEMBER entries of a structural object literal, in authored order.
+fn object_members(entries: &[SliceObjectEntry]) -> Vec<&SliceObjectMember> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SliceObjectEntry::Member(member) => Some(member),
+            SliceObjectEntry::Spread { .. } => None,
+        })
+        .collect()
+}
 
 fn memo_for(source: &str) -> Arc<DeclBodyMemo> {
     let (state, _provenance) =
@@ -441,13 +452,20 @@ fn symbolic_and_unrepresentable_calls() {
     );
 }
 
-/// @ai-generated - object return keeps the spread member for later spread projection
+/// A SPREAD entry lowers STRUCTURALLY — its source is an ordinary
+/// selected value position, lowered by whatever arm its own form takes,
+/// and the direct members around it keep their own lowered values.
 ///
-/// The spread operand is a FREE name: the whole-literal leaf lowering
-/// resolves `typeof base` in the file's OWNER SCOPE, which is exactly
-/// where a free name belongs.
+/// The spread operand here is a FREE name, so its own arm is the leaf
+/// lowering, which resolves `typeof base` in the file's OWNER SCOPE —
+/// exactly where a free name belongs.
+///
+/// Mutation recipe: abandoning the structural lowering when an entry is a
+/// spread (the pre-change behaviour) folds the whole literal into ONE
+/// `SliceExpr::Type` leaf and fails the entry destructure — which is what
+/// made `{ ...base(), n: 1 }` an unmodelled position at the root.
 #[test]
-fn object_return_rides_spread_member() {
+fn object_return_lowers_a_spread_entry_structurally() {
     let node = content_for(
         "declare const base: { a: number };\n\
          function merge() {\n\
@@ -456,41 +474,130 @@ fn object_return_rides_spread_member() {
         "merge",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Type(leaf)),
+        argument: Some(SliceExpr::Object { entries }),
         ..
     }] = node.body.statements.as_ref()
     else {
         panic!(
-            "merge must return a lowered object: {:?}",
+            "merge must return a STRUCTURAL object: {:?}",
             node.body.statements
         );
     };
-    let TypeExpr::Object(object) = leaf.ty() else {
-        panic!("merge must return a lowered object: {:?}", leaf.ty());
+    let [SliceObjectEntry::Spread { source }, SliceObjectEntry::Member(member)] = entries.as_ref()
+    else {
+        panic!("the spread entry precedes the direct member in source order: {entries:?}");
     };
     assert!(
-        matches!(&object.properties[0], ObjectMember::Spread(_)),
-        "the spread member rides unfolded: {:?}",
-        object.properties
+        matches!(source, SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::TypeOf(_))),
+        "a FREE spread operand takes the owner-scope leaf lowering: {source:?}"
     );
+    assert_eq!(member.key.as_ref(), "x");
     assert!(
-        matches!(&object.properties[1], ObjectMember::Property(_)),
-        "the direct member follows in source order"
+        matches!(member.value, SliceExpr::Type(_)),
+        "the direct member keeps its own lowered value: {:?}",
+        member.value
     );
 }
 
-/// @ai-generated - a spread of a FRAME binding rides the root-identifier gate's carrier
+/// The DEMAND PLANNER selects a spread SOURCE's expression site, and the
+/// content half reaches it — under a projection demand for a key ONLY the
+/// spread can provide.
 ///
-/// A spread operand naming a parameter (or any frame binding) is the
-/// SAME owner-scope leak a bare read would be: the whole-literal leaf
-/// lowering emits `...typeof base`, which resolves against the file's
-/// module scope, so `{ ...base }` would publish an unrelated
-/// module-scope `base`'s members — cleanly and warm. The content half
-/// cannot see the owner scope, so it wraps the answer with the
-/// frame-owned name and the EVALUATOR decides (see
-/// `flow_return_root_gate_tests`).
+/// This is the planner/content agreement the shared entry classifier
+/// exists to hold. The whole pipeline runs for real here (skeleton →
+/// graph → plan → IR → selection), so a content half that descended into
+/// a spread the PLANNER did not open a site for would lower its source as
+/// the typed `Elided` carrier and lose it — the failure mode the earlier
+/// conditional-expression asymmetry produced.
+///
+/// The DIRECT sibling is the discrimination in the other direction: a
+/// demand for `a` cannot be satisfied by the static `x` write, so `x`
+/// stays elided while the spread — an unknown-key write — stays a
+/// candidate provider.
+///
+/// Mutation recipe: dropping `SkeletonObjectEntry::Spread`'s
+/// `open_site` (or the graph's spread `PathWrite` edge) elides the spread
+/// SOURCE instead, which is the exact under-selection that publishes an
+/// object missing the keys the spread contributes.
 #[test]
-fn object_return_spread_of_a_frame_binding_rides_the_gate_carrier() {
+fn member_demand_selects_the_spread_source_and_elides_the_unrelated_sibling() {
+    let source = "declare const base: { a: number };\n\
+                  function merge() {\n\
+                  \x20 return { ...base, x: 1 };\n\
+                  }\n";
+
+    let node = content_for_path(source, "merge", &[Arc::from("a")]);
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Object { entries }),
+        ..
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "merge must return a structural object: {:?}",
+            node.body.statements
+        );
+    };
+    let [SliceObjectEntry::Spread { source: spread }, SliceObjectEntry::Member(member)] =
+        entries.as_ref()
+    else {
+        panic!("the spread entry precedes the direct member: {entries:?}");
+    };
+    assert!(
+        !matches!(spread, SliceExpr::Elided),
+        "a demand for `a` reaches the SPREAD source (the only entry that can \
+         provision it): {spread:?}"
+    );
+    assert_eq!(member.key.as_ref(), "x");
+    assert!(
+        matches!(member.value, SliceExpr::Elided),
+        "the statically-unrelated sibling `x` stays elided: {:?}",
+        member.value
+    );
+
+    // A WHOLE-return demand selects both.
+    let node = content_for(source, "merge");
+    let [SliceStatement::Return {
+        argument: Some(SliceExpr::Object { entries }),
+        ..
+    }] = node.body.statements.as_ref()
+    else {
+        panic!(
+            "merge must return a structural object: {:?}",
+            node.body.statements
+        );
+    };
+    let [SliceObjectEntry::Spread { source: spread }, SliceObjectEntry::Member(member)] =
+        entries.as_ref()
+    else {
+        panic!("the spread entry precedes the direct member: {entries:?}");
+    };
+    assert!(
+        !matches!(spread, SliceExpr::Elided),
+        "a whole-return demand reaches the spread source: {spread:?}"
+    );
+    assert!(
+        !matches!(member.value, SliceExpr::Elided),
+        "and the direct member: {:?}",
+        member.value
+    );
+}
+
+/// A spread of a FRAME binding resolves through the frame's own lexical
+/// authority — the parameter carrier, never an owner-scope leaf.
+///
+/// Before the structural spread lowering this was an owner-scope LEAK:
+/// the whole-literal leaf emitted `...typeof base`, which resolves
+/// against the file's module scope, so `{ ...base, x: 1 }` published an
+/// unrelated module-scope `base`'s members. The root-identifier gate
+/// caught it and failed the whole return closed. Now there is nothing to
+/// catch: the operand never reaches owner scope at all.
+///
+/// Mutation recipe: leaf-lowering a spread-bearing literal republishes
+/// `SliceExpr::Type`/`FrameShadowed` over `typeof base` and fails the
+/// `Param` assertion — the bait `{ a: string }` is what the evaluator
+/// would then answer with.
+#[test]
+fn object_return_spread_of_a_frame_binding_reads_the_frame_binding() {
     let node = content_for(
         "declare const base: { a: string };\n\
          function merge(base: { a: number }) {\n\
@@ -499,7 +606,7 @@ fn object_return_spread_of_a_frame_binding_rides_the_gate_carrier() {
         "merge",
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::FrameShadowed { inner, shadowed }),
+        argument: Some(SliceExpr::Object { entries }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -508,17 +615,16 @@ fn object_return_spread_of_a_frame_binding_rides_the_gate_carrier() {
             node.body.statements
         );
     };
+    let [SliceObjectEntry::Spread { source }, SliceObjectEntry::Member(member)] = entries.as_ref()
+    else {
+        panic!("the spread entry precedes the direct member in source order: {entries:?}");
+    };
     assert_eq!(
-        shadowed.as_ref(),
-        &[crate::flow_slice_content::FrameShadowedName::Value(
-            std::sync::Arc::from("base")
-        )],
-        "the frame-owned spread operand is the gated name"
+        source,
+        &SliceExpr::Param { ordinal: 0 },
+        "the frame-owned spread operand IS the parameter"
     );
-    assert!(
-        matches!(inner.as_ref(), SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::Object(_))),
-        "the wrapped answer is the whole-literal leaf: {inner:?}"
-    );
+    assert_eq!(member.key.as_ref(), "x");
 }
 
 /// @ai-generated - arrow expression body lowers to a single return of the expression
@@ -589,7 +695,7 @@ fn member_demand_elides_sibling_member_values() {
         &[Arc::from("b")],
     );
     let [SliceStatement::Return {
-        argument: Some(SliceExpr::Object { members }),
+        argument: Some(SliceExpr::Object { entries }),
         ..
     }] = node.body.statements.as_ref()
     else {
@@ -598,6 +704,7 @@ fn member_demand_elides_sibling_member_values() {
             node.body.statements
         );
     };
+    let members = object_members(entries);
     assert_eq!(members.len(), 2, "the member LIST stays complete");
     assert_eq!(members[0].key.as_ref(), "a");
     assert!(

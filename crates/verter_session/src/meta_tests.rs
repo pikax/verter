@@ -2587,45 +2587,59 @@ fn runtime_props_derive_each_member_from_that_members_own_evidence() {
 /// strictly worse than refusing, because refusing is loud and the TSX lane
 /// still type-checks the file.
 ///
-/// Two families reach the root: an object literal containing a SPREAD (the
-/// flow content half has no structural arm for it, so the whole literal folds
-/// into one unmodelled answer) and a NO-VALUE outcome (`R2Loop`: a
-/// return-bearing loop the substrate does not model).
+/// Two families reach the root: a NO-VALUE outcome (`R2Loop`: a
+/// return-bearing loop the substrate does not model) and an object literal
+/// whose SPREAD SOURCE the substrate cannot type — directly
+/// (`S5NewSpread`) or one call away (`S6MarkerSpread`, whose callee's own
+/// frame is what cannot type its return). An unknown source makes the
+/// literal's KEY SET unknown, and an object surface has no way to say
+/// "and an unknown number of further keys". tsgo types both as
+/// `{ label: …; n: number }`, so publishing `{ n }` alone would be a
+/// surface missing a declared prop — not a conservative answer.
+///
+/// `S5NewSpread` is the row that discriminates the evaluator's spread
+/// fail-closed rail: dropping an unevaluable spread source instead of
+/// failing the literal closed publishes `props: { n: { type: Number } }`
+/// for it. `S6MarkerSpread` reaches the same verdict one rail earlier
+/// (the callee's frame failure propagates) and is coverage for that
+/// authored shape rather than a second discriminator for the same arm.
+///
+/// A spread whose source IS modelled is not in that family: the literal
+/// lowers structurally, the source rides the same call sink every other
+/// call position rides, and the surface publishes with its real
+/// constructors. That is the `SPREADS` block below.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
 /// every spread row's `ReturnType<typeof makeProps>` is an ordinary object
-/// type — `{ label: string; n: number }` for rows 1/3/4, `{ label: string }`
-/// for row 2 — which is exactly why publishing `props: {}` for them is wrong
+/// type — `{ label: string; n: number }` for S1/S3/S4/C1, `{ label: string }`
+/// for S2 — which is exactly why publishing `props: {}` for them is wrong
 /// rather than merely conservative.
 ///
-/// The two controls are the discrimination: a blanket "never publish an empty
-/// surface" regression passes every refusal row and fails BOTH controls,
-/// whose spread source is a module-scope const (modelled) and whose props
-/// must still carry their real constructors.
+/// The controls are the discrimination: a blanket "never publish an empty
+/// surface" regression passes every refusal row and fails every publish row,
+/// whose props must carry their real constructors.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() {
     /// `(canonical, script)` — the runtime lane must REFUSE.
     const REFUSES: &[(&str, &str)] = &[
         (
-            "/src/S1Spread.vue",
-            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }",
-        ),
-        (
-            "/src/S2SpreadOnly.vue",
-            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base() } }",
-        ),
-        (
-            "/src/S3TwoSpreads.vue",
-            "function a() { return { label: \"x\" } }\nfunction b() { return { n: 1 } }\nfunction makeProps() { return { ...a(), ...b() } }",
-        ),
-        (
-            "/src/S4ArrowSpread.vue",
-            "const arrowConst = () => ({ label: \"x\" })\nfunction makeProps() { return { ...arrowConst(), n: 1 } }",
-        ),
-        (
             "/src/R2Loop.vue",
             "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+        ),
+        (
+            "/src/S5NewSpread.vue",
+            "class Box { readonly label = \"x\" }\nfunction makeProps() { return { ...new Box(), n: 1 } }",
+        ),
+        // The same fact one CALL away — the spread source is a modelled
+        // direct call whose own frame is the one that cannot type its
+        // return. It exercises a different rail from S5 (which the
+        // content half refuses at the classifier) and reaches the same
+        // verdict: publishing `{ n }` here would declare a props surface
+        // missing `label`.
+        (
+            "/src/S6MarkerSpread.vue",
+            "class Box { readonly label = \"x\" }\nfunction base() { return new Box() }\nfunction makeProps() { return { ...base(), n: 1 } }",
         ),
     ];
 
@@ -2642,6 +2656,26 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 
     /// `(canonical, script)` — the runtime lane must PUBLISH exactly this.
     const PUBLISHES: &[(&str, &str, &[&str])] = &[
+        (
+            "/src/S1Spread.vue",
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/S2SpreadOnly.vue",
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base() } }",
+            &["label: { type: String"],
+        ),
+        (
+            "/src/S3TwoSpreads.vue",
+            "function a() { return { label: \"x\" } }\nfunction b() { return { n: 1 } }\nfunction makeProps() { return { ...a(), ...b() } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
+        (
+            "/src/S4ArrowSpread.vue",
+            "const arrowConst = () => ({ label: \"x\" })\nfunction makeProps() { return { ...arrowConst(), n: 1 } }",
+            &["label: { type: String", "n: { type: Number"],
+        ),
         (
             "/src/C1ModuleConst.vue",
             "const mc = { label: \"x\" }\nfunction makeProps() { return { ...mc, n: 1 } }",
@@ -2664,22 +2698,28 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
                 "{canonical}: expected `{needle}` in the emitted props object:\n{props}"
             );
         }
+        assert!(
+            !props.contains("type: null"),
+            "{canonical}: every member of a fully modelled spread surface has a real \
+             constructor — `type: null` is the erasure this row exists to forbid:\n{props}"
+        );
     }
 
-    // `defineEmits` is the same rule on the same evidence, and it is not a
-    // milder failure: `emits: []` for a component that declares emits sends
+    // `defineEmits` is the same rule on the same evidence, and the failure is
+    // not a milder one: `emits: []` for a component that declares emits sends
     // every `@evA` listener silently through to `$attrs` instead of the
     // declared emit.
-    match render_runtime_emits(
+    let RenderedRuntime::Props(emits) = render_runtime_emits(
         "/src/E1Spread.vue",
         "function base() { return { evA: (p: string) => true } }\nfunction makeEmits() { return { ...base(), evB: (n: number) => true } }",
-    ) {
-        RenderedRuntime::Refused => {}
-        RenderedRuntime::Props(emits) => panic!(
-            "/src/E1Spread.vue: a root-position degradation leaves no event set — the runtime \
-             lane must refuse rather than declare this component's emits to be `{emits}`"
-        ),
-    }
+    ) else {
+        panic!("/src/E1Spread.vue: a modelled spread source leaves a complete event set");
+    };
+    assert!(
+        emits.contains("\"evA\"") && emits.contains("\"evB\""),
+        "/src/E1Spread.vue: the spread-contributed event and the direct one must BOTH \
+         survive:\n{emits}"
+    );
 
     let RenderedRuntime::Props(emits) = render_runtime_emits(
         "/src/E2Plain.vue",
@@ -2707,9 +2747,10 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 ///
 /// The degradation is a property of the FRAME (it is seeded from the lowered
 /// slice's effect list before any member is evaluated), so it applies to
-/// every member; per-member attribution would need the flow evaluator to
-/// intersect each member value's slot reads with the unapplied write's
-/// targets, which this substrate does not compute.
+/// every member. Attributing it per member by intersecting each member
+/// value's slot reads with the write's targets is FAIL-OPEN and must not be
+/// done — see `degradation_reason_class` for the counter-example and for the
+/// sound complement.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`):
 /// row 1 is `{ label: string }`, rows 2 and 3 are `{ label: string; n: number

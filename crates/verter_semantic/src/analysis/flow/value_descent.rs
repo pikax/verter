@@ -49,7 +49,10 @@
 //! position is a property of the FORM, so it is decided here, where the
 //! form is.
 
-use oxc_ast::ast::{ChainElement, ConditionalExpression, Expression, ObjectExpression};
+use oxc_ast::ast::{
+    ChainElement, ConditionalExpression, Expression, ObjectExpression, ObjectProperty,
+    ObjectPropertyKind, PropertyKey, PropertyKind,
+};
 
 /// The value-structural disposition of one expression.
 ///
@@ -219,6 +222,139 @@ pub fn value_descent<'a, 'ast>(expression: &'a Expression<'ast>) -> ValueDescent
         | Expression::ComputedMemberExpression(_)
         | Expression::StaticMemberExpression(_)
         | Expression::PrivateFieldExpression(_) => ValueDescent::Leaf,
+    }
+}
+
+/// The value-structural disposition of ONE object-literal ENTRY — the
+/// second half of [`ValueDescent::Object`], and the single authority both
+/// halves iterate.
+///
+/// [`ValueDescent`] answers "does this FORM have value-providing
+/// children"; for an object literal the answer is "yes — its entries",
+/// and the enum hands the literal over whole. WHICH sub-expression each
+/// entry contributes was then re-decided per half, so the same asymmetry
+/// [`ValueDescent`] exists to prevent reappeared one level down: the
+/// planner opened a tracked site for a SPREAD's source and the graph
+/// named it an optional unknown-key write, while the content half's loop
+/// abandoned the structural lowering the moment it saw one and folded the
+/// whole literal — spread and modelled siblings alike — into a single
+/// leaf answer. `{ ...base(), n: 1 }` therefore published as one
+/// unmodelled position for a value the checker calls
+/// `{ label: string; n: number }`.
+///
+/// So the entry classification is ONE function with ONE exhaustive match,
+/// exactly like [`value_descent`]: a form dispositioned here is
+/// dispositioned for both halves in the same change.
+#[derive(Debug)]
+pub enum ObjectEntryDescent<'a, 'ast> {
+    /// An entry provisioning exactly ONE key: [`Self::Property::value`]
+    /// is a value provider of that key alone.
+    Property {
+        /// The provisioned key.
+        key: ObjectEntryKey<'a, 'ast>,
+        /// The value expression.
+        value: &'a Expression<'ast>,
+        /// The authored entry kind.
+        kind: ObjectEntryKind,
+        /// The authored node — spans, optionality, the raw key.
+        property: &'a ObjectProperty<'ast>,
+    },
+    /// A SPREAD (`...source`): `source`'s value provides EVERY key the
+    /// source carries, under an UNKNOWN key path, and a later entry
+    /// overrides what an earlier one provisioned.
+    ///
+    /// Both halves descend into `source` — it is an ordinary expression
+    /// position, lowered by whatever arm its own form takes (a call rides
+    /// the one call sink, an identifier the binding carriers, a literal
+    /// the leaf lowering).
+    Spread {
+        /// The spread source expression.
+        source: &'a Expression<'ast>,
+    },
+}
+
+/// How one object-literal entry names its key.
+#[derive(Debug)]
+pub enum ObjectEntryKey<'a, 'ast> {
+    /// A statically-known key: the authored text (an identifier or a
+    /// string literal — the two spellings that name a key without
+    /// evaluating anything).
+    Static(&'a str),
+    /// A COMPUTED key: the key expression. Its value is not a provider of
+    /// the entry's value, but it is its own evaluated position — the
+    /// planner tracks it, and a numeric-literal key (`{ 1: x }`) lands
+    /// here too, because its authored text is not its property name.
+    Computed(&'a Expression<'ast>),
+    /// A key form neither half models (a private name).
+    Unmodeled,
+}
+
+/// The authored kind of one object-literal property entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectEntryKind {
+    /// A plain data property (`k: v` / `k`).
+    Init,
+    /// A method shorthand (`k() {}`).
+    Method,
+    /// A getter (`get k() {}`).
+    Get,
+    /// A setter (`set k(v) {}`).
+    Set,
+}
+
+/// The value-structural disposition of `property` — see
+/// [`ObjectEntryDescent`]. The match is exhaustive with no wildcard, so a
+/// new `ObjectPropertyKind` variant does not compile until it is
+/// dispositioned here.
+#[must_use]
+pub fn object_entry_descent<'a, 'ast>(
+    property: &'a ObjectPropertyKind<'ast>,
+) -> ObjectEntryDescent<'a, 'ast> {
+    match property {
+        ObjectPropertyKind::ObjectProperty(property) => ObjectEntryDescent::Property {
+            key: object_entry_key(&property.key),
+            value: &property.value,
+            // The ACCESSOR kinds are decided first: `get`/`set` is what
+            // the entry IS, and the `method` flag says only that the
+            // value was written in shorthand. Reading the flag first
+            // would call a getter a method in whatever grammar sets
+            // both.
+            kind: match property.kind {
+                PropertyKind::Get => ObjectEntryKind::Get,
+                PropertyKind::Set => ObjectEntryKind::Set,
+                PropertyKind::Init if property.method => ObjectEntryKind::Method,
+                PropertyKind::Init => ObjectEntryKind::Init,
+            },
+            property,
+        },
+        ObjectPropertyKind::SpreadProperty(spread) => ObjectEntryDescent::Spread {
+            source: &spread.argument,
+        },
+    }
+}
+
+/// How `key` names its property — the single authority both halves (and
+/// [`crate::analysis::function_program::static_property_key_name`]) read
+/// a property key through.
+#[must_use]
+pub fn object_entry_key<'a, 'ast>(key: &'a PropertyKey<'ast>) -> ObjectEntryKey<'a, 'ast> {
+    match static_property_key_text(key) {
+        Some(text) => ObjectEntryKey::Static(text),
+        None => match key.as_expression() {
+            Some(expression) => ObjectEntryKey::Computed(expression),
+            None => ObjectEntryKey::Unmodeled,
+        },
+    }
+}
+
+/// The authored TEXT of a statically-known property key, borrowed — the
+/// key spellings that name a property without evaluating anything.
+#[must_use]
+pub fn static_property_key_text<'a>(key: &'a PropertyKey<'_>) -> Option<&'a str> {
+    match key {
+        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
     }
 }
 

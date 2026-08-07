@@ -1209,11 +1209,7 @@ fn discover_class_members(
 }
 
 pub(crate) fn static_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
-        PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-        _ => None,
-    }
+    crate::analysis::flow::static_property_key_text(key).map(str::to_owned)
 }
 
 fn discover_function_inner(

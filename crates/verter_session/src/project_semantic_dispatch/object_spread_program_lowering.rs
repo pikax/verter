@@ -15,6 +15,58 @@ use crate::semantic_query::{
 };
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
 
+/// The DIRECT construction effect one already-resolved surface member
+/// performs — the single translation from "a member of a surface" to "an
+/// effect of a construction program", shared by whole-surface lowering
+/// and by any caller that interleaves members with spread operands in
+/// authored order.
+pub(super) fn direct_effect_from_member(
+    member: &crate::semantic_query::SurfaceMember,
+) -> ObjectConstructionEffect {
+    let common = AuthoredAccessorEffect {
+        key: member.key.clone(),
+        signature: member.value,
+        optional: member.optional,
+        has_implementation_body: member.has_implementation_body,
+        visibility: member.visibility,
+        spans: member.spans,
+        declaration_origin: member.declaration_origin.clone(),
+        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        merge_role: member.merge_role,
+        excess_origin: member.excess_origin,
+    };
+    match member.method_kind {
+        Some(ObjectMethodKind::Method) => {
+            ObjectConstructionEffect::DirectMethod(AuthoredMethodEffect {
+                key: member.key.clone(),
+                signature: member.value,
+                optional: member.optional,
+                has_implementation_body: member.has_implementation_body,
+                visibility: member.visibility,
+                spans: member.spans,
+                declaration_origin: member.declaration_origin.clone(),
+                declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+                merge_role: member.merge_role,
+                excess_origin: member.excess_origin,
+            })
+        }
+        Some(ObjectMethodKind::Get) => ObjectConstructionEffect::DirectGet(common),
+        Some(ObjectMethodKind::Set) => ObjectConstructionEffect::DirectSet(common),
+        None => ObjectConstructionEffect::DirectProperty(AuthoredPropertyEffect {
+            key: member.key.clone(),
+            value: member.value,
+            optional: member.optional,
+            readonly: member.readonly,
+            visibility: member.visibility,
+            spans: member.spans,
+            declaration_origin: member.declaration_origin.clone(),
+            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+            merge_role: member.merge_role,
+            excess_origin: member.excess_origin,
+        }),
+    }
+}
+
 pub(super) fn direct_effects_from_surface(surface: &SurfaceView) -> Vec<ObjectConstructionEffect> {
     let mut effects = Vec::with_capacity(
         surface.positive_members().len()
@@ -23,48 +75,7 @@ pub(super) fn direct_effects_from_surface(surface: &SurfaceView) -> Vec<ObjectCo
             + surface.construct_signatures.len(),
     );
     for member in surface.positive_members() {
-        let common = AuthoredAccessorEffect {
-            key: member.key.clone(),
-            signature: member.value,
-            optional: member.optional,
-            has_implementation_body: member.has_implementation_body,
-            visibility: member.visibility,
-            spans: member.spans,
-            declaration_origin: member.declaration_origin.clone(),
-            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-            merge_role: member.merge_role,
-            excess_origin: member.excess_origin,
-        };
-        effects.push(match member.method_kind {
-            Some(ObjectMethodKind::Method) => {
-                ObjectConstructionEffect::DirectMethod(AuthoredMethodEffect {
-                    key: member.key.clone(),
-                    signature: member.value,
-                    optional: member.optional,
-                    has_implementation_body: member.has_implementation_body,
-                    visibility: member.visibility,
-                    spans: member.spans,
-                    declaration_origin: member.declaration_origin.clone(),
-                    declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-                    merge_role: member.merge_role,
-                    excess_origin: member.excess_origin,
-                })
-            }
-            Some(ObjectMethodKind::Get) => ObjectConstructionEffect::DirectGet(common),
-            Some(ObjectMethodKind::Set) => ObjectConstructionEffect::DirectSet(common),
-            None => ObjectConstructionEffect::DirectProperty(AuthoredPropertyEffect {
-                key: member.key.clone(),
-                value: member.value,
-                optional: member.optional,
-                readonly: member.readonly,
-                visibility: member.visibility,
-                spans: member.spans,
-                declaration_origin: member.declaration_origin.clone(),
-                declared_in_macro_type_arg: member.declared_in_macro_type_arg,
-                merge_role: member.merge_role,
-                excess_origin: member.excess_origin,
-            }),
-        });
+        effects.push(direct_effect_from_member(member));
     }
     effects.extend(surface.index_signatures.iter().map(|index| {
         ObjectConstructionEffect::DirectIndex(AuthoredIndexEffect {

@@ -363,12 +363,15 @@ fn string_lit(value: &str) -> TypeExpr {
 /// was `(() => "OUTERNEST")[]`, and `{ ...spreadBait, x: 1 }` was
 /// `{ a: "OUTERSPREAD"; x: number }` (tsgo: `{ a: number; x: number }`).
 ///
-/// A CONDITIONAL expression is no longer one of the fail-closed rows: it
-/// has a structural arm now, so each branch resolves through the frame's
-/// own lexical authority and `c ? condBait : 2` is the checker's `1 | 2`
-/// — the local, exactly. It stays in this suite as the row that proves
-/// the frame binding WINS rather than merely blocking an answer: an
-/// owner-scope resolution of the same name reads `"OUTERCOND" | 2`.
+/// A CONDITIONAL expression and an object SPREAD are no longer
+/// fail-closed rows: both have a structural arm now, so their operands
+/// resolve through the frame's own lexical authority. `c ? condBait : 2`
+/// is the checker's `1 | 2` and `{ ...spreadBait, x: 1 }` is the
+/// checker's `{ a: number; x: number }` — the local and the parameter,
+/// exactly. They stay in this suite as the rows that prove the frame
+/// binding WINS rather than merely blocking an answer: an owner-scope
+/// resolution of the same names reads `"OUTERCOND" | 2` and
+/// `{ a: "OUTERSPREAD"; x: number }`.
 ///
 /// Mutation recipe: dropping the gate's answer half republishes every one
 /// of these as the bait value, cleanly and warm.
@@ -381,7 +384,6 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
         "gateStaticMemberOnParam",
         "gateArrayElement",
         "gateNestedArrowInArray",
-        "gateObjectSpread",
         "gateTypeSpaceLocalClass",
     ] {
         assert_fails_closed(&host, name);
@@ -394,6 +396,85 @@ fn flow_return_leaf_answer_never_binds_a_frame_owned_name_in_owner_scope() {
         "gateConditionalArm",
         TypeExpr::Union(std::sync::Arc::from(vec![number_lit(1.0), number_lit(2.0)])),
     );
+
+    // The SPREAD source resolves the same way: the parameter, through the
+    // frame's own lexical authority — never the file-scope
+    // `spreadBait: { a: "OUTERSPREAD" }`.
+    //
+    // Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+    // --ignoreConfig`): `ReturnType<typeof gateObjectSpread>` is
+    // `{ a: number; x: number }`.
+    assert_clean_warm_object(
+        &host,
+        "gateObjectSpread",
+        &[
+            (
+                "a",
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            ),
+            (
+                "x",
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            ),
+        ],
+    );
+}
+
+/// [`assert_clean_warm`] for an OBJECT surface: the projected member
+/// `(key, type)` pairs in order, with no degradation and exactly one
+/// admitted candidate.
+///
+/// Member identity plus member TYPE, rather than whole-`TypeExpr`
+/// equality, because a spread-merged surface carries provenance the
+/// authored twin does not (`excess_origin: SpreadTainted`) — provenance
+/// that is not what this assertion is about, and whose spelling must not
+/// be able to turn a published-bait regression green.
+#[track_caller]
+fn assert_clean_warm_object(host: &Arc<VerterHost>, name: &str, expected: &[(&str, TypeExpr)]) {
+    with_dispatch(host, |dispatch| {
+        let key = r6_key(dispatch, name);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("{name} must produce a value");
+        };
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
+        let ty = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("a flow return value projects");
+        let TypeExpr::Object(object) = &ty else {
+            panic!("{name} must project an object surface: {ty:?}");
+        };
+        let observed: Vec<(String, TypeExpr)> = object
+            .properties
+            .iter()
+            .map(|member| match member {
+                verter_type_expr::ObjectMember::Property(property) => (
+                    property
+                        .key
+                        .as_string()
+                        .unwrap_or_else(|| panic!("{name}: non-string key {:?}", property.key))
+                        .to_owned(),
+                    property.ty.clone(),
+                ),
+                other => panic!("{name}: unexpected member shape {other:?}"),
+            })
+            .collect();
+        let expected: Vec<(String, TypeExpr)> = expected
+            .iter()
+            .map(|(key, ty)| ((*key).to_owned(), ty.clone()))
+            .collect();
+        assert_eq!(observed, expected, "{name} member surface");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "{name} must warm-admit exactly one candidate"
+        );
+    });
 }
 
 /// The other face: a form the leaf cannot model AT ALL answers a bare

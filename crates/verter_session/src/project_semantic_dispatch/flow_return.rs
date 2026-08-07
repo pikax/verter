@@ -145,9 +145,22 @@ const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_UN
 /// binding that evaluated to `any`. Nothing names WHICH member — the
 /// unapplied-write reason is seeded from the lowered slice's effect list
 /// before any member evaluates — so a value-reading consumer degrades
-/// every member rather than a nameable one. Per-member attribution would
-/// need the evaluator to intersect each member value's slot reads with
-/// the unapplied write's targets; it does not compute that.
+/// every member rather than a nameable one.
+///
+/// Per-member attribution is NOT "intersect each member value's slot
+/// reads with the unapplied write's targets". That reading is FAIL-OPEN:
+/// a member can depend on a written slot through an INTERMEDIATE local
+/// whose own definition read it, while naming only the intermediate.
+/// `function f(seed: string | number) { seed = "y"; const q = seed;
+/// return { label: q } }` reads `q` alone, so the intersection is empty
+/// and the member would publish the unnarrowed `string | number` warm
+/// where the checker says `string`. The sound direction is the
+/// COMPLEMENT — a position is exact only when it provably reads no frame
+/// binding at all (an owner-scope leaf), and every other position takes
+/// the positional marker. Adopting it changes both which typed
+/// [`FlowReturnDegradation`] a written frame reports and when the
+/// evaluator first observes it, so it belongs with the work that APPLIES
+/// write effects rather than beside it.
 fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
     match degradation {
         FlowReturnDegradation::UnmodeledPosition
@@ -2333,6 +2346,116 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Evaluate one STRUCTURAL object literal — the entries in authored
+    /// order, where construction order is meaning.
+    ///
+    /// A literal with no spread interns the object surface directly. A
+    /// literal WITH one is a CONSTRUCTION PROGRAM, so it interns the
+    /// shared [`SemanticNodeData::ObjectSpreadProgram`] carrier and the
+    /// one object-spread projection owns merging it — never a second
+    /// merge written here. That is the same carrier a spread-bearing
+    /// object type from any other producer lowers to, so every downstream
+    /// consumer already reduces it.
+    fn eval_object_literal(
+        &mut self,
+        entries: &[crate::flow_slice_content::SliceObjectEntry],
+    ) -> Positional<SemanticNodeId> {
+        let mut surface_members = Vec::with_capacity(entries.len());
+        let mut effects: Vec<crate::semantic_query::ObjectConstructionEffect> = Vec::new();
+        let mut spread_seen = false;
+        for entry in entries.iter() {
+            let member = match entry {
+                crate::flow_slice_content::SliceObjectEntry::Spread { source } => {
+                    // A spread SOURCE this frame cannot evaluate is not a
+                    // fact about ONE member — it is a fact about the
+                    // surface's KEY SET, and an object surface has no way
+                    // to say "these keys, plus an unknown number of
+                    // others". Publishing the literal's own properties
+                    // alone would declare a member set that is missing
+                    // keys the authored value has, which is the `props:
+                    // {}` defect at a smaller scale. So the LITERAL is
+                    // the unmodelled position.
+                    //
+                    // A HOLD is the same verdict for the same reason a
+                    // member value's hold is dropped
+                    // (`settle_composite_part`): the callee's return is
+                    // not this object's value. It cannot become a marker
+                    // member either, so it fails the literal closed.
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(source);
+                    self.holds.truncate(holds_before);
+                    let Positional::Value(operand) = outcome else {
+                        return Positional::Unmodeled;
+                    };
+                    spread_seen = true;
+                    effects.extend(surface_members.drain(..).map(
+                        |member: crate::semantic_query::SurfaceMember| {
+                            super::object_spread_program_lowering::direct_effect_from_member(
+                                &member,
+                            )
+                        },
+                    ));
+                    effects.push(crate::semantic_query::ObjectConstructionEffect::Spread(
+                        operand,
+                    ));
+                    continue;
+                }
+                crate::flow_slice_content::SliceObjectEntry::Member(member) => member,
+            };
+            // Each member value evaluates as a flow expression (parameter
+            // / local references substitute); a hold nested in a member
+            // value cannot be a plain skip — the whole evaluation is
+            // undecided (recursive object construction is beyond the
+            // direct same-slot hold the return sites model).
+            let holds_before = self.holds.len();
+            let outcome = self.eval_expr(&member.value);
+            let value = self.settle_composite_part(outcome, holds_before);
+            // Selective object widening (BL02-class): a member read of a
+            // WIDENING-literal local widens to its primitive at the
+            // mutable member position (`const b = 1; return { b }`
+            // publishes `b: number`), while `as const` / annotated
+            // literal locals stay pinned. Direct literal members already
+            // widened (or stayed pinned under a const assertion) at IR
+            // lowering.
+            let value = self.widen_if_widening_local_read(&member.value, value);
+            surface_members.push(crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::string(member.key.as_ref()),
+                value,
+                optional: false,
+                readonly: false,
+                method_kind: member.method_kind,
+                has_implementation_body: member.method_kind.is_some(),
+                visibility: verter_type_expr::MemberVisibility::Public,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
+                spans: member.spans,
+                declaration_origin: Some(Arc::from(self.canonical)),
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                merge_role: crate::semantic_query::MergeRoleStamp::default(),
+            });
+        }
+        if spread_seen {
+            effects.extend(surface_members.drain(..).map(|member| {
+                super::object_spread_program_lowering::direct_effect_from_member(&member)
+            }));
+            return Positional::Value(self.dispatch.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from(effects.into_boxed_slice()),
+                }),
+                self.binder_env.scope.clone(),
+            ));
+        }
+        Positional::Value(self.dispatch.graph().intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(surface_members.into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        )))
+    }
+
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
         self.degradation.get_or_insert(degradation);
     }
@@ -2503,16 +2626,29 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(filter) => Arc::clone(&filter.member),
             None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
         };
-        let Some(crate::flow_slice_content::SliceExpr::Object { members }) = argument else {
+        let Some(crate::flow_slice_content::SliceExpr::Object { entries }) = argument else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
         // Last write wins for duplicate keys (JS object-literal
-        // semantics): take the LAST member with the demanded key.
-        let Some(member) = members
-            .iter()
-            .rev()
-            .find(|member| member.key.as_ref() == member_name.as_ref())
-        else {
+        // semantics): take the LAST entry provisioning the demanded key.
+        // A SPREAD provisions an unknown key set, so the last one is a
+        // hard stop — anything before it may have been overridden and the
+        // demanded key may originate in it. That is beyond the modeled
+        // member point: fail closed rather than answer from a member the
+        // spread might replace.
+        let mut member = None;
+        for entry in entries.iter().rev() {
+            match entry {
+                crate::flow_slice_content::SliceObjectEntry::Spread { .. } => break,
+                crate::flow_slice_content::SliceObjectEntry::Member(candidate) => {
+                    if candidate.key.as_ref() == member_name.as_ref() {
+                        member = Some(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(member) = member else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
         let outcome = self.eval_expr(&member.value);
@@ -3260,54 +3396,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     ),
                 }
             }
-            crate::flow_slice_content::SliceExpr::Object { members } => {
-                // Structural object-literal return: each member value
-                // evaluates as a flow expression (parameter / local
-                // references substitute); a hold nested in a member value
-                // cannot be a plain skip — the whole evaluation is
-                // undecided (recursive object construction is beyond the
-                // direct same-slot hold the return sites model).
-                let mut surface_members = Vec::with_capacity(members.len());
-                for member in members.iter() {
-                    let holds_before = self.holds.len();
-                    let outcome = self.eval_expr(&member.value);
-                    let value = self.settle_composite_part(outcome, holds_before);
-                    // Selective object widening (BL02-class): a member
-                    // read of a WIDENING-literal local widens to its
-                    // primitive at the mutable member position (`const
-                    // b = 1; return { b }` publishes `b: number`), while
-                    // `as const` / annotated literal locals stay pinned.
-                    // Direct literal members already widened (or stayed
-                    // pinned under a const assertion) at IR lowering.
-                    let value = self.widen_if_widening_local_read(&member.value, value);
-                    surface_members.push(crate::semantic_query::SurfaceMember {
-                        key: crate::semantic_query::AuthoredPropertyKey::string(
-                            member.key.as_ref(),
-                        ),
-                        value,
-                        optional: false,
-                        readonly: false,
-                        method_kind: member.method_kind,
-                        has_implementation_body: member.method_kind.is_some(),
-                        visibility: verter_type_expr::MemberVisibility::Public,
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
-                        spans: member.spans,
-                        declaration_origin: Some(Arc::from(self.canonical)),
-                        declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::default(),
-                        merge_role: crate::semantic_query::MergeRoleStamp::default(),
-                    });
-                }
-                Positional::Value(graph.intern_node(SemanticNodeData::Object(
-                    crate::semantic_query::surface_view! {
-                        members: Arc::from(surface_members.into_boxed_slice()),
-                        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        keyspace: None,
-                        has_index_signature: false,
-                    },
-                )))
+            crate::flow_slice_content::SliceExpr::Object { entries } => {
+                self.eval_object_literal(entries)
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,

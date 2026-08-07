@@ -29,14 +29,12 @@ use std::sync::Arc;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
     AssignmentTargetProperty, BindingPattern, Expression, Function, ObjectExpression,
-    ObjectPropertyKind, SimpleAssignmentTarget, Statement,
+    SimpleAssignmentTarget, Statement,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::GetSpan;
 use rustc_hash::FxHashMap;
 use verter_no_typeexpr::NoTypeExpr;
-
-use crate::analysis::function_program::static_property_key_name;
 
 pub use frame_span::FrameSpan;
 
@@ -49,7 +47,9 @@ pub mod peeker;
 pub mod value_descent;
 
 pub use value_descent::{
-    value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ValueDescent,
+    object_entry_descent, object_entry_key, static_property_key_text,
+    value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ObjectEntryDescent,
+    ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };
 
 #[cfg(test)]
@@ -1144,32 +1144,41 @@ impl SkeletonBuilder {
         let id = self.alloc_site(span, parent);
         let mut entries = Vec::new();
         for property in &object.properties {
-            match property {
-                ObjectPropertyKind::ObjectProperty(property) => {
-                    let key = match static_property_key_name(&property.key) {
-                        Some(name) => SkeletonObjectKey::Static(self.intern(&name)),
-                        None => match property.key.as_expression() {
-                            Some(key_expression) => SkeletonObjectKey::Computed(
-                                self.open_site(key_expression, Some(id)),
-                            ),
-                            None => continue,
-                        },
+            // THE per-entry disposition, taken from the ONE shared
+            // classifier the content half also dispatches on — so a
+            // spread cannot be a value provider on this side and an
+            // abandoned structural lowering on the other.
+            match object_entry_descent(property) {
+                ObjectEntryDescent::Property {
+                    key,
+                    value,
+                    kind,
+                    property: _,
+                } => {
+                    let key = match key {
+                        ObjectEntryKey::Static(name) => {
+                            SkeletonObjectKey::Static(self.intern(name))
+                        }
+                        ObjectEntryKey::Computed(key_expression) => {
+                            SkeletonObjectKey::Computed(self.open_site(key_expression, Some(id)))
+                        }
+                        // A key form neither half models: the entry is
+                        // not tracked at all, and the content half
+                        // leaf-lowers the whole literal.
+                        ObjectEntryKey::Unmodeled => continue,
                     };
-                    let kind = if property.method {
-                        SkeletonPropertyKind::Method
-                    } else {
-                        match property.kind {
-                            oxc_ast::ast::PropertyKind::Init => SkeletonPropertyKind::Init,
-                            oxc_ast::ast::PropertyKind::Get | oxc_ast::ast::PropertyKind::Set => {
-                                SkeletonPropertyKind::Accessor
-                            }
+                    let kind = match kind {
+                        ObjectEntryKind::Init => SkeletonPropertyKind::Init,
+                        ObjectEntryKind::Method => SkeletonPropertyKind::Method,
+                        ObjectEntryKind::Get | ObjectEntryKind::Set => {
+                            SkeletonPropertyKind::Accessor
                         }
                     };
-                    let value = self.open_site(&property.value, Some(id));
+                    let value = self.open_site(value, Some(id));
                     entries.push(SkeletonObjectEntry::Property { key, value, kind });
                 }
-                ObjectPropertyKind::SpreadProperty(spread) => {
-                    let source = self.open_site(&spread.argument, Some(id));
+                ObjectEntryDescent::Spread { source } => {
+                    let source = self.open_site(source, Some(id));
                     entries.push(SkeletonObjectEntry::Spread { source });
                 }
             }

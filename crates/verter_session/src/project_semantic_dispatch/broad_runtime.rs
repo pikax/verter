@@ -774,12 +774,26 @@ mod tests {
     /// `ObservedRuntimePartial::shape_is_trustworthy` to `false`, which
     /// short-circuits the member projection this file exists to perform.
     ///
-    /// The mapping is asserted directly because no end-to-end fixture on
-    /// this tree reaches the arm: the marker is normally read as NODE DATA
-    /// inside a resolved surface, not returned as a `QueryResult::Error`.
-    /// The arm is live all the same — `rehydrate_broad_runtime_subject`
-    /// and `push_runtime_query_read` both route an error result through
-    /// it.
+    /// The mapping is asserted directly HERE, and exercised through the
+    /// production classification path by
+    /// `broad_runtime_tests::the_positional_marker_classifies_with_the_
+    /// flow_class_through_the_classifier`. It is not asserted at a
+    /// SURFACE-level fixture because none can see the class:
+    /// `runtime_props_derive_each_member_from_that_members_own_evidence`
+    /// does drive a marker node into the `Opaque` arm of
+    /// `classify_runtime_kinds`, but both spellings stop that walk
+    /// identically (`undecidable`) and the folded class does not escape it
+    /// to the macro-codegen completeness the publish/refuse decision
+    /// reads.
+    ///
+    /// The `QueryResult::Error` route into this function
+    /// (`rehydrate_broad_runtime_subject`, `push_runtime_query_read`) is
+    /// live but cannot carry this variant today: the marker exists only as
+    /// a NODE (`unmodeled_position_marker` interns
+    /// `SemanticNodeData::Opaque`), and no producer returns
+    /// `QueryResult::Error(QueryError::UnmodeledPosition)`. The arm covers
+    /// it so that a future producer inherits the right class rather than
+    /// the wildcard's.
     #[test]
     fn the_positional_marker_carries_the_flow_class_not_the_generic_query_fault() {
         assert_eq!(

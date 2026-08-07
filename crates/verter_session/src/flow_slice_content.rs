@@ -45,15 +45,15 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Expression, FormalParameters, ObjectPropertyKind, Program, PropertyKey,
-    PropertyKind, Statement, VariableDeclarationKind,
+    BindingPattern, Expression, FormalParameters, Program, Statement, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
-    build_function_body_skeleton, value_descent, FrameSpan, FunctionBodySkeleton,
-    FunctionBodySource, NameMeaning, SkeletonBindingKind, ValueDescent,
+    build_function_body_skeleton, object_entry_descent, value_descent, FrameSpan,
+    FunctionBodySkeleton, FunctionBodySource, NameMeaning, ObjectEntryDescent, ObjectEntryKey,
+    ObjectEntryKind, SkeletonBindingKind, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
     inventory_statement_list, resolve_function_node, FunctionControlRegion, FunctionNode,
@@ -279,18 +279,19 @@ impl GatedLeaf {
 /// One expression of the slice content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SliceExpr {
-    /// A fully lowered leaf: literals, arrays, objects (spread members ride
-    /// as `ObjectMember::Spread` for later delegation to the object-spread
-    /// projection), templates, `typeof` paths, `as` / `satisfies` /
-    /// parenthesized results — the shared shallow-pass per-expression
-    /// lowering, through the frame gate.
+    /// A fully lowered leaf: literals, arrays, object literals this half
+    /// cannot lower structurally (spread members in one of those ride as
+    /// `ObjectMember::Spread`, for the shared object-spread projection),
+    /// templates, `typeof` paths, `as` / `satisfies` / parenthesized
+    /// results — the shared shallow-pass per-expression lowering, through
+    /// the frame gate.
     Type(GatedLeaf),
     /// A leaf answer that names one or more bindings THIS FRAME owns —
     /// the root-identifier gate's carrier.
     ///
     /// The shared shallow-pass leaf lowering has no frame: it resolves
     /// every name in FILE OWNER SCOPE. So the leaf's `typeof CBait.s` /
-    /// `ReturnType<typeof obj.m>` / `{ ...base }` answers are only
+    /// `ReturnType<typeof obj.m>` / `{ ...base, [k]: 1 }` answers are only
     /// correct while no owner-scope declaration ANSWERS those names — the
     /// moment one does, the published value is a different symbol's,
     /// cleanly and warm. The gate cannot decide that in the lowerer (the
@@ -336,14 +337,15 @@ pub enum SliceExpr {
         /// read takes, and never a file-scope resolution of the same name.
         captured: bool,
     },
-    /// An object-literal return evaluated STRUCTURALLY: every member value
-    /// is a flow expression (parameter / local references substitute). Only
-    /// plain string-keyed `Init` properties lower this way — spreads,
-    /// computed keys, and method / accessor members keep the whole-literal
-    /// leaf lowering.
+    /// An object-literal return evaluated STRUCTURALLY: every entry's
+    /// contributing expression is a flow expression (parameter / local
+    /// references substitute). Plain string-keyed properties, method /
+    /// accessor members, and SPREADS lower this way; a computed key still
+    /// keeps the whole-literal leaf lowering.
     Object {
-        /// The members in source order.
-        members: Arc<[SliceObjectMember]>,
+        /// The entries in source order — construction order is meaning
+        /// (a later entry overrides what an earlier one provisioned).
+        entries: Arc<[SliceObjectEntry]>,
     },
     /// A nested function VALUE (a function / arrow expression or an
     /// object-literal method in any expression position): its parameters
@@ -683,6 +685,27 @@ enum SignatureScope<'a, 'b> {
         /// them, so they are the answer's binders, not references into
         /// the enclosing frame.
         binders: &'a [Arc<str>],
+    },
+}
+
+/// One ENTRY of a structurally lowered object-literal return, in authored
+/// order.
+///
+/// The two variants are the two dispositions
+/// `verter_semantic::analysis::flow::object_entry_descent` assigns, which
+/// is the same classification the skeleton's `open_object_site` opens
+/// child sites from — so an entry this half lowers is an entry the demand
+/// planner reached.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceObjectEntry {
+    /// An entry provisioning exactly one key.
+    Member(SliceObjectMember),
+    /// A SPREAD (`...source`): every key the source's value carries
+    /// enters the surface at this position, and a later entry overrides
+    /// what it provisioned.
+    Spread {
+        /// The spread source's lowered value.
+        source: SliceExpr,
     },
 }
 
@@ -2237,67 +2260,85 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Lower one plain string-keyed object literal STRUCTURALLY: each
-    /// member value is a flow expression, gated by the demand selection.
-    /// A literal this half cannot model structurally (a spread, a
-    /// computed key, a non-function method value) falls back to the
-    /// whole-literal leaf lowering of `whole`.
+    /// Lower one object literal STRUCTURALLY: each entry's contributing
+    /// expression is a flow expression, gated by the demand selection. A
+    /// literal this half cannot model structurally (a computed key, a
+    /// non-function method value) falls back to the whole-literal leaf
+    /// lowering of `whole`.
+    ///
+    /// Entry dispositions come from the ONE shared classifier
+    /// (`object_entry_descent`), the same one the skeleton's
+    /// `open_object_site` opens child sites from: a SPREAD is a value
+    /// provider on both sides, so its source lowers here exactly as a
+    /// member value does and rides whatever arm its own form takes.
     fn lower_object_literal(
         &mut self,
         object: &oxc_ast::ast::ObjectExpression<'_>,
         whole: &Expression<'_>,
         mode: ExprMode,
     ) -> SliceExpr {
-        let mut members = Vec::with_capacity(object.properties.len());
+        let mut entries = Vec::with_capacity(object.properties.len());
         let mut structural = true;
-        for prop in &object.properties {
-            let ObjectPropertyKind::ObjectProperty(p) = prop else {
-                structural = false;
-                break;
+        for property in &object.properties {
+            let (key, value_expression, kind, p) = match object_entry_descent(property) {
+                ObjectEntryDescent::Spread { source } => {
+                    // The spread SOURCE is an ordinary selected value
+                    // position: an unselected one rides the same typed
+                    // `Elided` carrier a member value does, so a
+                    // planner/content selection mismatch stays visible
+                    // rather than silently contributing nothing.
+                    let source = if self.value_span_selected(source.span()) {
+                        self.lower_expr(source, mode)
+                    } else {
+                        SliceExpr::Elided
+                    };
+                    entries.push(SliceObjectEntry::Spread { source });
+                    continue;
+                }
+                ObjectEntryDescent::Property {
+                    key,
+                    value,
+                    kind,
+                    property,
+                } => (key, value, kind, property),
             };
-            let key = match &p.key {
-                PropertyKey::StaticIdentifier(id) => Arc::from(id.name.as_str()),
-                PropertyKey::StringLiteral(lit) => Arc::from(lit.value.as_str()),
-                _ => {
+            let key: Arc<str> = match key {
+                ObjectEntryKey::Static(name) => Arc::from(name),
+                ObjectEntryKey::Computed(_) | ObjectEntryKey::Unmodeled => {
                     structural = false;
                     break;
                 }
+            };
+            let method_kind = match kind {
+                ObjectEntryKind::Init => None,
+                ObjectEntryKind::Method => Some(verter_type_expr::ObjectMethodKind::Method),
+                ObjectEntryKind::Get => Some(verter_type_expr::ObjectMethodKind::Get),
+                ObjectEntryKind::Set => Some(verter_type_expr::ObjectMethodKind::Set),
+            };
+            let spans = verter_type_expr::MemberSpans {
+                declaration: Some(p.span.into()),
+                name: Some(p.key.span().into()),
+                type_annotation: None,
             };
             // A member value OUTSIDE the demand selection never
             // lowers — the elided sibling rides the typed carrier
             // (present in the member LIST so missing-member
             // detection stays static, content-free forever).
-            if !self.value_span_selected(p.value.span()) {
-                members.push(SliceObjectMember {
+            if !self.value_span_selected(value_expression.span()) {
+                entries.push(SliceObjectEntry::Member(SliceObjectMember {
                     key,
                     value: SliceExpr::Elided,
-                    method_kind: match (p.method, p.kind) {
-                        (false, PropertyKind::Init) => None,
-                        (_, PropertyKind::Get) => Some(verter_type_expr::ObjectMethodKind::Get),
-                        (_, PropertyKind::Set) => Some(verter_type_expr::ObjectMethodKind::Set),
-                        (true, PropertyKind::Init) => {
-                            Some(verter_type_expr::ObjectMethodKind::Method)
-                        }
-                    },
-                    spans: verter_type_expr::MemberSpans {
-                        declaration: Some(p.span.into()),
-                        name: Some(p.key.span().into()),
-                        type_annotation: None,
-                    },
-                });
+                    method_kind,
+                    spans,
+                }));
                 continue;
             }
             // A method / accessor member with a body is a nested
             // function value (its return evaluates inline through
             // the same flow machinery); a method without a body
             // keeps the whole-literal leaf lowering.
-            if p.method || !matches!(p.kind, PropertyKind::Init) {
-                let method_kind = match p.kind {
-                    PropertyKind::Get => verter_type_expr::ObjectMethodKind::Get,
-                    PropertyKind::Set => verter_type_expr::ObjectMethodKind::Set,
-                    _ => verter_type_expr::ObjectMethodKind::Method,
-                };
-                let value = match &p.value {
+            if method_kind.is_some() {
+                let value = match value_expression {
                     Expression::FunctionExpression(func) => {
                         self.lower_nested_function(&FunctionNode::Function(func))
                     }
@@ -2309,16 +2350,12 @@ impl Lowerer<'_> {
                         break;
                     }
                 };
-                members.push(SliceObjectMember {
+                entries.push(SliceObjectEntry::Member(SliceObjectMember {
                     key,
                     value,
-                    method_kind: Some(method_kind),
-                    spans: verter_type_expr::MemberSpans {
-                        declaration: Some(p.span.into()),
-                        name: Some(p.key.span().into()),
-                        type_annotation: None,
-                    },
-                });
+                    method_kind,
+                    spans,
+                }));
                 continue;
             }
             // An object-literal member's fresh literal ALWAYS
@@ -2327,30 +2364,26 @@ impl Lowerer<'_> {
             // object-literal property widening rule. An `as
             // const` member keeps its literal.
             let widen_member = !verter_semantic::analysis::type_eval_build::expr_is_const_asserted(
-                &p.value,
+                value_expression,
                 self.source,
             );
-            let value = self.lower_expr(&p.value, mode);
+            let value = self.lower_expr(value_expression, mode);
             let value = match (widen_member, value) {
                 (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
                     leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
                 ),
                 (_, value) => value,
             };
-            members.push(SliceObjectMember {
+            entries.push(SliceObjectEntry::Member(SliceObjectMember {
                 key,
                 value,
-                method_kind: None,
-                spans: verter_type_expr::MemberSpans {
-                    declaration: Some(p.span.into()),
-                    name: Some(p.key.span().into()),
-                    type_annotation: None,
-                },
-            });
+                method_kind,
+                spans,
+            }));
         }
         if structural {
             SliceExpr::Object {
-                members: Arc::from(members.into_boxed_slice()),
+                entries: Arc::from(entries.into_boxed_slice()),
             }
         } else {
             self.lower_leaf(whole, mode)
