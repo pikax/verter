@@ -48,22 +48,40 @@
 //!
 //! # CONTRIBUTOR NOTE — read this before you build your own fixtures
 //!
-//! **If you measured a shape, add it here.** Passing or failing, agreeing with
-//! the checker or not. A reviewer who measured a shape in a scratch worktree,
-//! reported it, and did not add a row has thrown the measurement away — that
-//! is the exact waste this table exists to end. Landed coverage grows
-//! monotonically; measurement corpora do not, unless you append.
+//! **This is a TypeScript semantics corpus.** A row's identity is the semantic
+//! answer the substrate computes for a plain `.ts` program, measured against
+//! the checker: the flow-return GRAPH NODE, its MEMBER shapes, the typed
+//! `degradation`, the `slot_candidate_count`. Vue and Svelte emission are an
+//! OPTIONAL SECONDARY column meaning "the semantic answer reached a consumer
+//! intact" — real evidence (several defects here were caught only there), but
+//! never the subject. Most rows you add will carry no framework column at all.
 //!
-//! ## Adding a row — the whole procedure
+//! **If you measured a shape, add it here and COMMIT it on your branch.**
+//! Passing or failing. A reviewer who measured a shape in a scratch worktree,
+//! found a defect, reported it in prose, and did not land the row has thrown
+//! the measurement away — the next agent rebuilds it, slightly differently,
+//! and the surface never grows. A failing row is worth more than a paragraph:
+//! the fix agent's target is then exact and its red-first evidence already
+//! exists. Landed coverage grows monotonically; measurement corpora do not,
+//! unless you append.
+//!
+//! # Adding a row — the whole procedure
 //!
 //! 1. **Write the row.** One [`Row`] literal appended to [`CORPUS`], with
-//!    `..Row::BLANK` filling the lanes your shape does not exercise. `script`
-//!    is the authored `<script setup>` body; `macro_call` defaults to
-//!    `defineProps<ReturnType<typeof makeProps>>()`; `probe` defaults to
-//!    `ReturnType<typeof makeProps>`. Nothing outside the table changes.
+//!    `..Row::BLANK` filling everything else. `BLANK` defaults every FRAMEWORK
+//!    lane to `Skip`, so a plain `.ts` semantic row is the SHORT literal:
+//!    ```text
+//!    Row { id: "N13_…", script: "…", checker: "{ label: string; }",
+//!          flow: Flow::Result { function: "makeProps", node: NodeShape::Object,
+//!                               members: &[("label", NodeShape::Union)],
+//!                               degradation: Degr::None, candidates: 1 },
+//!          verdict: Verdict::KnownOwed { … }, ..Row::BLANK },
+//!    ```
+//!    Add a framework column only when you want to assert that the answer
+//!    survived the trip to a consumer.
 //! 2. **Measure it, do not guess it.**
 //!    ```text
-//!    U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus \
+//!    U6_CORPUS_DUMP=1 cargo test -p verter_session --lib u6_flow_shape_corpus \\
 //!        -- --nocapture --test-threads=1 2>&1 | grep <your_row_id>
 //!    ```
 //!    Every lane prints its MEASURED value. Transcribe them into the row.
@@ -71,41 +89,33 @@
 //!    `probe`; leave it empty and the row is rejected. Do not hand-write it —
 //!    run the suite, and [`oracle::corpus_checker_column_matches_tsgo`]
 //!    regenerates the probe from your own `script` + `probe` and byte-compares
-//!    against the pinned binary. If the row is `any`, set `checker_is_any`:
+//!    it against the pinned binary. If the row is `any`, set `checker_is_any`:
 //!    `any` is assignable to `null`, so the shape probe alone cannot see it.
-//! 4. **Pick the verdict.** [`Verdict`] is the row's relationship to the
+//! 4. **Pin the MEMBER shapes, not just the enclosing node.** For anything
+//!    that depends on a computed member type — every narrowing row — the
+//!    enclosing node is `Object` whether or not the guard applied. `members`
+//!    is where the answer actually lives.
+//! 5. **Pick the verdict.** [`Verdict`] is the row's relationship to the
 //!    CHECKER, and [`verdict_consistency`] enforces each claim:
-//!    * [`Verdict::MatchesChecker`] — the published member set equals the
+//!    * [`Verdict::MatchesChecker`] — the computed answer equals the
 //!      checker's. No erased member, no refusal.
 //!    * [`Verdict::Degraded`] — the member SET is right and some member TYPE
-//!      is erased to `type: null`. An honest weaker answer.
+//!      is erased. An honest weaker answer.
 //!    * [`Verdict::FailsClosed`] — production REFUSES, and refusing is the
-//!      DESIGNED answer because the root's key set is genuinely unknowable
-//!      (spread of `any`, of an index signature, of a class instance).
+//!      DESIGNED answer because the root's key set is genuinely unknowable.
 //!    * [`Verdict::KnownOwed`] — production DISAGREES with the checker and the
-//!      divergence is a debt. Name the `owner`, and put in `owed_absent` the
-//!      needles that would APPEAR if the debt were repaired. Also append the
-//!      row's id to [`OPEN_DEBTS`]. This makes the row a tripwire in BOTH
-//!      directions: it fails if the shape degrades further AND it fails the
-//!      moment the owner fixes it, so the fix is visible instead of silent.
-//! 5. **Run the suite.** It is 8 tests and about 5 seconds once the crate is
-//!    built; no other crate and no other suite is involved.
-//!
-//! ## Two ways to read a failure
-//!
-//! Every failure prints the authored shape, the checker's answer, EXPECTED,
-//! ACTUAL, the verdict, the owner, and the one command that re-measures that
-//! single row. You should never need to re-derive a row to understand why it
-//! failed. A failure is either
-//! * a **regression** — production got worse; fix production; or
-//! * a **repair** — a pinned `KnownOwed` / `Tsx::Faults` row started behaving
-//!   correctly. That failure is the INTENDED signal. Re-pin the row and drop
-//!   its id from [`OPEN_DEBTS`] in the same change.
-//!
-//! # Adding a row
-//!
-//! One [`Row`] literal appended to [`CORPUS`], with `..Row::BLANK` filling the
-//! lanes that shape does not exercise. Nothing else.
+//!      divergence is a debt. Name the `owner`; for a framework row put in
+//!      `owed_absent` the needles that would APPEAR if the debt were repaired;
+//!      for a semantic row the pinned `members` are the tripwire. Append the
+//!      row's id to [`OPEN_DEBTS`]. This makes the row fail in BOTH directions
+//!      — if the shape degrades further, AND the moment an owner fixes it —
+//!      so a repair is visible instead of silent.
+//! 6. **Set `demand` / `subject` when they apply.** A narrowing row sets
+//!    [`Demand::Narrowing`] with its owning `U6.NARROW_*` block. A shape that
+//!    exists only as a framework shape sets [`Subject::FrameworkOnly`] and
+//!    joins `FRAMEWORK_ONLY_WORKLIST`.
+//! 7. **Run the suite and commit the row.** Eleven tests, about five seconds
+//!    once the crate is built. No other crate and no other suite is involved.
 
 use std::sync::Arc;
 
@@ -220,6 +230,20 @@ pub(crate) enum Flow {
     Result {
         function: &'static str,
         node: NodeShape,
+        /// The GRAPH-NODE shape of named members of the returned surface.
+        ///
+        /// This is the row's PRIMARY semantic assertion for everything that
+        /// depends on a member's computed type — narrowing above all. A
+        /// `typeof` guard that stopped applying shows up here as
+        /// `Union` where the checker says `Primitive`, and it shows up
+        /// NOWHERE else: the enclosing node is `Object` either way.
+        ///
+        /// Read at the GRAPH-NODE level on purpose. `TypeParam` / `DeclRef` /
+        /// `BareRef` all project to `TypeExpr::Ref { name }`, so a
+        /// `TypeExpr`-level member assertion cannot discriminate them.
+        ///
+        /// `&[]` asserts nothing about members.
+        members: &'static [(&'static str, NodeShape)],
         degradation: Degr,
         /// `slot_candidate_count_for_tests` for the row's `FlowReturn` key.
         /// A DEGRADED success is `ReturnOnly` — nothing warms — so this is
@@ -239,6 +263,110 @@ pub(crate) enum Svelte {
     /// The framework surface resolves and PROPS carries exactly these member
     /// names (order-insensitive, compared as a set).
     Props(&'static [&'static str]),
+}
+
+/// WHO owns a row.
+///
+/// The corpus is a **TypeScript semantics** corpus first. A row's identity is
+/// the semantic answer the substrate computes for a plain `.ts` program,
+/// measured against the checker: the flow-return GRAPH NODE, its member
+/// shapes, the typed `degradation`, and the `slot_candidate_count`. Framework
+/// emission is SECONDARY evidence — it answers "did the semantic answer reach
+/// a consumer intact", which is a real and separately-catchable defect, but it
+/// is never the subject.
+///
+/// A row must therefore be expressible with NO framework column at all, and
+/// [`Row::BLANK`] defaults every framework lane to its `Skip` variant so that
+/// a plain `.ts` row is the SHORT literal and a framework row is the long one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Subject {
+    /// Plain TypeScript semantics. Any framework column on the row is
+    /// secondary evidence that the answer survived the trip to a consumer.
+    TypeScript,
+    /// The shape EXISTS only as a framework shape — a macro payload spelling,
+    /// `withDefaults`, `defineModel`, `defineSlots`, the runtime-form macros,
+    /// Vue's own scope policy. Framework-specific POLICY for these rows is
+    /// scoped to the project owner's post-merge pass; this marker is what
+    /// makes that worklist a single query
+    /// (see `the_framework_only_worklist_is_pinned`).
+    FrameworkOnly,
+}
+
+/// WHAT a row demands — the row's SUBJECT, named rather than implied.
+///
+/// The corpus is the fence for the whole `U6` programme, not only for
+/// `U6.FLOW_RETURN_SUBSTRATE`. Narrowing (`U6.NARROW_TYPEOF`,
+/// `U6.NARROW_LATTICE`, `U6.NARROW_SUBSTITUTION`, `U6.NARROW_INVALIDATION`) is
+/// the class where a weakening passes every test that was not written for it:
+/// a branch join that silently widens, a `typeof` guard that stops applying
+/// across a call boundary, a narrowed type that stays warm after its
+/// predicate's dependency changes. None of those announce themselves, so the
+/// fence has to exist BEFORE the work starts.
+///
+/// # Where a genuinely new subject attaches
+///
+/// A narrowing row whose evidence is a RETURNED MEMBER's type needs no new
+/// machinery: the narrowed type is observable in the emitted option value
+/// (`label: { type: String` vs an erased `type: null`), so it rides the
+/// existing drivers and is only LABELLED here. That is
+/// [`Demand::Narrowing`] — a new variant, not a new harness.
+///
+/// A subject the current drivers genuinely cannot express is
+/// **type-at-an-arbitrary-position under a predicate** (the hover-shaped
+/// demand: "what is `v` on line N, inside this guard"). Building it
+/// speculatively would be an abstraction with no consumer, so it is NOT built.
+/// The seam is exact and small, and is recorded here so the narrowing blocks
+/// do not have to rediscover it:
+///
+/// 1. one new `Demand` variant carrying the position and the expected type;
+/// 2. one new `drive_*` function beside [`drive_runtime`] / [`drive_flow`] /
+///    [`drive_svelte`], demanding that position through the shared
+///    `ProjectSemanticDispatch` (never a second resolver);
+/// 3. one new lane test in `corpus_suite` that dispatches on the variant.
+///
+/// Nothing in [`Row`], [`Verdict`], [`report`], the oracle, or the debt ledger
+/// changes for that, which is the property this enum exists to preserve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Demand {
+    /// The published macro surface: the emitted runtime option value, the TSX
+    /// projection, the flow-return graph node, and the `.svelte` twin.
+    MacroSurface,
+    /// A NARROWING shape, owned by one of the `U6.NARROW_*` blocks. Driven
+    /// through exactly the same lanes — the narrowed type is evidence that
+    /// surfaces in the published member's type — and labelled so the
+    /// population is countable, filterable, and attributable.
+    Narrowing(NarrowBlock),
+}
+
+/// The closed set of narrowing blocks that can own a [`Demand::Narrowing`]
+/// row. Closed on purpose: a new owner is a deliberate edit, not a typo.
+// The variants mirror the PLAN's block ids one-for-one; the shared prefix is
+// the point, not an accident.
+#[allow(clippy::enum_variant_names)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NarrowBlock {
+    /// `typeof` / `instanceof` / literal guards.
+    NarrowTypeof,
+    /// Branch joins — the lattice over two or more arms.
+    NarrowLattice,
+    /// A guard applied ACROSS a call boundary (user-defined type predicates,
+    /// assertion functions, substituted generics).
+    NarrowSubstitution,
+    /// A narrowed value read after an intervening write, and warm-cache
+    /// invalidation of a narrowed result.
+    NarrowInvalidation,
+}
+
+impl NarrowBlock {
+    /// The block id, exactly as it is spelled in the plan.
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::NarrowTypeof => "U6.NARROW_TYPEOF",
+            Self::NarrowLattice => "U6.NARROW_LATTICE",
+            Self::NarrowSubstitution => "U6.NARROW_SUBSTITUTION",
+            Self::NarrowInvalidation => "U6.NARROW_INVALIDATION",
+        }
+    }
 }
 
 /// A row's relationship to the CHECKER.
@@ -301,6 +429,11 @@ pub(crate) struct Row {
     /// (`type IsAny<T> = 0 extends 1 & T ? true : false`). A row that is
     /// `any` to the checker is a fail-closed row for us by construction.
     pub(crate) checker_is_any: bool,
+    /// WHO owns this row — TypeScript semantics, or a framework-only shape.
+    pub(crate) subject: Subject,
+    /// WHAT this row demands. Defaults to [`Demand::MacroSurface`]; a
+    /// narrowing row sets [`Demand::Narrowing`] and nothing else changes.
+    pub(crate) demand: Demand,
     pub(crate) runtime: Runtime,
     pub(crate) tsx: Tsx,
     pub(crate) flow: Flow,
@@ -320,8 +453,10 @@ impl Row {
         probe: "ReturnType<typeof makeProps>",
         checker: "",
         checker_is_any: false,
+        subject: Subject::TypeScript,
+        demand: Demand::MacroSurface,
         runtime: Runtime::Skip,
-        tsx: Tsx::Projects,
+        tsx: Tsx::Skip,
         flow: Flow::Skip,
         svelte: Svelte::Skip,
         verdict: Verdict::MatchesChecker,
@@ -566,7 +701,7 @@ fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
 /// Drive the FLOW lane: demand `FlowReturn` on the row's named function and
 /// read back the GRAPH NODE, the typed degradation, and the warm-candidate
 /// count for that key.
-fn drive_flow(row: &Row, function: &str) -> Flow {
+fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
     let host = make_host();
     let dir = "/ws";
     if !row.aux.is_empty() {
@@ -608,15 +743,44 @@ fn drive_flow(row: &Row, function: &str) -> Flow {
             ..
         }) => {
             let data = dispatch.graph().node_data(result.return_type());
-            Flow::Result {
-                function: "",
+            // The MEMBER shapes are the row's primary semantic evidence for
+            // anything that depends on a computed member type. Only a closed
+            // `Object` surface has named members; a spread PROGRAM is a
+            // construction plan and reports none.
+            let members: Vec<(String, NodeShape)> = match data.as_deref() {
+                Some(SemanticNodeData::Object(surface)) => surface
+                    .positive_members()
+                    .iter()
+                    .filter_map(|member| {
+                        let name = member.key.as_string()?.to_owned();
+                        let value = dispatch.graph().node_data(member.value);
+                        Some((name, node_shape(value.as_deref())))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            MeasuredFlow::Result {
                 node: node_shape(data.as_deref()),
+                members,
                 degradation: degr_of(result.degradation()),
                 candidates,
             }
         }
-        _ => Flow::NoValue,
+        _ => MeasuredFlow::NoValue,
     }
+}
+
+/// What the flow lane actually produced. Distinct from the row's declarative
+/// [`Flow`] expectation because the measured member list is owned, not static.
+#[derive(Debug)]
+enum MeasuredFlow {
+    Result {
+        node: NodeShape,
+        members: Vec<(String, NodeShape)>,
+        degradation: Degr,
+        candidates: usize,
+    },
+    NoValue,
 }
 
 /// The `.svelte` twin for a row.
@@ -814,8 +978,8 @@ mod corpus_suite {
             );
         }
         assert!(
-            CORPUS.len() >= 73,
-            "the corpus is APPEND-ONLY: it landed with 73 rows, and a change that shrinks it is \
+            CORPUS.len() >= 85,
+            "the corpus is APPEND-ONLY: it landed with 85 rows, and a change that shrinks it is \
              deleting measured coverage, not refactoring it (got {})",
             CORPUS.len()
         );
@@ -1058,22 +1222,23 @@ mod corpus_suite {
                 println!("FLOW {} [{function}] => {measured:?}", row.id);
                 continue;
             }
-            match (row.flow, measured) {
+            match (row.flow, &measured) {
                 (
                     Flow::Result {
                         node,
+                        members,
                         degradation,
                         candidates,
                         ..
                     },
-                    Flow::Result {
+                    MeasuredFlow::Result {
                         node: got_node,
+                        members: got_members,
                         degradation: got_degr,
                         candidates: got_candidates,
-                        ..
                     },
                 ) => {
-                    if node != got_node {
+                    if node != *got_node {
                         failures.push(report(
                             row,
                             &format!("flow GRAPH NODE of `{function}`"),
@@ -1084,7 +1249,33 @@ mod corpus_suite {
                              TypeParam / DeclRef / BareRef all project to `Ref { name }`.",
                         ));
                     }
-                    if degradation != got_degr {
+                    // The PRIMARY semantic assertion: each named member's own
+                    // graph-node shape. A narrowing that stopped applying is
+                    // visible ONLY here — the enclosing node is `Object`
+                    // whether or not the guard was honoured.
+                    for (name, want) in members {
+                        match got_members.iter().find(|(got, _)| got == name) {
+                            Some((_, got)) if got == want => {}
+                            Some((_, got)) => failures.push(report(
+                                row,
+                                &format!("member `{name}` of `{function}`'s return"),
+                                &format!("{want:?}"),
+                                &format!("{got:?}"),
+                                "the MEMBER's computed type changed. For a narrowing row this \
+                                 is the whole assertion: `Union` where the checker says \
+                                 `Primitive` means the guard stopped applying, and the \
+                                 enclosing node looks identical either way.",
+                            )),
+                            None => failures.push(report(
+                                row,
+                                &format!("member `{name}` of `{function}`'s return"),
+                                &format!("{want:?}"),
+                                &format!("no such member; the surface carries {got_members:?}"),
+                                "the pinned member is absent from the returned surface",
+                            )),
+                        }
+                    }
+                    if degradation != *got_degr {
                         failures.push(report(
                             row,
                             &format!("flow degradation of `{function}`"),
@@ -1093,7 +1284,7 @@ mod corpus_suite {
                             "the typed degradation reason changed",
                         ));
                     }
-                    if candidates != got_candidates {
+                    if candidates != *got_candidates {
                         failures.push(report(
                             row,
                             &format!("flow slot_candidate_count of `{function}`"),
@@ -1104,13 +1295,13 @@ mod corpus_suite {
                         ));
                     }
                 }
-                (Flow::NoValue, Flow::NoValue) => {}
+                (Flow::NoValue, MeasuredFlow::NoValue) => {}
                 (expected, got) => failures.push(report(
                     row,
                     &format!("flow lane of `{function}`"),
                     &format!("{expected:?}"),
                     &format!("{got:?}"),
-                    "the flow lane's OUTCOME class changed (value ↔ no-value)",
+                    "the flow lane's OUTCOME class changed (value \u{2194} no-value)",
                 )),
             }
         }
@@ -1498,9 +1689,15 @@ mod verdict_consistency {
                     // label is decorative: either the lane refuses, or the TSX
                     // lane faults, or the row names the needles whose
                     // appearance means the debt was repaired.
+                    // A narrowing row carries no framework column at all; its
+                    // tripwire is the pinned MEMBER shape, which flips the
+                    // moment the owning block starts narrowing correctly.
+                    let pins_members = matches!(row.flow, Flow::Result { members, .. }
+                        if !members.is_empty());
                     let observable = matches!(row.runtime, Runtime::Refused)
                         || matches!(row.tsx, Tsx::Faults(_))
-                        || !owed_absent.is_empty();
+                        || !owed_absent.is_empty()
+                        || pins_members;
                     if !observable {
                         failures.push(format!(
                             "{}: labelled KnownOwed but the row pins nothing that would change \
@@ -1547,6 +1744,134 @@ mod verdict_consistency {
     }
 }
 
+#[cfg(test)]
+mod programme_ledgers {
+    use super::*;
+
+    /// Every narrowing row is OWNED by a `U6.NARROW_*` block, and every one of
+    /// them is pinned against today's substrate until that block lands.
+    ///
+    /// The narrowing blocks are the class where a weakening passes every test
+    /// that was not written for it. Seeding the rows BEFORE the work starts is
+    /// what gives those blocks a fence on day one: each row fails the moment
+    /// its shape starts behaving correctly, which forces a deliberate
+    /// reclassification instead of a silent pass.
+    #[test]
+    fn narrowing_rows_are_owned_by_a_narrow_block() {
+        let mut seen_blocks = std::collections::BTreeSet::new();
+        for row in CORPUS {
+            let Demand::Narrowing(block) = row.demand else {
+                continue;
+            };
+            seen_blocks.insert(block.id());
+            assert!(
+                matches!(row.runtime, Runtime::Skip)
+                    && matches!(row.tsx, Tsx::Skip)
+                    && matches!(row.svelte, Svelte::Skip),
+                "{}: a narrowing row is PLAIN TypeScript semantics — it must carry no framework \
+                 column. Framework emission is secondary evidence, never the subject.",
+                row.id
+            );
+            assert!(
+                matches!(row.flow, Flow::Result { members, .. } if !members.is_empty()),
+                "{}: a narrowing row must pin at least one MEMBER shape — the enclosing node is \
+                 `Object` whether or not the guard applied, so a row without a member \
+                 assertion measures nothing",
+                row.id
+            );
+            match row.verdict {
+                Verdict::KnownOwed { owner, .. } => assert_eq!(
+                    owner,
+                    block.id(),
+                    "{}: a narrowing row's owner must be its block id",
+                    row.id
+                ),
+                Verdict::MatchesChecker => {}
+                other => panic!(
+                    "{}: a narrowing row is either KnownOwed against its block or (as a \
+                     deliberate CONTROL) MatchesChecker; got {other:?}",
+                    row.id
+                ),
+            }
+        }
+        assert_eq!(
+            seen_blocks,
+            [
+                "U6.NARROW_INVALIDATION",
+                "U6.NARROW_LATTICE",
+                "U6.NARROW_SUBSTITUTION",
+                "U6.NARROW_TYPEOF",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+            "every narrowing block must have at least one seeded row — a block with no row \
+             inherits no fence"
+        );
+    }
+
+    /// The FRAMEWORK-ONLY worklist, in one query.
+    ///
+    /// These rows exist only as framework shapes (a macro payload spelling,
+    /// `withDefaults`, `defineModel`, `defineSlots`, the runtime-form macros).
+    /// Framework-specific POLICY for them is the project owner's post-merge
+    /// pass; this list is that pass's input.
+    #[test]
+    fn the_framework_only_worklist_is_pinned() {
+        let measured: Vec<&str> = CORPUS
+            .iter()
+            .filter(|r| matches!(r.subject, Subject::FrameworkOnly))
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(
+            measured, FRAMEWORK_ONLY_WORKLIST,
+            "the framework-only worklist changed. Adding a framework-only shape means adding \
+             its id here too, so the owner's post-merge pass stays a single query."
+        );
+    }
+
+    /// The corpus is a TYPESCRIPT SEMANTICS corpus first.
+    ///
+    /// A row whose identity is the semantic answer must assert on the semantic
+    /// answer. A framework column may accompany it — a semantic answer that
+    /// dies on the way to a consumer is still a defect — but it may never be
+    /// the ONLY thing a `Subject::TypeScript` row asserts.
+    #[test]
+    fn every_typescript_row_asserts_the_semantic_answer() {
+        let mut failures = Vec::new();
+        for row in CORPUS {
+            if matches!(row.subject, Subject::FrameworkOnly) {
+                continue;
+            }
+            if matches!(row.flow, Flow::Skip) {
+                failures.push(format!(
+                    "{}: a TypeScript-subject row must assert the SEMANTIC answer (the \
+                     flow-return graph node), not only a framework emission",
+                    row.id
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "TypeScript-subject rows:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// The rows whose shape exists ONLY as a framework shape. The project owner's
+/// post-merge framework pass owns their POLICY; the corpus only records what
+/// the substrate does today.
+#[cfg(test)]
+const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
+    "C05_withdefaults_intersection_clean",
+    "C06_withdefaults_intersection_degraded",
+    "F01_withdefaults",
+    "F02_definemodel",
+    "F03_defineslots",
+    "F04_defineprops_runtime_spread",
+    "F05_defineoptions_runtime_spread",
+];
+
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
 ///
@@ -1554,9 +1879,11 @@ mod verdict_consistency {
 /// re-pinning its row AND removing its id here, in the same change.
 #[cfg(test)]
 const OPEN_DEBTS: &[&str] = &[
+    // ── TypeScript semantics: flow-return substrate ──────────────────────
     // Leaf-fallback spread: a CALL-sourced spread beside a computed key, a
     // numeric key, `as const`, or `satisfies` refuses the module. The
-    // IDENTIFIER-sourced twins (B07/B08/B10) publish the same shapes.
+    // IDENTIFIER-sourced twins (B07/B08/B10) publish the same shapes, so the
+    // gap is callee-source-specific, not an unknowable key domain.
     "B01_computed_after_call",
     "B02_numeric_key_after_call",
     "B03_as_const_call",
@@ -1572,20 +1899,41 @@ const OPEN_DEBTS: &[&str] = &[
     "C04_emits_intersection_degraded",
     "C11_props_intersection_unmodelled_arm",
     "C12_heritage_unmodelled_clause",
-    // A mapped type over a flow-return heritage clause publishes ZERO props.
+    // A mapped type over a flow-return heritage clause publishes ZERO members.
     "C09_heritage_members_clean",
     "C10_heritage_members_degraded",
     // Multi-return join: `switch` / `try` arms that each return an object
-    // literal produce NO VALUE and the module is deleted.
+    // literal produce NO VALUE.
     "D06_switch_return",
     "D07_try_return",
     // Overloaded callee: refused at runtime AND the TSX lane faults.
     "D08_overloaded_callee",
-    // The TSX lane FAULTS — the file loses its whole type-check surface for
-    // programs tsgo types without difficulty.
+    // A GENERIC callee's type argument is not substituted into the spread
+    // source, so the instantiated member is erased.
+    "H01_generic_callee_spread",
+    // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
+    // The file loses its whole type-check surface for programs the checker
+    // types without difficulty.
     "D10_callee_new_spread_only",
     "D11_callee_new_spread_key",
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
+    "H02_union_spread_source",
+    // ── NARROWING — seeded before the owning blocks exist ─────────────────
+    // Every one of these fails today by design. When its block lands and the
+    // row starts MATCHING the checker, the corpus fails and forces the row to
+    // be reclassified. `N07_branch_join_widens` is deliberately ABSENT: it is
+    // the over-narrow control and already agrees with the checker.
+    "N01_typeof_guard_ternary",
+    "N02_typeof_guard_block",
+    "N03_truthiness_guard",
+    "N04_discriminated_union",
+    "N05_in_operator_guard",
+    "N06_instanceof_guard",
+    "N08_predicate_across_call",
+    "N09_narrow_then_write",
+    "N10_assertion_signature",
+    "N11_narrow_survives_call",
+    "N12_literal_union_narrow",
 ];
