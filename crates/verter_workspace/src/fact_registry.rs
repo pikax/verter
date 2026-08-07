@@ -363,11 +363,8 @@ pub enum FactKey {
     // Route-surface domain (RouteDb-owned; resolve_env_hash +
     // lib_env_hash keyed). The route-surface producer populates these.
     // ────────────────────────────────────────────────────────────────
-    /// Effective post-augmentation, post-wildcard export surface
-    /// fingerprint.
-    EffectiveExportSet,
-    /// Augmenter-set membership fingerprint per augmentation target.
-    /// Observed by `EffectiveExportSet(specifier)` consumers (R29).
+    /// Augmenter-set membership fingerprint per augmentation target —
+    /// the sole `RouteSurface` fact (R29).
     ModuleAugmentationIndexShape {
         target_kind_tag: AugmentationTargetKindTag,
         external_specifier: Option<InternedSpecifier>,
@@ -438,9 +435,7 @@ impl FactKey {
                 FactDomain::ResolveImports
             }
 
-            Self::EffectiveExportSet | Self::ModuleAugmentationIndexShape { .. } => {
-                FactDomain::RouteSurface
-            }
+            Self::ModuleAugmentationIndexShape { .. } => FactDomain::RouteSurface,
         }
     }
 }
@@ -737,15 +732,12 @@ mod registry_tests {
             );
         }
 
-        let route_surface_keys = [
-            FactKey::EffectiveExportSet,
-            FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-                external_specifier: Some(InternedSpecifier::from("vue")),
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            },
-        ];
+        let route_surface_keys = [FactKey::ModuleAugmentationIndexShape {
+            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+            external_specifier: Some(InternedSpecifier::from("vue")),
+            resolved_relative_canonical: None,
+            wildcard_pattern: None,
+        }];
         for k in &route_surface_keys {
             assert_eq!(
                 k.domain(),

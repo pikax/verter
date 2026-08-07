@@ -155,6 +155,8 @@ fn cold_resolve_advances_cold_counter_and_bubbles_admitted_facts() {
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("cold-resolve tracer unexpectedly non-cacheable")
         }
-        FactReadSetFinalise::Overflow => panic!("cold-resolve tracer overflowed"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("cold-resolve tracer overflowed")
+        }
     }
 }

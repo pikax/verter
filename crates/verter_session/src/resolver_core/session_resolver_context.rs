@@ -226,12 +226,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
             .prepared_value_decl_in_with_context(self, canonical_id, owner, symbol_name)
     }
 
-    /// Expose the request-scoped completion overlay so the view-aware
-    /// prepared-decl producer can consult the session-overlay bundle memo
-    /// (see the memo field docs on
-    /// [`CanonicalCompletionOverlay`]). Every context this request builds
-    /// shares the same `Arc`, so the memo's lifetime is exactly the
-    /// request's.
+    /// Expose the request-scoped completion overlay so the prepared-decl
+    /// producers can consult the request-world bundle memo (see
+    /// `CanonicalCompletionOverlay::bundle_memo`). Every context this
+    /// request builds shares the same `Arc`, so the memo's lifetime is
+    /// exactly the request's.
     #[inline]
     fn request_completion_overlay(&self) -> Option<&CanonicalCompletionOverlay> {
         Some(self.request_view.overlay())
@@ -495,6 +494,11 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     #[inline]
     fn store_view(&self) -> &dyn StoreView {
         &self.request_view
+    }
+
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        StoreView::aggregate_basis_seed(&self.request_view)
     }
 
     #[inline]

@@ -135,6 +135,7 @@ fn authored_decl_body_source_raises_to_the_lower_locator_node() {
             &SemanticTypeSource::Authored(locator.clone()),
             navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("the authored decl-body source must raise");
 
     // Oracle: the direct memoized locator provider. Same interned node id —
@@ -191,6 +192,7 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
             &SemanticTypeSource::Authored(locator),
             navigate_ctx(SFC_ID, verter_type_expr::TopLevelOwnerId::instance(0)),
         )
+        .at_optional_boundary()
         .expect("the macro type-argument source must raise through the hot mirror");
 
     let mirror =
@@ -217,6 +219,7 @@ fn closed_leaf_sources_lower_in_scope() {
             ))),
             navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("a primitive leaf must raise");
     assert!(
         matches!(
@@ -235,6 +238,7 @@ fn closed_leaf_sources_lower_in_scope() {
             ))),
             navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("a bare Ref leaf must raise");
     let data = crate::project_semantic_dispatch::node_data_for(&host, reference.node());
     assert!(
@@ -304,6 +308,7 @@ fn closed_ref_leaf_uses_exact_instance_owner_when_module_import_has_same_name() 
             ))),
             navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::instance(0)),
         )
+        .at_optional_boundary()
         .expect("the instance-owner leaf reference must raise");
 
     assert_instance_target(&host, raised.node());
@@ -328,6 +333,7 @@ fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_na
             &source,
             navigate_ctx(OWNER, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("the anchor-owner symbol reference must raise");
 
     assert_instance_target(&host, raised.node());
@@ -368,6 +374,7 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
             &source,
             navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("a closed tuple with a leaf-union element must raise");
 
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
@@ -470,6 +477,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
             &SemanticTypeSource::Synthesized(shape),
             navigate_ctx(OWNER_ID, verter_type_expr::TopLevelOwnerId::ordinary_file()),
         )
+        .at_optional_boundary()
         .expect("a synthesized object shape must raise");
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
     let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
@@ -659,6 +667,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                     interior_failures: None,
                 },
             )
+            .at_optional_boundary()
             .is_some()
     }
 
@@ -714,4 +723,179 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
          so its `result_is_partial()`-only gate cannot see the fenced serve — the WHOLE \
          compute must run inside a cacheability tracer whose verdict gates the admission",
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Raise-boundary routing of a typed `QueryError`
+//
+// The raise rail used to answer EVERY `QueryResult::Error` with a bare `None`,
+// so a budget trip, a cancellation, a cycle sentinel, a genuine fault and an
+// unknown file were one indistinguishable outcome. These tests pin the routing
+// per disposition against the single authority. They are unit-level on
+// purpose: the arms that can produce each variant are spread across the
+// dispatch, and the routing itself is what the block owns.
+// ──────────────────────────────────────────────────────────────────────────
+mod query_error_raise_routing {
+    use std::sync::Arc;
+
+    use crate::project_semantic_dispatch::semantic_source::SourceRaiseOutcome;
+    use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
+    use crate::semantic_query::{QueryError, SemanticNodeId, SemanticQueryValueTag};
+
+    /// Stand-in carrier minting: returns a fixed node id so the test can
+    /// observe WHETHER the routing asked for a carrier at all.
+    const CARRIER: SemanticNodeId = SemanticNodeId(4242);
+
+    fn route(err: QueryError) -> SourceRaiseOutcome {
+        SourceRaiseOutcome::from_error(err, |_| Some(CARRIER))
+    }
+
+    fn budget_failure() -> BudgetExceededFailure {
+        BudgetExceededFailure {
+            domain: BudgetDomain::SolverResolveSteps,
+            limit: 10,
+            actual: 11,
+            context: "raise-routing fixture".to_string(),
+        }
+    }
+
+    #[test]
+    fn miss_and_raise_miss_are_the_only_absences() {
+        for err in [QueryError::Miss, QueryError::RaiseMiss] {
+            assert!(
+                matches!(route(err.clone()), SourceRaiseOutcome::Absent),
+                "{err:?} is the optional-absence disposition",
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_ref_raises_as_a_carrier_not_absence() {
+        let outcome = route(QueryError::RecursiveRef {
+            name: Arc::from("TreeNode"),
+        });
+        let SourceRaiseOutcome::Raised(hot) = outcome else {
+            panic!("RecursiveRef must RAISE as recursion, got {outcome:?}");
+        };
+        assert_eq!(hot.node(), CARRIER);
+    }
+
+    #[test]
+    fn decl_placeholder_raises_as_the_expandable_carrier() {
+        let outcome = route(QueryError::DeclPlaceholder {
+            canonical_id: Arc::from("/a.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            name: Arc::from("Foo"),
+            whole_hash: Default::default(),
+        });
+        let SourceRaiseOutcome::Raised(hot) = outcome else {
+            panic!("DeclPlaceholder must reach Instantiate as a carrier, got {outcome:?}");
+        };
+        assert_eq!(hot.node(), CARRIER);
+    }
+
+    /// A carrier that cannot be minted still travels as the TYPED error — it
+    /// never degrades into absence.
+    #[test]
+    fn an_unmintable_control_carrier_stays_typed() {
+        let outcome = SourceRaiseOutcome::from_error(
+            QueryError::RecursiveRef {
+                name: Arc::from("TreeNode"),
+            },
+            |_| None,
+        );
+        assert!(
+            matches!(
+                outcome,
+                SourceRaiseOutcome::Failed(QueryError::RecursiveRef { .. })
+            ),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn cycle_sentinels_travel_as_typed_failures_with_their_payload() {
+        let chain: Arc<[Arc<str>]> =
+            Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice());
+        let outcome = route(QueryError::AliasCycle {
+            chain: Arc::clone(&chain),
+        });
+        let SourceRaiseOutcome::Failed(QueryError::AliasCycle { chain: observed }) = outcome else {
+            panic!("AliasCycle must stay a typed control carrier, got {outcome:?}");
+        };
+        assert_eq!(
+            observed.as_ref(),
+            chain.as_ref(),
+            "the participant chain must survive the raise boundary"
+        );
+
+        for err in [QueryError::RaiseAliasCycle, QueryError::TypeParamCycle] {
+            assert!(
+                matches!(route(err.clone()), SourceRaiseOutcome::Failed(_)),
+                "{err:?} must stay a typed control sentinel",
+            );
+        }
+    }
+
+    #[test]
+    fn partials_travel_as_typed_failures() {
+        for err in [
+            QueryError::BudgetExceeded(budget_failure()),
+            QueryError::Cancelled,
+            QueryError::UnstableState { attempts: 3 },
+        ] {
+            assert!(
+                matches!(route(err.clone()), SourceRaiseOutcome::Failed(_)),
+                "{err:?} is a typed partial, never absence",
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_failures_travel_as_typed_failures() {
+        for err in [
+            QueryError::Other(Arc::from("boom")),
+            QueryError::UnsupportedIntrinsic {
+                name: Arc::from("NoSuchIntrinsic"),
+            },
+            QueryError::ValueDomainMismatch {
+                expected: SemanticQueryValueTag::TypeNode,
+                actual: SemanticQueryValueTag::OverloadSet,
+            },
+        ] {
+            assert!(
+                matches!(route(err.clone()), SourceRaiseOutcome::Failed(_)),
+                "{err:?} is a genuine typed failure, never absence",
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_surface_sentinels_travel_as_typed_failures() {
+        for err in [
+            QueryError::UnrepresentableSurface,
+            QueryError::UnrepresentableSurfaceMember,
+        ] {
+            assert!(
+                matches!(route(err.clone()), SourceRaiseOutcome::Failed(_)),
+                "{err:?} keeps its unsupported-surface sentinel semantics as a typed result",
+            );
+        }
+    }
+
+    /// The optional-boundary collapse is EXPLICIT: it is the only way a
+    /// typed failure becomes `None`, and every production call site of it is
+    /// a boundary that answers absence and failure identically.
+    #[test]
+    fn the_optional_boundary_collapse_is_the_only_route_to_none() {
+        assert!(SourceRaiseOutcome::Absent.at_optional_boundary().is_none());
+        assert!(SourceRaiseOutcome::Failed(QueryError::Cancelled)
+            .at_optional_boundary()
+            .is_none());
+        assert!(
+            SourceRaiseOutcome::Raised(crate::semantic_query::HotTypeRef::new(CARRIER))
+                .at_optional_boundary()
+                .is_some()
+        );
+    }
 }

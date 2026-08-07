@@ -375,14 +375,16 @@ impl VerterHost {
                     crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
                         &resolution,
                     );
-                let (output, _output_read_set) = self.with_fact_tracer(|| {
-                    crate::meta_resolve::projectors::build_component_meta_output(
-                        ctx,
-                        canonical.as_str(),
-                        analysis,
-                        Some(seed),
-                    )
-                });
+                let (output, _output_read_set) =
+                    crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                        .with_fact_tracer(|| {
+                            crate::meta_resolve::projectors::build_component_meta_output(
+                                ctx,
+                                canonical.as_str(),
+                                analysis,
+                                Some(seed),
+                            )
+                        });
                 return output
                     .map(|output| (Some(output), request_id))
                     .map_err(|err| (err, request_id));
@@ -423,14 +425,16 @@ impl VerterHost {
         let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed::from_resolved_state(
             &resolved,
         );
-        let (output, _output_read_set) = self.with_fact_tracer(|| {
-            crate::meta_resolve::projectors::build_component_meta_output(
-                host_ctx_ref,
-                canonical.as_str(),
-                analysis,
-                Some(seed),
-            )
-        });
+        let (output, _output_read_set) =
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(host_ctx_ref)
+                .with_fact_tracer(|| {
+                    crate::meta_resolve::projectors::build_component_meta_output(
+                        host_ctx_ref,
+                        canonical.as_str(),
+                        analysis,
+                        Some(seed),
+                    )
+                });
         output
             .map(|output| (Some(output), request_id))
             .map_err(|err| (err, request_id))

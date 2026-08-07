@@ -279,6 +279,7 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
                     interior_failures: None,
                 },
             )
+            .at_optional_boundary()
             .map(|hot| hot.node());
     });
     out

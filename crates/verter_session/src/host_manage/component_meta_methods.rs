@@ -1274,12 +1274,15 @@ impl VerterHost {
             let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let locator =
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
-            match dispatch.raise_authored_locator_to_hot(
-                &locator,
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            ) {
+            match dispatch
+                .raise_authored_locator_to_hot(
+                    &locator,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                )
+                .at_optional_boundary()
+            {
                 Some(hot) => {
                     crate::meta_resolve::exactness::node_root_should_stay_symbolic(ctx, hot.node())
                 }
@@ -1752,12 +1755,14 @@ impl VerterHost {
                 {
                     Some(locator) => seed_dispatch
                         .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                        .at_optional_boundary()
                         .map(|hot| hot.node()),
                     None => entry
                         .type_source
                         .present()
                         .and_then(|source| {
                             raise_seed_source(&seed_dispatch, &producer_scope, source)
+                                .at_optional_boundary()
                         })
                         .map(|hot| hot.node()),
                 };
@@ -1815,47 +1820,47 @@ impl VerterHost {
         // Names referenced from already-seeded registry entries.
         // Helpers that a published type transitively references should
         // still be published even when they are imported generic aliases.
-        let seeded_dependency_names: rustc_hash::FxHashSet<String> =
-            {
-                let mut names = rustc_hash::FxHashSet::default();
-                for (index, entry) in resolved_type_registry.iter().enumerate() {
-                    let Some(meta) = resolved_type_registry_meta.get(index) else {
-                        continue;
-                    };
-                    let canonical = if meta.declaration.canonical_source.is_empty() {
-                        owner_canonical
-                    } else {
-                        meta.declaration.canonical_source.as_str()
-                    };
-                    let producer_scope =
-                        RegistryProducerScope::explicit(canonical, meta.declaration.owner);
-                    if let Some(hot) = entry.type_source.present().and_then(|source| {
-                        raise_seed_source(&seed_dispatch, &producer_scope, source)
-                    }) {
-                        crate::resolver_core::component_meta_registry::collect_node_ref_names(
-                            query_engine.ctx,
-                            hot.node(),
-                            &mut names,
-                        );
+        let seeded_dependency_names: rustc_hash::FxHashSet<String> = {
+            let mut names = rustc_hash::FxHashSet::default();
+            for (index, entry) in resolved_type_registry.iter().enumerate() {
+                let Some(meta) = resolved_type_registry_meta.get(index) else {
+                    continue;
+                };
+                let canonical = if meta.declaration.canonical_source.is_empty() {
+                    owner_canonical
+                } else {
+                    meta.declaration.canonical_source.as_str()
+                };
+                let producer_scope =
+                    RegistryProducerScope::explicit(canonical, meta.declaration.owner);
+                if let Some(hot) = entry.type_source.present().and_then(|source| {
+                    raise_seed_source(&seed_dispatch, &producer_scope, source)
+                        .at_optional_boundary()
+                }) {
+                    crate::resolver_core::component_meta_registry::collect_node_ref_names(
+                        query_engine.ctx,
+                        hot.node(),
+                        &mut names,
+                    );
+                }
+            }
+            // Also include owner-local names queued alongside a seeded
+            // published entry. When the registry already has published
+            // entries, any owner-local pending name was transitively
+            // enqueued through seed scanning and must keep its own
+            // registry entry instead of being inlined as an indexed-access
+            // alias. When there are no published entries yet, pending
+            // names come purely from public-field scanning and may still
+            // be inlined; do not protect them here.
+            if !published_names.is_empty() {
+                for pending in referenced_names.iter() {
+                    if pending.producer_scope.canonical_id.as_ref() == owner_canonical {
+                        names.insert(pending.name.clone());
                     }
                 }
-                // Also include owner-local names queued alongside a seeded
-                // published entry. When the registry already has published
-                // entries, any owner-local pending name was transitively
-                // enqueued through seed scanning and must keep its own
-                // registry entry instead of being inlined as an indexed-access
-                // alias. When there are no published entries yet, pending
-                // names come purely from public-field scanning and may still
-                // be inlined; do not protect them here.
-                if !published_names.is_empty() {
-                    for pending in referenced_names.iter() {
-                        if pending.producer_scope.canonical_id.as_ref() == owner_canonical {
-                            names.insert(pending.name.clone());
-                        }
-                    }
-                }
-                names
-            };
+            }
+            names
+        };
         let mut _loop_iterations: usize = 0;
         let mut _loop_materializations: usize = 0;
         let _loop_start = Instant::now();
@@ -2172,6 +2177,7 @@ impl VerterHost {
             let owner_collection_ref_head = owner_collection_locator.as_ref().and_then(|locator| {
                 seed_dispatch
                     .raise_authored_locator_to_hot(locator, seed_transit_ctx)
+                    .at_optional_boundary()
                     .and_then(|hot| {
                         crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
                             engine_ctx,
@@ -2876,10 +2882,7 @@ impl VerterHost {
         // overwriting the base slot (view_fingerprint == 0) and
         // contaminating a later base read.
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
             derived_ref
                 .value_mut()
                 .cached_resolved_meta
@@ -3003,10 +3006,7 @@ impl VerterHost {
 
         // cached_meta_payload lives on DerivedRawState (D48 split).
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
             derived_ref.value_mut().cached_meta_payload = Some(cached);
         }
     }
@@ -3041,9 +3041,7 @@ impl VerterHost {
             return false;
         };
         let view = current.view();
-        fact_versions
-            .iter()
-            .all(|fact| crate::resolver_core::StoreView::validates(view, fact))
+        crate::resolver_core::StoreView::validates_fact_signature(view, fact_versions)
     }
 
     pub(crate) fn append_dependency_fact_versions(

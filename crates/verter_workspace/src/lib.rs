@@ -144,12 +144,17 @@ pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 pub use fact_cache::{
-    DerivedFactKind, FactHash16, FactVersionRef, FactVersionValidator, ParseEnvHash, ParseFactRef,
-    ReadSetSignature, ResolveImportsFactRef, RouteSurfaceFactRef, SignatureAdmission,
-    CANDIDATE_CAP,
+    compaction_domain, AggregateBasisSeed, AggregateGenerations, AggregatePopulation,
+    AggregateStamp, CompactionDomain, CompletionOverlayState, DerivedFactKind,
+    DomainGenerationFact, FactAttribution, FactHash16, FactVersionRef, FactVersionValidator,
+    LiveAggregateCounters, OverlayId, ParseEnvHash, ParseFactRef, ReadSetSignature,
+    RequestCompletion, ResolutionRootsStamp, ResolveImportsFactRef, RouteSurfaceFactRef,
+    RouteSurfaceStamp, SemanticImportsStamp, SessionOverlayFingerprint, SignatureAdmission,
+    StrictSelfRootWorld, ViewAggregateDomains, ViewPopulation, ViewPopulationParent, CANDIDATE_CAP,
 };
 pub use fact_read_set::{
-    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation, FACT_SIGNATURE_CAP,
+    FactReadSet, FactReadSetCell, FactReadSetFinalise, NonCacheablePropagation,
+    FACT_DOMAIN_PRECISE_MAX, FACT_SIGNATURE_CAP,
 };
 pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 #[cfg(not(target_arch = "wasm32"))]

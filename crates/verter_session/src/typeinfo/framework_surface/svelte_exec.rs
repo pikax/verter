@@ -147,9 +147,10 @@ pub(crate) fn resolve_svelte_surface(
     // Cold compute under an installed fact tracer so the CROSS-FILE facts the
     // captured-`TypeExpr` resolution reads enter the entry's `ReadSetSignature`.
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let (outcome, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-        compute_svelte_surface(host, ctx, owner, source)
-    });
+    let (outcome, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        || compute_svelte_surface(host, ctx, owner, source),
+    );
     let completeness = crate::request_context::current_cold_compute_completeness();
     let outcome = if completeness.is_partial() {
         let diagnostics = partial_diagnostic_messages(completeness.reasons());

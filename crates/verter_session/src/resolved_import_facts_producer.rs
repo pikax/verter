@@ -289,19 +289,24 @@ impl VerterHost {
         //    removal would also drop a sibling candidate that is still
         //    valid for another view.
         //
-        //    A recomputation that reproduces BOTH the retained payload
-        //    and its witness is pure churn: re-admitting it would age a
-        //    genuinely distinct concurrent candidate out of the bounded
-        //    slot, so it is skipped and counted as no admission.
+        //    A recomputation that reproduces a retained candidate WHOLE
+        //    is pure churn: re-admitting it would age a genuinely
+        //    distinct concurrent candidate out of the bounded slot, so
+        //    it is skipped and counted as no admission.
+        //
+        //    "Whole" is one CORRELATED question over ONE slot load: does
+        //    a single candidate carry BOTH this witness and this payload.
+        //    Asking the two halves separately is unsound twice over — the
+        //    witness could be held by one candidate and the payload by
+        //    another, and the slot could be mutated between the two
+        //    loads. Either way the producer would skip on the strength of
+        //    a pair no candidate retains, silently dropping a fresh
+        //    resolution state.
         //
         //    A refused admission (empty or over-cap signature) leaves
         //    the store untouched and reports no admission, so the
         //    provenance counters below never claim unretained work.
-        if db.holds_candidate_with_signature(&key, &facts)
-            && db
-                .retained_bundle(&key)
-                .is_some_and(|retained| retained == payload)
-        {
+        if db.holds_candidate_matching(&key, &facts, payload.as_ref()) {
             return false;
         }
         let admitted = db.admit(key, payload, facts);
@@ -430,3 +435,7 @@ fn collect_analyzed_bindings(
     }
     out
 }
+
+#[cfg(test)]
+#[path = "resolved_import_facts_producer_tests.rs"]
+mod tests;

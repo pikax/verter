@@ -1,4 +1,8 @@
-//! Matrix slice: `owner_import_surface` × `route_surface`.
+//! Behavioural slice: `owner_import_surface` × barrel-route walk.
+//!
+//! Retained OUTSIDE the cross-consumer completeness grid (see
+//! `app_config_proof_observes_no_route_facts.rs`). Asserts RouteDb route
+//! WALKING, unaffected by the deleted `EffectiveExportSet` arm.
 //!
 //! Discrimination: each owner-import that resolves through a
 //! barrel re-export drives a RouteDb walk; the route_facts

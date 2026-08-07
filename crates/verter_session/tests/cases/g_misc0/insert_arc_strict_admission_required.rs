@@ -381,7 +381,6 @@ const VALIDATED_FACT_CACHE_FIELDS: &[&str] = &[
     "roots",
     "routes",
     "barrel_surfaces",
-    "effective_export_sets",
     "prepared_decl_bundles",
     "component_meta",
 ];

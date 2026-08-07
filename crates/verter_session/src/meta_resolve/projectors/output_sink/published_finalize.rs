@@ -136,15 +136,18 @@ fn finalize_published_prop_source(
     }
     // Raise the resolved source ONCE — the observed INPUT node for the
     // reducer AND its no-poison input fact (one lowering, no re-lower).
-    let Some(input) = dispatch.raise_semantic_type_source_to_hot(
-        &current,
-        crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-            scope_canonical_id,
-            scope_owner,
-            context: transit_ctx,
-            interior_failures: None,
-        },
-    ) else {
+    let Some(input) = dispatch
+        .raise_semantic_type_source_to_hot(
+            &current,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id,
+                scope_owner,
+                context: transit_ctx,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()
+    else {
         // Unraisable under the live view — the source publishes shallow
         // verbatim (never a fabricated stand-in).
         return;
@@ -161,8 +164,11 @@ fn finalize_published_prop_source(
     // `reduce_published_raises_the_shallow_form_only_in_the_props_loop`)
     // and shared by the node-compare below and the name-preservation gate
     // after it.
-    let shallow_node = shallow_source
-        .and_then(|shallow| dispatch.raise_authored_locator_to_hot(shallow, transit_ctx));
+    let shallow_node = shallow_source.and_then(|shallow| {
+        dispatch
+            .raise_authored_locator_to_hot(shallow, transit_ctx)
+            .at_optional_boundary()
+    });
     if let Some(shallow) = shallow_source {
         let ctx = query_engine.ctx;
         // The shallow form is an INPUT (untainted); compare in NODE DOMAIN

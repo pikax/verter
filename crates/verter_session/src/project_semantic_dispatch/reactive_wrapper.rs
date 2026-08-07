@@ -24,7 +24,8 @@ use verter_type_expr::{
     ReactiveWrapperUnresolvedReason, ResolutionProvenance, ResolvedSymbolIdentity, TopLevelOwnerId,
 };
 
-use super::semantic_source::SourceRaiseContext;
+use super::query_error_disposition::classify_query_error;
+use super::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
 use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -163,7 +164,11 @@ pub(crate) fn wrapper_role_for_value_signature_return(
         return unresolved(ReactiveWrapperUnresolvedReason::MissingDependency);
     };
     let source = SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(return_ty.clone()));
-    let Some(hot) = dispatch.raise_semantic_type_source_to_hot(
+    // TYPED raise boundary: a genuine absence stays `MissingDependency`, but a
+    // typed query failure publishes ITS OWN reason (a budget trip, a
+    // cancellation, a cycle, an unsupported surface, a fault) instead of being
+    // erased into "missing dependency".
+    let hot = match dispatch.raise_semantic_type_source_to_hot(
         &source,
         SourceRaiseContext {
             scope_canonical_id: canonical,
@@ -173,8 +178,14 @@ pub(crate) fn wrapper_role_for_value_signature_return(
             ),
             interior_failures: None,
         },
-    ) else {
-        return unresolved(ReactiveWrapperUnresolvedReason::MissingDependency);
+    ) {
+        SourceRaiseOutcome::Raised(hot) => hot,
+        SourceRaiseOutcome::Absent => {
+            return unresolved(ReactiveWrapperUnresolvedReason::MissingDependency);
+        }
+        SourceRaiseOutcome::Failed(err) => {
+            return unresolved(classify_query_error(&err).wrapper_reason());
+        }
     };
     let expected = [candidate.symbol.clone()];
     match dispatch.demand_terminal_symbol_instantiation(hot.node(), &expected) {

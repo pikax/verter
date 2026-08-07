@@ -15,10 +15,10 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::locators::{AuthoredBodyLocator, TypeBodySlot};
 
-use super::semantic_source::{absolutize_locator, SourceRaiseContext};
+use super::semantic_source::{absolutize_locator, SourceRaiseContext, SourceRaiseOutcome};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    HotTypeRef, IndexKey, IndexSignature, NodeScopeId, QueryError, QueryResult, SemanticNodeData,
+    HotTypeRef, IndexKey, IndexSignature, NodeScopeId, QueryError, SemanticNodeData,
     SemanticNodeId, SurfaceEntry, SurfaceMember, SurfaceView, TupleElement,
 };
 
@@ -26,20 +26,22 @@ impl ProjectSemanticDispatch<'_> {
     // ── fact-shell composition (private) ─────────────────────────────────
 
     /// Lower one `TypeBodySlot` (a decl-body sub-position) through the
-    /// memoized locator query.
+    /// memoized locator query. Returns the typed
+    /// [`SourceRaiseOutcome`] — a deref that fails with a non-absence
+    /// disposition travels as a typed failure instead of vanishing.
     pub(in crate::project_semantic_dispatch) fn raise_body_slot(
         &self,
         slot: &TypeBodySlot,
         scope_canonical_id: &str,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         let locator = absolutize_locator(
             &AuthoredBodyLocator::DeclBody(slot.clone()),
             scope_canonical_id,
         );
-        match self.lower_locator(locator) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => Some(HotTypeRef::new(node)),
-            QueryResult::Error(_) => None,
-        }
+        let owner = slot.anchor.owner;
+        SourceRaiseOutcome::from_read(self.lower_locator(locator), |err| {
+            self.intern_control_carrier(err, scope_canonical_id, owner)
+        })
     }
 
     /// The file scope composed fact-shell nodes intern under: the raise
@@ -149,9 +151,10 @@ impl ProjectSemanticDispatch<'_> {
                     scope.clone(),
                 )
             }
-            FactOrLocator::Locator(slot) => {
-                required(&|| self.raise_body_slot(slot, ctx.scope_canonical_id))
-            }
+            FactOrLocator::Locator(slot) => required(&|| {
+                self.raise_body_slot(slot, ctx.scope_canonical_id)
+                    .at_optional_boundary()
+            }),
             // The authored macro-payload escape (a synthesized component
             // default's `$props` / `$emit` / `$slots` / `$events` member
             // value): the payload lowers through the same single-engine
@@ -164,6 +167,7 @@ impl ProjectSemanticDispatch<'_> {
                     ctx.scope_canonical_id,
                 );
                 self.raise_authored_locator_to_hot(&locator, ctx.context)
+                    .at_optional_boundary()
             }),
             // A fabricated depth-closed sub-object surface: named leaf
             // members compose directly (leaves lower through the shared
@@ -288,7 +292,10 @@ impl ProjectSemanticDispatch<'_> {
                             crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
                                 property.name.as_str(),
                             )),
-                            || self.raise_body_slot(&property.ty, ctx.scope_canonical_id),
+                            || {
+                                self.raise_body_slot(&property.ty, ctx.scope_canonical_id)
+                                    .at_optional_boundary()
+                            },
                         ),
                         optional: property.optional,
                         readonly: property.readonly,
@@ -358,7 +365,10 @@ impl ProjectSemanticDispatch<'_> {
                             crate::meta_resolve::InteriorSourceStep::IndexSignatureValue {
                                 ordinal,
                             },
-                            || self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id),
+                            || {
+                                self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id)
+                                    .at_optional_boundary()
+                            },
                         ),
                         readonly: signature.readonly,
                         spans: verter_type_expr::IndexSignatureSpans::default(),
@@ -396,7 +406,10 @@ impl ProjectSemanticDispatch<'_> {
                     crate::meta_resolve::InteriorSourceStep::Member(Arc::from(
                         member.name.as_str(),
                     )),
-                    || self.raise_body_slot(&member.ty, ctx.scope_canonical_id),
+                    || {
+                        self.raise_body_slot(&member.ty, ctx.scope_canonical_id)
+                            .at_optional_boundary()
+                    },
                 ),
                 optional: member.optional,
                 readonly: member.readonly,
@@ -453,7 +466,10 @@ impl ProjectSemanticDispatch<'_> {
                     crate::meta_resolve::InteriorSourceStep::IndexSignatureValue {
                         ordinal: ordinal as u32,
                     },
-                    || self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id),
+                    || {
+                        self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id)
+                            .at_optional_boundary()
+                    },
                 ),
                 readonly: signature.readonly,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
@@ -527,9 +543,10 @@ impl ProjectSemanticDispatch<'_> {
                     ctx,
                 )
             }),
-            KeyTypeShape::Other(slot) => {
-                required(&|| self.raise_body_slot(slot, ctx.scope_canonical_id))
-            }
+            KeyTypeShape::Other(slot) => required(&|| {
+                self.raise_body_slot(slot, ctx.scope_canonical_id)
+                    .at_optional_boundary()
+            }),
         }
     }
 
@@ -563,7 +580,10 @@ impl ProjectSemanticDispatch<'_> {
                         crate::meta_resolve::InteriorSourceStep::Parameter {
                             ordinal: ordinal as u32,
                         },
-                        || self.raise_body_slot(slot, ctx.scope_canonical_id),
+                        || {
+                            self.raise_body_slot(slot, ctx.scope_canonical_id)
+                                .at_optional_boundary()
+                        },
                     ),
                     None => self.miss_node(&scope),
                 },
@@ -577,7 +597,10 @@ impl ProjectSemanticDispatch<'_> {
                 ctx,
                 &scope,
                 crate::meta_resolve::InteriorSourceStep::ReturnType,
-                || self.raise_body_slot(slot, ctx.scope_canonical_id),
+                || {
+                    self.raise_body_slot(slot, ctx.scope_canonical_id)
+                        .at_optional_boundary()
+                },
             ),
             None => self.miss_node(&scope),
         };
@@ -600,7 +623,9 @@ impl ProjectSemanticDispatch<'_> {
                                 ordinal: ordinal as u32,
                             },
                             || {
-                                let raised = self.raise_body_slot(slot, ctx.scope_canonical_id);
+                                let raised = self
+                                    .raise_body_slot(slot, ctx.scope_canonical_id)
+                                    .at_optional_boundary();
                                 match raised.as_ref() {
                                     Some(_) => ctx
                                         .check_raised_unknown_materializing(self, raised.as_ref()),
@@ -616,7 +641,9 @@ impl ProjectSemanticDispatch<'_> {
                                 ordinal: ordinal as u32,
                             },
                             || {
-                                let raised = self.raise_body_slot(slot, ctx.scope_canonical_id);
+                                let raised = self
+                                    .raise_body_slot(slot, ctx.scope_canonical_id)
+                                    .at_optional_boundary();
                                 match raised.as_ref() {
                                     Some(_) => ctx
                                         .check_raised_unknown_materializing(self, raised.as_ref()),
@@ -696,7 +723,10 @@ impl ProjectSemanticDispatch<'_> {
             ctx,
             &scope,
             crate::meta_resolve::InteriorSourceStep::IndexedAccessObject,
-            || self.raise_body_slot(&access.object, ctx.scope_canonical_id),
+            || {
+                self.raise_body_slot(&access.object, ctx.scope_canonical_id)
+                    .at_optional_boundary()
+            },
         );
         for key in access.index_path.iter() {
             node = self.graph().intern_node_with_scope(

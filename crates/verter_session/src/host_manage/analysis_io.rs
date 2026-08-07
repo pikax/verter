@@ -33,6 +33,54 @@ use super::{
     exact_resolution_uses_type_preferred_target, HostExportGraphResolver,
 };
 
+/// Test-visible record of which resolver context the template-class lane bound
+/// for one invocation of [`VerterHost::build_template_class_semantic_facts`].
+///
+/// The lane picks its context from cache presence, so a defect in ONE of the
+/// two branches is invisible from the outside: both return facts. This record
+/// makes the choice observable, and `request_bound` is the load-bearing field —
+/// the resolver-tier builder demands prepared declarations, which only a
+/// request-bound context can serve.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TemplateClassLaneBinding {
+    /// `true` when the lane took the indexed-present / base-publishable
+    /// branch, `false` when it took the cold-seed session branch.
+    pub(crate) indexed_present: bool,
+    /// [`crate::resolver_core::ResolverContext::is_request_bound`] of the
+    /// context handed to the resolver-tier builder.
+    pub(crate) request_bound: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEMPLATE_CLASS_LANE_BINDINGS: std::cell::RefCell<Vec<TemplateClassLaneBinding>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn record_template_class_lane_binding(binding: TemplateClassLaneBinding) {
+    TEMPLATE_CLASS_LANE_BINDINGS.with(|slot| slot.borrow_mut().push(binding));
+}
+
+#[cfg(test)]
+#[path = "template_class_lane_context_tests.rs"]
+mod template_class_lane_context_tests;
+
+/// Drain every [`TemplateClassLaneBinding`] recorded on this thread.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "drained by the in-crate template-class lane fixture; exposed under \
+                  test-support so an integration fixture can read the same record"
+    )
+)]
+pub(crate) fn take_template_class_lane_bindings() -> Vec<TemplateClassLaneBinding> {
+    TEMPLATE_CLASS_LANE_BINDINGS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
 impl VerterHost {
     pub fn get_source(&self, canonical_or_alias: &str) -> Option<std::sync::Arc<str>> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -65,6 +113,19 @@ impl VerterHost {
     /// seed's own currentness proof, which the fixed view carries as an
     /// explicit typed fact
     /// ([`crate::resolver_store::ColdSeedHostStoreView::is_current`]).
+    ///
+    /// BOTH branches bind a REQUEST-BOUND context before delegating. The
+    /// builder's `classify_binding` demands `prepared_value_decl` for every
+    /// template `:class` subject that is a script binding, and a prepared
+    /// declaration can only be served against a per-request store view — so
+    /// the base branch constructs a [`HostResolverContext`] exactly as the
+    /// cold branch constructs its [`SessionResolverContext`]. The
+    /// resolver-tier builder takes `&dyn RequestBoundResolverContext`, which
+    /// makes a non-request-bound binding here a compile error rather than a
+    /// cache-presence-dependent runtime abort.
+    ///
+    /// [`HostResolverContext`]: crate::resolver_core::HostResolverContext
+    /// [`SessionResolverContext`]: crate::resolver_core::SessionResolverContext
     pub(crate) fn build_template_class_semantic_facts(
         &self,
         canonical: &str,
@@ -84,8 +145,24 @@ impl VerterHost {
                 .get(canonical, whole_hash)
                 .is_some()
         {
+            // Cold-seed binding, the same shape every other base-lane request
+            // entry uses: a known-stale (`ReturnOnly`) read fails every nested
+            // warm validation closed, so no result is ever validated against a
+            // superseded snapshot.
+            let base = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx =
+                crate::resolver_core::HostResolverContext::from_cold_seed(self, &base, overlay);
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                use crate::resolver_core::ResolverContext;
+                record_template_class_lane_binding(TemplateClassLaneBinding {
+                    indexed_present: true,
+                    request_bound: ctx.is_request_bound(),
+                });
+            }
             return crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
-                self,
+                &ctx,
                 canonical,
                 whole_hash,
                 script,
@@ -109,6 +186,14 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            use crate::resolver_core::ResolverContext as _;
+            record_template_class_lane_binding(TemplateClassLaneBinding {
+                indexed_present: false,
+                request_bound: ctx.is_request_bound(),
+            });
+        }
         crate::project_semantic_dispatch::template_class_facts::build_template_class_semantic_facts(
             &ctx, canonical, whole_hash, script, raw, scope,
         )
@@ -369,10 +454,7 @@ impl VerterHost {
             return;
         }
         // raw_template_analysis lives on DerivedRawState (D48 split).
-        let mut derived_ref = self
-            .derived_raw_cache()
-            .entry(canonical.to_string())
-            .or_default();
+        let mut derived_ref = self.derived_raw_entry_or_default(canonical.to_string());
         derived_ref
             .value_mut()
             .install_raw_template_analysis(template, admission);
@@ -414,11 +496,12 @@ impl VerterHost {
         };
         let current = self.resolver_store_view_read().current()?;
         use crate::resolver_core::StoreView;
-        if !signature
-            .facts
-            .iter()
-            .all(|fact| current.view().validates(fact))
-        {
+        // The view is borrowed ONCE for the whole signature. Re-borrowing
+        // it per fact opened the widest straddle window in the tree: a
+        // concurrent writer could move state between two facts of the
+        // SAME signature and each half would validate against a different
+        // world.
+        if !current.view().validates_fact_signature(&signature.facts) {
             return None;
         }
         crate::fact_signature_helpers::observe_fact_signature(&signature.facts);
@@ -2238,10 +2321,7 @@ impl VerterHost {
         // caller's statement verbatim. Its currency rides the
         // `ExactResolution` facts the exact-table sync below installs.
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical.clone())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical.clone());
             derived_ref.value_mut().import_routes = import_routes.clone();
         }
 

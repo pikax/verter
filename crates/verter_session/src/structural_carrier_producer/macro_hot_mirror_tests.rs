@@ -780,7 +780,9 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
 
     // 1st demand under the broken lease: returns None, marks non-cacheability, and
     // leaves the mirror slot VACANT (retryable), never a committed permanent None.
-    let (h1, rs1) = host.with_fact_tracer(|| macro_type_arg_hot_ref(&host, "/L.vue", macro_index));
+    let (h1, rs1) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        macro_type_arg_hot_ref(&host, "/L.vue", macro_index)
+    });
     assert!(
         h1.is_none(),
         "a broken-lease macro-arg demand cannot build a hot ref"
@@ -801,7 +803,9 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     // 2nd demand (lease still broken): the vacant slot RE-RUNS and re-marks — proof
     // the transient miss was not frozen. Pre-fix the committed None short-circuits
     // (no re-run, no mark).
-    let (h2, rs2) = host.with_fact_tracer(|| macro_type_arg_hot_ref(&host, "/L.vue", macro_index));
+    let (h2, rs2) = host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        macro_type_arg_hot_ref(&host, "/L.vue", macro_index)
+    });
     assert!(h2.is_none(), "still broken lease → still None");
     assert!(
         rs2.non_cacheable_read_observed(),
@@ -841,9 +845,10 @@ fn broken_lease_type_decl_accessor_marks_non_cacheability_via_into_option() {
     );
     memo.release_retained_snapshot_for_test();
 
-    let (result, read_set) = host.with_fact_tracer(|| {
-        memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B")
-    });
+    let (result, read_set) = host
+        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B")
+        });
     assert!(
         result.is_none(),
         "a broken-lease type_decl demand reads as None (fail-closed)"

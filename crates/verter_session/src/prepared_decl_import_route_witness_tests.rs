@@ -21,10 +21,10 @@
 //! digest from two different route-table source orders.
 //!
 //! The rail is now the witness itself: resolving the owner's authored
-//! specifiers through the shared route-edge policy fans the sealed
-//! transactions' own observations (the exhausted probe set for a miss)
-//! onto the bundle's read set, and a store view validates them against
-//! the immutable resolution world it captured.
+//! specifiers through the shared route-edge policy fans each sealed
+//! transaction's derived Decision node onto the bundle's read set. A store
+//! view validates those nodes against the immutable resolution world whose
+//! DAG retains the exhausted probe set for a miss.
 //!
 //! ## Pinned properties
 //!
@@ -95,7 +95,7 @@ fn owner_with_absent_dependency(owner: &str) -> VerterHost {
     );
     let view = host.resolver_store_view_read().into_owned_view();
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, owner)
+        .prepared_decl_bundle_with_store_view(&view, None, owner)
         .expect("the owner's bundle must materialise");
     host
 }
@@ -196,7 +196,7 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
     host.provenance().reset();
 
     let _first = host
-        .prepared_decl_bundle_with_store_view(&view, owner)
+        .prepared_decl_bundle_with_store_view(&view, None, owner)
         .expect("first prepared_decl_bundle call must materialise a bundle");
     assert_eq!(
         host.provenance().snapshot().bundle_materializations,
@@ -205,7 +205,7 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
     );
 
     let _second = host
-        .prepared_decl_bundle_with_store_view(&view, owner)
+        .prepared_decl_bundle_with_store_view(&view, None, owner)
         .expect("second prepared_decl_bundle call must return a bundle");
     let after_second = host.provenance().snapshot();
     assert_eq!(
@@ -225,12 +225,13 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
     );
 }
 
-/// FAIL-CLOSED: an import-bearing owner whose witness is UNROOTABLE must
-/// leave no warm bundle candidate.
+/// FAIL-CLOSED: an import-bearing owner whose witness is REFUSED must leave no
+/// warm bundle candidate.
 ///
-/// `owner_import_route_witness` returns `None` for a refused resolution,
-/// an unreadable parse surface, or a union that overflows
-/// `FACT_SIGNATURE_CAP`. The bundle's values are RESOLVED canonicals, so
+/// Decision facts make ordinary large witnesses bounded. This fixture uses
+/// the typed test seam for the surviving upstream-refusal outcome and proves
+/// the session producer still propagates it as `UnrootableRoute`. The bundle's
+/// values are RESOLVED canonicals, so
 /// the owner's own `FileWholeHash` is not a validity oracle for them: a
 /// dependency appearing or retargeting moves no byte of the owner. A
 /// bundle admitted on `FileWholeHash` alone therefore keeps serving its
@@ -245,80 +246,28 @@ fn a_second_bundle_read_through_one_view_warm_hits() {
 /// non-empty, non-overflowing signature — so the producer is the only
 /// correct refusal point.
 ///
-/// OVERFLOW is the case staged here — one of two ways to reach `None`,
-/// the other being a REFUSED resolution. They are not interchangeable: a
-/// refusal observes nothing, overflow observes too much, and a fixture
-/// that asserts only `witness.is_none()` is satisfied by either. So this
-/// case asserts the quantity the bound is compared against, and measures
-/// its own headroom against a single-specifier owner rather than sitting
-/// at a hand-picked count one specifier past the threshold.
-///
-/// Each unresolved bare specifier carries its whole exhausted probe set,
-/// so a few dozen exceed the 1,024-fact bound. Bare specifiers are used
-/// rather than deep relative ones because they reach it at a fraction of
-/// the resolution cost.
 #[test]
 fn an_unrootable_witness_leaves_no_warm_bundle_candidate() {
-    const OWNER: &str = "/proj_irw_overflow/owner.ts";
-    const UNIT_OWNER: &str = "/proj_irw_overflow/unit.ts";
-    const SPECIFIERS: usize = 72;
+    const OWNER: &str = "/proj_irw_refused/owner.ts";
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let mut source = String::new();
-    for index in 0..SPECIFIERS {
-        source.push_str(&format!(
-            "import type {{ T{index} }} from '@absent{index}/pkg{index}/sub{index}';\n"
-        ));
-    }
-    source.push_str("export type Wrapper = { inner: number };\n");
-    upsert(&host, OWNER, &source);
-
-    // One specifier of the same shape, to measure what one costs. The
-    // fixture's headroom is then stated in specifiers rather than assumed.
     upsert(
         &host,
-        UNIT_OWNER,
-        "import type { TU } from '@absentu/pkgu/subu';\n\
-         export type UnitWrapper = { inner: number };\n",
+        OWNER,
+        "import type { T } from '@absent/pkg/sub';\n\
+         export type Wrapper = { inner: number };\n",
     );
-    let per_specifier = host
-        .owner_import_route_observation_count_for_tests(UNIT_OWNER)
-        .expect("fixture invariant: a single unresolved specifier must be observed, not refused");
-    assert!(
-        per_specifier > 0,
-        "fixture invariant: one unresolved bare specifier must observe at \
-         least one fact"
-    );
-
-    // Precondition 1: the owner really does author imports, and its
-    // observation set was BUILT (not refused).
-    let observed = host
-        .owner_import_route_observation_count_for_tests(OWNER)
-        .expect(
-            "fixture invariant: this case stages OVERFLOW, not refusal — a \
-             refused resolution observes nothing and would satisfy the \
-             unrootable assertion for the wrong reason",
-        );
-
-    // Precondition 2: it is unrootable BECAUSE it overflows, with more
-    // than one specifier of margin. A change to FACT_SIGNATURE_CAP or to
-    // witness composition that erodes the margin fails HERE, naming the
-    // numbers, instead of silently converting this into a refusal test.
-    assert!(
-        observed > verter_workspace::FACT_SIGNATURE_CAP + per_specifier,
-        "fixture invariant: {SPECIFIERS} unresolved specifiers must exceed \
-         FACT_SIGNATURE_CAP ({}) by more than the {per_specifier} facts one \
-         specifier contributes; observed {observed}",
-        verter_workspace::FACT_SIGNATURE_CAP
-    );
+    assert!(host.owner_import_route_witness_for_tests(OWNER).is_some());
+    host.test_force
+        .force_import_route_witness_refusal_for_tests
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(
         host.owner_import_route_witness_for_tests(OWNER).is_none(),
-        "an observation set past FACT_SIGNATURE_CAP must yield NO witness — \
-         never a truncated or empty one"
+        "the typed refusal seam must reach the producer's unrootable-witness arm"
     );
 
     let view = host.resolver_store_view_read().into_owned_view();
-    let bundle = host.prepared_decl_bundle_with_store_view(&view, OWNER);
+    let bundle = host.prepared_decl_bundle_with_store_view(&view, None, OWNER);
     assert!(
         bundle.is_some(),
         "the caller must still be SERVED its bundle — fail-closed refuses \
@@ -358,7 +307,7 @@ fn a_rootable_witness_still_admits_a_warm_bundle_candidate() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, OWNER)
+        .prepared_decl_bundle_with_store_view(&view, None, OWNER)
         .expect("the owner's bundle must materialise");
 
     assert!(
@@ -389,28 +338,21 @@ fn a_rootable_witness_still_admits_a_warm_bundle_candidate() {
 /// behaviourally, with a control that discriminates the two arms.
 #[test]
 fn component_meta_admits_nothing_for_an_owner_with_an_unrootable_witness() {
-    fn meta_candidates(owner: &str, specifiers: usize) -> usize {
+    fn meta_candidates(owner: &str, force_refusal: bool) -> usize {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let mut source = String::from("<script setup lang=\"ts\">\n");
-        for index in 0..specifiers {
-            source.push_str(&format!(
-                "import type {{ T{index} }} from '@absent{index}/pkg{index}/sub{index}';\n"
-            ));
-        }
-        source.push_str("defineProps<{ a: string }>()\n</script>\n<template><div/></template>\n");
-        upsert(&host, owner, &source);
-
-        let rootable = host.owner_import_route_witness_for_tests(owner).is_some();
+        let source = "<script setup lang=\"ts\">\n\
+                      import type { T } from '@absent/pkg/sub';\n\
+                      defineProps<{ a: string }>()\n\
+                      </script>\n<template><div/></template>\n";
+        upsert(&host, owner, source);
+        assert!(host.owner_import_route_witness_for_tests(owner).is_some());
+        host.test_force
+            .force_import_route_witness_refusal_for_tests
+            .store(force_refusal, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            rootable,
-            specifiers == 1,
-            "fixture invariant: {specifiers} unresolved bare specifiers must \
-             yield a {} witness",
-            if specifiers == 1 {
-                "rootable"
-            } else {
-                "unrootable"
-            }
+            host.owner_import_route_witness_for_tests(owner).is_none(),
+            force_refusal,
+            "the fixture must select the intended witness disposition"
         );
 
         let _meta = host.get_component_meta(owner);
@@ -421,17 +363,36 @@ fn component_meta_admits_nothing_for_an_owner_with_an_unrootable_witness() {
     }
 
     assert_eq!(
-        meta_candidates("/proj_irw_meta_open/Comp.vue", 36),
+        meta_candidates("/proj_irw_meta_open/Comp.vue", true),
         0,
         "an owner whose import-route witness is unrootable must leave no warm \
          component-meta candidate — the result's values are resolved \
          canonicals, and nothing left in the signature can invalidate them"
     );
     assert_eq!(
-        meta_candidates("/proj_irw_meta_rootable/Comp.vue", 1),
+        meta_candidates("/proj_irw_meta_rootable/Comp.vue", false),
         1,
         "CONTROL: the same producer with a ROOTABLE witness must still admit. \
          Without this the assertion above would pass on a tree that simply \
          never caches component-meta at all."
     );
 }
+
+// Sibling fixture modules, declared here rather than in `lib.rs`: both
+// pin behaviour of the same import-route-witness / prepared-decl-bundle
+// rail this module documents, and `lib.rs` carries a line ceiling that
+// exists to keep module declarations from accumulating there.
+#[path = "resolution_signature_growth_tests.rs"]
+mod resolution_signature_growth_tests;
+
+#[path = "non_cacheable_bundle_reuse_tests.rs"]
+mod non_cacheable_bundle_reuse_tests;
+
+#[path = "request_only_reuse_tests.rs"]
+mod request_only_reuse_tests;
+
+#[path = "parse_env_asymmetry_tests.rs"]
+mod parse_env_asymmetry_tests;
+
+#[path = "file_language_capability_tests.rs"]
+mod file_language_capability_tests;

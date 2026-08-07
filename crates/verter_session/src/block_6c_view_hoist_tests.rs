@@ -683,147 +683,28 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     );
 }
 
-/// Overlay flag-ordering arch guard.
-///
-/// Source-grep guard verifying the strict-ordering invariant in
-/// [`crate::resolver_core::request_store_view::CanonicalCompletionOverlay::write_completion_entry`]:
-/// each map insert AND the corresponding `_nonempty.store(true,
-/// Release)` MUST execute under the same write-lock critical section,
-/// so a concurrent reader that observes `_nonempty == false` is
-/// guaranteed to also observe the underlying map as empty for the
-/// canonical (no skip-the-overlay false-negative window).
-///
-/// Pre-fix shape (would FAIL this guard):
-/// ```ignore
-/// self.whole_hashes.write().insert(...);   // lock released here
-/// self.whole_hashes_nonempty.store(true, Ordering::Release);  // race window
-/// ```
-///
-/// Post-fix shape (passes this guard):
-/// ```ignore
-/// {
-///     let mut whole = self.whole_hashes.write();
-///     whole.insert(...);
-///     self.whole_hashes_nonempty.store(true, Ordering::Release);
-///     drop(whole);
-/// }
-/// ```
-///
-/// The arch guard reads the function source and asserts that each
-/// `_nonempty.store(true, Ordering::Release)` line is preceded
-/// (within the same brace-balanced block, immediately following the
-/// insert) by a write-lock guard binding that is NOT dropped before
-/// the store. The deterministic form here is: the function source
-/// must NOT contain the pre-fix sequence
-/// `self.whole_hashes.write().insert(...)` followed by the
-/// flag-store on the next non-comment line.
-///
-/// Discriminating: a pre-fix tree's `write_completion_entry` source
-/// would contain `self.whole_hashes.write().insert(canonical.to_owned(),
-/// whole_hash);` immediately followed by
-/// `self.whole_hashes_nonempty.store(true, Ordering::Release);`. The
-/// post-fix tree binds the write guard to a named variable
-/// (`let mut whole = self.whole_hashes.write();`) and stores the
-/// flag inside the brace-bounded critical section.
+/// Every validation-visible completion map publishes its presence flag
+/// before insertion while already holding that map's write lock. The
+/// instrumented writers assert both properties at runtime; the lookups then
+/// prove all three insertions are visible through the public overlay behavior.
 #[test]
-fn write_completion_entry_flag_set_under_write_lock() {
-    use std::fs;
-    use std::path::Path;
+fn completion_writers_publish_presence_under_the_map_lock_before_insertion() {
+    use crate::file_artifact_store::FileFacts;
+    use crate::resolver_core::DerivedFactKind;
 
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("resolver_core")
-        .join("request_store_view.rs");
-    let src =
-        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    let overlay = CanonicalCompletionOverlay::new();
+    overlay.verify_write_protocol_for_tests();
+    overlay.insert_whole_hash_for_tests("/whole.ts", [0x11; 16]);
+    overlay.insert_derived_hash_for_tests("/derived.ts", DerivedFactKind::Route, [0x22; 16]);
+    overlay.insert_file_facts_for_tests("/facts.ts", Arc::new(FileFacts::empty()));
 
-    let fn_needle = "fn write_completion_entry(";
-    let fn_idx = src
-        .find(fn_needle)
-        .unwrap_or_else(|| panic!("expected `{fn_needle}` in {}", path.display()));
-    let fn_end = src[fn_idx..]
-        .find("\n    }\n")
-        .expect("write_completion_entry fn close");
-    let window = &src[fn_idx..fn_idx + fn_end];
-
-    // Pre-fix anti-patterns: the chained `.write().insert(...)`
-    // releases the lock at the statement-end semicolon, then the
-    // flag store runs without the lock.
-    let pre_fix_anti_patterns = [
-        "self.whole_hashes\n            .write()\n            .insert(",
-        "self.whole_hashes.write().insert(",
-        "self.file_facts\n                .write()\n                .insert(",
-        "self.file_facts.write().insert(",
-    ];
-    for pat in pre_fix_anti_patterns {
-        assert!(
-            !window.contains(pat),
-            "write_completion_entry MUST NOT use the chained \
-             `self.<map>.write().insert(...)` pattern — that releases the write \
-             lock at the statement-end semicolon and leaves a race window where \
-             a concurrent reader can observe `_nonempty == false` while the map \
-             is already populated. Bind the write guard to a named variable and \
-             store the `_nonempty` flag BEFORE dropping the guard. Pattern \
-             found:\n{pat}\n\nWindow:\n{window}"
-        );
-    }
-
-    // Post-fix invariant: each `_nonempty.store(true, Ordering::Release)`
-    // line must appear inside a brace-bounded block that also
-    // contains the corresponding `write()` lock guard binding —
-    // proxy: the named-guard pattern is present.
-    let post_fix_named_guard_patterns = [
-        "let mut whole = self.whole_hashes.write();",
-        "self.whole_hashes_nonempty.store(true, Ordering::Release);",
-        "let mut facts = self.file_facts.write();",
-        "self.file_facts_nonempty.store(true, Ordering::Release);",
-        "let mut derived = self.derived_hashes.write();",
-        "self.derived_hashes_nonempty.store(true, Ordering::Release);",
-    ];
-    for pat in post_fix_named_guard_patterns {
-        assert!(
-            window.contains(pat),
-            "write_completion_entry MUST bind each write-lock guard to a named \
-             variable and store the corresponding `_nonempty` flag under the \
-             same critical section. Missing \
-             pattern:\n{pat}\n\nWindow:\n{window}"
-        );
-    }
-
-    // The post-fix shape stores the flag BEFORE dropping the guard.
-    // Verify each `_nonempty.store(...)` precedes the corresponding
-    // `drop(<guard>)` in the source. The relative ordering of these
-    // two lines is the actual safety invariant — if a future edit
-    // swaps `drop(whole)` before `self.whole_hashes_nonempty.store(...)`,
-    // the race window reopens.
-    for (guard, flag_store) in [
-        (
-            "drop(whole);",
-            "self.whole_hashes_nonempty.store(true, Ordering::Release);",
-        ),
-        (
-            "drop(facts);",
-            "self.file_facts_nonempty.store(true, Ordering::Release);",
-        ),
-        (
-            "drop(derived);",
-            "self.derived_hashes_nonempty.store(true, Ordering::Release);",
-        ),
-    ] {
-        let store_idx = window
-            .find(flag_store)
-            .unwrap_or_else(|| panic!("flag store `{flag_store}` not found in window"));
-        let drop_idx = window
-            .find(guard)
-            .unwrap_or_else(|| panic!("guard drop `{guard}` not found in window"));
-        assert!(
-            store_idx < drop_idx,
-            "write_completion_entry MUST store the `_nonempty` flag BEFORE \
-             dropping the write-lock guard. A reader that observes the flag as \
-             `false` must be guaranteed that the writer has not yet inserted \
-             into the map (the writer's insert + flag-store happen under the \
-             same critical section). Flag-store `{flag_store}` at byte \
-             {store_idx} appears AFTER guard drop `{guard}` at byte {drop_idx}."
-        );
-    }
+    assert_eq!(
+        overlay.peek_whole_hash_for_tests("/whole.ts"),
+        Some([0x11; 16])
+    );
+    assert_eq!(
+        overlay.lookup_derived_hash_for_tests("/derived.ts", DerivedFactKind::Route),
+        Some([0x22; 16])
+    );
+    assert!(overlay.tracks_file_for_tests("/facts.ts"));
 }

@@ -1,4 +1,9 @@
-//! Matrix slice: `materialize_structure` × `route_surface`.
+//! Behavioural slice: `materialize_structure` × barrel-route walk.
+//!
+//! Retained OUTSIDE the cross-consumer completeness grid (see
+//! `app_config_proof_observes_no_route_facts.rs` for why the former
+//! `route_surface` column is gone). Asserts RouteDb route WALKING, which
+//! is unaffected by the deleted `EffectiveExportSet` arm.
 //!
 //! Discrimination: route_surface facts are produced when the
 //! materializer's cold path drives an import-route walk that

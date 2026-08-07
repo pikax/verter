@@ -61,7 +61,11 @@ fn component_meta_outcome_from_tracer(
             }
             Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
         }
-        crate::resolver_core::FactReadSetFinalise::Overflow => {
+        // Both size and STABILITY refusals propagate transitively: the
+        // value is served, nothing is published, and every enclosing
+        // scope inherits the refusal.
+        crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
             Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
         }
     };
@@ -293,75 +297,79 @@ impl ComponentMetaRequestHost for VerterHost {
         store_view: Option<&Self::View>,
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
-        let (value, finalise) = named_fact_tracer!(self, TracerScope::ComponentMetaRequest, || {
-            // Consume the request-bound `store_view` to construct a
-            // `HostResolverContext` so the cold-compute pipeline binds
-            // overlay-aware reads to the same view the executor already
-            // snapshotted. The singleflight executor always supplies a
-            // view in production (`snapshot_view` builds one above);
-            // the `None` branch falls back to building a view here for
-            // robustness. `base_is_current` carries the executor snapshot's
-            // currentness so the `HostResolverContext` fails its nested
-            // warm-cache probes closed on a non-current seed.
-            let overlay =
-                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            match store_view {
-                Some(view) => {
-                    if let Some(captured) = captured {
-                        return self.compute_component_meta_state_from_captured_with_view_arg(
+        let (value, finalise) = named_fact_tracer!(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self),
+            TracerScope::ComponentMetaRequest,
+            || {
+                // Consume the request-bound `store_view` to construct a
+                // `HostResolverContext` so the cold-compute pipeline binds
+                // overlay-aware reads to the same view the executor already
+                // snapshotted. The singleflight executor always supplies a
+                // view in production (`snapshot_view` builds one above);
+                // the `None` branch falls back to building a view here for
+                // robustness. `base_is_current` carries the executor snapshot's
+                // currentness so the `HostResolverContext` fails its nested
+                // warm-cache probes closed on a non-current seed.
+                let overlay =
+                    std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                match store_view {
+                    Some(view) => {
+                        if let Some(captured) = captured {
+                            return self.compute_component_meta_state_from_captured_with_view_arg(
+                                canonical,
+                                mode,
+                                captured,
+                                view,
+                                &overlay,
+                                base_is_current,
+                            );
+                        }
+                        let whole_hash = self
+                            .current_or_read_whole_hash(canonical)
+                            .unwrap_or_default();
+                        self.compute_component_meta_state_with_view_arg(
                             canonical,
                             mode,
-                            captured,
+                            whole_hash,
                             view,
                             &overlay,
                             base_is_current,
-                        );
+                        )
                     }
-                    let whole_hash = self
-                        .current_or_read_whole_hash(canonical)
-                        .unwrap_or_default();
-                    self.compute_component_meta_state_with_view_arg(
-                        canonical,
-                        mode,
-                        whole_hash,
-                        view,
-                        &overlay,
-                        base_is_current,
-                    )
-                }
-                None => {
-                    // Cold compute with no driver-supplied view: this runs
-                    // inside `run_stable_request`'s `compute`, whose `is_stable`
-                    // fence gates promotion. Seed from the cold-seed view AND
-                    // carry its currentness so the derived context fails its
-                    // nested warm-cache probes closed on a non-current seed.
-                    let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-                    let seed_is_current = cold_seed.is_current();
-                    let view = cold_seed.into_inner();
-                    if let Some(captured) = captured {
-                        return self.compute_component_meta_state_from_captured_with_view_arg(
+                    None => {
+                        // Cold compute with no driver-supplied view: this runs
+                        // inside `run_stable_request`'s `compute`, whose `is_stable`
+                        // fence gates promotion. Seed from the cold-seed view AND
+                        // carry its currentness so the derived context fails its
+                        // nested warm-cache probes closed on a non-current seed.
+                        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+                        let seed_is_current = cold_seed.is_current();
+                        let view = cold_seed.into_inner();
+                        if let Some(captured) = captured {
+                            return self.compute_component_meta_state_from_captured_with_view_arg(
+                                canonical,
+                                mode,
+                                captured,
+                                &view,
+                                &overlay,
+                                seed_is_current,
+                            );
+                        }
+                        let whole_hash = self
+                            .current_or_read_whole_hash(canonical)
+                            .unwrap_or_default();
+                        self.compute_component_meta_state_with_view_arg(
                             canonical,
                             mode,
-                            captured,
+                            whole_hash,
                             &view,
                             &overlay,
                             seed_is_current,
-                        );
+                        )
                     }
-                    let whole_hash = self
-                        .current_or_read_whole_hash(canonical)
-                        .unwrap_or_default();
-                    self.compute_component_meta_state_with_view_arg(
-                        canonical,
-                        mode,
-                        whole_hash,
-                        &view,
-                        &overlay,
-                        seed_is_current,
-                    )
                 }
             }
-        });
+        );
         component_meta_outcome_from_tracer(value, finalise)
     }
 
@@ -461,8 +469,10 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
         store_view: Option<&Self::View>,
         base_is_current: bool,
     ) -> ComponentMetaComputeOutcome<Self::Resolution> {
-        let (value, finalise) =
-            named_fact_tracer!(self.host, TracerScope::ComponentMetaRequest, || {
+        let (value, finalise) = named_fact_tracer!(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(self.host),
+            TracerScope::ComponentMetaRequest,
+            || {
                 // View-aware cold compute: thread the session view through a
                 // `SessionResolverContext` so the resolver-tier reads (prepared
                 // declarations, dep-source materialisation, registry+macro shapes)
@@ -529,7 +539,8 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
                         &cold_seed,
                         &self.overlay,
                     )
-            });
+            }
+        );
         component_meta_outcome_from_tracer(value, finalise)
     }
 

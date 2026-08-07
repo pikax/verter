@@ -1041,6 +1041,51 @@ impl VerterHost {
         self.project_type_store.derived_raw_cache().entries()
     }
 
+    /// Get or create one derived-state row while advancing the strict
+    /// self-root authority around a membership insertion. Mutating an existing
+    /// row does not move trackedness and therefore leaves the authority stable.
+    pub(crate) fn derived_raw_entry_or_default(
+        &self,
+        canonical: String,
+    ) -> dashmap::mapref::one::RefMut<'_, String, crate::types::DerivedRawState> {
+        use dashmap::mapref::entry::Entry;
+
+        match self.derived_raw_cache().entry(canonical) {
+            Entry::Occupied(entry) => entry.into_ref(),
+            Entry::Vacant(entry) => {
+                struct EndTransition<'a>(&'a dyn verter_workspace::WorkspaceAccess);
+                impl Drop for EndTransition<'_> {
+                    fn drop(&mut self) {
+                        self.0.end_strict_self_root_transition();
+                    }
+                }
+                let workspace = self.ws();
+                workspace.begin_strict_self_root_transition();
+                let _transition = EndTransition(workspace.as_ref());
+                entry.insert(crate::types::DerivedRawState::default())
+            }
+        }
+    }
+
+    pub(crate) fn remove_derived_raw_entry(
+        &self,
+        canonical: &str,
+    ) -> Option<(String, crate::types::DerivedRawState)> {
+        if !self.derived_raw_cache().contains_key(canonical) {
+            return None;
+        }
+        struct EndTransition<'a>(&'a dyn verter_workspace::WorkspaceAccess);
+        impl Drop for EndTransition<'_> {
+            fn drop(&mut self) {
+                self.0.end_strict_self_root_transition();
+            }
+        }
+        let workspace = self.ws();
+        workspace.begin_strict_self_root_transition();
+        let _transition = EndTransition(workspace.as_ref());
+        self.derived_raw_cache().remove(canonical)
+    }
+
     /// Reference to the dependency-closure-domain DB's underlying storage
     /// (D48 split). Stores [`crate::types::DependencyState`] keyed by
     /// canonical id; call sites access resolution metadata
@@ -1061,7 +1106,7 @@ impl VerterHost {
     /// drop together).
     pub(crate) fn drop_all_per_canonical_compile_caches(&self, canonical: &str) {
         self.compile_cache().remove(canonical);
-        self.derived_raw_cache().remove(canonical);
+        let _ = self.remove_derived_raw_entry(canonical);
         self.dependency_cache().remove(canonical);
         // The content-addressed compile-output node lives on the
         // project-global store, not on the per-canonical ProfileState, so

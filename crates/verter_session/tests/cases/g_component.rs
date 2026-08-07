@@ -18,8 +18,6 @@ mod component_meta_result_matrix_member;
 mod component_meta_result_matrix_member_presence;
 #[path = "g_component/component_meta_result_matrix_module_aug_index_shape.rs"]
 mod component_meta_result_matrix_module_aug_index_shape;
-#[path = "g_component/component_meta_result_matrix_route_surface.rs"]
-mod component_meta_result_matrix_route_surface;
 #[path = "g_component/component_meta_result_unrelated_edit_stays_warm.rs"]
 mod component_meta_result_unrelated_edit_stays_warm;
 #[path = "g_component/component_meta_route_facts_flow_into_signature.rs"]

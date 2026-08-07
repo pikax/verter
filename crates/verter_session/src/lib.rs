@@ -223,7 +223,7 @@ mod svelte_vertical_tests;
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
 #[cfg(test)]
-mod overlay_bundle_memo_tests;
+mod request_bundle_memo_tests;
 // `SessionView::content_hash_for` is a view-authoritative current-
 // content oracle, consistent with `source()` — base + overlay
 // fallthrough route through the scheduler authority, never a

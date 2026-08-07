@@ -7,11 +7,9 @@
 //! wildcard specifiers are resolved once. Individual `(barrel, name)` lookups
 //! then read the surface in O(1). Route misses are cached as `RouteResult::Miss`.
 //!
-//! Module-augmentation stitching is owned by `ProjectSemanticDispatch`. The
-//! `effective_export_sets` table remains only as the validation backing for the
-//! legacy `FactKey::EffectiveExportSet` fact shape; there is no production cold
-//! publisher for it. New semantic results observe
-//! `ModuleAugmentationIndexShape` and contributor facts directly.
+//! Module-augmentation stitching is owned by `ProjectSemanticDispatch`.
+//! Semantic results observe `ModuleAugmentationIndexShape` and contributor
+//! facts directly; `RouteSurface` is a one-arm fact domain.
 //!
 //! Concurrent cold requests for the same barrel surface or route key coalesce
 //! via singleflight.
@@ -21,7 +19,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_semantic::facts::registry::SymbolSpace;
 
-use crate::file_artifact_store::ProjectIdentity;
+use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
 use crate::resolver_core::{
@@ -30,7 +28,6 @@ use crate::resolver_core::{
 };
 use crate::types::Hash16;
 
-mod effective_export_set;
 #[path = "route_db_singleflight.rs"]
 mod singleflight_inner;
 
@@ -129,10 +126,50 @@ impl BarrelSurfaceKey {
     }
 }
 
-pub(crate) use effective_export_set::build_module_augmentation_index_shape_fact_key;
-pub use effective_export_set::{
-    EffectiveExportEntry, EffectiveExportSetEntry, EffectiveExportSetKey, EffectiveExportSetScope,
-};
+/// Build the parse-domain `FactKey::ModuleAugmentationIndexShape`
+/// payload an augmentation-index consumer observes for the queried
+/// target — the sole `RouteSurface` fact shape. The parallel optional
+/// fields hold the concrete target value; the `target_kind_tag`
+/// discriminates.
+pub(crate) fn build_module_augmentation_index_shape_fact_key(
+    target: &AugmentationTargetKind,
+) -> verter_semantic::facts::FactKey {
+    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+    match target {
+        AugmentationTargetKind::ExternalSpecifier(spec) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
+                external_specifier: Some(spec.clone()),
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            }
+        }
+        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                external_specifier: None,
+                resolved_relative_canonical: Some(Arc::clone(canon)),
+                wildcard_pattern: None,
+            }
+        }
+        AugmentationTargetKind::WildcardAmbient(pat) => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: Some(pat.clone()),
+            }
+        }
+        AugmentationTargetKind::GlobalAugmentation => {
+            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            }
+        }
+    }
+}
 
 /// Result of resolving a named export route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,13 +258,6 @@ pub struct RouteDb {
     /// [`BarrelSurfaceKey`] → full wildcard route surface (lazy, built once).
     barrel_surfaces: ValidatedFactCache<BarrelSurfaceKey, BarrelRouteSurface>,
     barrel_singleflight: SingleflightGroup<BarrelSurfaceKey, Arc<BarrelRouteSurface>, ()>,
-    /// Per-provider effective export surface (post-augmentation
-    /// stitching) keyed by `(provider, project_identity,
-    /// resolve_env_hash, lib_env_hash, session_scope)` (R15 + R21 + R29).
-    /// `session_scope` is the CONTENT-FREE [`EffectiveExportSetScope`]
-    /// (R6); the overlay-set content fingerprint is matched on the value,
-    /// never in this key.
-    effective_export_sets: ValidatedFactCache<EffectiveExportSetKey, EffectiveExportSetEntry>,
     /// Test-only provenance counter — bumped each time
     /// [`Self::get_or_resolve_route_observing_facts`] returns through
     /// the warm-hit branch (validated cache lookup succeeded). Pairs
@@ -258,7 +288,6 @@ impl RouteDb {
             route_singleflight: SingleflightGroup::default(),
             barrel_surfaces: ValidatedFactCache::default(),
             barrel_singleflight: SingleflightGroup::default(),
-            effective_export_sets: ValidatedFactCache::default(),
             #[cfg(any(test, feature = "test-support"))]
             route_warm_fact_bubble_emissions: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -372,10 +401,10 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        let tracer_host = ctx.host_for_fact_tracer_install();
-        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
-            self.get_or_resolve_route_with_facts_in_scope(key, view, probe, resolve)
-        })
+        crate::fact_signature_helpers::with_cacheability_scope(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            |probe| self.get_or_resolve_route_with_facts_in_scope(key, view, probe, resolve),
+        )
         .0
     }
 
@@ -518,10 +547,10 @@ impl RouteDb {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        let tracer_host = ctx.host_for_fact_tracer_install();
-        crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
-            self.get_or_resolve_route_observing_facts_in_scope(key, view, probe, resolve)
-        })
+        crate::fact_signature_helpers::with_cacheability_scope(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            |probe| self.get_or_resolve_route_observing_facts_in_scope(key, view, probe, resolve),
+        )
         .0
     }
 
@@ -662,19 +691,6 @@ impl RouteDb {
         for key in barrel_keys {
             self.barrel_surfaces.remove(&key);
         }
-
-        // Evict every effective-export-set candidate for this
-        // provider across all `(project, resolve_env, lib_env)` keys.
-        let effective_keys: Vec<_> = self
-            .effective_export_sets
-            .snapshot_all()
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|key| key.provider_canonical == provider_canonical)
-            .collect();
-        for key in effective_keys {
-            self.effective_export_sets.remove(&key);
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -703,9 +719,10 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(host, |probe| {
-            self.get_or_build_barrel_surface_in_scope(key, view, probe, build)
-        })
+        crate::fact_signature_helpers::with_cacheability_scope(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+            |probe| self.get_or_build_barrel_surface_in_scope(key, view, probe, build),
+        )
         .0
     }
 
@@ -779,9 +796,7 @@ impl RouteDb {
     /// this stays at 0 over the steady-state loop.
     #[must_use]
     pub fn signature_overflow_count(&self) -> u64 {
-        self.routes.signature_overflow_count()
-            + self.barrel_surfaces.signature_overflow_count()
-            + self.effective_export_sets.signature_overflow_count()
+        self.routes.signature_overflow_count() + self.barrel_surfaces.signature_overflow_count()
     }
 
     /// R20 instrumentation: total `admission_refused_count` across
@@ -791,23 +806,19 @@ impl RouteDb {
     /// `insert_arc_with_kind` advance it.
     #[must_use]
     pub fn admission_refused_count(&self) -> u64 {
-        self.routes.admission_refused_count()
-            + self.barrel_surfaces.admission_refused_count()
-            + self.effective_export_sets.admission_refused_count()
+        self.routes.admission_refused_count() + self.barrel_surfaces.admission_refused_count()
     }
 
     // -----------------------------------------------------------------------
     // Clearing
     // -----------------------------------------------------------------------
 
-    /// Clear all cached routes, barrel surfaces, and effective export
-    /// sets.
+    /// Clear all cached routes and barrel surfaces.
     pub fn clear(&self) {
         self.routes.clear();
         self.route_singleflight.clear();
         self.barrel_surfaces.clear();
         self.barrel_singleflight.clear();
-        self.effective_export_sets.clear();
         // Reset the test-only fact-bubble provenance counters so each
         // test sees a clean baseline after a host-wide clear.
         #[cfg(any(test, feature = "test-support"))]

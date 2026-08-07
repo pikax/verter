@@ -1208,7 +1208,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the same fail-closed miss as an absent source (a `Synthesized`
         // skeleton always raises; only a bare authored/projected source can
         // miss here).
-        let result = raised?.node();
+        let result = raised.at_optional_boundary()?.node();
 
         // Origin edge + dep signature, mirroring `build_instantiate`'s shell. The
         // instance object is synthesized from the `.vue`'s macro type arguments,
@@ -3089,6 +3089,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resolve_rel,
             overlay_discriminator,
         );
+
+        // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
+        // augmenter add/remove/reorder and on any augmenter's
+        // `parse_stable_hash` move). Observed onto the active tracer so it
+        // enters this build's `ReadSetSignature.facts`.
+        //
+        // Observed HERE, immediately after the index read and BEFORE every
+        // early return, because the NEGATIVE outcomes are reads too and their
+        // results are cacheable:
+        //   - empty set: "no augmenter targets this module" is a read of the
+        //     index whose answer changes the moment an augmenter appears;
+        //   - non-empty set, no contributor for this declaration: the set is
+        //     keyed by target MODULE, not by declaration, so an existing
+        //     augmenter GAINING this declaration moves the set fingerprint
+        //     (it folds each augmenter's `parse_stable_hash`).
+        // A cacheable "no augmentation" surface published without this fact
+        // has nothing keyed on the augmenter set and serves stale once either
+        // of those happens.
+        //
+        // The fingerprint is stable across the rest of this function: the
+        // stale-key self-heal below re-publishes under the IDENTICAL
+        // fingerprint by construction, so observing before it is equivalent to
+        // observing after it.
+        //
+        // The shape fact's `canonical_id` is attribution only —
+        // `ModuleAugmentationIndexShape` validation keys entirely on the typed
+        // `FactKey` (target kind + specifier/canonical) and `expected_hash`,
+        // never on this field.
+        let shape_attribution = match &target {
+            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
+            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
+            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
+            AugmentationTargetKind::GlobalAugmentation => String::new(),
+        };
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: shape_attribution,
+                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
+            ),
+        );
+
         if augmenter_set.entries.is_empty() {
             return None;
         }
@@ -3359,31 +3406,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
 
-        // Fact rail: the augmenter-set shape fact (invalidates
-        // on augmenter add/remove/reorder) + each augmenter's whole-hash
-        // (invalidates on augmenter content edit). Observed onto the active
-        // tracer so they enter this build's `ReadSetSignature.facts`. The shape
-        // fact's `canonical_id` is attribution only — `ModuleAugmentationIndexShape`
-        // validation keys entirely on the typed `FactKey` (target kind +
-        // specifier/canonical) and `expected_hash`, never on this field.
-        let shape_attribution = match &target {
-            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
-            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
-            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
-            AugmentationTargetKind::GlobalAugmentation => String::new(),
-        };
-        crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution,
-                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
-                        &target,
-                    ),
-                    lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: augmenter_set.fingerprint,
-                },
-            ),
-        );
+        // Fact rail, part 2 — each contributing augmenter's whole-hash
+        // (invalidates on augmenter content edit). The augmenter-set shape
+        // fact that pairs with these was observed above, before the early
+        // returns, so the negative outcomes carry it too.
+        //
         // Parent transitive contributor rule, emitted from the ONE carrier in
         // ONE step per contributor: the content-version fact
         // (`FileWholeHash`) AND the typed SOURCE-ENV observation

@@ -62,6 +62,17 @@ fn owner_import_surface_producer_calls_resolve_imported_type_root_with_facts() {
 /// lookup (`get_with_view`) that fact-validates the cached entry
 /// against the caller's `StoreView`. The legacy `get` stays
 /// reserved for tests + introspection.
+///
+/// The validation must go through the view's WHOLE-SIGNATURE entry
+/// point, not a locally written `.iter().all(|f| view.validates(f))`
+/// loop. The two are indistinguishable while that loop is also the
+/// trait's default body, and stop being so the moment a view states a
+/// rule the per-fact predicate cannot express — at which point an
+/// inlined loop silently opts this cache out of it. The behavioural
+/// half of that invariant lives in
+/// `verter_session::resolver_core::central_signature_rail_tests`, which
+/// drives every `ValidatedFactCache` reader against a view whose only
+/// override is the central rail.
 #[test]
 fn owner_import_surface_db_has_view_aware_lookup() {
     let source = read_file("src/owner_import_surface.rs");
@@ -71,9 +82,16 @@ fn owner_import_surface_db_has_view_aware_lookup() {
          the cached entry against the live store view (R3)."
     );
     assert!(
-        source.contains("view.validates(fact)"),
-        "OwnerImportSurfaceDb::get_with_view MUST iterate the surface's \
-         fact_dep_signature and validate each fact against the caller's StoreView."
+        source.contains("view.validates_fact_signature(&candidate.read_set_signature.facts)"),
+        "OwnerImportSurfaceDb::get_with_view MUST validate the surface's \
+         fact_dep_signature through the view's whole-signature entry point \
+         `StoreView::validates_fact_signature`, not a local per-fact loop."
+    );
+    assert!(
+        !source.contains("all(|fact| view.validates(fact))"),
+        "OwnerImportSurfaceDb::get_with_view MUST NOT re-inline the per-fact \
+         validation loop — that is exactly the bypass the whole-signature entry \
+         point exists to close."
     );
 }
 

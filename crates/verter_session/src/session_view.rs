@@ -193,10 +193,21 @@ pub trait SessionView: Send + Sync {
     ///
     /// Reads the one resolve-domain store
     /// ([`crate::resolved_import_facts::ResolvedImportFactsDb`]) at the
-    /// `(canonical, content_hash_for(canonical),
-    /// env_hashes().parse_env_hash, env_hashes().resolve_env_hash,
-    /// RESOLVED_IMPORT_FACTS_RESOLVER_VERSION)` slot and serves the
-    /// candidate whose recorded import-route witness still validates.
+    /// slot named by the store view's own
+    /// [`resolved_import_facts_key_for`](crate::resolver_store::HostStoreView::resolved_import_facts_key_for)
+    /// composer — `(canonical, content_hash_for(canonical),
+    /// PER-CANONICAL parse/resolve env, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION)`
+    /// — and serves the candidate whose recorded import-route witness
+    /// still validates.
+    ///
+    /// The env dimensions are NOT this view's `env_hashes()` bundle. That
+    /// bundle is workspace-level on every production constructor, while
+    /// the producer keys per-canonical (owning project's env, else the
+    /// workspace default) — and `resolve_env_hash` folds per-project
+    /// aliases, compiler options and references, so for a canonical owned
+    /// by a project carrying real resolution configuration the two
+    /// compose different slots. Both readers of this store go through the
+    /// one composer so they cannot diverge.
     /// `None` means the slot is cold or every retained bundle predates a
     /// resolution change — either way the resolver repopulates on
     /// demand and downstream consumers re-read from here instead of
@@ -285,6 +296,17 @@ pub trait SessionView: Send + Sync {
 pub struct HostView {
     base: Arc<VerterHost>,
     env_hashes: EnvHashes,
+    /// An EXPLICITLY pinned env bundle for the resolve-domain key, or
+    /// `None` to compose it per-canonical.
+    ///
+    /// `Some` only when a caller supplied the bundle itself
+    /// (`with_env_hashes` / `with_overlay_hashes`): that caller is
+    /// addressing one specific slot and must keep addressing it.
+    /// `None` on every derived constructor — those previously reused the
+    /// view's workspace-level `env_hashes` as key dimensions, which for a
+    /// canonical owned by a project with real resolution config addresses
+    /// a slot the per-canonical producer never wrote.
+    key_env_override: Option<EnvHashes>,
 }
 
 impl HostView {
@@ -296,7 +318,11 @@ impl HostView {
     /// instead.
     pub fn new(base: Arc<VerterHost>) -> Self {
         let env_hashes = base.host_view_env_hashes();
-        Self { base, env_hashes }
+        Self {
+            base,
+            env_hashes,
+            key_env_override: None,
+        }
     }
 
     /// Construct a `HostView` with explicit env hashes.
@@ -306,7 +332,11 @@ impl HostView {
     /// [`HostView::new`] which composes the workspace-default bundle.
     #[allow(dead_code)]
     pub fn with_env_hashes(base: Arc<VerterHost>, env_hashes: EnvHashes) -> Self {
-        Self { base, env_hashes }
+        Self {
+            base,
+            env_hashes,
+            key_env_override: Some(env_hashes),
+        }
     }
 
     /// Borrow the underlying host. Reserved for impls that need
@@ -326,20 +356,38 @@ impl HostView {
 /// then validated against the host's store view, exactly as the
 /// resolve-imports fact validator does — the store has one read, and
 /// that read roots the bundle's import-route witness.
+///
+/// The key comes from the store view's own
+/// [`crate::resolver_store::HostStoreView::resolved_import_facts_key_for`]
+/// composer — the SAME one the resolve-imports fact validator uses — so the
+/// two readers of this slot cannot compose different keys. Notably the env
+/// dimensions are PER-CANONICAL, mirroring the producer's project
+/// resolution: `resolve_env_hash` folds per-project aliases, compiler
+/// options and references, so a view's workspace-level bundle would address
+/// a slot the producer never wrote for any canonical owned by a project
+/// carrying real resolution configuration.
 fn resolved_import_facts_for_view(
     base: &VerterHost,
     canonical: &str,
     content_hash: verter_semantic::analysis::Hash16,
-    env_hashes: &EnvHashes,
+    key_env_override: Option<&EnvHashes>,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
-    let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-        canonical: Arc::from(canonical),
-        content_hash,
-        parse_env_hash: env_hashes.parse_env_hash,
-        resolve_env_hash: env_hashes.resolve_env_hash,
-        resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-    };
     let (view, _is_current) = base.resolver_store_view_with_currentness();
+    let key = match key_env_override {
+        // A caller that PINNED an explicit env bundle addresses exactly that
+        // slot — the documented `with_env_hashes` / `with_overlay_hashes`
+        // capability, and what lets two views over one canonical read their
+        // own distinct resolve-env entries.
+        Some(env) => crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: Arc::from(canonical),
+            content_hash,
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        },
+        // No pin: compose PER-CANONICAL through the one shared composer.
+        None => view.resolved_import_facts_key_for(canonical, content_hash),
+    };
     base.project_type_store()
         .resolved_import_facts()
         .get_if_valid(&key, &view)
@@ -399,7 +447,7 @@ impl SessionView for HostView {
             self.base.as_ref(),
             canonical,
             content_hash,
-            &self.env_hashes,
+            self.key_env_override.as_ref(),
         )
     }
 
@@ -436,6 +484,17 @@ pub struct OverlaidView {
     overlay_hashes: Arc<FxHashMap<String, Hash16>>,
     base: Arc<VerterHost>,
     env_hashes: EnvHashes,
+    /// An EXPLICITLY pinned env bundle for the resolve-domain key, or
+    /// `None` to compose it per-canonical.
+    ///
+    /// `Some` only when a caller supplied the bundle itself
+    /// (`with_env_hashes` / `with_overlay_hashes`): that caller is
+    /// addressing one specific slot and must keep addressing it.
+    /// `None` on every derived constructor — those previously reused the
+    /// view's workspace-level `env_hashes` as key dimensions, which for a
+    /// canonical owned by a project with real resolution config addresses
+    /// a slot the per-canonical producer never wrote.
+    key_env_override: Option<EnvHashes>,
     /// Overlay-set fingerprint, computed LAZILY on the first
     /// [`SessionView::fingerprint`] read via [`overlay_set_fingerprint`]
     /// over the immutable `overlay_hashes` map, then memoized for the
@@ -474,6 +533,7 @@ impl OverlaidView {
             overlay_hashes: Arc::new(overlay_hashes),
             base,
             env_hashes,
+            key_env_override: None,
             // Lazy: computed on the first `fingerprint()` read through the
             // single shared algorithm, then memoized. A view that never
             // reads the fingerprint never pays the collect + sort + hash.
@@ -495,6 +555,7 @@ impl OverlaidView {
             overlay_hashes,
             base,
             env_hashes,
+            key_env_override: Some(env_hashes),
             // Lazy: see `Self::new`.
             overlay_set_fingerprint: std::sync::OnceLock::new(),
         }
@@ -574,7 +635,7 @@ impl SessionView for OverlaidView {
             self.base.as_ref(),
             canonical,
             content_hash,
-            &self.env_hashes,
+            self.key_env_override.as_ref(),
         )
     }
 
@@ -619,6 +680,17 @@ impl SessionView for OverlaidView {
 pub struct HostViewRef<'a> {
     base: &'a VerterHost,
     env_hashes: EnvHashes,
+    /// An EXPLICITLY pinned env bundle for the resolve-domain key, or
+    /// `None` to compose it per-canonical.
+    ///
+    /// `Some` only when a caller supplied the bundle itself
+    /// (`with_env_hashes` / `with_overlay_hashes`): that caller is
+    /// addressing one specific slot and must keep addressing it.
+    /// `None` on every derived constructor — those previously reused the
+    /// view's workspace-level `env_hashes` as key dimensions, which for a
+    /// canonical owned by a project with real resolution config addresses
+    /// a slot the per-canonical producer never wrote.
+    key_env_override: Option<EnvHashes>,
 }
 
 impl<'a> HostViewRef<'a> {
@@ -626,7 +698,11 @@ impl<'a> HostViewRef<'a> {
     /// workspace-default env hashes computed from the host's workspace.
     pub fn new(base: &'a VerterHost) -> Self {
         let env_hashes = base.host_view_env_hashes();
-        Self { base, env_hashes }
+        Self {
+            base,
+            env_hashes,
+            key_env_override: None,
+        }
     }
 
     /// Construct a view with explicit env hashes.
@@ -635,7 +711,11 @@ impl<'a> HostViewRef<'a> {
     /// workspace config.
     #[allow(dead_code)]
     pub fn with_env_hashes(base: &'a VerterHost, env_hashes: EnvHashes) -> Self {
-        Self { base, env_hashes }
+        Self {
+            base,
+            env_hashes,
+            key_env_override: Some(env_hashes),
+        }
     }
 }
 
@@ -662,7 +742,12 @@ impl SessionView for HostViewRef<'_> {
         canonical: &str,
     ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
         let content_hash = current_content_hash_from_scheduler(self.base, canonical)?;
-        resolved_import_facts_for_view(self.base, canonical, content_hash, &self.env_hashes)
+        resolved_import_facts_for_view(
+            self.base,
+            canonical,
+            content_hash,
+            self.key_env_override.as_ref(),
+        )
     }
 
     fn env_hashes(&self) -> &EnvHashes {
@@ -701,6 +786,17 @@ pub struct OverlaidViewRef<'a> {
     overlay_tombstones: &'a std::collections::HashSet<String>,
     base: &'a VerterHost,
     env_hashes: EnvHashes,
+    /// An EXPLICITLY pinned env bundle for the resolve-domain key, or
+    /// `None` to compose it per-canonical.
+    ///
+    /// `Some` only when a caller supplied the bundle itself
+    /// (`with_env_hashes` / `with_overlay_hashes`): that caller is
+    /// addressing one specific slot and must keep addressing it.
+    /// `None` on every derived constructor — those previously reused the
+    /// view's workspace-level `env_hashes` as key dimensions, which for a
+    /// canonical owned by a project with real resolution config addresses
+    /// a slot the per-canonical producer never wrote.
+    key_env_override: Option<EnvHashes>,
     /// Overlay-set fingerprint, computed LAZILY on the first
     /// [`SessionView::fingerprint`] read via [`overlay_set_fingerprint`]
     /// over the immutable `overlay_hashes` map + `overlay_tombstones`
@@ -743,6 +839,7 @@ impl<'a> OverlaidViewRef<'a> {
             overlay_tombstones,
             base,
             env_hashes,
+            key_env_override: None,
             // Lazy: computed on the first `fingerprint()` read through the
             // single shared algorithm, then memoized. An analysis-only
             // request never reads it, so it pays nothing; the cache-key
@@ -845,7 +942,12 @@ impl SessionView for OverlaidViewRef<'_> {
         } else {
             current_content_hash_from_scheduler(self.base, canonical)?
         };
-        resolved_import_facts_for_view(self.base, canonical, content_hash, &self.env_hashes)
+        resolved_import_facts_for_view(
+            self.base,
+            canonical,
+            content_hash,
+            self.key_env_override.as_ref(),
+        )
     }
 
     fn env_hashes(&self) -> &EnvHashes {

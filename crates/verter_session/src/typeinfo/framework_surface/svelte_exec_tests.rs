@@ -2015,6 +2015,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("props payload raises")
         .node();
     let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {
@@ -2199,6 +2200,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("props payload raises")
         .node();
     let read = dispatch.execute_read(crate::semantic_query::SemanticQueryKey::ProjectPath {

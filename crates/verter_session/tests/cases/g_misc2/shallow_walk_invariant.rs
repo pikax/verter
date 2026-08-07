@@ -102,7 +102,6 @@ fn fact_emission_emits_only_parse_domain_fact_keys() {
     let banned_fact_keys: &[&str] = &[
         "FactKey::ResolvedImportClause",
         "FactKey::ResolvedReexportBinding",
-        "FactKey::EffectiveExportSet",
         "FactKey::ModuleAugmentationIndexShape",
     ];
     for banned in banned_fact_keys {

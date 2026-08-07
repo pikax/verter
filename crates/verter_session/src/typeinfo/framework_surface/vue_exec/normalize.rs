@@ -1225,11 +1225,14 @@ fn authored_candidate_matches_call_signature_payload(
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     params: &[FunctionParam],
 ) -> bool {
-    let Some(raised) = dispatch.raise_authored_locator_to_hot(
-        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-            .absolutized_against(owner_canonical),
-        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-    ) else {
+    let Some(raised) = dispatch
+        .raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+                .absolutized_against(owner_canonical),
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        )
+        .at_optional_boundary()
+    else {
         return false;
     };
     let Some(data) = node_data_for(dispatch.ctx, raised.node()) else {
@@ -1280,11 +1283,14 @@ fn authored_candidate_matches_member_value(
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     member_value: SemanticNodeId,
 ) -> bool {
-    let Some(raised) = dispatch.raise_authored_locator_to_hot(
-        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-            .absolutized_against(owner_canonical),
-        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-    ) else {
+    let Some(raised) = dispatch
+        .raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+                .absolutized_against(owner_canonical),
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        )
+        .at_optional_boundary()
+    else {
         return false;
     };
     if crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(

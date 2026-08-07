@@ -384,14 +384,16 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     ) -> Option<bool> {
         let locator = mac.parsed_type_argument.as_ref()?;
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
-        let payload = dispatch.raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
-                absolutize_macro_payload_locator(locator, owner_canonical),
-            ),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        )?;
+        let payload = dispatch
+            .raise_authored_locator_to_hot(
+                &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                    absolutize_macro_payload_locator(locator, owner_canonical),
+                ),
+                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .at_optional_boundary()?;
         Some(node_has_direct_macro_reference(
             self.ctx,
             payload.node(),

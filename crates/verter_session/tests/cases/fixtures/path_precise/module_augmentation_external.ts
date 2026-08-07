@@ -12,8 +12,7 @@
 // not through a typed augmentation fact. Editing this file
 // invalidates the consumer.
 //
-// Stage 6d post-change discriminator: the augmenter contributes via
-// `EffectiveExportSet("vue")` consulting
+// The augmenter contributes via the augmentation stitch consulting
 // `FileArtifactStore.augmentation_index[ExternalSpecifier("vue")]`.
 // Editing the augmenter file changes
 // `ModuleAugmentationIndexShape(ExternalSpecifier("vue")).semantic_hash`

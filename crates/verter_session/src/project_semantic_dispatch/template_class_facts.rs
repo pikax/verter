@@ -17,12 +17,13 @@ use verter_type_expr::{
 };
 
 use super::evaluate::StructuralFactDemandOutcome;
+use super::query_error_disposition::classify_query_error;
 use super::reactive_wrapper::{wrapper_candidate_for_route, WrapperCandidate};
-use super::semantic_source::SourceRaiseContext;
+use super::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
 use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
 use super::ProjectSemanticDispatch;
 use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::{FactReadSetFinalise, ResolverContext};
+use crate::resolver_core::{FactReadSetFinalise, RequestBoundResolverContext, ResolverContext};
 use crate::resolver_store::ColdSeedHostStoreView;
 use crate::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId,
@@ -110,15 +111,23 @@ enum RequestedSubject {
 }
 
 /// Build exact facts through the caller's already-selected resolver context.
+///
+/// The context must be REQUEST-BOUND. `classify_binding` demands
+/// [`ResolverContext::prepared_value_decl`] for every template `:class`
+/// subject that resolves to a script binding, and a prepared declaration can
+/// only be served against a per-request store view. Taking
+/// [`RequestBoundResolverContext`] — the sealed marker implemented for
+/// `HostResolverContext` and `SessionResolverContext` but never for
+/// `VerterHost` — makes a bare-host binding a compile error instead of a
+/// cache-presence-dependent runtime abort at the caller's chosen branch.
 pub(crate) fn build_template_class_semantic_facts(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn RequestBoundResolverContext,
     canonical: &str,
     whole_hash: verter_semantic::analysis::Hash16,
     script: TemplateClassScriptInputs<'_>,
     raw: &RawTemplateData,
     scope: TemplateClassPublicationScope,
 ) -> SessionTemplateClassSemanticFacts {
-    let host = ctx.host_for_fact_tracer_install();
     // Stamp the revision the classification ACTUALLY RESOLVED AGAINST — the
     // owner shallow state the selected resolver context serves — not the
     // caller's argument. Stamping the argument makes the converter's coherence
@@ -135,42 +144,50 @@ pub(crate) fn build_template_class_semantic_facts(
         .shallow_file_state(canonical)
         .map_or(whole_hash, |state| state.whole_hash);
     let ((subjects, rows, mut completeness), finalise) =
-        crate::fact_signature_helpers::install_fact_tracer(host, || {
-            let requested = select_requested_subjects(raw, script);
-            let dispatch = ProjectSemanticDispatch::new(ctx);
-            let mut rows = Vec::with_capacity(requested.len());
-            let mut subjects = Vec::with_capacity(requested.len());
-            let mut completeness = TemplateClassFactsCompleteness::Complete;
+        crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            || {
+                let requested = select_requested_subjects(raw, script);
+                let dispatch = ProjectSemanticDispatch::new(ctx);
+                let mut rows = Vec::with_capacity(requested.len());
+                let mut subjects = Vec::with_capacity(requested.len());
+                let mut completeness = TemplateClassFactsCompleteness::Complete;
 
-            for requested_subject in &requested {
-                let subject = join_subject(ctx, canonical, script, requested_subject);
-                let row = match subject {
-                    TemplateClassSubject::Binding {
-                        ref declaration, ..
-                    } => {
-                        classify_binding(&dispatch, canonical, declaration.clone(), subject.clone())
+                for requested_subject in &requested {
+                    let subject = join_subject(ctx, canonical, script, requested_subject);
+                    let row = match subject {
+                        TemplateClassSubject::Binding {
+                            ref declaration, ..
+                        } => classify_binding(
+                            &dispatch,
+                            canonical,
+                            declaration.clone(),
+                            subject.clone(),
+                        ),
+                        TemplateClassSubject::Prop { ref payload, .. } => {
+                            classify_prop(&dispatch, canonical, script, payload, subject.clone())
+                        }
+                        TemplateClassSubject::Unresolved { .. } => unresolved_row(
+                            subject.clone(),
+                            ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
+                            ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
+                        ),
+                    };
+                    if row.wrapper.completeness == TemplateClassFactsCompleteness::ReturnOnly {
+                        completeness = TemplateClassFactsCompleteness::ReturnOnly;
                     }
-                    TemplateClassSubject::Prop { ref payload, .. } => {
-                        classify_prop(&dispatch, canonical, script, payload, subject.clone())
-                    }
-                    TemplateClassSubject::Unresolved { .. } => unresolved_row(
-                        subject.clone(),
-                        ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable,
-                        ReactiveWrapperUnresolvedReason::AnalysisUnavailable,
-                    ),
-                };
-                if row.wrapper.completeness == TemplateClassFactsCompleteness::ReturnOnly {
-                    completeness = TemplateClassFactsCompleteness::ReturnOnly;
+                    subjects.push(subject);
+                    rows.push(row);
                 }
-                subjects.push(subject);
-                rows.push(row);
-            }
-            (subjects, rows, completeness)
-        });
+                (subjects, rows, completeness)
+            },
+        );
 
     let dependency_signature = match finalise {
         FactReadSetFinalise::Ok(facts) => ReadSetSignature::new(facts),
-        FactReadSetFinalise::NonCacheable(_) | FactReadSetFinalise::Overflow => {
+        FactReadSetFinalise::NonCacheable(_)
+        | FactReadSetFinalise::Overflow
+        | FactReadSetFinalise::MutationUnstable => {
             completeness = TemplateClassFactsCompleteness::ReturnOnly;
             ReadSetSignature::overflow()
         }
@@ -220,12 +237,39 @@ pub(crate) fn complete_dependency_signature(
         .then(|| facts.dependency_signature().clone())
 }
 
+/// Whether the pure-content publish is safe for these facts.
+///
+/// The pure-content slot is keyed on `(owner, owner_whole_hash,
+/// profile)` and validated by that key ALONE — it carries no fact
+/// signature. So the publish is safe exactly when the owner's own
+/// content hash is a complete validity oracle for the signature, i.e.
+/// when every fact in it is attributable to the owner.
 pub(crate) fn owner_only_publication_safe(facts: &SessionTemplateClassSemanticFacts) -> bool {
+    use verter_workspace::FactAttribution;
     facts.completeness() == TemplateClassFactsCompleteness::Complete
-        && facts.dependency_signature().facts.iter().all(|fact| {
-            fact.canonical_id()
-                .is_some_and(|id| id == facts.owner_canonical())
-        })
+        && facts
+            .dependency_signature()
+            .facts
+            .iter()
+            .all(|fact| match fact.attribution() {
+                FactAttribution::Canonical(canonical_id) => canonical_id == facts.owner_canonical(),
+                // Both are UNATTRIBUTABLE, and for opposite reasons: a
+                // project scalar describes no canonical, a domain
+                // aggregate stands in for an unbounded set of them.
+                // Either way the owner's content hash cannot be a
+                // complete validity oracle, so the publish is declined.
+                //
+                // Stated as its own arm because through the `Option`
+                // projection this was an ACCIDENT — an aggregate answered
+                // `None`, `None` failed `is_some_and`, and the right
+                // result arrived for a reason nothing recorded. That is
+                // one refactor away from becoming `true`, which would
+                // publish a cross-file-dependent compile output under a
+                // key that only tracks the owner's bytes.
+                FactAttribution::ProjectScalar
+                | FactAttribution::DomainAggregate(_)
+                | FactAttribution::StrictSelfRootWorld => false,
+            })
 }
 
 #[derive(Debug, Clone)]
@@ -490,7 +534,10 @@ fn classify_prop(
     let context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let source = SemanticTypeSource::Authored(AuthoredBodyLocator::MacroPayload(payload.clone()));
-    let Some(hot) = dispatch.raise_semantic_type_source_to_hot(
+    // TYPED raise boundary: a genuine absence stays `MissingDependency`, but a
+    // typed query failure publishes ITS OWN reason through the single
+    // disposition authority instead of being erased into "missing dependency".
+    let hot = match dispatch.raise_semantic_type_source_to_hot(
         &source,
         SourceRaiseContext {
             scope_canonical_id: canonical,
@@ -498,12 +545,16 @@ fn classify_prop(
             context,
             interior_failures: None,
         },
-    ) else {
-        return unresolved_row(
-            subject,
-            ClosedLiteralDomainUnresolvedReason::MissingDependency,
-            ReactiveWrapperUnresolvedReason::MissingDependency,
-        );
+    ) {
+        SourceRaiseOutcome::Raised(hot) => hot,
+        SourceRaiseOutcome::Absent => {
+            return unresolved_row(
+                subject,
+                ClosedLiteralDomainUnresolvedReason::MissingDependency,
+                ReactiveWrapperUnresolvedReason::MissingDependency,
+            );
+        }
+        SourceRaiseOutcome::Failed(err) => return unresolved_row_from_query(subject, &err),
     };
     classify_node(dispatch, hot.node(), subject, route_candidate.as_ref())
 }
@@ -730,7 +781,7 @@ fn classify_normalized_domain(
             classify_normalized_domain(dispatch, *next, visited, remaining)
         }
         SemanticNodeData::Opaque(error) => ClosedLiteralDomain::Unresolved {
-            reason: domain_reason_from_query(error),
+            reason: classify_query_error(error).domain_reason,
             exactness: ResolutionExactness::Incomplete,
         },
         SemanticNodeData::RawFallback { .. }
@@ -747,13 +798,15 @@ fn classify_normalized_domain(
     result
 }
 
+/// Publish an unresolved row for a typed [`QueryError`] through the SINGLE
+/// disposition authority ([`classify_query_error`]) — never a local
+/// re-classification of the error's arms.
 fn unresolved_row_from_query(
     subject: TemplateClassSubject,
     error: &QueryError,
 ) -> TemplateClassSemanticFactRow {
-    let domain = domain_reason_from_query(error);
-    let wrapper = wrapper_reason_from_query(error);
-    unresolved_row(subject, domain, wrapper)
+    let class = classify_query_error(error);
+    unresolved_row(subject, class.domain_reason, class.wrapper_reason())
 }
 
 fn unresolved_row(
@@ -802,56 +855,6 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
         _ => ClosedTypeFact::LeafUnion(Arc::from(leaves.into_boxed_slice())),
     };
     Some(SemanticTypeSource::Closed(fact))
-}
-
-fn domain_reason_from_query(error: &QueryError) -> ClosedLiteralDomainUnresolvedReason {
-    match error {
-        QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::RaiseMiss => {
-            ClosedLiteralDomainUnresolvedReason::MissingDependency
-        }
-        QueryError::BudgetExceeded(_) => ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
-        QueryError::AliasCycle { .. }
-        | QueryError::RecursiveRef { .. }
-        | QueryError::RaiseAliasCycle
-        | QueryError::TypeParamCycle => ClosedLiteralDomainUnresolvedReason::Cycle,
-        QueryError::Cancelled => ClosedLiteralDomainUnresolvedReason::Cancelled,
-        QueryError::UnsupportedIntrinsic { .. }
-        | QueryError::UnrepresentableSurface
-        | QueryError::UnrepresentableSurfaceMember => {
-            ClosedLiteralDomainUnresolvedReason::Unsupported
-        }
-        QueryError::UnstableState { .. }
-        | QueryError::Other(_)
-        | QueryError::ValueDomainMismatch { .. } => ClosedLiteralDomainUnresolvedReason::Fault,
-    }
-}
-
-fn wrapper_reason_from_query(error: &QueryError) -> ReactiveWrapperUnresolvedReason {
-    match domain_reason_from_query(error) {
-        ClosedLiteralDomainUnresolvedReason::AnalysisUnavailable => {
-            ReactiveWrapperUnresolvedReason::AnalysisUnavailable
-        }
-        ClosedLiteralDomainUnresolvedReason::RevisionMismatch => {
-            ReactiveWrapperUnresolvedReason::RevisionMismatch
-        }
-        ClosedLiteralDomainUnresolvedReason::MissingDependency => {
-            ReactiveWrapperUnresolvedReason::MissingDependency
-        }
-        ClosedLiteralDomainUnresolvedReason::Cycle => ReactiveWrapperUnresolvedReason::Cycle,
-        ClosedLiteralDomainUnresolvedReason::BudgetExceeded => {
-            ReactiveWrapperUnresolvedReason::BudgetExceeded
-        }
-        ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded => {
-            ReactiveWrapperUnresolvedReason::WorkLimitExceeded
-        }
-        ClosedLiteralDomainUnresolvedReason::Cancelled => {
-            ReactiveWrapperUnresolvedReason::Cancelled
-        }
-        ClosedLiteralDomainUnresolvedReason::Unsupported => {
-            ReactiveWrapperUnresolvedReason::Unsupported
-        }
-        ClosedLiteralDomainUnresolvedReason::Fault => ReactiveWrapperUnresolvedReason::Fault,
-    }
 }
 
 /// Shared with the sibling [`super::reactive_wrapper`] demand entry so the
@@ -1068,8 +1071,15 @@ mod tests {
             bindings: &data.parse.script_analysis.bindings,
         };
 
+        // Mirror the production lane's binding exactly: a cold-seed
+        // request-bound context, never the raw owned-view escape hatch.
+        let base_view = host.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let request_ctx =
+            crate::resolver_core::HostResolverContext::from_cold_seed(&host, &base_view, overlay);
+
         let publishable = build_template_class_semantic_facts(
-            &host,
+            &request_ctx,
             canonical,
             data.parse.whole_hash,
             script,
@@ -1103,7 +1113,7 @@ mod tests {
 
         // The fenced scope is the ONLY difference that flips the same fact set.
         let fenced = build_template_class_semantic_facts(
-            &host,
+            &request_ctx,
             canonical,
             data.parse.whole_hash,
             script,
@@ -1173,6 +1183,109 @@ mod tests {
                     member: Arc::from("size"),
                 },
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+    use verter_workspace::{
+        AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
+        FactVersionRef, ViewPopulation,
+    };
+
+    const OWNER: &str = "/p/Owner.vue";
+
+    fn facts_with(signature: ReadSetSignature) -> SessionTemplateClassSemanticFacts {
+        SessionTemplateClassSemanticFacts::new(
+            std::sync::Arc::from(OWNER),
+            [3u8; 16],
+            std::sync::Arc::from([]),
+            std::sync::Arc::from([]),
+            TemplateClassFactsCompleteness::Complete,
+            signature,
+        )
+    }
+
+    fn owner_whole_hash_fact() -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: OWNER.to_string(),
+            hash: [3u8; 16],
+        }
+    }
+
+    fn content_aggregate() -> FactVersionRef {
+        FactVersionRef::DomainGeneration(DomainGenerationFact {
+            domain: CompactionDomain::Content,
+            population: AggregatePopulation::View(ViewPopulation::Base),
+            stamp: AggregateStamp::Generation(9),
+        })
+    }
+
+    #[test]
+    fn an_owner_only_signature_admits_the_pure_content_publish() {
+        assert!(
+            owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
+                [owner_whole_hash_fact()]
+            )))),
+            "every fact attributes to the owner, so the owner's content hash \
+             IS a complete validity oracle for this signature"
+        );
+    }
+
+    #[test]
+    fn a_cross_file_signature_declines_the_pure_content_publish() {
+        assert!(
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
+                [
+                    owner_whole_hash_fact(),
+                    FactVersionRef::FileWholeHash {
+                        canonical_id: "/p/Dep.ts".to_string(),
+                        hash: [4u8; 16],
+                    },
+                ]
+            )))),
+            "the pure-content slot is keyed on the owner's hash alone, so a \
+             dependency on another file's content cannot be published there"
+        );
+    }
+
+    #[test]
+    fn a_compacted_signature_declines_the_pure_content_publish() {
+        // The aggregate stands in for every `Content` fact the compute read
+        // — across an unbounded set of canonicals, none of which it names.
+        // The owner's content hash therefore cannot decide whether this
+        // entry is still valid, and the publish must decline.
+        assert!(
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
+                [owner_whole_hash_fact(), content_aggregate()]
+            )))),
+            "a terminal `Content` aggregate is UNATTRIBUTABLE: it stands in \
+             for facts on files the owner's content hash says nothing about, \
+             so the pure-content publish must decline"
+        );
+        // And an aggregate ALONE is not "no dependencies".
+        assert!(
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
+                [content_aggregate()]
+            )))),
+            "a signature that is nothing BUT an aggregate is maximally \
+             cross-file, not dependency-free"
+        );
+    }
+
+    #[test]
+    fn a_project_scalar_signature_declines_the_pure_content_publish() {
+        assert!(
+            !owner_only_publication_safe(&facts_with(ReadSetSignature::new(std::sync::Arc::from(
+                [
+                    owner_whole_hash_fact(),
+                    FactVersionRef::ProjectGeneration { generation: 5 },
+                ]
+            )))),
+            "a whole-project scalar describes no canonical, so the owner's \
+             content hash cannot decide it either"
         );
     }
 }

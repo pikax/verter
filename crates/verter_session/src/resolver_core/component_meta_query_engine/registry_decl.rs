@@ -371,7 +371,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         let ctx = self.ctx;
         let (resolved, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |_probe| match ctx.prepared_type_decl(canonical_id, owner, symbol_name) {
                 Ok(Some(prepared)) => Some(prepared),
                 Ok(None) => {
@@ -650,6 +650,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         ProjectionMode::Navigate,
                     ),
                 )
+                .at_optional_boundary()
                 .map(|hot| hot.node())?
         };
         let peel_alias = |mut node: SemanticNodeId| {

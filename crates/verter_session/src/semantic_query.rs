@@ -3030,29 +3030,15 @@ impl QueryError {
     ///   `TypeExpr::RecursiveRef` to STOP the walk.
     /// - [`BudgetExceeded`](Self::BudgetExceeded) / [`UnstableState`](Self::UnstableState)
     ///   — resource / completion-fence control (`ReturnOnly`-routed).
+    ///
+    /// Derived from the SINGLE `QueryError` disposition authority
+    /// (`project_semantic_dispatch::query_error_disposition`) — the §22 error
+    /// type is exactly the `Failure` disposition. There is no second listing
+    /// of which arms are errors.
     #[must_use]
     pub(crate) fn is_error_type(&self) -> bool {
-        match self {
-            QueryError::Other(_)
-            | QueryError::UnsupportedIntrinsic { .. }
-            | QueryError::ValueDomainMismatch { .. } => true,
-            QueryError::Miss
-            | QueryError::BudgetExceeded(_)
-            | QueryError::Cancelled
-            | QueryError::UnstableState { .. }
-            | QueryError::AliasCycle { .. }
-            | QueryError::RecursiveRef { .. }
-            | QueryError::DeclPlaceholder { .. }
-            // The typed semantic-sentinel carriers are CONTROL signals
-            // (cycle / miss / unrepresentable / macro-placeholder), not the
-            // §22 error type — they keep their existing raw-sentinel
-            // semantics under relation / raise / absorption.
-            | QueryError::RaiseAliasCycle
-            | QueryError::TypeParamCycle
-            | QueryError::RaiseMiss
-            | QueryError::UnrepresentableSurface
-            | QueryError::UnrepresentableSurfaceMember => false,
-        }
+        crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(self)
+            .is_error_type()
     }
 }
 

@@ -60,9 +60,10 @@ fn bench_cold_compute_install_uninstall(c: &mut Criterion) {
     let host = make_host();
     c.bench_function("fact_tracer/cold_compute_install_uninstall", |b| {
         b.iter(|| {
-            let ((), set) = host.with_fact_tracer(|| {
-                // Empty body — measures the install+drop overhead.
-            });
+            let ((), set) =
+                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                    // Empty body — measures the install+drop overhead.
+                });
             black_box(set);
         });
     });
@@ -81,11 +82,12 @@ fn bench_cold_compute_one_observation(c: &mut Criterion) {
     };
     c.bench_function("fact_tracer/cold_compute_one_observation", |b| {
         b.iter(|| {
-            let ((), set) = host.with_fact_tracer(|| {
-                if let Some(cell) = host.current_fact_tracer() {
-                    cell.observe(fact.clone());
-                }
-            });
+            let ((), set) =
+                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                    if let Some(cell) = host.current_fact_tracer() {
+                        cell.observe(fact.clone());
+                    }
+                });
             black_box(set);
         });
     });

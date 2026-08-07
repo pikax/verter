@@ -1,4 +1,9 @@
-//! Matrix slice: `app_config_proof` × `route_surface`.
+//! Behavioural slice: `app_config_proof` observes NO route facts.
+//!
+//! Retained OUTSIDE the cross-consumer completeness grid. It was filed
+//! under the grid's former `route_surface` fact-kind column, which named
+//! the deleted `EffectiveExportSet` arm; the assertion here is about
+//! RouteDb route WALKING, not that fact, so it survives the column.
 //!
 //! Degenerate cell — the AppConfigNoOverrideProofDb producer
 //! observes only the decl canonical's `FileWholeHash`. It does not

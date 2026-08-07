@@ -712,6 +712,17 @@ where
 /// a candidate with no facts (an empty signature) still self-roots its
 /// keyed canonical — e.g. the imported-registry keyed canonical — and that
 /// self-root must be drainable.
+///
+/// A COMPACTED signature deliberately registers under fewer canonicals.
+/// Its terminal aggregate names none of the files it stands in for, so
+/// this projection is an under-approximation — and that is sound HERE,
+/// where the registration is an eager-eviction index rather than a
+/// validity oracle: the aggregate rejects on ANY movement in its domain,
+/// registration and drain walk the SAME projection so they stay
+/// symmetric, and read-side validation is authoritative. The cost is a
+/// candidate that lingers until FIFO instead of being evicted eagerly,
+/// never a stale serve. See `ReadSetSignature::aggregated_domains` for the
+/// consumer class that must NOT accept the narrower projection.
 fn reverse_index_canonicals<V>(
     candidate: &Candidate<FactCandidateDiscriminant, V>,
 ) -> Vec<Arc<str>> {

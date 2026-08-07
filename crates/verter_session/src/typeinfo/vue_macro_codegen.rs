@@ -32,7 +32,9 @@ use crate::locator_identity::BroadRuntimeSubjectLocator;
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{FactReadSetFinalise, ResolverContext, StoreViewCompatToken};
+use crate::resolver_core::{
+    FactReadSetFinalise, FactVersionRef, ResolverContext, StoreViewCompatToken,
+};
 use crate::semantic_query::{
     BroadRuntimeKind, PartialReasonSet, PathSegment, ProjectionMode, ProjectionReductionContext,
     QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId, SemanticNodeData, SemanticQueryApi,
@@ -255,11 +257,9 @@ pub(crate) struct VueMacroCodegenOutput {
     /// compile pipeline.
     #[allow(dead_code)]
     pub completeness: ResultCompleteness,
-    /// Whether the fact footprint was bounded and based only on publishable
-    /// reads. Same deterministic-instrumentation contract surface as
-    /// `completeness`.
-    #[allow(dead_code)]
-    pub facts_cacheable: bool,
+    /// The producer's finalised fact observation set, carried back for the
+    /// consuming thread to replay. See [`MacroFactFootprint`].
+    pub fact_footprint: MacroFactFootprint,
     /// Deterministic work counters (the flake-free performance-contract
     /// rail: one producer invocation, one root shallow demand, no per-prop
     /// scheduler fan-out — asserted by the contract suites).
@@ -267,7 +267,105 @@ pub(crate) struct VueMacroCodegenOutput {
     pub counters: VueMacroCodegenCounters,
 }
 
+/// The producer's finalised fact observation set, carried across the scheduler
+/// worker boundary.
+///
+/// [`VerterHost::produce_vue_macro_codegen_with_ctx`] dispatches its build
+/// closure through [`verter_scheduler::scheduler::Scheduler::execute_scoped_cache_node`],
+/// which runs it on a scheduler CPU-pool worker. The fact tracer stack is
+/// thread-local with no cross-thread bridge, so the tracer the producer installs
+/// on that worker cannot reach the enclosing compute's tracer on the submitting
+/// thread — and a caller that joins an in-flight rendezvous runs no closure at
+/// all. This carrier holds the producer's observations plus its non-cacheable
+/// refusal so [`Self::replay`] can restate both on the CONSUMING thread; it is
+/// what roots the enclosing compile on every file the macro traversal actually
+/// read, including the transitively reached ones no direct import names.
+#[derive(Debug, Clone)]
+pub(crate) enum MacroFactFootprint {
+    /// A bounded observation set built only from publishable reads.
+    Rooted(Arc<[FactVersionRef]>),
+    /// A bounded observation set whose compute also consumed a read these facts
+    /// cannot validate. The facts still bubble into enclosing scopes; they must
+    /// never authorize shared-cache admission.
+    RootedNonCacheable(Arc<[FactVersionRef]>),
+    /// Finalisation exceeded the per-signature cap, so NO facts survived.
+    /// Replaying that as an empty observation set would root the consumer on
+    /// nothing — silently, and on exactly the wide-footprint inputs most likely
+    /// to reach it — so this arm can only refuse.
+    Overflowed,
+    /// The producer's aggregate basis moved while its tracer was open.
+    /// No fact set can validate that mixed world, so the consumer must
+    /// refuse even though the producer did run.
+    MutationUnstable,
+    /// No traced producer compute ran (cancelled, shut down, faulted, or
+    /// re-entrant), so nothing was observed and nothing may authorize rooting.
+    Unobserved,
+}
+
+impl MacroFactFootprint {
+    /// Split a producer tracer's finalised observation set into the transitive
+    /// canonical inventory the compile pipeline syncs as macro type dependencies
+    /// and the replayable footprint carrier.
+    pub(crate) fn from_finalise(finalise: FactReadSetFinalise) -> (Vec<String>, Self) {
+        let footprint = match finalise {
+            FactReadSetFinalise::Ok(facts) => Self::Rooted(facts),
+            FactReadSetFinalise::NonCacheable(facts) => Self::RootedNonCacheable(facts),
+            FactReadSetFinalise::Overflow => Self::Overflowed,
+            FactReadSetFinalise::MutationUnstable => Self::MutationUnstable,
+        };
+        let canonicals: BTreeSet<String> = footprint
+            .facts()
+            .iter()
+            .filter_map(FactVersionRef::canonical_id)
+            .map(ToOwned::to_owned)
+            .collect();
+        (canonicals.into_iter().collect(), footprint)
+    }
+
+    /// The surviving observations. Every factless arm yields an empty slice —
+    /// they carry a refusal, never a signature.
+    fn facts(&self) -> &[FactVersionRef] {
+        match self {
+            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => facts,
+            Self::Overflowed | Self::MutationUnstable | Self::Unobserved => &[],
+        }
+    }
+
+    /// Restate the producer's footprint onto the CURRENT thread's tracer stack.
+    ///
+    /// Idempotent: finalisation canonicalises before enforcing the cap, so a
+    /// re-observed fact dedups away rather than inflating the consumer's set.
+    /// Every arm is handled explicitly — a factless arm must taint, because a
+    /// consumer that roots on nothing serves stale results forever.
+    pub(crate) fn replay(&self) {
+        use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+        use crate::resolver_core::resolver_context;
+        match self {
+            Self::Rooted(facts) => resolver_context::observe_fan_out_borrowed(facts),
+            Self::RootedNonCacheable(facts) => {
+                resolver_context::observe_fan_out_borrowed(facts);
+                resolver_context::note_non_cacheable_propagation(
+                    NonCacheablePropagation::Transitive,
+                );
+            }
+            Self::Overflowed | Self::MutationUnstable | Self::Unobserved => {
+                resolver_context::note_non_cacheable_propagation(
+                    NonCacheablePropagation::Transitive,
+                );
+            }
+        }
+    }
+}
+
 impl VueMacroCodegenOutput {
+    /// Whether the producer's footprint was bounded and built only from
+    /// publishable reads — the deterministic-instrumentation contract surface
+    /// the in-crate suites assert, derived from the carrier that drives replay.
+    #[cfg(test)]
+    pub(crate) fn facts_cacheable(&self) -> bool {
+        matches!(self.fact_footprint, MacroFactFootprint::Rooted(_))
+    }
+
     pub(crate) fn compiler_input(&self) -> verter_compiler::compile::VueMacroSemanticInput {
         match (&self.runtime, &self.tsc) {
             (Some(runtime), Some(tsc)) => {
@@ -521,7 +619,10 @@ fn terminal_partial_vue_macro_codegen_output(
         transitive_canonicals: Vec::new(),
         dependency_failures: Vec::new(),
         completeness,
-        facts_cacheable: false,
+        // No traced compute ran, so this handoff roots nothing: replaying it
+        // refuses the consumer's admission rather than pretending an empty
+        // signature validated.
+        fact_footprint: MacroFactFootprint::Unobserved,
         counters: VueMacroCodegenCounters {
             producer_invocations: 1,
             scheduler_submissions: 1,
@@ -590,7 +691,7 @@ impl VerterHost {
             request_context: verter_scheduler::request_context::current_context(),
         };
 
-        match self
+        let output = match self
             .scheduler()
             .execute_scoped_cache_node(request, |job_cancellation| {
                 if job_cancellation.is_cancelled() {
@@ -622,7 +723,15 @@ impl VerterHost {
                 PartialReasonSet::SEMANTIC_QUERY_FAULT,
                 MacroPartialReason::IncompleteTraversal,
             ),
-        }
+        };
+        // The ONLY point at which the producer's observations reach this
+        // thread. The build ran on a scheduler CPU-pool worker (or, for a
+        // caller that joined the in-flight rendezvous, did not run here at
+        // all), and the tracer stack is thread-local — so without this the
+        // enclosing compute roots on nothing the macro traversal read past its
+        // direct imports, and any refusal the producer raised is lost.
+        output.fact_footprint.replay();
+        output
     }
 
     fn compute_vue_macro_codegen_output(
@@ -641,17 +750,19 @@ impl VerterHost {
             rendezvous.0.wait();
             rendezvous.1.wait();
         }
-        let (mut state, finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(self, || {
+        let (mut state, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            || {
                 let _completeness_scope =
                     crate::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
                 state.completeness = crate::request_context::current_cold_compute_completeness();
                 state
-            });
+            },
+        );
         state.counters.scheduler_submissions = 1;
 
-        let (transitive_canonicals, facts_cacheable) = fact_footprint(finalise);
+        let (transitive_canonicals, fact_footprint) = MacroFactFootprint::from_finalise(finalise);
         VueMacroCodegenOutput {
             origin_whole_hash: state.origin_whole_hash,
             runtime: demand.wants_runtime().then(|| {
@@ -667,7 +778,7 @@ impl VerterHost {
             transitive_canonicals,
             dependency_failures: state.dependency_failures,
             completeness: state.completeness,
-            facts_cacheable,
+            fact_footprint,
             counters: state.counters,
         }
     }

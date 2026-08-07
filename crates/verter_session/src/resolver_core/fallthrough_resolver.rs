@@ -218,7 +218,10 @@ impl FallthroughResolverState {
         let host = ctx.host_for_fact_tracer_install();
         let supersession_before = host.current_external_supersession_fingerprint();
         let ((value, candidate), non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(host, |_probe| compute());
+            crate::fact_signature_helpers::with_cacheability_scope(
+                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                |_probe| compute(),
+            );
 
         if !non_cacheable && host.current_external_supersession_fingerprint() == supersession_before
         {

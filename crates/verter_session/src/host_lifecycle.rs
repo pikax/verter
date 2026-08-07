@@ -474,10 +474,7 @@ impl VerterHost {
         // here so we can re-apply to workspace below without holding the
         // entry lock.
         let preserved_routes = {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical_id.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             let preserved_routes = derived.import_routes.clone();
             derived.evicted = false;
@@ -932,10 +929,7 @@ impl VerterHost {
         // and capture pre-evict whole_hash; clear all source-derived
         // caches.
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical_id.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;

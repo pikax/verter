@@ -167,9 +167,11 @@ enum FactFamily {
     DirectoryMembers,
     RecoveryScope,
     ContextSelection,
+    Decision,
+    OwnerResolutionSet,
 }
 
-fn family(key: &ResolutionFactKey) -> FactFamily {
+fn model_family(key: &ResolutionFactKey) -> FactFamily {
     match key {
         ResolutionFactKey::PathProbe { .. } => FactFamily::PathProbe,
         ResolutionFactKey::Manifest { .. } => FactFamily::Manifest,
@@ -178,6 +180,26 @@ fn family(key: &ResolutionFactKey) -> FactFamily {
         ResolutionFactKey::DirectoryMembers { .. } => FactFamily::DirectoryMembers,
         ResolutionFactKey::RecoveryScope { .. } => FactFamily::RecoveryScope,
         ResolutionFactKey::ContextSelection { .. } => FactFamily::ContextSelection,
+    }
+}
+
+fn workspace_family(key: &verter_workspace::ResolutionFactKey) -> FactFamily {
+    match key {
+        verter_workspace::ResolutionFactKey::PathProbe { .. } => FactFamily::PathProbe,
+        verter_workspace::ResolutionFactKey::Manifest { .. } => FactFamily::Manifest,
+        verter_workspace::ResolutionFactKey::Realpath { .. } => FactFamily::Realpath,
+        verter_workspace::ResolutionFactKey::ExactResolution { .. } => FactFamily::ExactResolution,
+        verter_workspace::ResolutionFactKey::DirectoryMembers { .. } => {
+            FactFamily::DirectoryMembers
+        }
+        verter_workspace::ResolutionFactKey::RecoveryScope { .. } => FactFamily::RecoveryScope,
+        verter_workspace::ResolutionFactKey::ContextSelection { .. } => {
+            FactFamily::ContextSelection
+        }
+        verter_workspace::ResolutionFactKey::Decision { .. } => FactFamily::Decision,
+        verter_workspace::ResolutionFactKey::OwnerResolutionSet { .. } => {
+            FactFamily::OwnerResolutionSet
+        }
     }
 }
 
@@ -371,41 +393,12 @@ impl PublicationModel {
 }
 
 #[test]
-fn resolution_fact_key_taxonomy_is_closed_over_seven_families() {
-    let population = ResolutionPopulation::Base;
-    let entry = ResolutionEntry::Importer(CanonicalId("/p/main.ts"));
-    let keys = [
-        ResolutionFactKey::PathProbe {
-            canonical: CanonicalId("/p/dep.ts"),
-            population: population.clone(),
-        },
-        ResolutionFactKey::Manifest {
-            canonical: CanonicalId("/p/package.json"),
-            population: population.clone(),
-        },
-        ResolutionFactKey::Realpath {
-            requested: CanonicalId("/p/link.ts"),
-            population: population.clone(),
-        },
-        ResolutionFactKey::ExactResolution {
-            entry: entry.clone(),
-            specifier: NormalizedSpecifier("./dep"),
-            phase: ResolvePhase::ProviderGraph,
-            kind: ResolveRequestKind::EsmImport,
-            population: population.clone(),
-        },
-        ResolutionFactKey::DirectoryMembers {
-            canonical: CanonicalId("/p"),
-            population: population.clone(),
-        },
-        ResolutionFactKey::RecoveryScope {
-            canonical_prefix: CanonicalId("/p"),
-            population: population.clone(),
-        },
-        ResolutionFactKey::ContextSelection { entry, population },
-    ];
+fn resolution_fact_key_taxonomy_is_closed_over_nine_families() {
+    // Taking the function pointer makes the exhaustive classifier part of
+    // this test. A new workspace enum variant cannot compile until classified.
+    let classifier: fn(&verter_workspace::ResolutionFactKey) -> FactFamily = workspace_family;
+    let _ = classifier;
     assert_eq!(
-        keys.iter().map(family).collect::<BTreeSet<_>>(),
         fact_families([
             FactFamily::PathProbe,
             FactFamily::Manifest,
@@ -414,7 +407,11 @@ fn resolution_fact_key_taxonomy_is_closed_over_seven_families() {
             FactFamily::DirectoryMembers,
             FactFamily::RecoveryScope,
             FactFamily::ContextSelection,
+            FactFamily::Decision,
+            FactFamily::OwnerResolutionSet,
         ])
+        .len(),
+        9
     );
 }
 
@@ -482,7 +479,7 @@ fn observation_to_fact_table_covers_every_observation_kind() {
     let actual = observations
         .into_iter()
         .flat_map(|observation| observation_facts(observation, ResolutionPopulation::Base))
-        .map(|fact| family(&fact))
+        .map(|fact| model_family(&fact))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         actual,

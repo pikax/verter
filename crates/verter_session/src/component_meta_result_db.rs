@@ -632,7 +632,8 @@ impl<P> ComponentMetaResultDb<P> {
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
     {
-        let (value, read_set) = host.with_fact_tracer(compute);
+        let (value, read_set) =
+            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, compute);
         let finalise = read_set.finalise();
         match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
@@ -686,6 +687,17 @@ impl<P> ComponentMetaResultDb<P> {
                     file = %canonical,
                     path = %path_label,
                     "skipping component-meta cache promotion: fact-signature overflowed cap",
+                );
+            }
+            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+                let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
+                crate::cache_runtime::admission::propagate_non_admission(reason);
+                tracing::debug!(
+                    target: "verter::audit::record",
+                    file = %canonical,
+                    path = %path_label,
+                    "skipping component-meta cache promotion: a compaction domain advanced \
+                     mid-compute",
                 );
             }
         }

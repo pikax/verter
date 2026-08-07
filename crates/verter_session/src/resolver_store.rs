@@ -398,18 +398,21 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 ///      `content_hash`, so a new content version is a NEW key and a
 ///      fixed handle reads a correct value without a rebuild
 ///      (immutable-by-key).
-///    - `RouteDb` is NOT content-addressed — `EffectiveExportSetKey` is
-///      `(provider_canonical, project_identity, resolve_env_hash,
-///      lib_env_hash)` with no content hash, and evict/clear/replace
-///      reuse the same key. It stays out of the token because its
-///      route-surface validator
+///    - `RouteDb` is NOT content-addressed — its keys carry no content
+///      hash, and evict/clear/replace reuse the same key. It stays out
+///      of the token because every value it hands out is validated per
+///      candidate against THIS view through the candidate's own
+///      recorded `fact_dep_signature`: an evicted/replaced entry yields
+///      a conservative fail-closed MISS (the consumer recomputes
+///      through the cold path), never a stale positive. The token
+///      therefore does not need a `RouteDb` generation to stay sound —
+///      the per-candidate signature comparison IS the validity rail.
+///      Note the route-surface FACT domain does not read `RouteDb` at
+///      all: its sole arm
 ///      ([`StoreView::validates_route_surface_domain`]) compares the
-///      consumer's recorded `expected_hash` fingerprint against the live
-///      `RouteDb` slot: an evicted/replaced entry yields a conservative
-///      fail-closed MISS (the consumer recomputes through the cold
-///      path), never a stale positive. The token therefore does not need
-///      a `RouteDb` generation to stay sound — the fingerprint
-///      comparison IS the validity rail.
+///      consumer's recorded `expected_hash` against the
+///      augmentation-index fingerprint snapshot captured on this
+///      view's artifact root.
 ///
 /// Additive lazy loads observed mid-request (a dependency `FileArtifactStore`
 /// publication that lands AFTER the snapshot was
@@ -488,6 +491,11 @@ pub(crate) struct StoreViewValidationToken {
     /// only a real external file-set mutation does — so folding it into
     /// the supersession fingerprint cannot self-fence promotion.
     pub(crate) content_generation: u64,
+    /// Dedicated strict-self-root authority. It participates in manager
+    /// reuse so a live trackedness transition rebuilds the sealed roots, but
+    /// stays outside external supersession because a cold compute may create
+    /// its own derived-state membership.
+    pub(crate) strict_self_root_generation: Option<u64>,
     /// Monotonic count of resolution FACT VERSIONS the workspace's
     /// resolution world has minted
     /// ([`verter_workspace::WorkspaceRead::resolution_fact_generation`]).
@@ -538,24 +546,25 @@ pub(crate) struct StoreViewValidationToken {
     pub(crate) env_hash_fold: Hash16,
     /// Workspace-default project identity (R21).
     pub(crate) project_identity: crate::file_artifact_store::ProjectIdentity,
-    /// Frozen request-overlay / session identity.
+    /// Frozen session-overlay identity.
     ///
-    /// `None` for a base (non-session, no-completion-overlay) view.
-    /// `Some(_)` carries the session id plus the count of canonicals the
-    /// session has overlaid / tombstoned, so two requests with DIFFERENT
-    /// completion overlays get DISTINCT token identities and a later
-    /// block's proof memo never crosses an overlay boundary.
+    /// `None` for a base view. `Some(_)` carries the session id plus the
+    /// structural overlay fold. Request-completion overlays do not enter
+    /// this token: they can advance within one request and are identified
+    /// separately by `ViewPopulation::RequestCompletion` in fact
+    /// signatures. `RequestStoreView::compat_token` intentionally remains
+    /// the durable base/session coalescing identity.
     pub(crate) overlay_identity: Option<OverlayIdentity>,
 }
 
-/// Frozen identity of a session / completion overlay folded into a
-/// [`StoreViewValidationToken`]. Distinguishes a
-/// base view from a session-overlaid one and distinguishes two sessions
-/// whose overlay shapes differ.
+/// Frozen identity of a session overlay folded into a
+/// [`StoreViewValidationToken`]. Distinguishes a base view from a
+/// session-overlaid one and distinguishes two sessions whose overlay
+/// shapes differ. Request-completion identity lives on the fact-signature
+/// population rail, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct OverlayIdentity {
-    /// Raw session id (`SessionView`-scoped) — `None` for a
-    /// completion-overlay-only view with no session.
+    /// Raw session id (`SessionView`-scoped).
     pub(crate) session_id: Option<u64>,
     /// Structural fold of the overlay's masked canonicals (count +
     /// per-canonical content hashes XOR-folded). Any change to the set
@@ -638,6 +647,7 @@ impl StoreViewValidationToken {
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
+            strict_self_root_generation: host.ws().strict_self_root_generation(),
             resolution_fact_generation: host.ws().resolution_fact_generation(),
             env_hash_fold: fold_env_hashes(&env_hashes),
             project_identity: host.host_view_project_identity(),
@@ -701,7 +711,56 @@ struct PreBuildTokenInputs {
     artifact_generation: u64,
     load_generation: u64,
     content_generation: u64,
+    strict_self_root_generation: Option<u64>,
     resolution_fact_generation: u64,
+    /// Live generation of the SOURCE-ENV compaction domain, or `None`
+    /// when the workspace tracks no such producer.
+    ///
+    /// Deliberately NOT a [`StoreViewValidationToken`] dimension. Of the
+    /// three dimensions a `FileSourceEnv` fact carries, `parser_version`
+    /// is a compile-time constant and `file_language_id` cannot move at
+    /// runtime, so `parse_env_hash` is the only one that can actually
+    /// change — and it is already folded into the token's `env_hash_fold`.
+    /// Every source-env change capable of invalidating the domain
+    /// therefore already supersedes the view. The counter bumps more
+    /// eagerly than that (any env-table republication, even a byte-identical
+    /// one), so promoting it to a token dimension would supersede every
+    /// cached view on a no-op republish while protecting nothing the fold
+    /// does not already protect.
+    source_env_generation: Option<u64>,
+    /// Stable membership generation of the SEMANTIC-IMPORTS compaction
+    /// domain, or `None` when an admission was in flight at capture
+    /// time.
+    ///
+    /// Deliberately NOT a [`StoreViewValidationToken`] dimension, for the
+    /// same reason as its source-env sibling and one more: a resolved-
+    /// import admission is something a COLD COMPUTE legitimately performs
+    /// as part of its own work (the bundler pushes import dependencies
+    /// through the same host it then queries), so promoting it would make
+    /// every such publication supersede every cached view and split the
+    /// singleflight lane. Every key dimension the store answers on —
+    /// `content_hash`, `parse_env_hash`, `resolve_env_hash` — is already
+    /// a token dimension or folded into `env_hash_fold`. This counter
+    /// exists so the domain's COMPOSITE aggregate has a membership
+    /// component to validate against, nothing more.
+    ///
+    /// `None` disarms the domain rather than guessing a number: an
+    /// aggregate can then never match, so a view captured mid-admission
+    /// refuses compacted semantic-import witnesses instead of vouching
+    /// for a generation it could not read.
+    semantic_imports_generation: Option<u64>,
+    /// Stable semantic generation of the ROUTE-SURFACE compaction
+    /// domain, or `None` while an augmentation-world mutation is in
+    /// flight.
+    ///
+    /// NOT a [`StoreViewValidationToken`] dimension, and specifically not
+    /// a second `artifact_generation`: that counter is deliberately
+    /// EXCLUDED from external-supersession promotion because a cold
+    /// compute legitimately publishes its own artifacts, and this clock
+    /// exists precisely to separate the augmentation WORLD from that
+    /// index churn. It is captured here only so the domain's composite
+    /// aggregate has a semantic component to validate against.
+    route_surface_generation: Option<u64>,
     env_hashes: crate::session_view::EnvHashes,
     project_identity: crate::file_artifact_store::ProjectIdentity,
     /// The workspace's immutable published resolution world, captured in
@@ -740,7 +799,17 @@ impl PreBuildTokenInputs {
             artifact_generation: host.project_type_store.indexed().artifact_generation(),
             load_generation: host.current_load_generation(),
             content_generation: host.ws().content_generation(),
+            strict_self_root_generation: host.ws().strict_self_root_generation(),
             resolution_fact_generation: host.ws().resolution_fact_generation(),
+            source_env_generation: host.ws().source_env_generation(),
+            semantic_imports_generation: host
+                .project_type_store
+                .resolved_import_facts()
+                .stable_generation(),
+            route_surface_generation: host
+                .project_type_store
+                .indexed()
+                .stable_route_surface_generation(),
             env_hashes: host.host_view_env_hashes(),
             project_identity: host.host_view_project_identity(),
             root_capture: crate::store_view_roots::RootCapture::capture(host),
@@ -756,6 +825,7 @@ impl PreBuildTokenInputs {
             artifact_generation: self.artifact_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
+            strict_self_root_generation: self.strict_self_root_generation,
             resolution_fact_generation: self.resolution_fact_generation,
             env_hash_fold: fold_env_hashes(&self.env_hashes),
             project_identity: self.project_identity,
@@ -1325,11 +1395,7 @@ pub(crate) struct StoreViewSnapshot {
     /// read validates against the `Session(fingerprint)` augmenter-set
     /// fingerprint and a base read against the `Base` one — the
     /// content-addressed `AugmentationTargetKey.population` slot can
-    /// never be cross-validated. The QUERY-IDENTITY `EffectiveExportSetKey`
-    /// is keyed instead by the CONTENT-FREE `session_scope`
-    /// ([`crate::resolver_core::route_db::EffectiveExportSetScope`], derived
-    /// from `session_id`, R6) — this overlay-set fingerprint never enters
-    /// that key. Mirrors the SINGLE derivation in
+    /// never be cross-validated. Mirrors the SINGLE derivation in
     /// [`crate::session_view::augmentation_population_for_view`].
     session_overlay_fingerprint: u64,
     /// The sealed ROOT TOKEN this view was captured from.
@@ -1422,10 +1488,31 @@ pub struct HostStoreView {
     /// [`Self::validation_token`] can reconstruct the token's
     /// `content_generation` dimension without re-reading the host.
     content_generation: u64,
+    strict_self_root_generation: Option<u64>,
     /// Resolution fact-version generation captured at build time (same
     /// single pre-build read window) so [`Self::validation_token`] can
     /// reconstruct that token dimension without re-reading the host.
     resolution_fact_generation: u64,
+    /// Source-env domain generation captured at build time, or `None`
+    /// when the workspace exposes no source-env producer.
+    ///
+    /// Unlike its siblings this is NOT a token dimension — see
+    /// [`PreBuildTokenInputs::source_env_generation`]. It exists so the
+    /// SOURCE-ENV terminal aggregate has something to validate against.
+    /// `None` disarms the domain: an aggregate can never match, so a
+    /// workspace with no producer refuses compacted source-env witnesses
+    /// instead of accepting them against a fabricated constant.
+    source_env_generation: Option<u64>,
+    /// Semantic-imports domain membership generation captured at build
+    /// time, or `None` when an admission was in flight. See
+    /// [`PreBuildTokenInputs::semantic_imports_generation`]. `None`
+    /// disarms the domain.
+    semantic_imports_generation: Option<u64>,
+    /// Route-surface domain semantic generation captured at build time,
+    /// or `None` while a mutation was in flight. See
+    /// [`PreBuildTokenInputs::route_surface_generation`]. `None` disarms
+    /// the domain.
+    route_surface_generation: Option<u64>,
     /// Per-view memo of canonicals this view has actually been asked
     /// about — O(request footprint), populated on demand, never at build
     /// time. It is a COST mechanism, not a correctness one: every entry
@@ -1452,7 +1539,11 @@ impl Default for HostStoreView {
             artifact_generation: 0,
             load_generation: 0,
             content_generation: 0,
+            strict_self_root_generation: None,
             resolution_fact_generation: 0,
+            source_env_generation: None,
+            semantic_imports_generation: None,
+            route_surface_generation: None,
             memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
         }
     }
@@ -2278,6 +2369,176 @@ impl HostStoreView {
         }
     }
 
+    /// Validate one domain's terminal aggregate against this view.
+    ///
+    /// Exhaustive over [`verter_workspace::CompactionDomain`] — a new
+    /// domain cannot compile without stating how this view validates it,
+    /// which is the compile rail that stops a new domain from silently
+    /// inheriting a permissive or a blanket-reject answer.
+    ///
+    /// Two independent gates, both required:
+    ///
+    /// 1. **Population.** The aggregate must speak for THIS view. A
+    ///    `Resolution`-domain aggregate carries a resolution population
+    ///    the captured world adjudicates; every other domain carries a
+    ///    VIEW population that must equal [`Self::view_population`]. This
+    ///    is what stops an overlay-derived aggregate from satisfying a
+    ///    base read at a numerically equal stamp.
+    /// 2. **Stamp.** The aggregate's generation must equal the one this
+    ///    view captured for that domain.
+    ///
+    /// `SemanticImports` and `RouteSurface` are COMPOSITE domains: their
+    /// own clock says nothing about the key their store is addressed by,
+    /// so each compares a whole composite stamp rather than one counter.
+    /// A component this view cannot read rejects the aggregate outright
+    /// — the fail-safe direction, since refusing a witness costs a
+    /// recompute while accepting one this view cannot actually check is a
+    /// stale serve.
+    pub(crate) fn validates_domain_aggregate_in_population(
+        &self,
+        aggregate: &verter_workspace::DomainGenerationFact,
+        fact: &crate::resolver_core::FactVersionRef,
+        view_population: verter_workspace::ViewPopulation,
+    ) -> bool {
+        use verter_workspace::{AggregatePopulation, AggregateStamp, CompactionDomain};
+
+        // The single-producer domains all pin an exact counter. `None`
+        // means this view has no live producer for the domain, which
+        // rejects — never a fabricated constant.
+        let matches_view_counter = |captured: Option<u64>| match (captured, aggregate.population) {
+            (Some(captured), AggregatePopulation::View(population)) => {
+                population == view_population
+                    && aggregate.stamp == AggregateStamp::Generation(captured)
+            }
+            // A resolution population on a non-resolution domain is
+            // malformed; a missing producer cannot vouch for anything.
+            _ => false,
+        };
+
+        match aggregate.domain {
+            CompactionDomain::Content => matches_view_counter(Some(self.content_generation)),
+            CompactionDomain::SourceEnv => matches_view_counter(self.source_env_generation),
+            // A whole-host scalar no per-canonical overlay shadows, so its
+            // aggregate is global — minted under `View(Base)` even inside
+            // an overlay-bearing scope, which is what lets one witness
+            // serve base and session views alike.
+            CompactionDomain::WorkspaceShape => {
+                aggregate.population
+                    == AggregatePopulation::View(verter_workspace::ViewPopulation::Base)
+                    && aggregate.stamp
+                        == AggregateStamp::Generation(
+                            self.snapshot.roots.project_env_root.project_generation,
+                        )
+            }
+            // The captured immutable resolution world is this domain's
+            // sole authority — exactly as it already is for the precise
+            // facts the aggregate replaced. A view that captured no world
+            // validates nothing here. The world itself refuses a `View`
+            // population, so the population gate lives there.
+            CompactionDomain::Resolution => self
+                .snapshot
+                .roots
+                .resolution_root
+                .as_ref()
+                .is_some_and(|world| {
+                    verter_workspace::FactVersionValidator::validates_fact_version(
+                        world.as_ref(),
+                        fact,
+                    )
+                }),
+            // A COMPOSITE domain: its own membership counter is not
+            // sufficient, because the store answers per KEY and every key
+            // dimension lives in another domain. Each component must
+            // match the one this view captured, and any component this
+            // view cannot answer for rejects the whole aggregate.
+            CompactionDomain::SemanticImports => {
+                aggregate.population == AggregatePopulation::View(view_population)
+                    && self
+                        .semantic_imports_stamp()
+                        .is_some_and(|captured| aggregate.stamp == captured)
+            }
+            // The second COMPOSITE domain. Its own semantic clock says
+            // nothing about the key the augmentation index is addressed
+            // by, so the components that compose that key must match too.
+            CompactionDomain::RouteSurface => {
+                aggregate.population == AggregatePopulation::View(view_population)
+                    && self
+                        .route_surface_stamp()
+                        .is_some_and(|captured| aggregate.stamp == captured)
+            }
+        }
+    }
+
+    /// The composite [`CompactionDomain::RouteSurface`] stamp this view
+    /// vouches for, or `None` when any component is unreadable.
+    ///
+    /// ONE derivation shared by producer and validator, for the same
+    /// reason as its semantic-imports sibling: a stamp composed two ways
+    /// is a stamp two sides can disagree about.
+    pub(crate) fn route_surface_stamp(&self) -> Option<verter_workspace::AggregateStamp> {
+        use verter_workspace::{AggregateStamp, RouteSurfaceStamp};
+        Some(AggregateStamp::RouteSurface(RouteSurfaceStamp {
+            route_surface: self.route_surface_generation?,
+            content: self.content_generation,
+            source_env: self.source_env_generation?,
+            workspace_shape: self.snapshot.roots.project_env_root.project_generation,
+        }))
+    }
+
+    /// The composite [`CompactionDomain::SemanticImports`] stamp this
+    /// view vouches for, or `None` when any component is unreadable.
+    ///
+    /// ONE derivation, so a producer minting the aggregate and this
+    /// validator cannot disagree about what the domain's stamp means. A
+    /// missing component is `None` rather than a substituted constant:
+    /// the whole point of the composite is that a witness pinning fewer
+    /// dimensions than the store keys on is a stale serve, and a
+    /// fabricated component would reintroduce exactly that.
+    pub(crate) fn semantic_imports_stamp(&self) -> Option<verter_workspace::AggregateStamp> {
+        use verter_workspace::{AggregateStamp, ResolutionRootsStamp, SemanticImportsStamp};
+
+        let world = self.snapshot.roots.resolution_root.as_ref()?;
+        let resolution = match world.own_resolution_stamp()? {
+            AggregateStamp::ResolutionRoots { base, session } => {
+                ResolutionRootsStamp { base, session }
+            }
+            // Unreachable by construction — `own_resolution_stamp`
+            // answers with root identity or not at all — but expressed as
+            // a refusal rather than a panic so a future reshaping degrades
+            // to "this domain does not compact".
+            _ => return None,
+        };
+        Some(AggregateStamp::SemanticImports(SemanticImportsStamp {
+            semantic_imports: self.semantic_imports_generation?,
+            content: self.content_generation,
+            source_env: self.source_env_generation?,
+            resolution,
+            workspace_shape: self.snapshot.roots.project_env_root.project_generation,
+        }))
+    }
+
+    /// This view's population identity for the four VIEW-DERIVED
+    /// compaction domains (`Content`, `SourceEnv`, `SemanticImports`,
+    /// `RouteSurface`).
+    ///
+    /// The SAME overlay-set fingerprint [`Self::augmentation_population`]
+    /// keys on, and derived here rather than at each call site so the
+    /// producer of a terminal aggregate and its validator cannot disagree
+    /// about which view an aggregate speaks for. A session overlay
+    /// re-roots whole hashes and parse facts while leaving the workspace
+    /// content generation untouched, so an overlay-derived aggregate must
+    /// never satisfy a base read.
+    pub(crate) fn view_population(&self) -> verter_workspace::ViewPopulation {
+        match verter_workspace::SessionOverlayFingerprint::new(
+            self.snapshot.session_overlay_fingerprint,
+        ) {
+            // A zero fingerprint is not a session identity — no overlays
+            // installed IS the base view. The constructor owns that rule.
+            None => verter_workspace::ViewPopulation::Base,
+            Some(fingerprint) => verter_workspace::ViewPopulation::SessionOverlay(fingerprint),
+        }
+    }
+
     /// This view's complete per-canonical answer, resolved through the
     /// captured roots by exact point lookup and memoized per view.
     ///
@@ -2321,6 +2582,7 @@ impl HostStoreView {
             artifact_generation: self.artifact_generation,
             load_generation: self.load_generation,
             content_generation: self.content_generation,
+            strict_self_root_generation: self.strict_self_root_generation,
             resolution_fact_generation: self.resolution_fact_generation,
             env_hash_fold: fold_env_hashes(&env.env_hashes),
             project_identity: env.project_identity,
@@ -2357,6 +2619,10 @@ impl HostStoreView {
         let artifact_generation = pre.artifact_generation;
         let load_generation = pre.load_generation;
         let content_generation = pre.content_generation;
+        let strict_self_root_generation = pre.strict_self_root_generation;
+        let source_env_generation = pre.source_env_generation;
+        let semantic_imports_generation = pre.semantic_imports_generation;
+        let route_surface_generation = pre.route_surface_generation;
         let resolution_fact_generation = pre.resolution_fact_generation;
         // The ENTIRE build: a fixed number of scalar reads and `Arc`
         // clones into one sealed root token. No owner list is enumerated,
@@ -2428,7 +2694,11 @@ impl HostStoreView {
             artifact_generation,
             load_generation,
             content_generation,
+            strict_self_root_generation,
             resolution_fact_generation,
+            source_env_generation,
+            semantic_imports_generation,
+            route_surface_generation,
             memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
         };
         view.compat_token = view.compute_compat_token();
@@ -2563,6 +2833,23 @@ impl HostStoreView {
                     ))
                 }
             }
+            crate::resolver_core::FactVersionRef::DomainGeneration(aggregate) => {
+                if crate::resolver_core::StoreView::validates(self, fact) {
+                    None
+                } else {
+                    Some(format!(
+                        "DomainGeneration rejected domain={:?} population={:?} expected={:?}",
+                        aggregate.domain, aggregate.population, aggregate.stamp
+                    ))
+                }
+            }
+            crate::resolver_core::FactVersionRef::StrictSelfRootWorld(world) => {
+                if crate::resolver_core::StoreView::validates(self, fact) {
+                    None
+                } else {
+                    Some(format!("StrictSelfRootWorld rejected expected={world:?}"))
+                }
+            }
         }
     }
 
@@ -2626,6 +2913,46 @@ impl HostStoreView {
     /// dimensions (`parse_env_hash`, `resolve_env_hash`, and
     /// `resolver_version`) compose against
     /// the base view's snapshot unchanged.
+    /// Compose the `ResolvedImportFactsKey` for `canonical` as of this
+    /// view's captured roots.
+    ///
+    /// The single validator-side key composer. Both env dimensions come
+    /// from the CAPTURED PER-CANONICAL accessors, mirroring the producer's
+    /// `VerterHost::host_view_env_hashes_for` project resolution — the
+    /// producer keys per-canonical, so composing either dimension from the
+    /// workspace-level value here would address a slot it never wrote.
+    /// `resolve_env_hash` is the dimension where that genuinely diverges
+    /// (it folds per-project aliases / compiler options / references);
+    /// `parse_env_hash` is project-independent today, but it is routed
+    /// through the same per-canonical accessor so the two dimensions
+    /// cannot drift apart again.
+    pub(crate) fn resolved_import_facts_key_for(
+        &self,
+        canonical: &str,
+        content_hash: Hash16,
+    ) -> crate::resolved_import_facts::ResolvedImportFactsKey {
+        let env_root = &self.snapshot.roots.project_env_root;
+        crate::resolved_import_facts::ResolvedImportFactsKey {
+            canonical: std::sync::Arc::from(canonical),
+            content_hash,
+            parse_env_hash: env_root.parse_env_hash_for(canonical),
+            resolve_env_hash: env_root.resolve_env_hash_for(canonical),
+            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
+        }
+    }
+
+    /// [`Self::resolved_import_facts_key_for`], exposed to in-crate
+    /// fixtures so a test composes the key through the SAME path the
+    /// production validator does rather than re-deriving it.
+    #[cfg(test)]
+    pub(crate) fn resolved_import_facts_key_for_tests(
+        &self,
+        canonical: &str,
+        content_hash: Hash16,
+    ) -> crate::resolved_import_facts::ResolvedImportFactsKey {
+        self.resolved_import_facts_key_for(canonical, content_hash)
+    }
+
     pub(crate) fn validates_resolve_imports_domain_for_content_hash(
         &self,
         fact: &crate::resolver_core::ResolveImportsFactRef,
@@ -2633,7 +2960,6 @@ impl HostStoreView {
     ) -> bool {
         use verter_semantic::facts::registry::FactLane;
         use verter_semantic::facts::FactKey;
-        const ZERO_HASH: Hash16 = [0u8; 16];
         let crate::resolver_core::ResolveImportsFactRef::Semantic {
             canonical_id,
             key: fact_key,
@@ -2652,23 +2978,7 @@ impl HostStoreView {
             None => return false,
         };
 
-        let key = crate::resolved_import_facts::ResolvedImportFactsKey {
-            canonical: std::sync::Arc::from(canonical_id.as_str()),
-            content_hash,
-            parse_env_hash: self
-                .snapshot
-                .roots
-                .project_env_root
-                .env_hashes
-                .parse_env_hash,
-            resolve_env_hash: self
-                .snapshot
-                .roots
-                .project_env_root
-                .env_hashes
-                .resolve_env_hash,
-            resolver_version: crate::resolved_import_facts::RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
-        };
+        let key = self.resolved_import_facts_key_for(canonical_id.as_str(), content_hash);
 
         // The candidate must root its own path-precise resolution witness in
         // THIS view. That is
@@ -2681,7 +2991,20 @@ impl HostStoreView {
             // retained bundle predates a resolution change. Reject so
             // the caller recomputes through the producer (which
             // populates the store + re-emits).
-            None => return *expected_hash == ZERO_HASH,
+            //
+            // `ZH-1`: this rejects unconditionally, including for a
+            // consumer that recorded the zero sentinel. A missing slot is
+            // ABSENCE OF EVIDENCE, not evidence that a particular Semantic
+            // fact is absent — an absence assertion needs a current
+            // authoritative slot or an explicit negative carrier, and a
+            // slot that is not there supplies neither. Zero was never the
+            // negative-resolution rail either: an unresolved import
+            // carries `UNRESOLVED_SENTINEL` with a real semantic hash.
+            //
+            // The separate UNTRACKED-canonical zero-accept in
+            // `validates_resolve_imports_domain` is a different decision
+            // on a different question and is deliberately untouched.
+            None => return false,
         };
 
         // Pick the lane that the consumer observed under.
@@ -2879,6 +3202,30 @@ impl crate::resolver_core::StoreView for HostStoreView {
         self.compat_token
     }
 
+    /// The effective population and two COMPOSITE stamps this view
+    /// captured, handed to a tracer scope so composing its basis never
+    /// costs a store-view read.
+    ///
+    /// Both come from the same derivations the aggregate VALIDATOR uses
+    /// ([`Self::semantic_imports_stamp`] / [`Self::route_surface_stamp`]),
+    /// so a producer seeded here and a validator reading through this
+    /// view cannot disagree about what a domain's stamp means. Each is
+    /// `None` when a component is unreadable, which disarms that domain
+    /// rather than pinning fewer dimensions than its store keys on.
+    ///
+    /// Scalar stamps remain live-counter inputs. Content and source
+    /// environment participate. Semantic imports and route surface stay
+    /// precise because their membership advances inside cold computes that
+    /// populate them.
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        verter_workspace::AggregateBasisSeed::Vouched {
+            view_population: Some(self.view_population()),
+            view_domains: verter_workspace::ViewAggregateDomains::CONTENT_SOURCE_ENV,
+            semantic_imports: self.semantic_imports_stamp(),
+            route_surface: self.route_surface_stamp(),
+        }
+    }
+
     fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
         match fact {
             crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
@@ -2986,6 +3333,17 @@ impl crate::resolver_core::StoreView for HostStoreView {
             crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
                 self.snapshot.roots.project_env_root.project_generation == *generation
             }
+            // A whole domain's terminal aggregate, minted when that
+            // domain's precise bucket outgrew its threshold.
+            //
+            // Exhaustive by domain, and every arm fails CLOSED: a domain
+            // whose stamp this view cannot produce rejects rather than
+            // accepting on a coincidence.
+            crate::resolver_core::FactVersionRef::DomainGeneration(aggregate) => self
+                .validates_domain_aggregate_in_population(aggregate, fact, self.view_population()),
+            crate::resolver_core::FactVersionRef::StrictSelfRootWorld(world) => {
+                self.strict_self_root_world_identity() == Some(*world)
+            }
         }
     }
 
@@ -3029,6 +3387,18 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // recomputes against current content.
             None => false,
         }
+    }
+
+    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        self.snapshot
+            .roots
+            .strict_self_root_world(self.view_population())
+    }
+
+    fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+        self.snapshot
+            .roots
+            .strict_self_root_is_witnessable(canonical_id)
     }
 
     /// Strict contributor source-env identity validation.
@@ -3175,19 +3545,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
 
     /// Route-surface-domain validator (R26 + R29 + G1).
     ///
+    /// `RouteSurface` is a ONE-ARM domain:
     /// `ModuleAugmentationIndexShape` → consult the snapshot of
     /// augmentation-index fingerprints captured at view-build time
     /// (R29 / G1 producer state).
-    ///
-    /// `EffectiveExportSet` → compose
-    /// `EffectiveExportSetKey { provider_canonical,
-    /// project_identity, resolve_env_hash, lib_env_hash, session_scope }`
-    /// from the fact's `canonical_id` plus the view's `project_identity`,
-    /// `env_hashes`, and CONTENT-FREE session scope (R6), look up the
-    /// cached entry in the captured `RouteDb` handle, and compare the
-    /// entry's `augmenter_set_fingerprint` to `fact.expected_hash` (the
-    /// overlay content identity is matched here on the VALUE, never in
-    /// the key).
     fn validates_route_surface_domain(
         &self,
         fact: &crate::resolver_core::RouteSurfaceFactRef,
@@ -3221,9 +3582,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // against the `Session(overlay-set fingerprint)` augmenter
                 // set, a base view against `Base`. This is the
                 // augmentation-INDEX population (the fingerprint IS its
-                // content view identity), deliberately DISTINCT from the
-                // `EffectiveExportSet` arm below, which composes the
-                // CONTENT-FREE `EffectiveExportSetScope` (R6). The index
+                // content view identity). The index
                 // entry is fresh per fingerprint, so a session
                 // membership/content change moves the fingerprint and the
                 // validated lookup misses. The fact carries no population
@@ -3241,46 +3600,6 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     // through the cold path (which will populate the index).
                     None => false,
                 }
-            }
-            FactKey::EffectiveExportSet => {
-                let route_db = match self.snapshot.roots.route_db.as_ref() {
-                    Some(db) => db,
-                    None => return false,
-                };
-                // Compose the `EffectiveExportSetKey` from the fact's
-                // `canonical_id` (provider) + view env. Then walk the
-                // cache slot for `provider_canonical`; we cannot call
-                // `get_effective_export_set(_, view)` here because we
-                // ARE the view — that would recurse on validation.
-                // Permissive cache-state snapshot via `snapshot_all`
-                // is acceptable: the validator only needs to find a
-                // candidate whose `augmenter_set_fingerprint` matches
-                // the consumer's `expected_hash` under the matching
-                // `(provider, project, resolve_env, lib_env)`
-                // quadruple.
-                let target_key = crate::resolver_core::route_db::EffectiveExportSetKey {
-                    provider_canonical: fact.canonical_id.clone(),
-                    project_identity: self.snapshot.roots.project_env_root.project_identity,
-                    resolve_env_hash: self
-                        .snapshot
-                        .roots
-                        .project_env_root
-                        .env_hashes
-                        .resolve_env_hash,
-                    lib_env_hash: self.snapshot.roots.project_env_root.env_hashes.lib_env_hash,
-                    // Compose the view's CONTENT-FREE session scope (R6) so a
-                    // session consumer validates against the session slot, a
-                    // base consumer against the base slot. The overlay content
-                    // fingerprint is NOT in this key — it is matched separately
-                    // on the value via the `augmenter_set_fingerprint` compared
-                    // below.
-                    session_scope:
-                        crate::resolver_core::route_db::EffectiveExportSetScope::from_session(
-                            self.session_id,
-                        ),
-                };
-                route_db.lookup_effective_export_set_fingerprint(&target_key)
-                    == Some(fact.expected_hash)
             }
             // Other parse-domain / resolve-domain keys do not belong
             // to the route-surface domain; the dispatch layer guards
@@ -3522,7 +3841,7 @@ enum ParkDecision {
     /// `BuildClaimGuard::drop`. Parking would be a one-thread deadlock, so
     /// the park was REFUSED and the chokepoint produced the fail-closed
     /// read the caller must return WITHOUT parking and WITHOUT claiming.
-    RefusedSelfAwait(StoreViewRead),
+    RefusedSelfAwait(Box<StoreViewRead>),
 }
 
 impl StoreViewManager {
@@ -3608,7 +3927,7 @@ impl StoreViewManager {
                  another store view. See CLAUDE.md: same-path recursion never \
                  self-awaits."
             );
-            return ParkDecision::RefusedSelfAwait(read);
+            return ParkDecision::RefusedSelfAwait(Box::new(read));
         }
         // A builder on ANOTHER thread owns the in-flight cold build: park
         // cooperatively until it publishes or abandons.
@@ -3765,7 +4084,7 @@ impl StoreViewManager {
                     // chokepoint hands back a fail-closed read instead.
                     match self.park_for_build(&mut state) {
                         ParkDecision::Woken => continue,
-                        ParkDecision::RefusedSelfAwait(read) => return read,
+                        ParkDecision::RefusedSelfAwait(read) => return *read,
                     }
                 }
                 // No warm hit and no in-flight build — claim it. Taking the
@@ -3917,7 +4236,7 @@ impl StoreViewManager {
                     // refuses fail-closed instead of deadlocking.
                     match self.park_for_build(&mut state) {
                         ParkDecision::Woken => {}
-                        ParkDecision::RefusedSelfAwait(read) => return read,
+                        ParkDecision::RefusedSelfAwait(read) => return *read,
                     }
                     // Re-check IN THE SAME lock acquisition: a cached view now
                     // (current/stale) is returned; if the lane freed, fall
@@ -3992,7 +4311,7 @@ impl StoreViewManager {
             while state.building.is_claimed() {
                 match self.park_for_build(&mut state) {
                     ParkDecision::Woken => {}
-                    ParkDecision::RefusedSelfAwait(read) => return read,
+                    ParkDecision::RefusedSelfAwait(read) => return *read,
                 }
                 if let Some(read) = Self::current_or_stale_cached_read(host, &state) {
                     return read;
@@ -4253,6 +4572,37 @@ impl VerterHost {
     #[track_caller]
     pub(crate) fn resolver_store_view(&self) -> StoreViewRead {
         HostStoreView::from_host_read(self)
+    }
+
+    /// Every compaction domain's LIVE clock, as five atomic loads.
+    ///
+    /// The live half of a fact tracer's basis. It is read at tracer
+    /// installation and again at every admission boundary's movement
+    /// re-check, so it must cost nothing that scales: no store-view
+    /// build, no overlay copy-on-write, no map walk. The view-derived
+    /// half is captured ONCE as an
+    /// [`AggregateBasisSeed`](verter_workspace::AggregateBasisSeed) by
+    /// whoever installs the tracer.
+    ///
+    /// A clock that reports `None` is IN FLIGHT (an admission or an
+    /// augmentation-world mutation is mid-bracket), which disarms its own
+    /// domain — the fail-safe direction, and the same answer both reads
+    /// get, so an in-flight clock never registers as spurious movement.
+    #[must_use]
+    pub(crate) fn live_aggregate_counters(&self) -> verter_workspace::LiveAggregateCounters {
+        verter_workspace::LiveAggregateCounters {
+            content: self.ws().content_generation(),
+            source_env: self.ws().source_env_generation(),
+            workspace_shape: self.project_type_store.project_generation(),
+            semantic_imports: self
+                .project_type_store
+                .resolved_import_facts()
+                .stable_generation(),
+            route_surface: self
+                .project_type_store
+                .indexed()
+                .stable_route_surface_generation(),
+        }
     }
 
     /// Alias for [`Self::resolver_store_view`] retained for the call sites
@@ -4858,9 +5208,26 @@ mod store_view_o1_build_tests;
 #[cfg(test)]
 #[path = "store_view_marginal_admit_tests.rs"]
 mod store_view_marginal_admit_tests;
+
+/// Terminal-aggregate validation contract — declared here for the same
+/// reason, and additionally because it reads `HostStoreView`'s private
+/// captured generations directly.
+#[cfg(test)]
+#[path = "store_view_domain_aggregate_tests.rs"]
+mod store_view_domain_aggregate_tests;
+
+/// `ZH-1`: the resolved-import slot-miss arm rejects rather than
+/// accepting a zero hash — declared here for the same reason.
+#[cfg(test)]
+#[path = "resolve_imports_slot_miss_tests.rs"]
+mod resolve_imports_slot_miss_tests;
 #[cfg(test)]
 #[path = "store_view_resolution_currency_contract_tests.rs"]
 mod store_view_resolution_currency_contract_tests;
 #[cfg(test)]
 #[path = "store_view_resolution_root_tests.rs"]
 mod store_view_resolution_root_tests;
+
+#[cfg(test)]
+#[path = "resolve_env_asymmetry_tests.rs"]
+mod resolve_env_asymmetry_tests;

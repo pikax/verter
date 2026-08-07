@@ -47,6 +47,10 @@ pub(crate) fn non_admission_propagation(
             NonCacheablePropagation::LocalOnly
         }
         NonAdmissionReason::SignatureOverflow
+        // A domain that moved mid-scope invalidates the DERIVATION BASIS,
+        // not just this scope's own entry: an enclosing scope that
+        // consumed this value observed the same moving domain.
+        | NonAdmissionReason::MutationUnstable
         | NonAdmissionReason::EmptySignature
         | NonAdmissionReason::SelfRootConflict
         | NonAdmissionReason::RouteGenerationDependency

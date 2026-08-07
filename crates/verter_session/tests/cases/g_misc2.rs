@@ -10,8 +10,6 @@ mod corpus_regression_capture_harness;
 mod cross_file_provenance_fixtures_tests;
 #[path = "g_misc2/derived_raw_state_cached_fallthrough_matrix_import_ref.rs"]
 mod derived_raw_state_cached_fallthrough_matrix_import_ref;
-#[path = "g_misc2/derived_raw_state_cached_fallthrough_matrix_route_surface.rs"]
-mod derived_raw_state_cached_fallthrough_matrix_route_surface;
 #[path = "g_misc2/derived_raw_state_cached_meta_payload_matrix_module_aug_index_shape.rs"]
 mod derived_raw_state_cached_meta_payload_matrix_module_aug_index_shape;
 #[path = "g_misc2/derived_raw_state_cached_resolved_meta_matrix_member.rs"]

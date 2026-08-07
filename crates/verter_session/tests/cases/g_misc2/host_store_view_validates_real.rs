@@ -10,13 +10,12 @@
 //!   [`crate::resolved_import_facts::ResolvedImportFactsKey`] from
 //!   the fact + view env + tracked content hash; consults the
 //!   captured `ResolvedImportFactsDb` handle.
-//! - `validates_route_surface_domain` — discriminates
-//!   `ModuleAugmentationIndexShape` (snapshot of augmentation-index
-//!   fingerprints) and `EffectiveExportSet` (cached
-//!   `augmenter_set_fingerprint` in `RouteDb.effective_export_sets`).
+//! - `validates_route_surface_domain` — a ONE-ARM domain: reads
+//!   `ModuleAugmentationIndexShape` against the snapshot of
+//!   augmentation-index fingerprints captured at view-build time.
 //!
 //! The placeholder shape (`false` for resolve-imports; permissive
-//! `true` for `EffectiveExportSet`) is forbidden.
+//! `true` for the route-surface arm) is forbidden.
 
 use std::fs;
 use std::path::PathBuf;
@@ -64,30 +63,30 @@ fn validates_resolve_imports_domain_real_body() {
 }
 
 /// Source-grep arch guard: `validates_route_surface_domain` for
-/// `FactKey::EffectiveExportSet` MUST consult the cached
-/// `EffectiveExportSetEntry` fingerprint — the permissive
-/// `true` placeholder is forbidden.
+/// `FactKey::ModuleAugmentationIndexShape` — the domain's SOLE arm —
+/// MUST consult real producer state (the view-build-time snapshot of
+/// augmentation-index fingerprints). The permissive `true` placeholder
+/// is forbidden.
 #[test]
-fn validates_route_surface_effective_export_set_real_body() {
+fn validates_route_surface_module_augmentation_index_shape_real_body() {
     let src = read_session_source("resolver_store.rs");
     assert!(
         src.contains("fn validates_route_surface_domain("),
         "`HostStoreView::validates_route_surface_domain` must be implemented",
     );
     assert!(
-        src.contains("EffectiveExportSetKey {"),
-        "`validates_route_surface_domain` must compose `EffectiveExportSetKey` for `EffectiveExportSet` facts (R26)",
+        src.contains("FactKey::ModuleAugmentationIndexShape {"),
+        "`validates_route_surface_domain` must discriminate `ModuleAugmentationIndexShape` keys (R26)",
     );
     assert!(
-        src.contains("lookup_effective_export_set_fingerprint"),
-        "`validates_route_surface_domain` must call `RouteDb::lookup_effective_export_set_fingerprint` for the `EffectiveExportSet` arm (view-free permissive read; the view-aware `get_effective_export_set` would recurse)",
+        src.contains("augmentation_fingerprint("),
+        "`validates_route_surface_domain` must consult the captured augmentation-index fingerprint snapshot (R26/R29 producer state) — a body that answers without reading producer state is a placeholder",
     );
-    // Negative: the legacy permissive `true` placeholder must NOT
-    // remain. The pattern `FactKey::EffectiveExportSet => true,`
-    // was the removed placeholder shape.
+    // Negative: the permissive `true` placeholder must NOT appear for
+    // the surviving arm.
     assert!(
-        !src.contains("FactKey::EffectiveExportSet => true,"),
-        "`FactKey::EffectiveExportSet => true,` placeholder is forbidden — the real validator is wired (R26)",
+        !src.contains("FactKey::ModuleAugmentationIndexShape { .. } => true,"),
+        "a permissive `true` placeholder for the route-surface arm is forbidden — the real validator is wired (R26)",
     );
 }
 

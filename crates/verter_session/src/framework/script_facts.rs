@@ -869,35 +869,39 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     let (resolved_import_targets_opt, mut import_non_cacheable): (
         Option<Vec<ResolvedImportTarget>>,
         bool,
-    ) = named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
-        let mut snapshot = host.get_analysis(canonical)?;
-        host.resolve_snapshot_imports(canonical, &mut snapshot);
-        Some(
-            snapshot
-                .imports
-                .iter()
-                .map(|imp| {
-                    // The TYPED resolved-package identity (P2): a bare specifier
-                    // whose resolved canonical is PACKAGE-BACKED per the
-                    // session's classifier (`workspace_is_package_backed` — NOT
-                    // a path substring) names its package; a relative /
-                    // workspace-owned / unresolved import carries no package
-                    // identity, so a userland `./fake-svelte` look-alike never
-                    // claims to be the `svelte` package.
-                    let package = resolved_package_for_import(
-                        host,
-                        &imp.source,
-                        imp.resolved_canonical_id.as_deref(),
-                    );
-                    ResolvedImportTarget {
-                        specifier: imp.source.clone(),
-                        resolved_canonical: imp.resolved_canonical_id.clone(),
-                        package,
-                    }
-                })
-                .collect(),
-        )
-    });
+    ) = named_cacheability_scope!(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
+        TracerScope::ScriptFactsImportRoute,
+        || {
+            let mut snapshot = host.get_analysis(canonical)?;
+            host.resolve_snapshot_imports(canonical, &mut snapshot);
+            Some(
+                snapshot
+                    .imports
+                    .iter()
+                    .map(|imp| {
+                        // The TYPED resolved-package identity (P2): a bare specifier
+                        // whose resolved canonical is PACKAGE-BACKED per the
+                        // session's classifier (`workspace_is_package_backed` — NOT
+                        // a path substring) names its package; a relative /
+                        // workspace-owned / unresolved import carries no package
+                        // identity, so a userland `./fake-svelte` look-alike never
+                        // claims to be the `svelte` package.
+                        let package = resolved_package_for_import(
+                            host,
+                            &imp.source,
+                            imp.resolved_canonical_id.as_deref(),
+                        );
+                        ResolvedImportTarget {
+                            specifier: imp.source.clone(),
+                            resolved_canonical: imp.resolved_canonical_id.clone(),
+                            package,
+                        }
+                    })
+                    .collect(),
+            )
+        }
+    );
     let Some(mut resolved_import_targets) = resolved_import_targets_opt else {
         return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
             ScriptFactUnavailableReason::AnalysisUnavailable,
@@ -1005,44 +1009,51 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         let ((extra_targets, extra_refused), extra_scope_non_cacheable): (
             (Vec<ResolvedImportTarget>, bool),
             bool,
-        ) = named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
-            let mut refused = false;
-            let targets = extra_specifiers
-                .iter()
-                .map(|specifier| {
-                    let resolved = host
-                        .authoritative_import_route(canonical, specifier)
-                        .and_then(|resolution| {
-                            resolution
-                                .resolved_canonical_id
-                                .clone()
-                                .or_else(|| resolution.effective_target().map(str::to_string))
-                        })
-                        .or_else(|| {
-                            let ctx = verter_workspace::ResolutionContext {
-                                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                kind: verter_workspace::ResolveRequestKind::TypeImport,
-                            };
-                            match host.resolve_via_vfs(canonical, specifier, ctx) {
-                                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                                    admitted.into_result()
-                                }
-                                verter_workspace::ResolutionPublication::Refused(_) => {
-                                    refused = true;
-                                    None
-                                }
-                            }
-                        });
-                    let package = resolved_package_for_import(host, specifier, resolved.as_deref());
-                    ResolvedImportTarget {
-                        specifier: specifier.clone(),
-                        resolved_canonical: resolved,
-                        package,
-                    }
-                })
-                .collect::<Vec<_>>();
-            (targets, refused)
-        });
+        ) = named_cacheability_scope!(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
+                host,
+                request_ctx
+            ),
+            TracerScope::ScriptFactsImportRoute,
+            || {
+                let mut refused = false;
+                let targets = extra_specifiers
+                    .iter()
+                    .map(|specifier| {
+                        let resolved =
+                            host.authoritative_import_route(canonical, specifier)
+                                .and_then(|resolution| {
+                                    resolution.resolved_canonical_id.clone().or_else(|| {
+                                        resolution.effective_target().map(str::to_string)
+                                    })
+                                })
+                                .or_else(|| {
+                                    let ctx = verter_workspace::ResolutionContext {
+                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                        kind: verter_workspace::ResolveRequestKind::TypeImport,
+                                    };
+                                    match host.resolve_via_vfs(canonical, specifier, ctx) {
+                                        verter_workspace::ResolutionPublication::Admitted(
+                                            admitted,
+                                        ) => admitted.into_result(),
+                                        verter_workspace::ResolutionPublication::Refused(_) => {
+                                            refused = true;
+                                            None
+                                        }
+                                    }
+                                });
+                        let package =
+                            resolved_package_for_import(host, specifier, resolved.as_deref());
+                        ResolvedImportTarget {
+                            specifier: specifier.clone(),
+                            resolved_canonical: resolved,
+                            package,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (targets, refused)
+            }
+        );
         resolved_import_targets.extend(extra_targets);
         import_non_cacheable = import_non_cacheable || extra_scope_non_cacheable || extra_refused;
     }
@@ -1129,7 +1140,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
     let (payload_opt, finalise) = named_fact_tracer!(
-        host,
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
         TracerScope::ScriptFactsProviderValidate,
         || {
             // Observe the owner's whole hash + every resolved import contributor so

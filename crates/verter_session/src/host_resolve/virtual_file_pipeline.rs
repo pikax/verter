@@ -780,7 +780,7 @@ impl VerterHost {
     ) -> bool {
         let view = current_view.view();
         use crate::resolver_core::StoreView;
-        signature.facts.iter().all(|fact| view.validates(fact))
+        view.validates_fact_signature(&signature.facts)
     }
 
     /// Read-only predicate: would `get_virtual_file(query)` for this
@@ -1675,46 +1675,47 @@ impl VerterHost {
         // have NO fact rail, so they compile directly without the tracer
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
-            let (result, fact_read_set) = self.with_fact_tracer(|| {
-                // Replay the prefetch's BY-VALUE fenced-serve consumption
-                // into THIS tracer scope: the compile's payload derives from
-                // the prefetch-populated state, so a fenced serve consumed
-                // there taints this compile exactly as an in-scope fenced
-                // serve would — one admission rail
-                // (`non_cacheable_read_observed`), consulted below.
-                if prefetch_observation.fenced_serve_observed {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+            let (result, fact_read_set) =
+                self.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                    // Replay the prefetch's BY-VALUE fenced-serve consumption
+                    // into THIS tracer scope: the compile's payload derives from
+                    // the prefetch-populated state, so a fenced serve consumed
+                    // there taints this compile exactly as an in-scope fenced
+                    // serve would — one admission rail
+                    // (`non_cacheable_read_observed`), consulted below.
+                    if prefetch_observation.fenced_serve_observed {
+                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                         crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
                     );
-                }
-                crate::compile_fact_emission::observe_compile_tier_dependencies(
-                    self,
-                    &canonical_id,
-                    &compile_input.script_imports,
-                    &compile_input.macro_type_deps,
-                    &compile_input.external_requests,
-                );
-                // Test-only fact injection: when armed, emit `N`
-                // synthetic `FileWholeHash` observations into the active
-                // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
-                // tracer to `Overflow` deterministically, exercising the
-                // refuse-publish-on-overflow path without a pathological
-                // workspace fixture.
-                let force_n = self
-                    .compile_force_overflow_observations
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if force_n > 0 {
-                    for n in 0..force_n {
-                        crate::resolver_core::resolver_context::observe_fan_out(
-                            crate::resolver_core::FactVersionRef::FileWholeHash {
-                                canonical_id: format!("__compile_force_overflow_{n}.ts"),
-                                hash: [(n & 0xff) as u8; 16],
-                            },
-                        );
                     }
-                }
-                self.compile_entry(&compile_input, profile)
-            });
+                    crate::compile_fact_emission::observe_compile_tier_dependencies(
+                        self,
+                        &canonical_id,
+                        &compile_input.script_imports,
+                        &compile_input.macro_type_deps,
+                        &compile_input.external_requests,
+                    );
+                    // Test-only fact injection: when armed, emit `N`
+                    // synthetic `FileWholeHash` observations into the active
+                    // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
+                    // tracer to `Overflow` deterministically, exercising the
+                    // refuse-publish-on-overflow path without a pathological
+                    // workspace fixture.
+                    let force_n = self
+                        .compile_force_overflow_observations
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if force_n > 0 {
+                        for n in 0..force_n {
+                            crate::resolver_core::resolver_context::observe_fan_out(
+                                crate::resolver_core::FactVersionRef::FileWholeHash {
+                                    canonical_id: format!("__compile_force_overflow_{n}.ts"),
+                                    hash: [(n & 0xff) as u8; 16],
+                                },
+                            );
+                        }
+                    }
+                    self.compile_entry(&compile_input, profile)
+                });
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
             // `NonCacheable` (fenced serve, overflow) → the session node
@@ -2685,10 +2686,7 @@ impl VerterHost {
             let arc = Arc::new(fresh);
             if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
-                let mut derived_ref = self
-                    .derived_raw_cache()
-                    .entry(canonical.clone())
-                    .or_default();
+                let mut derived_ref = self.derived_raw_entry_or_default(canonical.clone());
                 derived_ref.value_mut().cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
             }
 

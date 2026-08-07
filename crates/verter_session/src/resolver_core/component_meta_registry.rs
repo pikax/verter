@@ -151,18 +151,20 @@ fn raise_component_meta_registry_source(
     source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Option<crate::semantic_query::HotTypeRef> {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    dispatch.raise_semantic_type_source_to_hot(
-        source,
-        crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-            scope_canonical_id: producer_scope.canonical_id.as_ref(),
-            scope_owner: producer_scope.owner,
-            context:
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            interior_failures: None,
-        },
-    )
+    dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                scope_owner: producer_scope.owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()
 }
 
 /// Observe a registry publication source in its exact producing scope and
@@ -684,15 +686,17 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         .authority
         .source()
         .and_then(|source| {
-            dispatch.raise_semantic_type_source_to_hot(
-                source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: producer_scope.canonical_id.as_ref(),
-                    scope_owner: producer_scope.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            )
+            dispatch
+                .raise_semantic_type_source_to_hot(
+                    source,
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                        scope_owner: producer_scope.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary()
         })
         .map(|hot| hot.node());
 
@@ -707,6 +711,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         field.authored_evidence.as_ref().and_then(|evidence| {
             dispatch
                 .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+                .at_optional_boundary()
                 .map(|hot| hot.node())
         })
     })
@@ -2196,6 +2201,7 @@ pub(crate) fn prepared_body_root_node(
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
         )
+        .at_optional_boundary()
         .map(|hot| hot.node())
 }
 
