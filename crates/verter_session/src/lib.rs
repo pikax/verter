@@ -852,3 +852,5 @@ mod framework_parse_characterization_tests;
 #[cfg(test)]
 #[path = "plain_script_dialect_tests.rs"]
 mod plain_script_dialect_tests;
+#[cfg(test)]
+mod u6_flow_shape_corpus_tests;
