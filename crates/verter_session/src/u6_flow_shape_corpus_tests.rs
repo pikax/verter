@@ -1933,6 +1933,34 @@ const OPEN_DEBTS: &[&str] = &[
     "N12_literal_union_narrow",
     "N13_nested_property_guard",
     "N14_negated_typeof_guard",
+    // ── TypeScript semantics: adversarial axes (X family) ──────────────
+    // Conditional spread source whose arms share a key set: refused, and the
+    // TSX lane faults.
+    "X01_spread_narrow_arm_source",
+    // A narrowed member beside / above a spread publishes WIDER than the
+    // checker (`[String, Number]` for `string`).
+    "X02_spread_with_narrow_member",
+    "X03_narrow_member_spread_sibling",
+    // try/catch and labelled/fallthrough control-flow joins with object-literal
+    // returns produce NO VALUE — the D06_switch_return / D07_try_return family
+    // extended to catch arms, labelled blocks, and switch fallthrough.
+    "X04_try_catch_join",
+    "X05_catch_return_fallthrough",
+    "X15_labelled_block_return",
+    "X16_switch_fallthrough",
+    // Generic callee: the instantiation is not substituted at three sites, and
+    // a whole generic result the flow lane types exactly is still erased on
+    // the way to the consumer.
+    "X08_generic_two_instantiations",
+    "X09_generic_wrap_return",
+    // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
+    "X14_accessor_pair",
+    // Async return wrapping is unmodelled: the Promise is silently unwrapped
+    // and the inner object is published as a props surface.
+    "X18_async_return",
+    // The macro lane correctly rejects a generator return, but the TSX lane
+    // faults with the same code — the consumer-reach debt class.
+    "X19_generator_yield",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1955,16 +1983,16 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 2, 0, 2),
-    (Owner::U6CallResolve, 2, 0, 2),
-    (Owner::U6ValueInference, 9, 5, 4),
+    (Owner::U6CallResolve, 4, 0, 4),
+    (Owner::U6ValueInference, 18, 8, 9),
     (Owner::U6ContextualCore, 0, 0, 0),
-    (Owner::U6FlowReturnSubstrate, 37, 29, 0),
-    (Owner::U6NarrowTypeof, 7, 0, 7),
+    (Owner::U6FlowReturnSubstrate, 44, 33, 2),
+    (Owner::U6NarrowTypeof, 9, 0, 9),
     (Owner::U6NarrowLattice, 3, 1, 2),
     (Owner::U6NarrowSubstitution, 2, 0, 2),
     (Owner::U6NarrowInvalidation, 2, 0, 2),
     (Owner::SharedTypeResolution, 9, 4, 3),
-    (Owner::SharedCompilePipeline, 6, 0, 6),
+    (Owner::SharedCompilePipeline, 7, 0, 7),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];
 
@@ -2087,4 +2115,7 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "E02_spread_index_signature",
     "E03_spread_array",
     "H02_union_spread_source",
+    // The generator-return shape: the macro lane's rejection is correct, the
+    // TSX lane fault is not.
+    "X19_generator_yield",
 ];
