@@ -1881,17 +1881,11 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
 #[cfg(test)]
 const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: flow-return substrate ──────────────────────
-    // Leaf-fallback spread: a CALL-sourced spread beside a computed key, a
-    // numeric key, `as const`, or `satisfies` refuses the module. The
-    // IDENTIFIER-sourced twins (B07_computed_after_ident/B08_computed_before_ident/B10_as_const_ident) publish the same shapes, so the
-    // gap is callee-source-specific, not an unknowable key domain.
-    "B01_computed_after_call",
+    // A NUMERIC literal key is silently dropped from the published surface —
+    // identically whether the sibling spread is CALL-sourced or
+    // IDENTIFIER-sourced, so what remains owed is the numeric-key spelling
+    // and not the callee source.
     "B02_numeric_key_after_call",
-    "B03_as_const_call",
-    "B04_as_const_spread_only",
-    "B05_satisfies_object",
-    "B06_two_calls_computed",
-    // A numeric literal key is silently dropped from the published surface.
     "B09_numeric_key_ident",
     // An intersection / heritage arm whose flow return is WHOLLY unmodelled is
     // silently DROPPED instead of failing closed. This is the family the 15
@@ -1962,7 +1956,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 2, 0, 2),
     (Owner::U6CallResolve, 2, 0, 2),
-    (Owner::U6ValueInference, 9, 0, 9),
+    (Owner::U6ValueInference, 9, 5, 4),
     (Owner::U6ContextualCore, 0, 0, 0),
     (Owner::U6FlowReturnSubstrate, 37, 29, 0),
     (Owner::U6NarrowTypeof, 7, 0, 7),
