@@ -29,6 +29,8 @@ pub(crate) const SEMANTIC_FUNCTION: &str = "semanticFunction";
 pub(crate) const RAISE_MISS: &str = "<raise miss>";
 /// `QueryError::OpenSurface`.
 pub(crate) const OPEN_SURFACE: &str = "projectedOpenSurface";
+/// `QueryError::UnmodeledPosition`.
+pub(crate) const UNMODELED_POSITION: &str = "unmodeledPosition";
 /// `QueryError::Cancelled`.
 pub(crate) const CANCELLED: &str = "cancelled";
 

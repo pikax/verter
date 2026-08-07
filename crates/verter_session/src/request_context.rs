@@ -231,12 +231,42 @@ pub fn mark_request_result_partial() {
     mark_request_result_partial_with(PartialReasonSet::PROPAGATED);
 }
 
+/// The BOOLEAN-BRIDGE mark: the caller observed a partial child but has
+/// only a `bool` to carry, so it can name no reason of its own.
+///
+/// Marks the request sticky unconditionally, and records
+/// [`PartialReasonSet::PROPAGATED`] on the active per-cold-compute scope
+/// ONLY when that scope carries no reason yet. A child that already
+/// bubbled its OWN named class into this scope (on its scope's drop) must
+/// not then have the generic bridge stacked on top of it: a consumer that
+/// treats one class as CONTAINED cannot tell a contained-only observation
+/// from a mixed one once the unclassified bit is present, so the bridge
+/// would silently un-contain every named class in the tree. Adding
+/// `PROPAGATED` to an already-partial scope changes no `is_partial()`
+/// answer — only the reason set — so nothing else observes the difference.
+pub fn mark_request_result_partial_from_read() {
+    if let Some(ctx) = current_request_context() {
+        ctx.request_result_is_partial.store(true, Ordering::Relaxed);
+    }
+    if current_cold_compute_completeness().is_partial() {
+        return;
+    }
+    fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
+}
+
 /// Mark a locally exhausted semantic-inference budget without erasing its
 /// structural partial-reason class. This is separate from propagated
 /// partiality because macro handoff consumers classify budget exhaustion
 /// deterministically.
 pub(crate) fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
+}
+
+/// Mark the active result partial for a body-derived return the flow
+/// substrate could not infer, under its OWN named class — see
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`].
+pub(crate) fn mark_request_result_flow_return_uninferred() {
+    mark_request_result_partial_with(PartialReasonSet::FLOW_RETURN_UNINFERRED);
 }
 
 /// Mark the active result partial for the exact cancellation reason.

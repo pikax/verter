@@ -68,20 +68,26 @@ pub(crate) enum FunctionReturnNode {
 pub(crate) enum ConsumerFold {
     /// A complete answer: nothing folds.
     Clean,
-    /// The consumer receives NO VALUE and has its own typed arm for that
-    /// (a recorded interior failure, a typed declaration failure, a
-    /// `miss_node`). The enclosing build must not WARM — a result composed
-    /// around a fabricated miss is not cacheable — but the REQUEST is not
-    /// marked partial: the consumer decides what a contained failure means
-    /// for its own surface, and pre-empting it here discards the whole
-    /// surface for a fact about one member. That is the same collapse the
-    /// positional rule exists to prevent, one level up.
-    NonCacheable,
-    /// The consumer receives a USABLE VALUE with an opaque interior. It
-    /// cannot see the interior and will compose the value into its own
-    /// result, so BOTH rails fold: the request partial sticky (gating
-    /// component-meta / shape / materialize warm) and the build-local
-    /// taint.
+    /// The answer is NOT complete — either a usable value with an opaque
+    /// interior, or no value at all. BOTH rails fold: the request-partial
+    /// sticky (gating component-meta / shape / materialize warm) and the
+    /// build-local taint.
+    ///
+    /// The two shapes fold ALIKE, and that is the decision. Suppressing
+    /// only the build-local taint for the no-value shape left the request
+    /// unmarked, so `get_component_meta` published the surface as
+    /// COMPLETE and WARM: six measured programs answered `props: []`,
+    /// `synthesis_should_suppress: false`, with a warm cache hit on
+    /// replay, where the checker has an answer. "The consumer decides
+    /// what a contained failure means for its own surface" is true of the
+    /// VALUE — which is why the value still returns — but it is not true
+    /// of the ADMISSION rail: a surface built around a failure the
+    /// consumer could not see is not a complete result, and publishing it
+    /// warm is the wrong-and-warm class this substrate exists to close.
+    /// Localisation is the POSITIONAL rule's job, and it does that job
+    /// one level down, inside the evaluator, where the marker keeps every
+    /// modelled sibling; by the time a no-value outcome reaches HERE the
+    /// evaluation has already declined to localise it.
     Partial,
 }
 
@@ -92,6 +98,15 @@ impl FunctionReturnNode {
     /// it has said what it does to the enclosing result, which is what one
     /// classification at the ONE sealed consumer entry buys over a
     /// condition re-spelled at each call site.
+    ///
+    /// Only two of the five arms are LIVE at that entry
+    /// ([`ProjectSemanticDispatch::execute_function_return_source`] calls
+    /// this inside its `Flow` arm alone, and its `Declared` / `Absent`
+    /// arms return before reaching it), so [`Self::Declared`],
+    /// [`Self::Absent`] and [`Self::DeclaredMiss`] are classified here for
+    /// the TYPE, not for a live call. They are still stated, because the
+    /// classification is a property of the outcome rather than of the one
+    /// site that currently asks.
     pub(crate) fn consumer_fold(&self) -> ConsumerFold {
         match self {
             // A declared locator that raised, and a body-derived result
@@ -104,7 +119,7 @@ impl FunctionReturnNode {
                 None => ConsumerFold::Clean,
                 Some(_) => ConsumerFold::Partial,
             },
-            Self::DeclaredMiss | Self::NoValue(_) => ConsumerFold::NonCacheable,
+            Self::DeclaredMiss | Self::NoValue(_) => ConsumerFold::Partial,
         }
     }
 }
@@ -322,8 +337,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // [`FunctionReturnNode::consumer_fold`] classification.
                 match node.consumer_fold() {
                     ConsumerFold::Clean => {}
-                    ConsumerFold::NonCacheable => self.fold_cache_read_rails(false, true),
-                    ConsumerFold::Partial => self.fold_cache_read_rails(true, true),
+                    ConsumerFold::Partial => self.fold_flow_return_uninferred_rails(),
                 }
                 node
             }
@@ -1715,6 +1729,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // from a seedless member would make the outcome depend on which
         // member was demanded first. Any other failure poisons the
         // component outright, so its bit never reaches a discharge.
+        // A BUDGET edge is a FRAME condition — a resource limit over the
+        // whole connected demand, never a fact about one sub-expression —
+        // so it is read HERE, from the connected-demand ledger's sticky
+        // trip state, rather than propagated out of a nested callee's
+        // step. A callee that could not even open a frame answers its
+        // CALLER at a POSITION, and the positional evaluators cannot
+        // express a frame failure at all; without this read the budget
+        // class would be laundered into `UnmodeledPosition` and the
+        // request would attribute a resource edge as a semantic one.
+        let contributors = match self.connected_demand_trip() {
+            Some(_) => Err(FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            )),
+            None => contributors,
+        };
         let contributors = match contributors {
             Ok(contributors) => contributors,
             Err(failure) => {
@@ -2107,6 +2136,44 @@ struct FlowContribution {
     fresh_literal: bool,
 }
 
+/// The outcome of evaluating ONE POSITION — a sub-expression, or one call
+/// in a sub-expression.
+///
+/// THREE outcomes, and deliberately NO error variant. The recurring defect
+/// class of this substrate was a POSITIONAL condition carried as a
+/// frame-level `Err`: with `Result<_, FlowReturnFailure>` as the
+/// positional evaluators' return type, whole-frame propagation is what `?`
+/// does by default and localisation is the thing each site has to
+/// remember. Deleting the *reasons* left the *path*.
+///
+/// This type deletes the path. Inside
+/// [`FlowEvaluator::eval_expr`] / [`FlowEvaluator::eval_call`] a
+/// [`FlowReturnFailure`] is UNSPELLABLE, not merely unspelled: there is no
+/// variant to construct one into, and `?` over a
+/// `Result<_, FlowReturnFailure>` does not typecheck against a
+/// non-[`std::ops::Try`] return type, so a nested evaluator's frame-level
+/// failure has to be answered — as a value, a hold, or an unmodelled
+/// position — before it can be returned.
+///
+/// A frame still fails, for the reasons that are genuinely ABOUT the whole
+/// frame: an unmodelled CONTROL surface ([`FlowReturnUnsupported`]), a
+/// missing body, a budget, an empty cycle, a torn view, and an unmodelled
+/// DEMAND point. Every one of those is produced OUTSIDE these two
+/// functions.
+enum Positional<T> {
+    /// A modelled value.
+    Value(T),
+    /// A coinductive HOLD — a recursive back-edge whose value the SCC
+    /// fixed point supplies. Neither a contributor nor a failure.
+    Hold,
+    /// This POSITION has no modelled value. The enclosing structure still
+    /// does: the consumer mints the typed marker here and records the
+    /// positional degradation, so every modelled sibling survives and the
+    /// whole result is a DEGRADED SUCCESS — usable, `ReturnOnly`, never
+    /// warm.
+    Unmodeled,
+}
+
 impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Record a typed degradation (first-observed reason wins,
     /// deterministic in source order).
@@ -2134,6 +2201,45 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     fn unmodeled_call_position(&mut self) -> CallValue {
         self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition);
         CallValue::unmodeled_position(self.dispatch)
+    }
+
+    /// Settle one positional expression outcome into this frame's node: a
+    /// value passes through, a HOLD is `None` (the caller's own
+    /// coinductive arm), and an unmodelled position becomes the typed
+    /// marker plus the recorded degradation.
+    fn settle(&mut self, outcome: Positional<SemanticNodeId>) -> Option<SemanticNodeId> {
+        match outcome {
+            Positional::Value(node) => Some(node),
+            Positional::Hold => None,
+            Positional::Unmodeled => Some(self.unmodeled_position()),
+        }
+    }
+
+    /// Settle one positional sub-expression that must yield a node —
+    /// an object-literal member value, a union arm — where a HOLD cannot
+    /// be represented.
+    ///
+    /// A hold is a promise the SCC fixed point will union the hold
+    /// TARGET's whole admitted return into this entry's result. Inside a
+    /// composite that promise is false: the callee's return is not this
+    /// object's value, it is one member of it. So the position takes the
+    /// marker AND the hold it created is dropped — leaving it registered
+    /// would union the callee's return into the composite. `holds_before`
+    /// is the frame's hold count taken immediately before the
+    /// sub-expression, so a sibling's hold is never disturbed.
+    fn settle_composite_part(
+        &mut self,
+        outcome: Positional<SemanticNodeId>,
+        holds_before: usize,
+    ) -> SemanticNodeId {
+        match outcome {
+            Positional::Value(node) => node,
+            Positional::Hold => {
+                self.holds.truncate(holds_before);
+                self.unmodeled_position()
+            }
+            Positional::Unmodeled => self.unmodeled_position(),
+        }
     }
 
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
@@ -2318,7 +2424,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         else {
             return Err(FlowReturnFailure::UnmodeledDemandPoint);
         };
-        match self.eval_expr(&member.value)? {
+        let outcome = self.eval_expr(&member.value);
+        match self.settle(outcome) {
             Some(node) => Ok(Some(self.widen_if_widening_local_read(&member.value, node))),
             // A hold inside the demanded member is the same coinductive
             // hold the whole-return object path reports.
@@ -2429,17 +2536,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             // whether the callee was already in flight —
                             // i.e. on demand ORDER.
                             let holds_before = self.holds.len();
-                            match self.eval_expr(expr) {
-                                Ok(Some(node)) => {
-                                    fresh_literal |= self.holds.len() > holds_before;
-                                    contributors.push(FlowContribution {
-                                        node,
-                                        fresh_literal,
-                                    });
-                                }
-                                // A hold is neither a contributor nor a failure.
-                                Ok(None) => {}
-                                Err(failure) => return (Err(failure), region.can_fall_through),
+                            let outcome = self.eval_expr(expr);
+                            if let Some(node) = self.settle(outcome) {
+                                fresh_literal |= self.holds.len() > holds_before;
+                                contributors.push(FlowContribution {
+                                    node,
+                                    fresh_literal,
+                                });
                             }
                         }
                         None => {
@@ -2567,16 +2670,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                             (Some(init), Some(arms)) => {
                                 let node = match self.eval_expr(init) {
-                                    Ok(Some(init_node)) => self.assignment_reduced_union(
+                                    Positional::Value(init_node) => self.assignment_reduced_union(
                                         declared_node,
                                         &arms,
                                         init_node,
                                     ),
-                                    // A hold / failed initializer cannot
-                                    // select constituents: the whole
+                                    // A hold / unmodelled initializer
+                                    // cannot select constituents: the whole
                                     // declared union is the honest
                                     // superset, degraded.
-                                    Ok(None) | Err(_) => {
+                                    Positional::Hold | Positional::Unmodeled => {
                                         self.record_degradation(
                                             crate::semantic_query::FlowReturnDegradation::UnreducedDeclaredUnion,
                                         );
@@ -2594,24 +2697,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // an unselected sibling.
                     if let Some(init) = init {
                         match self.eval_expr(init) {
-                            Ok(Some(node)) => {
+                            Positional::Value(node) => {
                                 self.bind_local(name, *kind, node, *widening_literal, false);
                             }
-                            Ok(None) => {}
-                            // A failed initializer binds `any` — the
-                            // declaration itself is not a return
-                            // contribution; the binding's failure only
-                            // surfaces where the binding is OBSERVED: the
-                            // observation evaluates to `any` and records
-                            // the `FailedBindingInitializer` degradation
-                            // (never a poison; an unobserved failed
-                            // binding degrades nothing).
-                            Err(_) => {
-                                let any = self
-                                    .dispatch
-                                    .graph()
-                                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-                                self.bind_local(name, *kind, any, false, true);
+                            Positional::Hold => {}
+                            // An UNMODELLED initializer binds the typed
+                            // marker — never a fabricated `any`, which is
+                            // indistinguishable from an authored one at
+                            // every downstream gate. The declaration
+                            // itself is not a return contribution, so the
+                            // degradation is recorded only where the
+                            // binding is OBSERVED (`read_local` folds the
+                            // `FailedBindingInitializer` membership); an
+                            // unobserved unmodelled binding degrades
+                            // nothing.
+                            Positional::Unmodeled => {
+                                let marker = super::flow_return_callee::unmodeled_position_marker(
+                                    self.dispatch,
+                                );
+                                self.bind_local(name, *kind, marker, false, true);
                             }
                         }
                     }
@@ -2672,7 +2776,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
-    ) -> Result<SemanticNodeId, FlowReturnFailure> {
+    ) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         // The nested function's OWN type parameters are binders in scope
         // for the parameter / return lowering (a `<T>(x: T) => x` keeps
@@ -2805,25 +2909,39 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if let Some(degradation) = nested_degradation {
             self.record_degradation(degradation);
         }
-        let contributors = contributors?;
+        // A nested body's OWN frame-level failure — an unmodelled control
+        // surface, an empty hold-only cycle — is a fact about the NESTED
+        // function's return position, not about the frame that embeds its
+        // signature. Propagating it outward is what deleted
+        // `{ label: "x", go: (n) => { while (…) { return n } return 0 } }`
+        // whole, where the checker publishes
+        // `{ label: string; go: (n: number) => number }`. The signature
+        // survives with its parameters intact and the typed marker in its
+        // RETURN position.
+        //
         // A nested function value's body is its own join; its holds ride
         // the OUTER frame's component, so no fixed point closes here and
         // the freshness bit has no later consumer.
-        let (result, _fresh_seed) = self.dispatch.join_flow_return_contributors(
-            contributors,
-            can_fall_through,
-            nested_bare_return_seen,
-            &nested_holds,
-            nested_degradation,
-        )?;
-        Ok(graph.intern_node(SemanticNodeData::Signature {
+        let return_type = match contributors.and_then(|contributors| {
+            self.dispatch.join_flow_return_contributors(
+                contributors,
+                can_fall_through,
+                nested_bare_return_seen,
+                &nested_holds,
+                nested_degradation,
+            )
+        }) {
+            Ok((result, _fresh_seed)) => result.return_type(),
+            Err(_) => self.unmodeled_position(),
+        };
+        graph.intern_node(SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Call,
             params: Arc::from(signature_params.into_boxed_slice()),
-            return_type: result.return_type(),
+            return_type,
             type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
-        }))
+        })
     }
 
     /// The CALLEE's own type-parameter clause at a direct-call site.
@@ -2899,11 +3017,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
     /// that is `ReturnOnly` by contract.
-    fn degraded_unrepresentable_callee(&mut self) -> Result<Option<CallValue>, FlowReturnFailure> {
+    fn degraded_unrepresentable_callee(&mut self) -> Positional<CallValue> {
         self.record_degradation(
             crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
         );
-        Ok(Some(CallValue::modeled_any(self.dispatch)))
+        Positional::Value(CallValue::modeled_any(self.dispatch))
     }
 
     /// The call-bucket return of an already-lowered CALLEE TYPE — the one
@@ -2913,7 +3031,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         callee_node: SemanticNodeId,
         site: crate::flow_slice_content::SliceCallSite,
-    ) -> Result<Option<CallValue>, FlowReturnFailure> {
+    ) -> Positional<CallValue> {
         let resolved = self.dispatch.resolve_signature_source_carrier(
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -2956,25 +3074,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             site,
             ReturnOrigin::OwnerScopeDeclared,
         ) {
-            SignatureCall::Value(value) => Ok(Some(value)),
+            SignatureCall::Value(value) => Positional::Value(value),
             SignatureCall::NotCallable | SignatureCall::ClauseUnavailable => {
                 self.degraded_unrepresentable_callee()
             }
-            SignatureCall::ReturnMiss => Err(FlowReturnFailure::Unresolved),
+            // The callee's own return position is a semantic MISS — no
+            // value to transfer. That is a fact about THIS call, not
+            // about the body it sits in.
+            SignatureCall::ReturnMiss => Positional::Unmodeled,
         }
     }
 
-    /// Evaluate one flow expression to a graph node. `Ok(None)` is a
-    /// coinductive HOLD (a same-slot recursive backedge — neither a
-    /// contributor nor a failure).
+    /// Evaluate one flow expression to a graph node.
+    ///
+    /// [`Positional`] — so this function cannot report a FRAME failure at
+    /// all. Every condition it meets is a fact about the POSITION it is
+    /// standing on, and the type says so.
     fn eval_expr(
         &mut self,
         expr: &crate::flow_slice_content::SliceExpr,
-    ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
+    ) -> Positional<SemanticNodeId> {
         let graph = self.dispatch.graph();
         match expr {
             crate::flow_slice_content::SliceExpr::Type(leaf) => {
-                Ok(Some(self.lower_body_type(leaf.ty())))
+                Positional::Value(self.lower_body_type(leaf.ty()))
             }
             crate::flow_slice_content::SliceExpr::FrameShadowed { inner, shadowed } => {
                 // The root-identifier gate's decision point. The content
@@ -2997,16 +3120,20 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .iter()
                     .any(|name| self.owner_scope_answers_name(name))
                 {
-                    return Ok(Some(self.unmodeled_position()));
+                    return Positional::Unmodeled;
                 }
                 self.eval_expr(inner)
             }
-            crate::flow_slice_content::SliceExpr::Param { ordinal } => self
-                .params
-                .get(*ordinal as usize)
-                .copied()
-                .map(Some)
-                .ok_or(FlowReturnFailure::Unresolved),
+            // A parameter ordinal the frame's own parameter list does not
+            // carry: the slice and the signature disagree about this
+            // frame's arity. That is a fact about this REFERENCE, not
+            // about the body around it.
+            crate::flow_slice_content::SliceExpr::Param { ordinal } => {
+                match self.params.get(*ordinal as usize).copied() {
+                    Some(node) => Positional::Value(node),
+                    None => Positional::Unmodeled,
+                }
+            }
             crate::flow_slice_content::SliceExpr::Local {
                 name,
                 param,
@@ -3019,19 +3146,19 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // when the binding redeclares a parameter — then the
                 // parameter is still the reaching value.
                 match self.read_local(name.as_ref()) {
-                    Some(node) => Ok(Some(node)),
+                    Some(node) => Positional::Value(node),
                     // A CAPTURED binding the seeded snapshot does not
                     // carry has no honest value: it is neither the
                     // same-frame implicit-`any` nor a file-scope name, so
                     // the POSITION carries the marker.
-                    None if *captured => Ok(Some(self.unmodeled_position())),
-                    None => Ok(Some(
+                    None if *captured => Positional::Unmodeled,
+                    None => Positional::Value(
                         param
                             .and_then(|ordinal| self.params.get(ordinal as usize).copied())
                             .unwrap_or_else(|| {
                                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any))
                             }),
-                    )),
+                    ),
                 }
             }
             crate::flow_slice_content::SliceExpr::Object { members } => {
@@ -3043,9 +3170,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // direct same-slot hold the return sites model).
                 let mut surface_members = Vec::with_capacity(members.len());
                 for member in members.iter() {
-                    let Some(value) = self.eval_expr(&member.value)? else {
-                        return Err(FlowReturnFailure::Unresolved);
-                    };
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(&member.value);
+                    let value = self.settle_composite_part(outcome, holds_before);
                     // Selective object widening (BL02-class): a member
                     // read of a WIDENING-literal local widens to its
                     // primitive at the mutable member position (`const
@@ -3072,7 +3199,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         merge_role: crate::semantic_query::MergeRoleStamp::default(),
                     });
                 }
-                Ok(Some(graph.intern_node(SemanticNodeData::Object(
+                Positional::Value(graph.intern_node(SemanticNodeData::Object(
                     crate::semantic_query::surface_view! {
                         members: Arc::from(surface_members.into_boxed_slice()),
                         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -3081,7 +3208,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         keyspace: None,
                         has_index_signature: false,
                     },
-                ))))
+                )))
             }
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,
@@ -3092,13 +3219,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // The nested function's signature: its body-derived return
                 // evaluates through the same flow machinery in a FRESH
                 // frame (the nested function's own params / locals).
-                let signature = self.eval_nested_function_signature(
+                Positional::Value(self.eval_nested_function_signature(
                     nested_params,
                     type_parameters,
                     body,
                     *can_fall_through,
-                )?;
-                Ok(Some(signature))
+                ))
             }
             // EVERY call form, through the ONE call sink. `CallValue`'s
             // constructors all decide what happens to the callee's own
@@ -3106,11 +3232,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // return back to this frame untouched by accident — only by
             // asking for `own_frame_binder` by name.
             crate::flow_slice_content::SliceExpr::Call(call, site) => {
-                Ok(self.eval_call(call, *site)?.map(CallValue::into_node))
+                match self.eval_call(call, *site) {
+                    Positional::Value(value) => Positional::Value(value.into_node()),
+                    Positional::Hold => Positional::Hold,
+                    Positional::Unmodeled => Positional::Unmodeled,
+                }
             }
-            crate::flow_slice_content::SliceExpr::Any => Ok(Some(
+            crate::flow_slice_content::SliceExpr::Any => Positional::Value(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
-            )),
+            ),
             // A name the frame's lexical authority resolved to a
             // function-local binding the content half does not model
             // (a destructuring element, a local `class` / `enum` /
@@ -3119,9 +3249,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // RESOLVED — never free — so there is no honest value to
             // publish: fail closed with the typed no-value failure
             // rather than bind an unrelated same-named declaration.
-            crate::flow_slice_content::SliceExpr::UnmodeledBinding => {
-                Ok(Some(self.unmodeled_position()))
-            }
+            crate::flow_slice_content::SliceExpr::UnmodeledBinding => Positional::Unmodeled,
             // A conditional expression's branch VALUES. Each arm was
             // lowered as a flow expression, so a call in a branch already
             // took the one call sink above — the union here only joins
@@ -3134,17 +3262,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // A coinductive HOLD inside a branch cannot be
                     // represented as a partial union arm — the SCC
                     // discharge joins whole contributions, not fragments
-                    // of one. Fail closed rather than drop the held arm
-                    // and publish the rest as if it were the whole value.
-                    let Some(node) = self.eval_expr(arm)? else {
-                        return Err(FlowReturnFailure::Unresolved);
-                    };
-                    nodes.push(node);
+                    // of one. The ARM is the unmodelled position; the rest
+                    // of the union survives, degraded.
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(arm);
+                    nodes.push(self.settle_composite_part(outcome, holds_before));
                 }
-                Ok(Some(
+                Positional::Value(
                     self.dispatch
                         .intern_normalized_union_or_intersection(&nodes, true),
-                ))
+                )
             }
             // A call the content half could not route through the call
             // carrier: the only answer available was the shallow pass's
@@ -3152,13 +3279,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // own binders and skipped its overload group entirely.
             // Publishing it is a warm-admissible wrong answer with a
             // FOREIGN binder in it, so the evaluation fails closed.
-            crate::flow_slice_content::SliceExpr::UnreducedCallValue => {
-                Ok(Some(self.unmodeled_position()))
-            }
+            crate::flow_slice_content::SliceExpr::UnreducedCallValue => Positional::Unmodeled,
             // Content the demand slice did not select: never lowered,
             // never evaluable. Reaching one is a planner/content mismatch
-            // — undecided, fail closed; never a fabricated `any`.
-            crate::flow_slice_content::SliceExpr::Elided => Err(FlowReturnFailure::Unresolved),
+            // at THIS position — the marker, never a fabricated `any` and
+            // never the enclosing structure.
+            crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
         }
     }
 
@@ -3167,13 +3293,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// The ONE place a callee's return becomes a caller's value. Every
     /// arm returns a [`CallValue`], whose constructors each decide what
     /// happens to the CALLEE's own type-parameter clause — the rule
-    /// cannot be silently skipped at a new arm, only chosen. `Ok(None)`
-    /// is a coinductive HOLD, exactly as in [`Self::eval_expr`].
+    /// cannot be silently skipped at a new arm, only chosen.
+    ///
+    /// [`Positional`], exactly as in [`Self::eval_expr`]: a call this
+    /// substrate cannot resolve is an unmodelled POSITION, and the type
+    /// leaves no way to say otherwise.
     fn eval_call(
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
         site: crate::flow_slice_content::SliceCallSite,
-    ) -> Result<Option<CallValue>, FlowReturnFailure> {
+    ) -> Positional<CallValue> {
         let graph = self.dispatch.graph();
         match call {
             crate::flow_slice_content::SliceCall::Nested(function) => {
@@ -3184,9 +3313,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // resolved-callee route applies has to apply here, and it
                 // does, because both routes take their value from the ONE
                 // signature reader.
-                let signature = match self.eval_expr(function)? {
-                    Some(signature) => signature,
-                    None => return Ok(None),
+                let signature = match self.eval_expr(function) {
+                    Positional::Value(signature) => signature,
+                    Positional::Hold => return Positional::Hold,
+                    Positional::Unmodeled => return Positional::Unmodeled,
                 };
                 // A nested function value's signature is COMPOSED here:
                 // its return is the flow join of its own body, evaluated
@@ -3198,10 +3328,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     site,
                     ReturnOrigin::ClauseScoped,
                 ) {
-                    SignatureCall::Value(value) => Ok(Some(value)),
+                    SignatureCall::Value(value) => Positional::Value(value),
+                    // An IIFE whose composed signature is not callable,
+                    // whose return position missed, or whose clause could
+                    // not be recovered: the CALL has no modelled value.
+                    // The enclosing structure still does.
                     SignatureCall::NotCallable
                     | SignatureCall::ReturnMiss
-                    | SignatureCall::ClauseUnavailable => Err(FlowReturnFailure::Unresolved),
+                    | SignatureCall::ClauseUnavailable => Positional::Unmodeled,
                 }
             }
             crate::flow_slice_content::SliceCall::Direct(target) => {
@@ -3403,26 +3537,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     self.holds
                                         .push(HeldCallee::foreign(key, callee_clause.clone()));
                                 }
-                                Ok(Some(CallValue::of_served_return(
+                                Positional::Value(CallValue::of_served_return(
                                     self.dispatch,
                                     &callee_clause,
                                     result.return_type(),
                                     ReturnOrigin::ClauseScoped,
-                                )))
+                                ))
                             }
                             FlowReturnStep::Hold(key) => {
                                 self.holds
                                     .push(HeldCallee::foreign(*key.clone(), callee_clause));
-                                Ok(None)
+                                Positional::Hold
                             }
                             FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {
                                 // An empty-cycle callee IS a hold — the SCC
                                 // close discharges it (and its callers) on
                                 // the component's admitted returns.
                                 self.holds.push(HeldCallee::foreign(key, callee_clause));
-                                Ok(None)
+                                Positional::Hold
                             }
-                            FlowReturnStep::NoValue(failure) => Err(failure),
+                            // The CALLEE's frame failed. That is a fact
+                            // about the callee's body, and it reaches this
+                            // frame at exactly one place: the call.
+                            // Re-raising it here is what made one helper's
+                            // unmodelled control surface delete the whole
+                            // caller's surface.
+                            FlowReturnStep::NoValue(_) => Positional::Unmodeled,
                         }
                     }
                     source => match self
@@ -3434,19 +3574,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         // scope: the resolved same-named declaration IS
                         // the clause parameter, misresolved.
                         super::flow_return::FunctionReturnNode::Declared(hot) => {
-                            Ok(Some(CallValue::of_served_return(
+                            Positional::Value(CallValue::of_served_return(
                                 self.dispatch,
                                 &callee_clause,
                                 hot.node(),
                                 ReturnOrigin::OwnerScopeDeclared,
-                            )))
+                            ))
                         }
-                        super::flow_return::FunctionReturnNode::DeclaredMiss => {
-                            Err(FlowReturnFailure::Unresolved)
-                        }
-                        super::flow_return::FunctionReturnNode::Absent => {
-                            Err(FlowReturnFailure::Missing)
-                        }
+                        // A declared locator that would not raise, and a
+                        // signature with NO recoverable return carrier,
+                        // both leave this CALL without a value.
+                        super::flow_return::FunctionReturnNode::DeclaredMiss
+                        | super::flow_return::FunctionReturnNode::Absent => Positional::Unmodeled,
                         super::flow_return::FunctionReturnNode::Flow(_)
                         | super::flow_return::FunctionReturnNode::NoValue(_) => {
                             unreachable!("a Declared/Absent source never reaches the flow rail")
@@ -3477,9 +3616,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // has no honest value: the POSITION carries the marker
                     // rather than the same-frame implicit-`any` call.
                     if *captured {
-                        return Ok(Some(self.unmodeled_call_position()));
+                        return Positional::Value(self.unmodeled_call_position());
                     }
-                    return Ok(Some(CallValue::modeled_any(self.dispatch)));
+                    return Positional::Value(CallValue::modeled_any(self.dispatch));
                 };
                 // A function-typed BINDING carries the callee's clause on
                 // its own signature node — `const id = <T>(x: T): T => x`
@@ -3509,9 +3648,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     site,
                     ReturnOrigin::ClauseScoped,
                 ) {
-                    SignatureCall::Value(value) => Ok(Some(value)),
+                    SignatureCall::Value(value) => Positional::Value(value),
+                    // The binding's signature has no transferable return:
+                    // its return position missed, or a needed clause
+                    // default could not be recovered. Positional.
                     SignatureCall::ReturnMiss | SignatureCall::ClauseUnavailable => {
-                        Err(FlowReturnFailure::Unresolved)
+                        Positional::Unmodeled
                     }
                     SignatureCall::NotCallable
                         if matches!(
@@ -3519,13 +3661,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
                         ) =>
                     {
-                        Ok(Some(CallValue::modeled_any(self.dispatch)))
+                        Positional::Value(CallValue::modeled_any(self.dispatch))
                     }
                     SignatureCall::NotCallable => {
                         self.record_degradation(
                             crate::semantic_query::FlowReturnDegradation::NonCallableBinding,
                         );
-                        Ok(Some(CallValue::modeled_any(self.dispatch)))
+                        Positional::Value(CallValue::modeled_any(self.dispatch))
                     }
                 }
             }
@@ -3533,13 +3675,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
                 // recovery of the nested declaration's own return is not
-                // implemented — fail closed, never bind the outer callee.
-                Err(FlowReturnFailure::Unresolved)
+                // implemented. The CALL carries the marker — never the
+                // outer callee's value, and never the enclosing frame.
+                Positional::Unmodeled
             }
             crate::flow_slice_content::SliceCall::DirectSelf => {
                 // Only the frame that OWNS a flow slot can hold on it.
                 let Some(self_slot) = self.self_slot else {
-                    return Err(FlowReturnFailure::Unresolved);
+                    return Positional::Unmodeled;
                 };
                 match self.dispatch.execute_flow_return(self_slot.clone()) {
                     FlowReturnStep::Hold(_) => {
@@ -3547,12 +3690,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         // frame's own: a self-call's callee IS the caller,
                         // so the fixed point must leave them alone.
                         self.holds.push(HeldCallee::own_frame(self_slot.clone()));
-                        Ok(None)
+                        Positional::Hold
                     }
                     FlowReturnStep::Complete(_) => {
                         unreachable!("a same-slot recursive edge is always a hold in flight")
                     }
-                    FlowReturnStep::NoValue(failure) => Err(failure),
+                    FlowReturnStep::NoValue(_) => Positional::Unmodeled,
                 }
             }
             crate::flow_slice_content::SliceCall::Symbolic(ty) => {

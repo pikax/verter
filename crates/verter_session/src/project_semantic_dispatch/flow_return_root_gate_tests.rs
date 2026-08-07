@@ -498,9 +498,27 @@ fn flow_return_nested_self_call_never_holds_the_enclosing_slot() {
         };
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer),
-            "the unrecoverable inner self-call degrades where it is OBSERVED"
+            Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            "the unrecoverable inner self-call is an unmodelled POSITION inside \
+             the nested value's return, and degrades the frame that returns it"
         );
+        // The nested function VALUE survives with its shape intact — the
+        // marker sits in its RETURN position, not in place of the whole
+        // signature, and is never a fabricated `any` (which would be
+        // indistinguishable from an authored one at every downstream gate).
+        match dispatch.graph().node_data(result.return_type()).as_deref() {
+            Some(SemanticNodeData::Signature { return_type, .. }) => assert!(
+                matches!(
+                    dispatch.graph().node_data(*return_type).as_deref(),
+                    Some(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::UnmodeledPosition
+                    ))
+                ),
+                "the nested signature's return position carries the typed marker, got {:?}",
+                dispatch.graph().node_data(*return_type)
+            ),
+            other => panic!("`g` publishes the nested function's signature, got {other:?}"),
+        }
         assert_eq!(
             dispatch
                 .graph()

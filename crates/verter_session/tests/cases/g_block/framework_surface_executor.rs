@@ -145,6 +145,130 @@ fn member_keys(
         .collect()
 }
 
+/// A component whose props surface the substrate FAILED to compute must not
+/// encode as `SUPPORTED` + `GRAPH_EXACTNESS_EXACT_RESOLVED`.
+///
+/// Vue and Svelte are co-equal on this wire and were byte-indistinguishable
+/// from a clean answer: `encode_kind` maps `ResolvedOutcome::Resolved` (at
+/// ANY member count) and `::Missing` to SUPPORTED + EXACT_RESOLVED, and the
+/// flow substrate's degradation never reached `ResolvedOutcome`. So a
+/// consumer could not tell "this component declares these props" from "we
+/// could not work out its props".
+///
+/// Each row's props come from `ReturnType<typeof makeProps>` where
+/// `makeProps` returns an object with ONE member this substrate cannot type
+/// (tsgo `7.0.0-dev.20260526.1`: `{ label: string; made: Box }`).
+///
+/// The CLEAN controls are the discrimination: an ordinary component must
+/// still encode SUPPORTED + EXACT_RESOLVED, so a blanket downgrade fails
+/// them.
+///
+/// Mutation recipe: dropping the per-demand completeness read in
+/// `ExecutorResolveCtx::resolve_demand` returns both degraded rows to
+/// SUPPORTED / EXACT_RESOLVED while leaving the controls green.
+#[test]
+fn a_degraded_framework_surface_never_encodes_exact_resolved() {
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest};
+
+    const DEGRADED_BODY: &str = "class Box { readonly tag = \"box\" }\n\
+         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n";
+
+    let vue_degraded = format!(
+        "<script setup lang=\"ts\">\n{DEGRADED_BODY}\
+         defineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div></div></template>\n"
+    );
+    let vue_clean = "<script setup lang=\"ts\">\n\
+         function makeProps() { return { label: \"x\", n: 1 } }\n\
+         defineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div></div></template>\n";
+    let svelte_degraded = format!(
+        "<script lang=\"ts\">\n{DEGRADED_BODY}\
+         let {{ label, made }}: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{{label}}</p>\n"
+    );
+    let svelte_clean = "<script lang=\"ts\">\n\
+         function makeProps() { return { label: \"x\", n: 1 } }\n\
+         let { label, n }: ReturnType<typeof makeProps> = $props();\n</script>\n<p>{label}</p>\n";
+
+    for (canonical, source, language, adapter, degraded) in [
+        (
+            "/D.vue",
+            vue_degraded.as_str(),
+            FileLanguage::vue(),
+            "vue",
+            true,
+        ),
+        ("/C.vue", vue_clean, FileLanguage::vue(), "vue", false),
+        (
+            "/D.svelte",
+            svelte_degraded.as_str(),
+            FileLanguage::svelte(),
+            "svelte",
+            true,
+        ),
+        (
+            "/C.svelte",
+            svelte_clean,
+            FileLanguage::svelte(),
+            "svelte",
+            false,
+        ),
+    ] {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
+
+        let result =
+            host.resolve_framework_surface_with_audit(framework_envelope(canonical, adapter));
+        let response = result.as_result().expect("structural response");
+        let payload = expect_payload(response);
+        let entries = entries_by_kind(payload);
+        let props = entries
+            .get(&(FrameworkSurfaceKind::Props as i32))
+            .unwrap_or_else(|| panic!("{canonical}: a PROPS entry"));
+        let status = props
+            .status
+            .as_ref()
+            .unwrap_or_else(|| panic!("{canonical}: PROPS carries a status"));
+        let members = member_keys(payload, props);
+
+        if degraded {
+            assert_ne!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: a surface the substrate failed to compute must not claim SUPPORTED \
+                 (members={members:?})"
+            );
+            assert_ne!(
+                status.exactness,
+                wire::Exactness::ExactResolved as i32,
+                "{canonical}: a degraded resolution must not claim EXACT_RESOLVED \
+                 (members={members:?})"
+            );
+        } else {
+            assert_eq!(
+                status.support,
+                FrameworkSurfaceKindSupport::Supported as i32,
+                "{canonical}: the clean control stays SUPPORTED (members={members:?})"
+            );
+            assert_eq!(
+                status.exactness,
+                wire::Exactness::ExactResolved as i32,
+                "{canonical}: the clean control stays EXACT_RESOLVED (members={members:?})"
+            );
+            assert!(
+                members.iter().any(|m| m == "label"),
+                "{canonical}: the clean control publishes its props, got {members:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn malformed_envelope_op_payload_mismatch_returns_error_before_dispatch() {
     // An operation discriminator that disagrees with the payload arm (a

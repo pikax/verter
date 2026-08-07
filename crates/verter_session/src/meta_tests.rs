@@ -2164,6 +2164,150 @@ defineProps<ReturnType<typeof makeProps>>()
     );
 }
 
+/// A body-derived return the substrate could NOT infer never publishes as a
+/// COMPLETE and WARM component-meta surface.
+///
+/// SIX measured programs published `props: []` with
+/// `synthesis_should_suppress: false` and a WARM cache hit on replay, for
+/// shapes the checker types without difficulty. The whole no-value class
+/// reached `get_component_meta` announcing a complete answer, because the
+/// sealed consumer entry suppressed only the build-local taint and left the
+/// REQUEST unmarked — and `mark_request_result_partial` is the sole gate on
+/// `ComponentMetaResultDb`.
+///
+/// Each row states the checker's answer (tsgo `7.0.0-dev.20260526.1`,
+/// `--noEmit --strict --ignoreConfig`). The boundary triple is asserted for
+/// every one: the published `props`, `synthesis_should_suppress`, and the
+/// `component_meta_result_cache_hits` DELTA across a replay.
+///
+/// `cleanControl` is the discrimination control: an ordinary body must
+/// still publish its props, report complete, and warm — a fold that
+/// suppressed everything would pass every other row and fail this one.
+///
+/// Mutation recipe: returning the no-value arm to `(false, true)` —
+/// build-local taint only — flips every `NO_ANSWER` row's suppress to
+/// `false` and its replay delta to 1.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    /// The checker HAS an answer for every one of these; this substrate does
+    /// not. The publication contract is the same either way: not complete,
+    /// not warm.
+    const NO_ANSWER: &[(&str, &str, &str)] = &[
+        (
+            "/src/U1Loop.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            "{ label: string }",
+        ),
+        (
+            "/src/U1Switch.vue",
+            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+            "{ label: string }",
+        ),
+        (
+            "/src/U1Try.vue",
+            "function makeProps() { try { return { label: \"x\" } } catch { return { label: \"y\" } } }",
+            "{ label: string }",
+        ),
+        (
+            "/src/U1LoopArrow.vue",
+            "function makeProps() { return { label: \"x\", go: (n: number) => { while (n > 0) { return n } return 0 } } }",
+            "{ label: string; go: (n: number) => number }",
+        ),
+        (
+            "/src/U1HelperBare.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            "{ label: string; made: Box }",
+        ),
+        (
+            "/src/U1HelperArray.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
+            "{ label: string; made: (string | Box)[] }",
+        ),
+    ];
+
+    for (canonical, script, checker) in NO_ANSWER {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            resolved.synthesis_should_suppress,
+            "{canonical}: the checker publishes `{checker}` and this substrate publishes \
+             {names:?} — whatever it publishes, it must NOT report a COMPLETE surface"
+        );
+
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after, hits_before,
+            "{canonical}: an uninferred body return MUST NOT warm `ComponentMetaResultDb` \
+             (hits_before={hits_before}, hits_after={hits_after})"
+        );
+    }
+
+    // THE DISCRIMINATION CONTROL: an ordinary body publishes, reports
+    // complete, and warms. A blanket suppression passes every row above.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/U1Clean.vue",
+            "<script setup lang=\"ts\">\nfunction makeProps() { return { label: \"x\", n: 1 } }\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    let host = project.host();
+    let meta = get_meta(&project, "/src/U1Clean.vue");
+    let mut names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["label", "n"],
+        "the clean control publishes its whole props surface"
+    );
+    let (_, resolved) = host
+        .get_component_meta_with_resolution("/src/U1Clean.vue")
+        .expect("the clean resolve returns metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the clean control reports a COMPLETE surface"
+    );
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = get_meta(&project, "/src/U1Clean.vue");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after,
+        hits_before + 1,
+        "the clean control WARMS on replay (hits_before={hits_before}, hits_after={hits_after})"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {
@@ -2219,8 +2363,9 @@ defineProps<ReturnType<typeof makeProps>>()
     );
     assert_eq!(
         made.raw_type.as_deref(),
-        Some("semanticMiss"),
-        "`made`'s display passthrough names the unresolved marker, never `any`"
+        Some(crate::semantic_query::compat_spelling::UNMODELED_POSITION),
+        "`made`'s display passthrough names the POSITIONAL marker (its own \
+         carrier, distinct from a cache miss), never `any`"
     );
 
     // 3. The result is reported PARTIAL: the resolve suppresses synthesis,

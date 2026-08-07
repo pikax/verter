@@ -646,7 +646,21 @@ impl VerterHost {
                 let _completeness_scope =
                     crate::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                state.completeness = crate::request_context::current_cold_compute_completeness();
+                // The producer's OWN completeness, with the CONTAINED class
+                // subtracted: a body-derived return this substrate could not
+                // infer does not make the emitted TSX an incomplete surface
+                // (the declarations ride verbatim and the external checker
+                // types them), so it must not report the file-level result
+                // partial either. Every other reason class survives —
+                // including the declaration-local budget classification the
+                // class-member inference records precisely.
+                let observed = crate::request_context::current_cold_compute_completeness();
+                let residual = macro_projection_residual(observed);
+                state.completeness = if residual.is_empty() {
+                    crate::semantic_query::ResultCompleteness::Complete
+                } else {
+                    crate::semantic_query::ResultCompleteness::Partial(residual)
+                };
                 state
             });
         state.counters.scheduler_submissions = 1;
@@ -775,14 +789,13 @@ impl VerterHost {
                         }),
                 );
             }
-            let payload_failure =
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
-                    Some(partial_failure())
-                } else if payload.is_none() {
-                    Some(resolution_failure())
-                } else {
-                    None
-                };
+            let payload_failure = if macro_projection_faulted() {
+                Some(partial_failure())
+            } else if payload.is_none() {
+                Some(resolution_failure())
+            } else {
+                None
+            };
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
@@ -937,7 +950,7 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if macro_projection_faulted() {
                     return partial_failure().tsc();
                 }
                 let Some(surface) = surface else {
@@ -1010,7 +1023,7 @@ impl VerterHost {
                     ),
                     Some(&mut *walker_diagnostics),
                 );
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if macro_projection_faulted() {
                     return partial_failure().tsc();
                 }
                 let Some(surface) = surface else {
@@ -1132,7 +1145,7 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if crate::request_context::current_cold_compute_completeness().is_partial() {
+        if macro_projection_faulted() {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1235,7 +1248,7 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if crate::request_context::current_cold_compute_completeness().is_partial() {
+        if macro_projection_faulted() {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1253,7 +1266,7 @@ impl VerterHost {
             effective_index,
             runtime_context,
         );
-        if crate::request_context::current_cold_compute_completeness().is_partial() {
+        if macro_projection_faulted() {
             return partial_failure().runtime();
         }
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))

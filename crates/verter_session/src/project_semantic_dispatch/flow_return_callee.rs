@@ -460,9 +460,16 @@ pub(super) enum SignatureCall {
     Value(CallValue),
     /// The node is not a signature.
     NotCallable,
-    /// The signature's return position is a semantic-miss carrier — a
+    /// The signature's return position is a semantic-MISS carrier — a
     /// DEGRADED nested demand (an in-flight / failed callee), never a
     /// contributor.
+    ///
+    /// The typed POSITIONAL marker
+    /// ([`QueryError::UnmodeledPosition`](crate::semantic_query::QueryError::UnmodeledPosition))
+    /// is deliberately NOT this: a callee whose body left one position
+    /// unmodelled still has a return VALUE, and reclassifying it here
+    /// discarded the caller's whole surface for a fact about one interior
+    /// slot.
     ReturnMiss,
     /// The signature declares a defaulted clause parameter the call site
     /// needs, and the default could not be recovered.
@@ -595,9 +602,21 @@ impl CallValue {
 /// already distinguishes "not known" from "known" — the projector's
 /// published-field reducer, the flow result's own backstop verdict, the
 /// component-meta boundary — sees it without a new taxonomy.
+///
+/// Its OWN [`QueryError`](crate::semantic_query::QueryError) variant, not
+/// [`Miss`](crate::semantic_query::QueryError::Miss). A marker minted here
+/// travels UP through composed values — an object member, an array
+/// element, a nested signature's return position — and
+/// [`CallValue::of_signature_node`] reads a callee signature's return
+/// position looking for exactly a `Miss`, which it treats as a degraded
+/// nested demand. Sharing the carrier therefore fed this marker straight
+/// back into the frame-level failure it exists to avoid, and cost the
+/// whole enclosing surface. The two conditions are genuinely different —
+/// `Miss` is "no result yet", this is "there is a value here and this
+/// substrate cannot name it" — so they are different carriers.
 pub(super) fn unmodeled_position_marker(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        crate::semantic_query::QueryError::UnmodeledPosition,
     ))
 }
 

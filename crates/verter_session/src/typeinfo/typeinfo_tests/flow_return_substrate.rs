@@ -55,18 +55,39 @@ fn assert_flow_return_dispatched(record: &verter_audit::RequestAuditRecord, alia
     );
 }
 
-/// The degraded surface: a composed signature with no recoverable return
-/// carrier projects the typed miss.
+/// The FRAME-level degraded surface: an evaluation with NO VALUE AT ALL
+/// (an unmodelled control surface, an empty recursive cycle) projects the
+/// typed miss.
 fn assert_semantic_miss(expr: &TypeExpr) {
     match expr {
-        TypeExpr::Unknown(unknown) => assert_eq!(unknown.raw(), "semanticMiss"),
+        TypeExpr::Unknown(unknown) => assert_eq!(
+            unknown.raw(),
+            crate::semantic_query::compat_spelling::SEMANTIC_MISS
+        ),
         other => panic!("expected the degraded semantic-miss surface, got {other:?}"),
+    }
+}
+
+/// The POSITIONAL degraded surface: a position the substrate has no model
+/// for carries its OWN marker carrier, deliberately distinct from the
+/// cache-miss spelling — a marker that reads as a `Miss` fed itself back
+/// into the frame-level failure it exists to avoid.
+fn assert_unmodeled_position(expr: &TypeExpr) {
+    match expr {
+        TypeExpr::Unknown(unknown) => assert_eq!(
+            unknown.raw(),
+            crate::semantic_query::compat_spelling::UNMODELED_POSITION
+        ),
+        other => panic!("expected the positional-marker surface, got {other:?}"),
     }
 }
 
 fn expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     match expr {
-        TypeExpr::Unknown(unknown) => unknown.raw() == "semanticMiss",
+        TypeExpr::Unknown(unknown) => {
+            unknown.raw() == crate::semantic_query::compat_spelling::SEMANTIC_MISS
+                || unknown.raw() == crate::semantic_query::compat_spelling::UNMODELED_POSITION
+        }
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().any(expr_contains_semantic_miss)
         }
@@ -145,7 +166,7 @@ fn flow_surface_this_call_return_fails_closed() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_semantic_miss(&expr);
+    assert_unmodeled_position(&expr);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -245,7 +266,7 @@ fn flow_return_substrate_fails_closed_on_a_this_call() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubThisCallRun");
-    assert_semantic_miss(&expr);
+    assert_unmodeled_position(&expr);
     assert_flow_return_dispatched(&record, "SubThisCallRun");
 }
 

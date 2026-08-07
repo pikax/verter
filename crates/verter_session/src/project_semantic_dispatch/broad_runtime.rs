@@ -598,6 +598,10 @@ fn runtime_query_error_partial_reason(error: &QueryError) -> Option<PartialReaso
         | QueryError::RaiseMiss
         | QueryError::OpenSurface
         | QueryError::UnrepresentableSurface
+        // The flow substrate's positional marker states that a value
+        // EXISTS here and this substrate cannot name it — a genuine
+        // partial, never the benign "not found" `Miss` takes.
+        | QueryError::UnmodeledPosition
         | QueryError::UnrepresentableSurfaceMember => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
     }
 }

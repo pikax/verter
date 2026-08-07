@@ -479,7 +479,16 @@ impl ExecutorResolveCtx<'_> {
         requested_kind: FrameworkSurfaceKind,
         demand: PlannedDemand,
     ) -> ResolvedDemand {
-        match demand {
+        // PER-DEMAND completeness. The shared engine's degradation reaches
+        // this layer through the request/compute completeness rails, not
+        // through `ResolvedOutcome` — so without this read a resolution that
+        // FAILED to determine the surface encoded as `SUPPORTED` +
+        // `GRAPH_EXACTNESS_EXACT_RESOLVED`, byte-identical to a clean one.
+        // Scoped PER DEMAND so one kind's degradation never downgrades a
+        // sibling kind, and BUBBLED (not discarded) so the enclosing request
+        // still records it.
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let resolved = match demand {
             PlannedDemand::MacroPayload { owner, selector } => ResolvedDemand::MacroPayload(
                 self.resolve_macro_payload(&owner, requested_kind, &selector),
             ),
@@ -493,6 +502,14 @@ impl ExecutorResolveCtx<'_> {
                 crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
                     self.host, self.ctx, &owner, source,
                 ),
+            ),
+        };
+        let observed = crate::request_context::current_cold_compute_completeness();
+        drop(scope);
+        match observed {
+            crate::semantic_query::ResultCompleteness::Complete => resolved,
+            crate::semantic_query::ResultCompleteness::Partial(reasons) => resolved.degraded_by(
+                &format!("framework surface resolution was degraded: {reasons:?}"),
             ),
         }
     }

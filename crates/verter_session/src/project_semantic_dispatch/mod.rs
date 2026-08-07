@@ -107,6 +107,8 @@ pub(crate) mod flow_return_callee;
 #[cfg(test)]
 pub(crate) mod flow_return_coverage_tests;
 #[cfg(test)]
+pub(crate) mod flow_return_frame_seal_tests;
+#[cfg(test)]
 pub(crate) mod flow_return_lexical_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_positional_tests;
@@ -821,9 +823,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// build-local fold (the stack is empty); the sticky mark still fires.
     pub(super) fn fold_cache_read_rails(&self, result_is_partial: bool, cache_suppress: bool) {
         if result_is_partial {
-            crate::request_context::mark_request_result_partial();
+            crate::request_context::mark_request_result_partial_from_read();
         }
         self.fold_into_top_build_local_taint(result_is_partial, cache_suppress);
+    }
+
+    /// [`Self::fold_cache_read_rails`] for the ONE sealed function-return
+    /// consumer: the same two rails, folded under the NAMED
+    /// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNINFERRED`]
+    /// class instead of the boolean-bridge `PROPAGATED`.
+    ///
+    /// The class has to be named because its two consumers disagree about
+    /// what it means, and a boolean cannot carry that: publishing the
+    /// inferred type makes it a genuine partial, while emitting the
+    /// authored declaration for an external checker leaves the output
+    /// complete.
+    pub(super) fn fold_flow_return_uninferred_rails(&self) {
+        crate::request_context::mark_request_result_flow_return_uninferred();
+        self.fold_into_top_build_local_taint(true, true);
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /

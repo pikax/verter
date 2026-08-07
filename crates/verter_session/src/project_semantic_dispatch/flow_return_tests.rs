@@ -374,6 +374,54 @@ fn flow_result(
     (expr, result.can_fall_through)
 }
 
+/// The POSITIONAL fail-closed assertion: the demanded return is a
+/// DEGRADED SUCCESS whose value is the typed unmodelled-position MARKER —
+/// never the wrong binding's value, never warm.
+///
+/// A whole-return position that the substrate cannot model is a POSITION
+/// like any other; it is only "the whole frame" because there is nothing
+/// else in the return. The load-bearing half is the same in either
+/// spelling: whatever value the mis-binding WOULD have published is
+/// absent, and nothing admits.
+#[track_caller]
+fn assert_whole_return_is_unmodeled_marker(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+    canonical: &str,
+    what: &str,
+) {
+    match dispatch.execute_function_return_source(
+        &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+        canonical,
+    ) {
+        super::flow_return::FunctionReturnNode::Flow(result) => {
+            assert!(
+                matches!(
+                    dispatch.graph().node_data(result.return_type()).as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
+                ),
+                "{what}: the position carries the typed marker, got {:?}",
+                dispatch.graph().node_data(result.return_type())
+            );
+            assert_eq!(
+                result.degradation(),
+                Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+                "{what}: the positional degradation reason"
+            );
+        }
+        other => panic!("{what}: a degraded positional success, got {other:?}"),
+    }
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                dispatch.flow_return_key_for(identity)
+            ))),
+        0,
+        "{what}: a degraded success is ReturnOnly — nothing warms"
+    );
+}
+
 fn flow_is_miss(dispatch: &ProjectSemanticDispatch<'_>, key: FlowReturnKey) -> bool {
     matches!(
         execute_flow(dispatch, key),
@@ -1115,13 +1163,12 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
             },
             overload_ordinal: 0,
         };
-        match dispatch.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
             "/ws/member-recur.ts",
-        ) {
-            super::flow_return::FunctionReturnNode::NoValue(_) => {}
-            other => panic!("the recursive member call degrades, got {other:?}"),
-        }
+            "the recursive member call",
+        );
         // Nothing admitted: the family entry never materializes, and a
         // repeat demand runs cold.
         assert!(dispatch
@@ -1356,15 +1403,12 @@ fn flow_return_direct_call_fails_closed_on_nested_function_declaration_shadow() 
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        match dispatch.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
             "/ws/fn-shadow.ts",
-        ) {
-            super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Unresolved,
-            ) => {}
-            other => panic!("the shadowed direct call fails closed, got {other:?}"),
-        }
+            "the shadowed direct call",
+        );
     });
 }
 
@@ -1398,15 +1442,12 @@ fn flow_return_self_call_shadowed_by_nested_function_declaration_fails_closed() 
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        match dispatch.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
             "/ws/self-fn-shadow.ts",
-        ) {
-            super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Unresolved,
-            ) => {}
-            other => panic!("the shadowed self call fails closed, got {other:?}"),
-        }
+            "the shadowed self call",
+        );
     });
 }
 
@@ -1584,15 +1625,12 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        match dispatch.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
             "/ws/nested-fn-shadow.ts",
-        ) {
-            super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Unresolved,
-            ) => {}
-            other => panic!("the nested-value shadowed call fails closed, got {other:?}"),
-        }
+            "the nested-value shadowed call",
+        );
     });
 }
 
@@ -1626,17 +1664,12 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_fails_closed
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        match dispatch.execute_function_return_source(
-            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+        assert_whole_return_is_unmodeled_marker(
+            dispatch,
+            &identity,
             "/ws/nested-self-shadow.ts",
-        ) {
-            super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Unresolved,
-            ) => {}
-            other => panic!(
-                "the nested-value self-name shadow fails closed (never EmptyCycle), got {other:?}"
-            ),
-        }
+            "the nested-value self-name shadow",
+        );
     });
 }
 

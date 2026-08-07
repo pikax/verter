@@ -1625,10 +1625,19 @@ pub enum FlowReturnDegradation {
 /// value. Only undecidability of the RETURN SET ITSELF — an unmodelled
 /// control surface, a missing body, a budget edge, a torn view, an empty
 /// recursive cycle, an unmodelled demand point — is a
-/// `FlowReturnFailure`. The vocabulary below carries no positional
-/// variant, so positional non-modelling is UNREPRESENTABLE as a
-/// frame-level `Err`: whole-frame propagation cannot be reached by
-/// accident through a `?`.
+/// `FlowReturnFailure`.
+///
+/// The separation is held BY TYPE, not by vocabulary. Deleting the
+/// positional VARIANTS left the positional PATH: with
+/// `Result<_, FlowReturnFailure>` as the return type of the positional
+/// evaluators, whole-frame propagation is what `?` does by default and
+/// localisation is the thing each site must remember. So `eval_expr` /
+/// `eval_call` return a type with NO error variant instead
+/// (`Positional<T>` — value, hold, or unmodelled position), which makes
+/// this enum UNCONSTRUCTIBLE inside them: there is no variant to put one
+/// in, and `?` over a `Result<_, Self>` does not typecheck against a
+/// non-`Try` return type. Every producer below therefore lives OUTSIDE
+/// the positional evaluators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowReturnFailure {
     /// The function position has no served body (missing declaration,
@@ -3728,6 +3737,21 @@ impl PartialReasonSet {
     /// preserved for fail-closed consumers and is never warm-admitted as a
     /// complete result.
     pub const MISSING_DEPENDENCY: Self = Self(1 << 13);
+    /// A body-derived (`FlowReturn`) return this substrate could not infer
+    /// — either no value at all, or a usable value with an unmodelled
+    /// interior position.
+    ///
+    /// A NAMED class rather than the boolean-bridge
+    /// [`PROPAGATED`](Self::PROPAGATED), because two consumers must treat
+    /// it differently and neither may be forced to guess. A consumer that
+    /// PUBLISHES the inferred type (`get_component_meta`) is genuinely
+    /// incomplete and must not warm. A consumer that emits the AUTHORED
+    /// declaration for an external checker to type (the Vue macro TSC
+    /// projection) is complete regardless: it splices the declaration
+    /// verbatim, so an inference this substrate cannot do is not a defect
+    /// of its output — and faulting there deleted the WHOLE props
+    /// projection from the generated TSX over one member's return type.
+    pub const FLOW_RETURN_UNINFERRED: Self = Self(1 << 14);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]
@@ -3751,6 +3775,12 @@ impl PartialReasonSet {
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
+    }
+
+    /// `self` with every reason in `other` removed.
+    #[must_use]
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 
@@ -4179,6 +4209,19 @@ pub enum QueryError {
     /// sentinel — an unmaterialised degradation, but NEITHER the
     /// object-surface sentinel (intersection arm-drop) NOR the miss sentinel.
     OpenSurface,
+    /// A POSITION the flow substrate has no model for — the typed marker one
+    /// unmodelled sub-expression contributes while every modelled sibling of
+    /// the enclosing structure survives.
+    ///
+    /// DISTINCT from [`Miss`](Self::Miss) on purpose. `Miss` means "no
+    /// result yet"; this means "there is a value here and this substrate
+    /// cannot name it". The distinction is load-bearing at exactly one
+    /// place — the callee rail's signature reader, which treats a `Miss` in
+    /// a callee's RETURN position as a degraded nested demand
+    /// (`SignatureCall::ReturnMiss`) and must NOT do that to a marker it
+    /// minted itself one frame down: doing so fed the marker straight back
+    /// into the frame-level failure it exists to avoid.
+    UnmodeledPosition,
 }
 
 impl QueryError {
@@ -4206,6 +4249,7 @@ impl QueryError {
             | QueryError::RaiseMiss
             | QueryError::UnrepresentableSurface
             | QueryError::UnrepresentableSurfaceMember
+            | QueryError::UnmodeledPosition
             | QueryError::OpenSurface => true,
         }
     }
@@ -4262,6 +4306,7 @@ impl QueryError {
             | QueryError::RaiseMiss
             | QueryError::OpenSurface
             | QueryError::UnrepresentableSurface
+            | QueryError::UnmodeledPosition
             | QueryError::UnrepresentableSurfaceMember => false,
         }
     }
@@ -4317,6 +4362,7 @@ impl PartialEq for QueryError {
             (Self::UnrepresentableSurface, Self::UnrepresentableSurface) => true,
             (Self::UnrepresentableSurfaceMember, Self::UnrepresentableSurfaceMember) => true,
             (Self::OpenSurface, Self::OpenSurface) => true,
+            (Self::UnmodeledPosition, Self::UnmodeledPosition) => true,
             _ => false,
         }
     }
@@ -4346,6 +4392,7 @@ impl QueryError {
             Self::UnrepresentableSurfaceMember => 13,
             Self::Cancelled => 14,
             Self::OpenSurface => 15,
+            Self::UnmodeledPosition => 16,
         }
     }
 }
@@ -4394,6 +4441,7 @@ impl std::hash::Hash for QueryError {
             | Self::RaiseMiss
             | Self::UnrepresentableSurface
             | Self::UnrepresentableSurfaceMember
+            | Self::UnmodeledPosition
             | Self::OpenSurface => {}
         }
     }
@@ -8292,6 +8340,7 @@ mod tests {
             QueryError::UnrepresentableSurface,
             QueryError::UnrepresentableSurfaceMember,
             QueryError::OpenSurface,
+            QueryError::UnmodeledPosition,
         ];
         let mut tags = HashSet::new();
         for variant in &variants {

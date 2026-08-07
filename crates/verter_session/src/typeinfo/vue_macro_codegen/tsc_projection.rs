@@ -4,7 +4,8 @@
 //! Sibling half of the parent module `impl VerterHost` orchestrator.
 
 use super::runtime::{
-    authored_emit_anchor, authored_emit_order, partial_failure, resolution_failure,
+    authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
+    resolution_failure,
 };
 use super::*;
 
@@ -15,7 +16,7 @@ pub(super) fn render_tsc_node(
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
     let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted() {
         return Err(partial_failure());
     }
     rendered
@@ -1175,7 +1176,7 @@ pub(super) fn tsc_emit_rows(
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
 
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted() {
         return Err(partial_failure());
     }
     Ok(rows)
@@ -1211,13 +1212,11 @@ fn render_emit_payload_parameters(
         .normalize_node_for_structural_fact_demand(node, context)
         .into_complete_node()
     else {
-        return Err(
-            if crate::request_context::current_cold_compute_completeness().is_partial() {
-                partial_failure()
-            } else {
-                resolution_failure()
-            },
-        );
+        return Err(if macro_projection_faulted() {
+            partial_failure()
+        } else {
+            resolution_failure()
+        });
     };
     match crate::project_semantic_dispatch::node_data_for(dispatch.ctx, node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {

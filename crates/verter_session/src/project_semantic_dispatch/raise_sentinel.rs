@@ -43,6 +43,9 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
         | QueryError::RaiseAliasCycle
         | QueryError::OpenSurface
         | QueryError::UnrepresentableSurface
+        // A position the flow substrate cannot model never materialised
+        // a value.
+        | QueryError::UnmodeledPosition
         | QueryError::UnrepresentableSurfaceMember => true,
         // Deliberately NOT unmaterialised: `<raise miss>` (RaiseMiss) and
         // `semanticTypeParamCycle` (TypeParamCycle) are carrier-arg / cycle
@@ -88,6 +91,7 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentin
         | QueryError::OpenSurface
         | QueryError::Other(_)
         | QueryError::DeclPlaceholder { .. }
+        | QueryError::UnmodeledPosition
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }
@@ -120,6 +124,10 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentine
         | QueryError::Other(_)
         | QueryError::DeclPlaceholder { .. }
         | QueryError::UnrepresentableSurface
+        // NOT the miss sentinel: the flow marker is a DISTINCT carrier
+        // precisely so a consumer keyed on `Miss` cannot mistake it for
+        // one.
+        | QueryError::UnmodeledPosition
         | QueryError::UnrepresentableSurfaceMember => false,
     }
 }

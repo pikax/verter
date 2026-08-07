@@ -538,6 +538,45 @@ pub enum ResolvedOutcome<T> {
 }
 
 impl<T> ResolvedOutcome<T> {
+    /// Downgrade an outcome whose RESOLUTION was degraded.
+    ///
+    /// The wire's `SUPPORTED` + `GRAPH_EXACTNESS_EXACT_RESOLVED` pair is a
+    /// CLAIM: "this is the surface, exactly". A resolution that could not
+    /// determine part of what it read has no business making it — a
+    /// degraded surface was byte-indistinguishable on the wire from a
+    /// clean one, empty members and all, so a consumer had no way to tell
+    /// "this component declares no props" from "we could not work out its
+    /// props".
+    ///
+    /// `Missing` is downgraded too, and that arm is the one that mattered:
+    /// a demand whose resolution degraded to nothing encoded as
+    /// SUPPORTED-EMPTY-EXACT. `empty` supplies the value-shaped carrier for
+    /// the resulting `Partial`; `Unsupported` is already the strongest
+    /// negative and is left alone.
+    #[must_use]
+    pub fn degraded_by(self, diagnostic: impl Into<String>, empty: impl FnOnce() -> T) -> Self {
+        match self {
+            ResolvedOutcome::Resolved(value) => ResolvedOutcome::Partial {
+                value,
+                diagnostics: vec![diagnostic.into()],
+            },
+            ResolvedOutcome::Partial {
+                value,
+                mut diagnostics,
+            } => {
+                diagnostics.push(diagnostic.into());
+                ResolvedOutcome::Partial { value, diagnostics }
+            }
+            ResolvedOutcome::Unsupported { diagnostics } => {
+                ResolvedOutcome::Unsupported { diagnostics }
+            }
+            ResolvedOutcome::Missing => ResolvedOutcome::Partial {
+                value: empty(),
+                diagnostics: vec![diagnostic.into()],
+            },
+        }
+    }
+
     /// The resolved value, if the outcome carries one (`Resolved` or `Partial`).
     #[must_use]
     pub fn value(&self) -> Option<&T> {

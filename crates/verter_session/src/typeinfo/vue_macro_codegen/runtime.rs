@@ -52,7 +52,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if macro_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -72,7 +72,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if macro_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -89,7 +89,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if macro_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -357,7 +357,7 @@ pub(super) fn classify_runtime(
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
     let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted() {
         return Err(partial_failure());
     }
     let classification = match result {
@@ -618,6 +618,38 @@ fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool 
     })
 }
 
+/// The Vue-macro projection's CONTAINED partial class.
+///
+/// A macro projection emits the AUTHORED declarations verbatim into the
+/// generated TSX and splices the AUTHORED type argument; the external
+/// checker then computes the member types itself. So a body-derived return
+/// THIS substrate could not infer
+/// ([`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) says nothing about
+/// whether the projection is the full surface — and faulting on it deleted
+/// the WHOLE props projection from the generated TSX over one class
+/// member's return type, for programs the checker types without
+/// difficulty.
+///
+/// Every OTHER reason class still faults: a budget edge, a cancellation, a
+/// superseded generation, an unstable view, a recursion limit, a missing
+/// dependency, a semantic-query fault, and the boolean-bridge
+/// `PROPAGATED` are all statements about the REQUEST rather than about one
+/// declaration's inference.
+pub(super) fn macro_projection_faulted() -> bool {
+    !macro_projection_residual(crate::request_context::current_cold_compute_completeness())
+        .is_empty()
+}
+
+/// The reasons of `completeness` that FAULT a Vue-macro projection — the
+/// observed set minus the contained class.
+pub(super) fn macro_projection_residual(
+    completeness: crate::semantic_query::ResultCompleteness,
+) -> PartialReasonSet {
+    completeness
+        .reasons()
+        .without(PartialReasonSet::FLOW_RETURN_UNINFERRED)
+}
+
 pub(super) fn is_codegen_macro(kind: AnalyzedMacroKind) -> bool {
     matches!(
         kind,
@@ -636,7 +668,7 @@ pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {
 }
 
 pub(super) fn resolution_failure() -> ProjectionFailure {
-    if crate::request_context::current_cold_compute_completeness().is_partial() {
+    if macro_projection_faulted() {
         partial_failure()
     } else {
         ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)

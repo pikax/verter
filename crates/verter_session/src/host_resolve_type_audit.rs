@@ -136,6 +136,11 @@ impl TypeResolutionRequestError {
             | QueryError::RaiseMiss
             | QueryError::OpenSurface
             | QueryError::UnrepresentableSurface
+            // A POSITION the flow substrate has no model for is a
+            // well-formed "no resolved node", exactly like `Miss`: the
+            // flow rail already folded its own partial/ReturnOnly rails
+            // at the consumer boundary, so it is not a request FAULT.
+            | QueryError::UnmodeledPosition
             | QueryError::UnrepresentableSurfaceMember => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
                 name: Arc::clone(name),

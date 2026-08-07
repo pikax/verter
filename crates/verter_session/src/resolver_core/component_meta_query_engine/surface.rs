@@ -550,5 +550,6 @@ pub(crate) fn semantic_query_error_raw(err: &QueryError) -> String {
         QueryError::UnrepresentableSurface => spell::SEMANTIC_OBJECT_SURFACE.to_string(),
         QueryError::UnrepresentableSurfaceMember => spell::SEMANTIC_SURFACE_MEMBER.to_string(),
         QueryError::OpenSurface => spell::OPEN_SURFACE.to_string(),
+        QueryError::UnmodeledPosition => spell::UNMODELED_POSITION.to_string(),
     }
 }

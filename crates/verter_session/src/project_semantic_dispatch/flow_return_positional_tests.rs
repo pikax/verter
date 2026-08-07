@@ -62,6 +62,13 @@ export function objectWithUnmodeledBinding() {
 }
 
 // ── B-F2: an array element at a call position ────────────────────────
+//
+// The composite that survives here is the OBJECT, not the array: `made`
+// collapses to ONE marker rather than `Array<string | MARKER>`, losing
+// the modelled `"s"` element (tsgo: `{ label: string; made: (string |
+// Box)[] }`). That collapse is a KNOWN OWED granularity gap, NOT the
+// rule this file states — characterized, with its owner, by
+// `flow_return_frame_seal_tests::an_unmodeled_array_element_collapses_the_array_and_is_owed`.
 export function arrayWithUnmodeledCall() {
   return { label: "x", made: ["s", new Box()] };
 }
