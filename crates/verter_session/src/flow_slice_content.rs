@@ -445,8 +445,8 @@ pub enum SliceExpr {
 ///
 /// TypeScript resolves a call's type arguments in one order: explicit
 /// type arguments, else inference from the supplied arguments, else the
-/// declared defaults. This substrate cannot yet do the first two
-/// (`U6.CALL_RESOLVE`), and `unknown` is its recorded interim for both.
+/// declared defaults. This substrate cannot yet do the first two, and
+/// `unknown` is its recorded interim for both.
 /// But "the default applies" is a statement about the other two having
 /// produced NOTHING, so it is not expressible without knowing whether
 /// they COULD have produced something — which is exactly what these
@@ -464,8 +464,9 @@ pub struct SliceCallSite {
     /// default at a position inference could reach.
     spreads_arguments: bool,
     /// Whether the call authored explicit type arguments (`f<string>()`).
-    /// Resolving them is `U6.CALL_RESOLVE`'s; until then their presence
-    /// means the DECLARED DEFAULT is definitely not the answer.
+    /// Resolving them belongs to call-site type-argument resolution, which
+    /// this substrate does not perform; until then their presence means the
+    /// DECLARED DEFAULT is definitely not the answer.
     has_explicit_type_arguments: bool,
 }
 

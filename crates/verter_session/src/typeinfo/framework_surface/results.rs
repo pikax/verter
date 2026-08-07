@@ -492,9 +492,18 @@ impl MacroDtosRead {
     /// Fold a partial surface into the active request-result completeness so
     /// the enclosing component-meta result's warm promotion is refused. A
     /// no-op when the surface is `Complete`.
+    ///
+    /// The bundle's OWN reason classes are folded, not the anonymous
+    /// boolean bridge. A consumer that treats one class as CONTAINED cannot
+    /// tell a contained-only observation from a mixed one once the
+    /// unclassified bit is present, so re-lifting a named class as
+    /// `PROPAGATED` silently un-contains it — and this read is holding the
+    /// producer's classes the whole time.
     pub fn observe_partial(&self) {
         if self.completeness.is_partial() {
-            crate::request_context::mark_request_result_partial();
+            crate::request_context::mark_request_result_partial_from_read_with(
+                self.completeness.reasons(),
+            );
         }
     }
 }

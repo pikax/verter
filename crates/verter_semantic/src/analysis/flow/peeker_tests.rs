@@ -12,8 +12,8 @@ use crate::analysis::flow::flow_graph::{
 };
 use crate::analysis::flow::flow_ir::ReturnSlicePlan;
 use crate::analysis::flow::{
-    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonExprSiteId,
-    SkeletonPathSegment, SkeletonReturnSiteId, SkeletonWriteCertainty,
+    build_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource, SkeletonPathSegment,
+    SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
@@ -409,6 +409,19 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
         .plan(&demand, &FlowSliceBudget::default())
         .expect("plan");
 
+    // Every loop below is vacuous on an empty plan, so the plan being
+    // non-empty is the precondition that makes them mean anything: this
+    // fixture selects `b`, whose value reads `x`, and records the `x = "s"`
+    // write as an effect.
+    assert!(
+        !plan.value_nodes.is_empty(),
+        "the demanded member's value providers must be selected"
+    );
+    assert!(
+        !plan.effect_only_nodes.is_empty(),
+        "the parameter write must be selected as an effect-only node"
+    );
+
     for window in plan.value_nodes.windows(2) {
         assert!(window[0].index() < window[1].index(), "sorted, no dups");
     }
@@ -418,10 +431,29 @@ fn planner_holds_only_the_graph_and_emits_disjoint_sorted_sets() {
     for node in plan.effect_only_nodes.iter() {
         assert!(!plan.is_value(*node), "role sets are disjoint");
     }
-    // Every selected node is a real graph node with a kind.
+    for node in plan.value_nodes.iter() {
+        assert!(plan.is_value(*node), "role sets are disjoint");
+    }
+    // Every selected node addresses a real graph node — `node_kind` is
+    // total over the graph's own ids, so a selected id outside it is the
+    // failure this catches.
     for node in plan.value_nodes.iter().chain(plan.effect_only_nodes.iter()) {
-        let _kind: FlowNodeKind = graph.node_kind(*node);
-        let _ = SkeletonExprSiteId::from_index(0); // keep the import honest
+        assert!(
+            node.index() < graph.node_count(),
+            "a selected node must address a real graph node"
+        );
+    }
+    // A control REGION carries no value: it can be selected for its
+    // EFFECTS, never as a value provider.
+    for node in plan.value_nodes.iter() {
+        let kind: FlowNodeKind = graph.node_kind(*node);
+        assert!(
+            matches!(
+                kind,
+                FlowNodeKind::Binding(_) | FlowNodeKind::ExprSite(_) | FlowNodeKind::ReturnSite(_)
+            ),
+            "a control REGION is never a value provider, got {kind:?}"
+        );
     }
 }
 

@@ -3757,6 +3757,11 @@ impl PartialReasonSet {
     /// emits every member the faithful surface carries — faulting there
     /// deleted the WHOLE props projection over one member's return type,
     /// for a component whose props the same tree resolves correctly.
+    ///
+    /// The class is per-POSITION evidence, so a consumer reading it must
+    /// stay per-position too: the member holding the marker degrades and
+    /// its exact siblings do not. Collapsing the whole surface on the
+    /// class is the same defect as faulting on it, one step quieter.
     pub const FLOW_RETURN_UNINFERRED: Self = Self(1 << 14);
     /// A body-derived (`FlowReturn`) return produced a USABLE value the
     /// substrate could not fully VERIFY: an unapplied write effect, a
@@ -3765,15 +3770,33 @@ impl PartialReasonSet {
     /// present; one of them may be silently WRONG.
     ///
     /// Distinct from [`FLOW_RETURN_UNINFERRED`](Self::FLOW_RETURN_UNINFERRED)
-    /// because the two macro codegen lanes diverge here, and ONE bit
-    /// cannot carry that. The TSC projection never reads the value for its
-    /// public surface — it splices the authored declaration and the
-    /// external checker computes the members — so an unverified value is
-    /// not a defect of its output. The RUNTIME projection emits `props:
-    /// {...}` FROM the resolved members, so it must fault: emitting a
-    /// constructor set derived from a value that may be wrong is exactly
-    /// the wrong-and-warm class.
+    /// because the evidence has a different SHAPE and consumers must read
+    /// it differently, and ONE bit cannot carry that. The uninferred class
+    /// is positional — the marker names the member that degrades. This one
+    /// is not: it is seeded from the lowered slice's effect list before any
+    /// member evaluates, so it says every member may be wrong and names
+    /// none of them. A consumer that derives per-member data from the value
+    /// (the runtime `props: {...}` option object) therefore degrades EVERY
+    /// member — it publishes the complete member set with validation off,
+    /// and never a constructor derived from a value that may be wrong.
+    ///
+    /// It is not a reason to delete the consumer's output: the member set
+    /// is complete by definition, and refusing over it deleted every byte
+    /// of the module for parameter reassignment and conditional `var`.
     pub const FLOW_RETURN_UNVERIFIED: Self = Self(1 << 15);
+
+    /// Both flow-return degradation classes — the partials that leave the
+    /// resolved SHAPE intact.
+    ///
+    /// Every other class is a statement about the DEMAND (a budget, a
+    /// cancellation, a superseded generation, a torn view, a recursion, a
+    /// missing node) and leaves nothing about the resolved structure
+    /// trustworthy. These two are statements about a VALUE inside a
+    /// structure the substrate did produce, so a consumer addressing one
+    /// MEMBER of that structure may still select it and judge it on its
+    /// own node.
+    pub const FLOW_RETURN_DEGRADED: Self =
+        Self::FLOW_RETURN_UNINFERRED.union(Self::FLOW_RETURN_UNVERIFIED);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]

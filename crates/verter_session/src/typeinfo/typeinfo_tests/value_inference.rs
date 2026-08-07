@@ -64,7 +64,7 @@ fn value_inference_regular_variables_resolve_typeof_aliases_and_scratch_expressi
     assert_query_mode(&scratch_record, ProjectionModeTag::Expanded);
 }
 
-// RUNNING-UNRATIFIED: the U6.FLOW_RETURN_SUBSTRATE `as const` value lowering
+// RUNNING-UNRATIFIED: the flow-return substrate's `as const` value lowering
 // projects `typeof objectConst` with its readonly literal tuple `list` and
 // nested literal members — the pre-substrate tree lowered the list to a
 // mutable `Array<1 | 2 | 3>`, so the former `#[ignore]` reason no longer
@@ -165,7 +165,7 @@ fn value_inference_arrow_expression_body_publishes_return_shape() {}
 fn value_inference_arrow_expression_body_substitutes_parameter_references() {}
 
 #[test]
-#[ignore = "the substrate's branch join composes the per-arm return objects, but the text arm's `value` stays `string | number` — narrowing `typeof current === \"string\"` is the U6.NARROW_TYPEOF mechanism, not yet landed; keep as the future flow-sensitive value inference contract"]
+#[ignore = "the substrate's branch join composes the per-arm return objects, but the text arm's `value` stays `string | number` — `typeof` narrowing is a separate mechanism that has not landed; keep as the future flow-sensitive value inference contract"]
 fn value_inference_flow_variables_narrow_return_value_by_branch() {
     let host = make_host_with_footprint();
     upsert_value_fixture(&host);

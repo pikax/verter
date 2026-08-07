@@ -5708,10 +5708,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// wants (`ReturnType<typeof f>` over an overloaded `f` IS the last
     /// overload's return). A CALL is the opposite: TypeScript picks the
     /// FIRST signature whose parameters accept the arguments, which
-    /// needs argument-driven overload resolution
-    /// (`U6.CALL_RESOLVE`). Until then a call whose callee carries more
-    /// than one signature is not answerable, and this is how a call site
-    /// asks — WITHOUT changing what the utility selects.
+    /// needs argument-driven overload resolution. This substrate does not
+    /// perform it, so a call whose callee carries more than one signature
+    /// is not answerable, and this is how a call site asks — WITHOUT
+    /// changing what the utility selects.
     pub(super) fn signature_bucket_arity(
         &self,
         node: SemanticNodeId,

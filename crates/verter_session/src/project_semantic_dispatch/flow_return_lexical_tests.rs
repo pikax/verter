@@ -4154,12 +4154,10 @@ fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiat
 /// bodiless overloads in source order and hides the trailing
 /// implementation.
 ///
-/// Picking the right overload needs argument-driven overload resolution
-/// (`U6.CALL_RESOLVE`). Until then the answer is the
-/// `UnrepresentableCallee` DEGRADATION the rail already defines: a usable
-/// modeled `any` that is `ReturnOnly` by contract — never warm-admitted.
-/// The degradation is what makes the two `any`s distinguishable, and it
-/// is what a consumer's cache gate reads.
+/// Picking the right overload needs argument-driven overload resolution.
+/// Until then the answer is the `UnrepresentableCallee` DEGRADATION the
+/// rail already defines: the typed unresolved MARKER at that position,
+/// `ReturnOnly` by contract — never warm-admitted.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -4188,6 +4186,77 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
 
     // CONTROL — a LONE signature is untouched, bodied or not: the rule is
     // overload VISIBILITY, not "any function with a body".
+    r5_node(
+        &host,
+        "ovSingleCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "a lone visible signature still instantiates its clause"
+            );
+        },
+    );
+}
+
+/// GRAPH NODE — an `UnrepresentableCallee` contributes the typed
+/// positional MARKER, never a fabricated `any`.
+///
+/// The class this degradation rides
+/// (`PartialReasonSet::FLOW_RETURN_UNINFERRED`) makes exactly one claim:
+/// the position the substrate could not type SAYS SO in the graph, so a
+/// per-position consumer can degrade that position and leave its exact
+/// siblings alone. A fabricated `Primitive(Any)` breaks the claim in both
+/// directions at once — it is indistinguishable from an authored `any` at
+/// every downstream gate (an overloaded callee published a prop as `any`
+/// where the checker says `boolean`), and it is indistinguishable from an
+/// exactly-typed sibling to any consumer reading the position.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
+/// `ovXCall()` is `string` — the FIRST visible overload. The substrate
+/// cannot select it without argument-driven overload resolution, so the
+/// honest published node is the marker; the WRONG answers it must not
+/// publish are the implementation's `any` and the last overload's return.
+///
+/// Discrimination: restoring `CallValue::modeled_any` in
+/// `degraded_unrepresentable_callee` publishes `Primitive(Any)` and fails
+/// the node assertion while leaving the degradation assertion green — which
+/// is precisely why the degradation alone was not enough. The CONTROL is a
+/// LONE signature, whose clause still instantiates to `unknown`: a change
+/// that mints the marker for every call fails it.
+#[test]
+fn flow_return_unrepresentable_callee_publishes_the_marker_not_a_fabricated_any() {
+    let host = make_r5_host();
+
+    for name in ["ovXCall", "amb3Call", "tnAmbBare"] {
+        with_dispatch(&host, |dispatch| {
+            let key = r5_key(dispatch, name);
+            let QueryResult::Value(SemanticQueryOutput {
+                value: SemanticQueryValue::FlowReturn(result),
+                ..
+            }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
+            else {
+                panic!("{name} must produce a value");
+            };
+            assert_eq!(
+                result.degradation(),
+                Some(crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee),
+                "{name} must carry the typed degradation"
+            );
+            let data = dispatch.graph().node_data(result.return_type());
+            assert!(
+                matches!(
+                    data.as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
+                ),
+                "{name} must publish the typed positional marker, got {data:?}"
+            );
+        });
+    }
+
+    // CONTROL — a LONE signature is untouched: it instantiates its clause
+    // to the recorded `unknown` interim, not the marker.
     r5_node(
         &host,
         "ovSingleCall",
@@ -4735,10 +4804,10 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 ///
 /// The overload rows are the DEGRADATION assertion (the substrate does
 /// not resolve an overload group at a call site — `UnrepresentableCallee`
-/// is the modeled refusal, `ReturnOnly`); the generic rows assert the
-/// recorded `U6.CALL_RESOLVE` interim (`unknown` for an explicit type
-/// argument) and, discriminatingly, that NO callee binder survives in the
-/// published node.
+/// is the typed refusal, `ReturnOnly`); the generic rows assert the
+/// recorded interim (`unknown` for an explicit type argument) and,
+/// discriminatingly, that NO callee binder survives in the published
+/// node.
 ///
 /// Mutation recipe: dispositioning `ConditionalExpression` as
 /// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
@@ -4836,10 +4905,10 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
 /// ovSoloMethodCall():      "SOLO"    ← a LONE method is not a group
 /// ```
 ///
-/// Picking the right overload needs argument-driven overload resolution
-/// (`U6.CALL_RESOLVE`); until then `UnrepresentableCallee` is the modeled
-/// refusal — usable `any`, `ReturnOnly`, never warm — which is the same
-/// answer every other overload-group shape already gives.
+/// Picking the right overload needs argument-driven overload resolution;
+/// until then `UnrepresentableCallee` is the typed refusal — the
+/// positional marker, `ReturnOnly`, never warm — which is the same answer
+/// every other overload-group shape already gives.
 ///
 /// Mutation recipe: returning `None` unconditionally from
 /// `SurfaceView::project_known_key_overload_group` restores first-wins

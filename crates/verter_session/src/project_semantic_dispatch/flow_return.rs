@@ -124,25 +124,30 @@ pub(crate) enum ConsumerFold {
 const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
 
 /// The partial class a DEGRADED SUCCESS's typed
-/// [`FlowReturnDegradation`] carries — the split the two Vue macro
-/// codegen lanes disagree over.
+/// [`FlowReturnDegradation`] carries.
 ///
-/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`] — the surface is
-/// FAITHFUL: every modelled sibling is exact, and the one position the
+/// The axis is the SHAPE OF THE EVIDENCE, not which consumer sees it.
+/// Both classes are contained by both Vue macro codegen lanes; they
+/// differ in what a value-reading consumer can still do with the result.
+///
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`] — POSITIONAL. The surface
+/// is FAITHFUL: every modelled sibling is exact, and the one position the
 /// substrate could not type carries the typed marker rather than a
 /// fabricated `any`. An unmodelled position, an unresolved-value carrier,
-/// an unrepresentable callee, a failed binding initializer. BOTH lanes
-/// contain it: the TSC lane splices the AUTHORED declaration, and the
-/// runtime lane emits exactly the members the faithful surface carries.
+/// an unrepresentable callee, a failed binding initializer — each of them
+/// mints the marker AT the position, which is what lets a per-member
+/// consumer degrade exactly that member and keep its siblings exact.
 ///
-/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — the member set is
-/// complete but one member's TYPE may be WRONG: a write effect the
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — FRAME-WIDE. The member
+/// set is complete but one member's TYPE may be WRONG: a write effect the
 /// evaluator did not apply, a conditional `var` join it has no algebra
 /// for, a declared union it could not reduce, a call on a non-callable
-/// binding that evaluated to `any`. Only the TSC lane contains it,
-/// because only the TSC lane never reads the value — its public
-/// projection is the authored argument. The runtime lane derives the
-/// `props: {...}` constructor sets FROM the value, so it must refuse.
+/// binding that evaluated to `any`. Nothing names WHICH member — the
+/// unapplied-write reason is seeded from the lowered slice's effect list
+/// before any member evaluates — so a value-reading consumer degrades
+/// every member rather than a nameable one. Per-member attribution would
+/// need the evaluator to intersect each member value's slot reads with
+/// the unapplied write's targets; it does not compute that.
 fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
     match degradation {
         FlowReturnDegradation::UnmodeledPosition
@@ -393,7 +398,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     }
                 };
                 // THE cache-read fold — ONE call site, EVERY non-clean arm,
-                // no `degradation.is_some()` condition anywhere.
+                // no `degradation.is_some()` condition at THAT entry. (The
+                // bit is still read for questions that are not the
+                // consumer's fold: this module's own admission gate,
+                // `scc_publish`'s component-wide publication gate, and the
+                // TSC projection's inferred-class-member row.)
                 //
                 // `build_flow_return` sets `cache_suppress` on the
                 // `FlowReturn` query's OWN output. That says nothing about
@@ -3097,13 +3106,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         })
     }
 
-    /// The `UnrepresentableCallee` DEGRADATION: a usable modeled-`any`
-    /// that is `ReturnOnly` by contract.
+    /// The `UnrepresentableCallee` DEGRADATION: the typed unresolved
+    /// MARKER at this call position, `ReturnOnly` by contract.
+    ///
+    /// The marker rather than a modeled `any`, because this degradation is
+    /// classified [`PartialReasonSet::FLOW_RETURN_UNINFERRED`], and that
+    /// class's whole claim is that the position the substrate could not
+    /// type says so in the graph instead of fabricating a value. A
+    /// fabricated `any` is indistinguishable from an authored one at every
+    /// downstream gate: an overloaded callee published `flag: any` warm
+    /// and clean where the checker says `boolean`.
     fn degraded_unrepresentable_callee(&mut self) -> Positional<CallValue> {
         self.record_degradation(
             crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
         );
-        Positional::Value(CallValue::modeled_any(self.dispatch))
+        Positional::Value(CallValue::unmodeled_position(self.dispatch))
     }
 
     /// The call-bucket return of an already-lowered CALLEE TYPE — the one
@@ -3129,9 +3146,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // warm, with no visible signature the call would ever select.
         //
         // Picking the right overload needs argument-driven overload
-        // resolution (`U6.CALL_RESOLVE`); until then this is the
-        // `UnrepresentableCallee` degradation — a usable modeled `any`
-        // that is `ReturnOnly` by contract.
+        // resolution, which this substrate does not perform; the answer is
+        // the `UnrepresentableCallee` degradation — the typed positional
+        // marker, `ReturnOnly` by contract.
         if self
             .dispatch
             .signature_bucket_arity(resolved, super::build::SignatureBucket::Call)
@@ -3501,11 +3518,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // confidently wrong answer, cleanly and warm.
                 //
                 // Picking the right overload needs argument-driven
-                // overload resolution, which is `U6.CALL_RESOLVE`'s. Until
-                // then this is the `UnrepresentableCallee` degradation it
-                // already exists for: a usable modeled `any` that is
-                // ReturnOnly by contract — never a warm-admitted wrong
-                // answer. A LONE signature is untouched, bodied or not:
+                // overload resolution, which this substrate does not
+                // perform. The answer is the `UnrepresentableCallee`
+                // degradation it already exists for: the typed positional
+                // marker, ReturnOnly by contract — never a warm-admitted
+                // wrong answer. A LONE signature is untouched, bodied or
+                // not:
                 // the rule is overload VISIBILITY, not "any function with
                 // a body".
                 if prepared
@@ -3536,7 +3554,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // (`CallValue::of_signature_node`), so EVERY route to one
                 // callee answers alike. Call-site instantiation proper —
                 // explicit type arguments AND argument inference — is
-                // U6.CALL_RESOLVE's; a DECLARED DEFAULT is already exact
+                // not performed here; a DECLARED DEFAULT is already exact
                 // (`f<T = number>()` IS `number`), and `unknown` is the
                 // interim answer everywhere else — exact for the one shape
                 // TS itself cannot infer (`bare<T>(): T` called with no

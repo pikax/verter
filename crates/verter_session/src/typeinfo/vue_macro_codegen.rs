@@ -656,17 +656,13 @@ impl VerterHost {
                 // classification the class-member inference records
                 // precisely on its own rail.
                 //
-                // WHICH classes are contained depends on the STRICTEST lane
-                // this demand actually renders. A demand that derives
-                // runtime constructors FROM the value keeps the narrow
-                // `RUNTIME_CONTAINED`; a TSX-only / names-only demand keeps
-                // `TSC_CONTAINED`, because neither reads a member's type.
+                // ONE containment set serves both lanes. The runtime lane's
+                // extra protection is not a narrower class set — it is
+                // structural, at the projection: a member degrades per
+                // member, and an empty derived surface under an observed
+                // degradation refuses.
                 let observed = crate::request_context::current_cold_compute_completeness();
-                let residual = if demand.wants_runtime_constructors() {
-                    runtime_projection_residual(observed)
-                } else {
-                    macro_projection_residual(observed)
-                };
+                let residual = macro_projection_residual(observed);
                 state.completeness = if residual.is_empty() {
                     crate::semantic_query::ResultCompleteness::Complete
                 } else {
@@ -800,13 +796,12 @@ impl VerterHost {
                         }),
                 );
             }
-            // PER-LANE payload failure. The two lanes contain DIFFERENT
-            // partial classes (`TSC_CONTAINED` vs the strictly narrower
-            // `RUNTIME_CONTAINED`), so a single shared verdict would either
-            // delete the TSX over a class the checker handles, or emit a
-            // runtime `props` object built from a value the substrate
-            // could not verify. They are computed separately and never
-            // merged.
+            // PER-LANE payload failure. The contained CLASS set is shared,
+            // but the two lanes still differ on an ABSENT payload: the TSC
+            // lane splices the authored declaration and reports a
+            // resolution failure, while the runtime lane has nothing to
+            // derive a `props` option object from. They are computed
+            // separately and never merged.
             let tsc_payload_failure = if macro_projection_faulted() {
                 Some(partial_failure())
             } else if payload.is_none() {
@@ -814,14 +809,13 @@ impl VerterHost {
             } else {
                 None
             };
-            let runtime_payload_failure =
-                if runtime_projection_faulted_with(demand.wants_runtime_constructors()) {
-                    Some(partial_failure())
-                } else if payload.is_none() {
-                    Some(runtime_resolution_failure())
-                } else {
-                    None
-                };
+            let runtime_payload_failure = if macro_projection_faulted() {
+                Some(partial_failure())
+            } else if payload.is_none() {
+                Some(runtime_resolution_failure())
+            } else {
+                None
+            };
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
@@ -1172,7 +1166,7 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if runtime_projection_faulted_with(classify_constructors) {
+        if macro_projection_faulted() {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1241,6 +1235,29 @@ impl VerterHost {
             });
         }
 
+        // A ROOT-position degradation leaves NO member set. The class is
+        // the same one an interior position records — only the derived
+        // surface tells them apart, which is why this is a structural check
+        // on the surface and not a reason-class subtraction.
+        //
+        // An empty surface is a legitimate answer for `defineProps<{}>()`
+        // and only for it; under an observed flow-return degradation the
+        // same emptiness means the substrate could not type the root, and
+        // emitting `props: {}` then declares a props-less component for a
+        // component that declares props — every listener and bound
+        // attribute silently falls through to `$attrs`. Refusing is loud,
+        // and the TSX lane still type-checks the file.
+        //
+        // Scoped to the demand that RENDERS the option object. A names-only
+        // (TSX / IDE) compile reads the public binding names and renders no
+        // `props` option at all, and its generated TSX splices the AUTHORED
+        // macro call for the external checker — so refusing there would
+        // delete the whole file's type-check surface to prevent an option
+        // object that demand never emits.
+        if classify_constructors && props.is_empty() && flow_return_degradation_observed() {
+            return partial_failure().runtime();
+        }
+
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(PropsRuntimeShape {
             defaults: defaults_association(payload_index, defaults_index),
             props,
@@ -1256,7 +1273,7 @@ impl VerterHost {
         mac: &AnalyzedMacro,
         payload_index: usize,
         effective_index: usize,
-        reads_member_types: bool,
+        renders_runtime_options: bool,
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
@@ -1276,7 +1293,7 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if runtime_projection_faulted_with(reads_member_types) {
+        if macro_projection_faulted() {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1294,7 +1311,17 @@ impl VerterHost {
             effective_index,
             runtime_context,
         );
-        if runtime_projection_faulted_with(reads_member_types) {
+        if macro_projection_faulted() {
+            return partial_failure().runtime();
+        }
+        // The `props` twin of this refusal, for the same reason and with
+        // the same scope: a ROOT-position degradation leaves no member set,
+        // and `emits: []` for a component that declares emits sends every
+        // listener silently through to `$attrs`. `renders_runtime_options`
+        // keeps a names-only (TSX / IDE) compile out of it — that demand
+        // emits no `emits` option and its TSX splices the authored macro
+        // call for the external checker.
+        if renders_runtime_options && emits.is_empty() && flow_return_degradation_observed() {
             return partial_failure().runtime();
         }
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))

@@ -60,8 +60,8 @@
 //! explicit type arguments, else inference from the supplied arguments,
 //! else the declared default (`checker.ts::getInferredTypes` takes the
 //! default only when inference produced NO candidate). This substrate
-//! does not model the first two — that is `U6.CALL_RESOLVE` — and
-//! `unknown` is its recorded interim for both.
+//! does not model the first two — that is call-site type-argument
+//! resolution — and `unknown` is its recorded interim for both.
 //!
 //! The default is therefore NOT an unconditional answer: applying it
 //! whenever one is declared turns the honest interim into a confidently
@@ -406,8 +406,8 @@ impl CalleeClause {
     /// (`<A = B, B = A>`) resolves to a sibling BINDER under any depth-
     /// bounded version — the exact leak this module exists to prevent.
     /// The interim is the honest over-collapse, never a leaked binder.
-    /// Owned by `U6.CALL_RESOLVE`, which owns clause resolution
-    /// generally.
+    /// Owned by call-site clause resolution, which this substrate does not
+    /// perform.
     fn instantiate_default(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,

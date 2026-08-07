@@ -231,34 +231,28 @@ pub fn mark_request_result_partial() {
     mark_request_result_partial_with(PartialReasonSet::PROPAGATED);
 }
 
-/// The BOOLEAN-BRIDGE mark: the caller observed a partial child but has
-/// only a `bool` to carry, so it can name no reason of its own.
+/// The READ-propagation mark: a consumer folding a partial CHILD into its
+/// own request-result completeness.
 ///
-/// Marks the request sticky unconditionally, and records
-/// [`PartialReasonSet::PROPAGATED`] on the active per-cold-compute scope
-/// ONLY when that scope carries no reason yet. A child that already
-/// bubbled its OWN named class into this scope (on its scope's drop) must
-/// not then have the generic bridge stacked on top of it: a consumer that
-/// treats one class as CONTAINED cannot tell a contained-only observation
-/// from a mixed one once the unclassified bit is present, so the bridge
-/// would silently un-contain every named class in the tree. Adding
+/// Marks the request sticky unconditionally, and folds `reasons` into the
+/// active per-cold-compute scope.
+///
+/// A NAMED set is folded verbatim — that is the whole point of carrying the
+/// classes across the query/build boundary (see
+/// [`crate::semantic_query::CacheRead::partial_reasons`]), and it is
+/// unconditional: a consumer that treats one class as CONTAINED must see
+/// the class regardless of what the scope already holds.
+///
+/// An EMPTY set is the BOOLEAN BRIDGE — the caller observed a partial child
+/// but has only a `bool` to carry, so it can name no reason of its own. It
+/// records [`PartialReasonSet::PROPAGATED`] ONLY when the scope carries no
+/// reason yet. A child that already bubbled its OWN named class into this
+/// scope must not then have the generic bridge stacked on top of it: a
+/// consumer that treats one class as CONTAINED cannot tell a contained-only
+/// observation from a mixed one once the unclassified bit is present, so the
+/// bridge would silently un-contain every named class in the tree. Adding
 /// `PROPAGATED` to an already-partial scope changes no `is_partial()`
 /// answer — only the reason set — so nothing else observes the difference.
-pub fn mark_request_result_partial_from_read() {
-    mark_request_result_partial_from_read_with(PartialReasonSet::empty());
-}
-
-/// [`mark_request_result_partial_from_read`] for a read that CARRIES its
-/// partial classes (see
-/// [`crate::semantic_query::CacheRead::partial_reasons`]).
-///
-/// A NAMED set is folded verbatim — that is the whole point of carrying it
-/// across the boundary, and it is unconditional: a consumer that treats one
-/// class as CONTAINED must see the class regardless of what the scope
-/// already holds. An EMPTY set falls back to the historical bridge
-/// behaviour: record [`PartialReasonSet::PROPAGATED`] only when the scope
-/// carries no reason yet, because stacking the unclassified bit on top of a
-/// named class would silently un-contain it.
 pub fn mark_request_result_partial_from_read_with(reasons: PartialReasonSet) {
     if let Some(ctx) = current_request_context() {
         ctx.request_result_is_partial.store(true, Ordering::Relaxed);
