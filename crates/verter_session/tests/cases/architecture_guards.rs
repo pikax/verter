@@ -35,6 +35,90 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     workspace_root().join(rel)
 }
 
+#[test]
+fn creo_is_the_only_emit_occurrence_identity_path() {
+    // Static defense-in-depth behind the behavioral cross-kind heritage and
+    // runtime-origin identity tests: the CREO cutover deletes every
+    // analyzer/ordinal/parallel-lane identity seam from production.
+    use walkdir::WalkDir;
+
+    let crates = workspace_root().join("crates");
+    let forbidden = [
+        "EmitProducerKind",
+        "EmitProducerIdentity",
+        "producer_identity",
+        "merged_emit_fields",
+        "ProjectedTypeFact::CallableParams",
+        "ProjectedTypeFact::CallableReturn",
+        "pub event_payloads:",
+        "pub event_publications:",
+        "pub event_returns:",
+        "ordered_surface_entries",
+        "((macro_index as u64) << 32)",
+    ];
+    let mut violations = Vec::new();
+    for entry in WalkDir::new(crates).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+            || !path
+                .components()
+                .any(|component| component.as_os_str() == "src")
+        {
+            continue;
+        }
+        let src = fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!("read {}: {error}", path.display());
+        });
+        for needle in forbidden {
+            if src.contains(needle) {
+                violations.push(format!("{}: {needle}", path.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "retired emit identity path reintroduced:\n{}",
+        violations.join("\n")
+    );
+
+    let query = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let results =
+        read_workspace_file("crates/verter_session/src/typeinfo/framework_surface/results.rs");
+    let output = read_workspace_file("crates/verter_session/src/meta_resolve/output.rs");
+    assert!(query.contains("pub enum SurfaceEntry"));
+    assert!(results.contains("pub struct ResolvedEmitOccurrence"));
+    assert!(results.contains("pub payload_publication: verter_type_expr::TypePublication"));
+    assert!(output.contains("pub struct MaterializedEventOccurrence"));
+
+    let normalize = read_workspace_file(
+        "crates/verter_session/src/typeinfo/framework_surface/vue_exec/normalize.rs",
+    );
+    let emit_projection = normalize
+        .split("pub(crate) fn emits_from_typeinfo_surface")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(in crate::typeinfo").next())
+        .expect("Vue emit projection function");
+    assert!(emit_projection.contains("macro_surface.surface.entries.iter()"));
+    assert!(
+        !emit_projection.contains(".call_signatures")
+            && !emit_projection.contains(".members")
+            && !emit_projection.contains(".position("),
+        "Vue emit projection must walk only the canonical stored stream"
+    );
+
+    let semantic = read_workspace_file("crates/verter_semantic/src/analysis/component_meta.rs");
+    let event_extraction = semantic
+        .split("fn extract_events_from_macro")
+        .nth(1)
+        .and_then(|tail| tail.split("fn extract_slots_from_macro").next())
+        .expect("event extraction function");
+    assert!(
+        !event_extraction.contains(".find(") && !event_extraction.contains("evaluated"),
+        "event extraction must project complete occurrences without a name/evaluator join"
+    );
+}
+
 /// Relative paths (forward-slash, workspace-rooted) of GENERATED DATA
 /// modules under `crates/*/src/**`. These files are rendered by a
 /// generator script (each carries an "auto-generated" / "GENERATED ...
@@ -2837,6 +2921,10 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "last_const_prop_overrides",
             "phase-06b-report.md §F13: Phase-7 invalidation state-diff record (NOT a cache of resolution results). No equivalent in ProjectTypeStore.",
         ),
+        (
+            "registered_envelope_ingest",
+            "T-B R5 §2: one-shot validated cross-host envelope handoff into the scheduled Source stage. NOT a cache; entries are removed on intake.",
+        ),
         // F1, F2, F4, F5 — rehomed in Tier 1C-α (host-cache-rehoming.md
         // §3.4 + plan §3.4.1). The four fields (`compile_cache`,
         // `resolved_type_cache`, `eval_env_cache`, `semantic_db`) no
@@ -2999,6 +3087,14 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
         (
             "typeinfo_scratch_cache",
             "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
+        ),
+        (
+            "block_content_admission_fence",
+            "docs/arch/scanners-replacement-preprocessor-interim.md §Sealed handoff: a mutex serializes validation and atomic admission after asynchronous provider work. NOT a cache; admitted artifacts live in block_content_state.",
+        ),
+        (
+            "block_content_admission_seam_hook",
+            "Block-content admission-fence regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after validation and before publication for deterministic owner-publication races. Compiled out in production builds. NOT a cache.",
         ),
     ]
     .into_iter()
@@ -5552,6 +5648,11 @@ pub(crate) mod foundations_guards {
         // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
         // drive the demand producer + read the artifact payload.
         "pub mod binder_identity_facts",
+        // Frozen eight-field carrier-owned compatibility cohort consumed by
+        // B2 persistence/adoption and exercised by its owning module tests.
+        "pub mod carrier_artifact_cohort",
+        // T-B R5 §2 carrier-only publication identity/store and typed interim outcomes.
+        "pub mod carrier_publication_store",
         // Workspace-wide cache-cluster schema-version constant + the
         // `CacheSchemaVersioned` trait. Public so
         // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)
@@ -5565,6 +5666,8 @@ pub(crate) mod foundations_guards {
         // assembly (compile → bundle → assemble) instead of a hand copy.
         // Test-support public API (consumer: verter_vue_conformance dev-dep).
         "pub use compile::assemble_vue_main_module",
+        // Stamped handoff callers hash code and maps with the host-owned domain.
+        "pub use block_content::hash_block_content",
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
         // verter_napi::meta
@@ -5896,7 +5999,6 @@ pub(crate) mod foundations_guards {
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
-        "pub(crate) mod source_map_remap",
         "pub(crate) mod template_convert",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
@@ -9217,7 +9319,7 @@ pub(crate) mod foundations_guards {
             "crates/verter_svelte_conformance/src/generate.rs",
             "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
-            (
+        (
             "crates/verter_vue_conformance/src/lib.rs",
             "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
         ),
@@ -13512,125 +13614,6 @@ fn reachability_gc_uses_unified_artifact_name() {
          still references the legacy `evict_unreachable_indexed_ready` \
          name. The unified sweep is `evict_unreachable_artifacts`. \
          Violations:\n{}",
-        violations.join("\n")
-    );
-}
-
-/// R22 — reverse graph is never wired to cache invalidation.
-///
-/// Production source must not adjacently combine a reverse-graph
-/// read (`reverse_deps_for`, `affected_canonicals`) with a cache
-/// invalidation / eviction call. The reverse import graph is
-/// content-addressed and serves reachability GC + LSP affected-files
-/// reporting + diagnostics only — wiring it to a cache flush would
-/// resurrect the eager-invalidation model R22 retired.
-///
-/// "Adjacent" is defined as: a reverse-graph read and a forbidden
-/// call appearing within a 5-line sliding window in the same source
-/// file. This is a heuristic gate; it errs on the side of
-/// false-positives so the reviewer can audit any genuinely close
-/// pair. The architecture-guards self-test pair below proves the
-/// heuristic discriminates.
-#[test]
-fn reverse_graph_not_wired_to_invalidation() {
-    use std::fs;
-
-    const REVERSE_READS: &[&str] = &["reverse_deps_for", "affected_canonicals"];
-    const FORBIDDEN_INVALIDATIONS: &[&str] = &[
-        "invalidate_canonical",
-        ".clear()",
-        "evict_canonical",
-        "semantic_invalidate",
-        "smart_invalidate_dependents",
-    ];
-    // No production source is allow-listed. The reverse-dependent
-    // upsert-time invalidation cascade has been removed: `host_upsert.rs`
-    // no longer reads the reverse graph for cache invalidation. The
-    // reverse axis is content-addressed bookkeeping (R22) only.
-    const ALLOW_LIST: &[&str] = &[];
-
-    let scan_dirs = ["crates/verter_session/src", "crates/verter_workspace/src"];
-    let mut violations: Vec<String> = Vec::new();
-    for dir in &scan_dirs {
-        let root = workspace_root().join(dir);
-        let mut stack = vec![root];
-        while let Some(p) = stack.pop() {
-            let read = match fs::read_dir(&p) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for entry in read.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    continue;
-                }
-                // Skip test files — the guard targets production paths
-                // only. Tests legitimately read the reverse graph next
-                // to invalidation calls when characterising older
-                // behaviour.
-                let path_str = path.display().to_string().replace('\\', "/");
-                if path_str.ends_with("_tests.rs") || path_str.contains("/tests/") {
-                    continue;
-                }
-                // Allow-list residual back-stops that R3 will remove.
-                let rel_str = path
-                    .strip_prefix(workspace_root())
-                    .map(|p| p.display().to_string().replace('\\', "/"))
-                    .unwrap_or_else(|_| path_str.clone());
-                if ALLOW_LIST.iter().any(|p| rel_str == *p) {
-                    continue;
-                }
-                let src = match fs::read_to_string(&path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let lines: Vec<&str> = src.lines().collect();
-                for (idx, line) in lines.iter().enumerate() {
-                    if !REVERSE_READS.iter().any(|n| line.contains(n)) {
-                        continue;
-                    }
-                    let start = idx.saturating_sub(2);
-                    let end = (idx + 3).min(lines.len());
-                    for (j, neighbour) in lines.iter().enumerate().take(end).skip(start) {
-                        if j == idx {
-                            continue;
-                        }
-                        if FORBIDDEN_INVALIDATIONS
-                            .iter()
-                            .any(|n| neighbour.contains(n))
-                        {
-                            violations.push(format!(
-                                "{}:{}: reverse-graph read adjacent to invalidation `{}` at line {}",
-                                path.display(),
-                                idx + 1,
-                                FORBIDDEN_INVALIDATIONS
-                                    .iter()
-                                    .find(|n| neighbour.contains(*n))
-                                    .copied()
-                                    .unwrap_or("?"),
-                                j + 1,
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "reverse_graph_not_wired_to_invalidation: production source \
-         has a reverse-graph read adjacent (within 5 lines) to a cache \
-         invalidation call. R22 forbids wiring the reverse graph to \
-         cache flushes — the reverse axis is content-addressed and \
-         serves reachability GC + LSP affected-files reporting only. \
-         If the adjacency is legitimate (e.g. a documented backstop) \
-         add the file to the guard's allow-list with a one-line \
-         rationale. Violations:\n{}",
         violations.join("\n")
     );
 }

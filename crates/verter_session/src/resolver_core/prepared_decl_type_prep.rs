@@ -70,6 +70,17 @@ pub(super) fn prepare_type_decl_from_lowered(
                     local_name: dep.local_name.clone(),
                 })?;
             Ok(PreparedExternalDep {
+                local_name: dep.local_name.clone(),
+                source_specifier: dep.source_specifier.clone(),
+                imported_name: dep.imported_name.clone(),
+                member_path: match &dep.route {
+                    verter_type_expr::RouteDemand::MemberPath(path) => path
+                        .iter()
+                        .filter_map(|part| part.as_string().map(Arc::<str>::from))
+                        .collect::<Vec<_>>()
+                        .into(),
+                    _ => Arc::from([]),
+                },
                 canonical_id: identity.canonical_id.to_string(),
                 owner: identity.owner,
                 symbol_name: identity.symbol_name.to_string(),
@@ -273,6 +284,17 @@ pub(super) fn prepare_authored_partial_type_decl(
                 &verter_type_expr::DeclBindingKey::new(owner, dep.local_name.as_str()),
             )?;
             Some(PreparedExternalDep {
+                local_name: dep.local_name.clone(),
+                source_specifier: dep.source_specifier.clone(),
+                imported_name: dep.imported_name.clone(),
+                member_path: match &dep.route {
+                    verter_type_expr::RouteDemand::MemberPath(path) => path
+                        .iter()
+                        .filter_map(|part| part.as_string().map(Arc::<str>::from))
+                        .collect::<Vec<_>>()
+                        .into(),
+                    _ => Arc::from([]),
+                },
                 canonical_id: identity.canonical_id.to_string(),
                 owner: identity.owner,
                 symbol_name: identity.symbol_name.to_string(),

@@ -1680,7 +1680,7 @@ defineProps<Copy<ImportedProps>>()
         .as_ref()
         .expect("fixture must publish script analysis")
         .macros[macro_index];
-    let hot =
+    let product =
         crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
             .expect("macro type argument must have a hot carrier");
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
@@ -1690,7 +1690,7 @@ defineProps<Copy<ImportedProps>>()
             SurfaceProvenanceContext::MacroTypeArgOwnBody,
         );
 
-        let resolved = dispatch.resolve_carrier_subject_node(hot.node(), runtime_context);
+        let resolved = dispatch.resolve_carrier_subject_node(product.hot.node(), runtime_context);
         let resolved_data = dispatch
             .graph()
             .node_data(resolved)
@@ -1767,7 +1767,7 @@ defineProps<Copy<ImportedProps>>()
         );
 
         let navigate_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-            base: hot.node(),
+            base: product.hot.node(),
             path: Arc::from([]),
             context: ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
@@ -1798,7 +1798,7 @@ defineProps<Copy<ImportedProps>>()
             ),
             macro_index,
             macro_kind: mac.kind,
-            type_args: Arc::from(vec![hot.node()].into_boxed_slice()),
+            type_args: Arc::from(vec![product.hot.node()].into_boxed_slice()),
             context: dispatch.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
         assert!(!payload_read.result_is_partial);

@@ -1,3 +1,5 @@
+import type { HostPreprocessorRequest } from "@verter/native";
+
 /**
  * A function that preprocesses a custom block's content.
  *
@@ -7,8 +9,7 @@
  * @returns Preprocessed `{ code, sourceMap? }`, or `null` to skip.
  */
 export type BlockPreprocessor = (
-  content: string,
-  lang: string | undefined,
+  request: StampedBlockPreprocessorRequest,
   filename: string,
 ) => { code: string; sourceMap?: string } | Promise<{ code: string; sourceMap?: string }> | null;
 
@@ -99,3 +100,4 @@ export interface VerterPluginOptions {
 export type Options = VerterPluginOptions;
 
 export type HmrStrategy = "vite" | "webpack" | "none";
+export type StampedBlockPreprocessorRequest = HostPreprocessorRequest;

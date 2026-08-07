@@ -1,0 +1,43 @@
+error[E0599]: no associated function or constant named `from_semantic_source` found for struct `AuthoredTypeSource` in the current scope
+  --> tests/cases/compile-fail/type_publication_capability.rs:18:39
+   |
+18 |     let _forged = AuthoredTypeSource::from_semantic_source(arbitrary.clone());
+   |                                       ^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `AuthoredTypeSource`
+   |
+help: there is a method `to_semantic_source` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/verter_type_expr/src/publication.rs
+   |
+   |     pub fn to_semantic_source(&self) -> SemanticTypeSource {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this function takes 3 arguments but 4 arguments were supplied
+  --> tests/cases/compile-fail/type_publication_capability.rs:28:13
+   |
+28 |     let _ = select_type_publication(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^
+...
+32 |         "decoy display",
+   |         --------------- unexpected argument #4 of type `&'static str`
+   |
+note: function defined here
+  --> $WORKSPACE/crates/verter_type_expr/src/publication.rs
+   |
+   | pub fn select_type_publication(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+   |
+31 -         &PublicationPolicy::exact_only(),
+32 -         "decoy display",
+31 +         &PublicationPolicy::exact_only(),
+   |
+
+error[E0616]: field `text` of struct `TerminalTypeDisplay` is private
+  --> tests/cases/compile-fail/type_publication_capability.rs:41:21
+   |
+41 |     let _ = display.text;
+   |                     ^^^^ private field
+   |
+help: a method `text` also exists, call it with parentheses
+   |
+41 |     let _ = display.text();
+   |                         ++

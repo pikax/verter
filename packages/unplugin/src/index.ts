@@ -1,6 +1,7 @@
 import type { UnpluginFactory } from "unplugin";
 import { createUnplugin } from "unplugin";
 import { existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { relative } from "node:path";
 import type { ResolvedConfig } from "vite";
 import type {
@@ -11,6 +12,7 @@ import type {
 } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 import type {
+  BlockContentHashToken,
   HostCompileProfile,
   HostUpdateResult,
   NativeBlockOverrideEntry,
@@ -28,7 +30,7 @@ import {
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
 import { evictHydratedPath, hydrateMacroTypeDeps } from "./core/macro-type-hydration";
 import { parseVueRequest } from "./core/utils";
-import { preprocessBlock } from "./core/preprocessor";
+import { copyCapturedBlockContentEcho, preprocessBlock } from "./core/preprocessor";
 import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type {
@@ -234,26 +236,50 @@ function resolvedIdFromHookResult(result: unknown): string | null {
 async function resolveUpsertDependencies(
   host: VerterHost,
   filename: string,
+  ownerSource: string,
   upsertResult: HostUpdateResult,
   resolveId?: ResolveHook,
-): Promise<void> {
+): Promise<HostUpdateResult> {
+  let refreshedResult = upsertResult;
+  let registeredExternalSource = false;
+
   // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
   if (upsertResult.externalSourceRequests.length > 0) {
     const path = await import("path");
     for (const req of upsertResult.externalSourceRequests) {
       const resolvedId: string = req.resolvedCanonicalId;
       const specifier: string = req.specifier;
-      // Resolve relative to the owner file's directory
+      // Let the bundler choose the bytes when it can resolve this specifier,
+      // while keeping the host-minted canonical ID as the VFS identity.
       const absPath = path.resolve(path.dirname(filename), specifier);
-      const extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
+      const hookReadId = resolveId
+        ? resolvedIdFromHookResult(await resolveId(specifier, filename, { skipSelf: true }))
+        : null;
+      let extSource = hookReadId
+        ? await readTextFileThroughWorkspaceOrDisk(hookReadId)
+        : await readTextFileThroughWorkspaceOrDisk(absPath);
+      if (extSource === null && hookReadId && hookReadId !== absPath) {
+        extSource = await readTextFileThroughWorkspaceOrDisk(absPath);
+      }
       if (extSource !== null) {
         host.upsert({
           inputId: resolvedId,
           source: extSource,
           fileKind: "non_sfc",
         });
+        registeredExternalSource = true;
       }
     }
+  }
+
+  // External requests are stamped when the owner is upserted. Re-publish the
+  // byte-identical owner only after all external bytes are in the host VFS so
+  // processed-content requests capture those exact bytes and fresh stamps.
+  if (registeredExternalSource) {
+    refreshedResult = host.upsert({
+      inputId: filename,
+      source: ownerSource,
+    });
   }
 
   // Resolve exact and finite-set module references, then feed per-specifier
@@ -261,7 +287,7 @@ async function resolveUpsertDependencies(
   const resolutions: HostDependencyResolution[] = [];
   const dependencySpecifiers = collectResolvableModuleReferenceSpecifiers(
     host,
-    upsertResult.moduleReferences ?? [],
+    refreshedResult.moduleReferences ?? [],
   );
   if (dependencySpecifiers.length > 0) {
     const path = await import("path");
@@ -319,13 +345,14 @@ async function resolveUpsertDependencies(
     }
   }
   // Also include external src="..." blocks that were resolved during upsert
-  for (const req of upsertResult.externalSourceRequests ?? []) {
+  for (const req of refreshedResult.externalSourceRequests ?? []) {
     resolutions.push({
       specifier: req.specifier,
       resolvedCanonicalId: req.resolvedCanonicalId,
     });
   }
   host.setImportDependencies(filename, resolutions);
+  return refreshedResult;
 }
 
 /**
@@ -347,15 +374,18 @@ async function applyPreprocessorRequests(
   const overrides: NativeBlockOverrideEntry[] = [];
   for (const req of upsertResult.preprocessorRequests) {
     // In Vite mode, skip style preprocessing — Vite's CSS pipeline handles it.
-    if (viteConfig && req.blockType === "style") continue;
+    if (viteConfig && req.contentClass === "style") continue;
 
     const result = await preprocessBlock(req, filename, viteConfig, customBlocks);
     if (result) {
       overrides.push({
-        blockType: req.blockType,
-        index: req.index,
+        ...copyCapturedBlockContentEcho(req),
+        sourceSpaceToken: req.sourceSpaceToken,
         code: result.code,
+        codeHash: hashBlockContent(result.code),
         sourceMap: result.sourceMap,
+        sourceMapHash: result.sourceMap ? hashBlockContent(result.sourceMap) : undefined,
+        suppliedProvenance: "@verter/unplugin",
       });
     }
   }
@@ -438,10 +468,74 @@ function isClientComponent(filename: string): boolean {
 }
 
 interface StyleBlockEntry {
+  blockToken: string;
   content: string;
   lang: string;
   scoped: boolean;
   module: boolean | string;
+}
+
+interface HostStructureRange {
+  start: number;
+  end: number;
+}
+
+interface HostStructureAttribute {
+  name?: { normalized: string };
+  value?: string;
+}
+
+interface HostStructureSection {
+  blockToken: string;
+  role: { kind: string; scoped?: boolean };
+  contentRange: HostStructureRange;
+  attributes: HostStructureAttribute[];
+}
+
+interface HostDocumentStructure {
+  blocks: Array<{ kind: string; section?: HostStructureSection }>;
+}
+
+function utf8OffsetToUtf16(source: string, target: number): number | null {
+  let bytes = 0;
+  let units = 0;
+  for (const scalar of source) {
+    if (bytes === target) return units;
+    const code = scalar.codePointAt(0)!;
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    units += scalar.length;
+    if (bytes > target) return null;
+  }
+  return bytes === target ? units : null;
+}
+
+function styleEntriesFromStructure(
+  host: VerterHost,
+  filename: string,
+  source: string,
+): StyleBlockEntry[] {
+  const encoded = host.getDocumentStructure(filename);
+  if (encoded === null) return [];
+  const structure = JSON.parse(encoded) as HostDocumentStructure;
+  const entries: StyleBlockEntry[] = [];
+  for (const block of structure.blocks) {
+    const section = block.kind === "section" ? block.section : undefined;
+    if (section?.role.kind !== "style") continue;
+    const start = utf8OffsetToUtf16(source, section.contentRange.start);
+    const end = utf8OffsetToUtf16(source, section.contentRange.end);
+    if (start === null || end === null) continue;
+    const attribute = (name: string) =>
+      section.attributes.find((entry) => entry.name?.normalized === name);
+    const module = attribute("module");
+    entries.push({
+      blockToken: section.blockToken,
+      content: source.slice(start, end),
+      lang: attribute("lang")?.value ?? "css",
+      scoped: section.role.scoped ?? false,
+      module: module === undefined ? false : (module.value ?? true),
+    });
+  }
+  return entries;
 }
 
 function createFrameworkFactory(
@@ -480,7 +574,7 @@ function createFrameworkFactory(
     const styleBlockCache = new Map<string, StyleBlockEntry[]>();
     const compiledStyleCache = new Map<string, CompiledStyleArtifact[]>();
 
-    // Build timing instrumentation accumulates per-phase timings across carrier transforms.
+    // Build timing instrumentation accumulates timings across carrier transforms.
     // Enabled when VERTER_TIMING=1 env var is set.
     const timing = process.env.VERTER_TIMING === "1";
     let tFileCount = 0;
@@ -641,13 +735,14 @@ function createFrameworkFactory(
 
           profileCache.set(filename, profile);
 
-          const upsertResult = host.upsert({
+          let upsertResult = host.upsert({
             inputId: filename,
             source,
           });
-          await resolveUpsertDependencies(
+          upsertResult = await resolveUpsertDependencies(
             host,
             filename,
+            source,
             upsertResult,
             typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
           );
@@ -799,11 +894,12 @@ function createFrameworkFactory(
           profileCache.set(filename, profile);
 
           const t0 = timing ? performance.now() : 0;
-          const upsertResult = host.upsert({ inputId: filename, source: code });
+          let upsertResult = host.upsert({ inputId: filename, source: code });
           const t1 = timing ? performance.now() : 0;
-          await resolveUpsertDependencies(
+          upsertResult = await resolveUpsertDependencies(
             host,
             filename,
+            code,
             upsertResult,
             typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
           );
@@ -893,40 +989,29 @@ function createFrameworkFactory(
         // Cache the profile so load() can reuse it for virtual file requests
         profileCache.set(filename, profile);
 
-        // Extract per-style-block scoped flags from the SFC source.
-        // Match <style ... scoped ...> tags in order.
-        const scopedFlags: boolean[] = [];
-        const styleRe = /<style\b([^>]*)>/gi;
-        let styleMatch;
-        while ((styleMatch = styleRe.exec(code)) !== null) {
-          scopedFlags.push(/\bscoped\b/.test(styleMatch[1]));
-        }
-        styleScopedCache.set(filename, scopedFlags);
-
         // Register file in host (handles parsing, caching, change detection)
         const t0 = timing ? performance.now() : 0;
-        const upsertResult = host.upsert({
+        let upsertResult = host.upsert({
           inputId: filename,
           source: code,
         });
         const t1 = timing ? performance.now() : 0;
 
-        // In Vite mode, populate the style block cache with raw style content.
-        // Vite's CSS pipeline will preprocess SCSS/SASS/Less between load() and transform().
-        if (viteConfig && compiler) {
-          const { descriptor } = compiler.parse(code, { filename });
-          const entries: StyleBlockEntry[] = descriptor.styles.map((s: any) => ({
-            content: s.content,
-            lang: s.lang || "css",
-            scoped: s.scoped ?? false,
-            module: s.module ?? false,
-          }));
+        // Project authored inline styles from the registered inventory. External
+        // content is unavailable on this structure-only surface.
+        if (viteConfig) {
+          const entries = styleEntriesFromStructure(host, upsertResult.canonicalId, code);
           styleBlockCache.set(filename, entries);
+          styleScopedCache.set(
+            filename,
+            entries.map((entry) => entry.scoped),
+          );
         }
 
-        await resolveUpsertDependencies(
+        upsertResult = await resolveUpsertDependencies(
           host,
           filename,
+          code,
           upsertResult,
           typeof this?.resolve === "function" ? this.resolve.bind(this) : undefined,
         );
@@ -1007,9 +1092,7 @@ function createFrameworkFactory(
           });
 
           const scriptRequest = `${filename}?vue&type=script&lang.${mainLang}`;
-          // Build style imports. Prefer the compiler-parsed cache (accurate lang,
-          // scoped, module flags); fall back to a simple regex scan of the raw
-          // SFC source when compiler-sfc is absent.
+          // Build style imports from the registered inventory projection.
           //
           // CSS modules match @vitejs/plugin-vue:
           //   import styleN from "…?vue&type=style&index=N&lang.module.css"
@@ -1020,25 +1103,7 @@ function createFrameworkFactory(
           // `$style` from `type.__cssModules`.
           const cachedStyles = styleBlockCache.get(filename);
           const styleEntries: Array<{ lang: string; module: boolean | string }> =
-            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ??
-            (() => {
-              const entries: Array<{ lang: string; module: boolean | string }> = [];
-              const re = /<style\b([^>]*)>/gi;
-              let m;
-              while ((m = re.exec(code)) !== null) {
-                const attrs = m[1];
-                const langMatch = /\blang\s*=\s*["']([^"']+)["']/.exec(attrs);
-                let module: boolean | string = false;
-                const moduleNamed = /\bmodule\s*=\s*["']([^"']+)["']/.exec(attrs);
-                if (moduleNamed) {
-                  module = moduleNamed[1];
-                } else if (/\bmodule\b/.test(attrs)) {
-                  module = true;
-                }
-                entries.push({ lang: langMatch?.[1] ?? "css", module });
-              }
-              return entries;
-            })();
+            cachedStyles?.map((s) => ({ lang: s.lang, module: s.module })) ?? [];
 
           const styleLines: string[] = [];
           const cssModulesMap: Record<string, string> = {};
@@ -1202,3 +1267,10 @@ export const VerterVue = createUnplugin(unpluginFactory);
 export const VerterSvelte = createUnplugin(svelteUnpluginFactory);
 
 export default VerterVue;
+function hashBlockContent(content: string): BlockContentHashToken {
+  const digest = createHash("sha256")
+    .update("verter.block-content.bytes.v1\0")
+    .update(content)
+    .digest("hex");
+  return `sha256:${digest}` as BlockContentHashToken;
+}

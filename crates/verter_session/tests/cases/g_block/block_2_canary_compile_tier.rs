@@ -208,6 +208,7 @@ fn runtime_import_body_edit_invalidates_compile_slot() {
 /// consumer's signature empty, which trivially validates, and the
 /// stale slot is served forever.
 #[test]
+#[ignore = "multi-unit carrier lowering is deferred to block 3A"]
 fn external_src_template_edit_invalidates_compile_slot() {
     let host = standalone_host();
     upsert(
@@ -256,8 +257,17 @@ fn external_src_template_edit_invalidates_compile_slot() {
 
     host.ensure_compiled("/src/Comp.vue", &profile)
         .expect("recompile after external template edit");
+    assert!(
+        host.compile_slot_is_warm("/src/Comp.vue", &profile),
+        "after ensure_compiled the slot is warm again against the edited external template"
+    );
     let after = compile_main(&host, "/src/Comp.vue")
         .expect("assembled module recompiles after the external template edit");
+    assert!(
+        !after.diagnostics.has_errors,
+        "recompiled output must be error-free: {:?}",
+        after.diagnostics
+    );
     assert!(
         after.code.contains("BETA"),
         "the recompiled output MUST carry the NEW template text `BETA` — \

@@ -466,7 +466,7 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     // (2) infer nested inside an `Object` property value:
     //     `any extends { x: infer U } ? U : Y`.
-    let obj_surface = crate::semantic_query::surface_view! {
+    let obj_surface = crate::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,

@@ -121,6 +121,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = engine.fixes_for(&diag, &ctx);
@@ -143,6 +144,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = engine.fixes_for(&diag, &ctx);
@@ -164,6 +166,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         assert!(engine.fixes_for(&diag, &ctx).is_empty());

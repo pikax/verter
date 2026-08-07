@@ -91,9 +91,11 @@ impl RegistryProducerScope {
         explicit_resolution_scope: &Self,
     ) -> Self {
         field
-            .shallow_source
+            .authored_evidence
             .as_ref()
-            .map(|locator| Self::from_locator(locator, explicit_resolution_scope))
+            .map(|evidence| {
+                Self::from_locator(evidence.source().locator(), explicit_resolution_scope)
+            })
             .unwrap_or_else(|| explicit_resolution_scope.clone())
     }
 }
@@ -152,18 +154,20 @@ fn raise_component_meta_registry_source(
     source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Option<crate::semantic_query::HotTypeRef> {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    dispatch.raise_semantic_type_source_to_hot(
-        source,
-        crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-            scope_canonical_id: producer_scope.canonical_id.as_ref(),
-            scope_owner: producer_scope.owner,
-            context:
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            interior_failures: None,
-        },
-    )
+    dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                scope_owner: producer_scope.owner,
+                context:
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()
 }
 
 /// Observe a registry publication source in its exact producing scope and
@@ -556,15 +560,15 @@ pub(crate) fn collect_component_meta_registry_public_macro_root_refs(
         if !macro_call.is_type_based || macro_call.parsed_type_argument.is_none() {
             continue;
         }
-        let Some(hot) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             owner_canonical,
             macro_index,
         ) else {
             continue;
         };
-        let route_root_name = component_meta_registry_node_utility_route(ctx, hot.node())
-            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, hot.node()))
+        let route_root_name = component_meta_registry_node_utility_route(ctx, product.hot.node())
+            .or_else(|| component_meta_registry_node_indexed_access_route(ctx, product.hot.node()))
             .map(|(root, _)| root);
         let producer_scope = RegistryProducerScope::explicit(owner_canonical, macro_call.owner);
         let Some(owner_local_root) = component_meta_registry_public_route_owner_local_root(
@@ -682,18 +686,20 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             crate::semantic_query::ProjectionMode::Navigate,
         );
     let type_node = field
-        .r#type
-        .present()
+        .authority
+        .source()
         .and_then(|source| {
-            dispatch.raise_semantic_type_source_to_hot(
-                source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: producer_scope.canonical_id.as_ref(),
-                    scope_owner: producer_scope.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            )
+            dispatch
+                .raise_semantic_type_source_to_hot(
+                    source,
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: producer_scope.canonical_id.as_ref(),
+                        scope_owner: producer_scope.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary()
         })
         .map(|hot| hot.node());
 
@@ -706,9 +712,10 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     let shallow_node = (!type_node
         .is_some_and(|node| component_meta_registry_node_has_actionable_route(ctx, node)))
     .then(|| {
-        field.shallow_source.as_ref().and_then(|locator| {
+        field.authored_evidence.as_ref().and_then(|evidence| {
             dispatch
-                .raise_authored_locator_to_hot(locator, transit_ctx)
+                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+                .at_optional_boundary()
                 .map(|hot| hot.node())
         })
     })
@@ -914,7 +921,11 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
             // it re-derives navigation + substitution.
             let use_site = match &route {
                 RouteDemand::MemberPath(path) if path.len() == 1 => {
-                    match field.shallow_source.as_ref() {
+                    match field
+                        .authored_evidence
+                        .as_ref()
+                        .map(|evidence| evidence.source().locator())
+                    {
                         Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
                             Some((path[0].clone(), slot.clone()))
                         }
@@ -959,7 +970,11 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
         };
         let use_site = match &route {
             RouteDemand::MemberPath(path) if path.len() == 1 => {
-                match field.shallow_source.as_ref() {
+                match field
+                    .authored_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.source().locator())
+                {
                     Some(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot)) => {
                         Some((path[0].clone(), slot.clone()))
                     }
@@ -2169,6 +2184,7 @@ pub(crate) fn prepared_body_root_node(
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
         )
+        .at_optional_boundary()
         .map(|hot| hot.node())
 }
 

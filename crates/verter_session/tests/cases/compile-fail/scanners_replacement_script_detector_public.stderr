@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `verter_compiler::cursor::ScriptDetector`
+ --> tests/cases/compile-fail/scanners_replacement_script_detector_public.rs:1:5
+  |
+1 | use verter_compiler::cursor::ScriptDetector;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ScriptDetector` in `cursor`

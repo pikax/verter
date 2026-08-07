@@ -37,8 +37,9 @@ impl ActionProvider for PreferScriptAttrs {
             return vec![];
         };
 
-        // Find the `<script setup` tag in the source to insert `attrs="T"` before `>`
-        let Some(insert_pos) = find_script_setup_insert_pos(source) else {
+        // The parser-owned attribute-insertion anchor of the `<script setup>`
+        // block (fail closed without inventory facts).
+        let Some(insert_pos) = script_setup_insert_pos(ctx.blocks) else {
             return vec![];
         };
 
@@ -134,59 +135,28 @@ fn extract_type_parameter(call_text: &str) -> Option<TypeParamOffsets> {
     })
 }
 
-/// Find the byte position to insert ` attrs="..."` in the `<script setup ...>` tag.
-///
-/// Returns the position just before `>` in the opening tag.
-fn find_script_setup_insert_pos(source: &str) -> Option<u32> {
-    let bytes = source.as_bytes();
-    // Find `<script` tag that has `setup` attribute
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
-            let tag_start = i;
-            i += 1;
-            // Skip whitespace
-            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            // Check for `script`
-            if i + 6 <= bytes.len() && bytes[i..i + 6].eq_ignore_ascii_case(b"script") {
-                let after_script = i + 6;
-                // Check it's followed by whitespace or `>` (not `style` or other prefix)
-                if after_script < bytes.len()
-                    && (bytes[after_script].is_ascii_whitespace() || bytes[after_script] == b'>')
-                {
-                    // Find the `>` that closes this tag
-                    let mut j = after_script;
-                    let mut has_setup = false;
-                    while j < bytes.len() && bytes[j] != b'>' {
-                        // Check for `setup` attribute
-                        if j + 5 <= bytes.len() && &bytes[j..j + 5] == b"setup" {
-                            let after = j + 5;
-                            if after >= bytes.len()
-                                || bytes[after].is_ascii_whitespace()
-                                || bytes[after] == b'>'
-                                || bytes[after] == b'='
-                            {
-                                has_setup = true;
-                            }
-                        }
-                        j += 1;
-                    }
-                    if has_setup && j < bytes.len() {
-                        // j points to `>` — check we don't already have `attrs`
-                        let tag_text = &source[tag_start..j];
-                        if tag_text.contains("attrs=") || tag_text.contains("attributes=") {
-                            return None; // already has attrs
-                        }
-                        return Some(j as u32); // insert position just before `>`
-                    }
-                }
-            }
-        }
-        i += 1;
+/// The parser-owned position to insert ` attrs="..."` in the `<script setup>`
+/// opening tag: the selected script block's attribute-insertion anchor (just
+/// before `>`). Raw source is never scanned for a `<script` delimiter, so a
+/// decoy literal in a comment or string can never displace the anchor.
+/// `None` when there is no `setup` script block or it already carries an
+/// `attrs`/`attributes` attribute.
+fn script_setup_insert_pos(blocks: &[verter_diagnostics::SfcBlockFact]) -> Option<u32> {
+    let block = blocks.iter().find(|block| {
+        block.role == verter_diagnostics::SfcBlockRole::Script
+            && block
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name == "setup")
+    })?;
+    if block
+        .attributes
+        .iter()
+        .any(|attribute| matches!(attribute.name.as_str(), "attrs" | "attributes"))
+    {
+        return None; // already has attrs
     }
-    None
+    Some(block.attribute_insertion_anchor)
 }
 
 #[cfg(test)]
@@ -210,6 +180,38 @@ mod tests {
         }
     }
 
+    /// Test-fixture script facts: geometry a registered inventory would
+    /// supply for these well-formed fixtures (offsets computed from the
+    /// fixture text, as the expected-offset assertions already do).
+    fn script_setup_facts(source: &str) -> Vec<verter_diagnostics::SfcBlockFact> {
+        let Some(open) = source.find("<script") else {
+            return vec![];
+        };
+        let Some(gt) = source[open..].find('>') else {
+            return vec![];
+        };
+        let open_end = open + gt + 1;
+        let close = source.rfind("</script").unwrap_or(source.len());
+        let tag_text = &source[open..open_end - 1];
+        let mut attributes = Vec::new();
+        for name in ["setup", "lang", "attrs", "attributes"] {
+            if let Some(at) = tag_text.find(name) {
+                attributes.push(verter_diagnostics::SfcBlockAttribute {
+                    name: name.to_string(),
+                    value: None,
+                    name_span: Span::new((open + at) as u32, (open + at + name.len()) as u32),
+                });
+            }
+        }
+        vec![verter_diagnostics::SfcBlockFact {
+            role: verter_diagnostics::SfcBlockRole::Script,
+            opening_span: Span::new(open as u32, open_end as u32),
+            content_span: Span::new(open_end as u32, close as u32),
+            attribute_insertion_anchor: (open_end - 1) as u32,
+            attributes,
+        }]
+    }
+
     #[test]
     fn migrates_use_attrs_type_to_script_tag() {
         let source = r#"<script setup lang="ts">
@@ -223,6 +225,7 @@ const attrs = useAttrs<{ class?: string }>()
 
         let diag = make_diag("prefer-script-attrs", call_start, call_end);
         let set = DiagnosticSet::new();
+        let blocks = script_setup_facts(source);
         let ctx = ActionContext {
             source,
             file_id: "test.vue",
@@ -230,6 +233,7 @@ const attrs = useAttrs<{ class?: string }>()
             template: None,
             script: None,
             styles: &[],
+            blocks: &blocks,
         };
         let actions = PreferScriptAttrs.fixes_for_diagnostic(&diag, &ctx);
 
@@ -282,6 +286,7 @@ const attrs = useAttrs<{ class?: string }>()
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = PreferScriptAttrs.fixes_for_diagnostic(&diag, &ctx);
         assert!(
@@ -302,6 +307,7 @@ const attrs = useAttrs<{ class?: string }>()
 
         let diag = make_diag("prefer-script-attrs", call_start, call_end);
         let set = DiagnosticSet::new();
+        let blocks = script_setup_facts(source);
         let ctx = ActionContext {
             source,
             file_id: "test.vue",
@@ -309,6 +315,7 @@ const attrs = useAttrs<{ class?: string }>()
             template: None,
             script: None,
             styles: &[],
+            blocks: &blocks,
         };
         let actions = PreferScriptAttrs.fixes_for_diagnostic(&diag, &ctx);
         assert!(
@@ -343,24 +350,67 @@ const attrs = useAttrs<{ class?: string }>()
     }
 
     #[test]
-    fn find_insert_pos_basic() {
-        let source = r#"<script setup lang="ts">
-const x = 1
-</script>"#;
-        let pos = find_script_setup_insert_pos(source);
-        assert!(pos.is_some());
-        assert_eq!(source.as_bytes()[pos.unwrap() as usize], b'>');
+    fn insert_pos_ignores_decoy_script_setup_in_root_comment() {
+        // A `<script setup x>` literal inside a ROOT COMMENT is not a block;
+        // the insertion anchor is the REAL script block's parser-owned
+        // attribute-insertion anchor, never a raw `<script` byte scan (which
+        // anchored on the comment decoy).
+        let source =
+            "<!-- <script setup x> -->\n<script setup lang=\"ts\">\nconst x = 1\n</script>";
+        let real_open = source.rfind("<script setup lang").unwrap();
+        let real_gt = source.rfind("lang=\"ts\">").unwrap() + "lang=\"ts\"".len();
+        let facts = vec![verter_diagnostics::SfcBlockFact {
+            role: verter_diagnostics::SfcBlockRole::Script,
+            opening_span: Span::new(real_open as u32, (real_gt + 1) as u32),
+            content_span: Span::new(
+                (real_gt + 1) as u32,
+                source.rfind("</script>").unwrap() as u32,
+            ),
+            attribute_insertion_anchor: real_gt as u32,
+            attributes: vec![
+                verter_diagnostics::SfcBlockAttribute {
+                    name: "setup".to_string(),
+                    value: None,
+                    name_span: Span::new(0, 0),
+                },
+                verter_diagnostics::SfcBlockAttribute {
+                    name: "lang".to_string(),
+                    value: Some("ts".to_string()),
+                    name_span: Span::new(0, 0),
+                },
+            ],
+        }];
+        let pos = script_setup_insert_pos(&facts);
+        assert_eq!(
+            pos,
+            Some(real_gt as u32),
+            "anchor must be the real script opening tag, not the comment decoy"
+        );
     }
 
     #[test]
-    fn find_insert_pos_already_has_attrs() {
-        let source = r#"<script setup attrs="{ x: 1 }">
-const x = 1
-</script>"#;
-        let pos = find_script_setup_insert_pos(source);
+    fn insert_pos_from_facts_lands_before_the_gt() {
+        let source = "<script setup lang=\"ts\">\nconst x = 1\n</script>";
+        let facts = script_setup_facts(source);
+        let pos = script_setup_insert_pos(&facts).expect("anchor");
+        assert_eq!(source.as_bytes()[pos as usize], b'>');
+    }
+
+    #[test]
+    fn insert_pos_none_when_attrs_already_present() {
+        let source = "<script setup attrs=\"{ x: 1 }\">\nconst x = 1\n</script>";
+        let facts = script_setup_facts(source);
+        let pos = script_setup_insert_pos(&facts);
         assert!(
             pos.is_none(),
             "should return None when attrs already present"
         );
+    }
+
+    #[test]
+    fn insert_pos_none_without_facts() {
+        // Without inventory facts the provider fails closed — no raw-source
+        // `<script` search recovers an anchor.
+        assert!(script_setup_insert_pos(&[]).is_none());
     }
 }

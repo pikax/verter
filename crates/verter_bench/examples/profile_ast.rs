@@ -27,12 +27,28 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
 use verter_compiler::compile::{
-    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
 };
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::Syntax as NewSyntax;
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_compiler::template::oxc::parse_template_expressions;
 use verter_compiler::tokenizer::byte::tokenize;
+
+fn compile(
+    source: &str,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    _allocator: &Allocator,
+) -> VerterCompileResult {
+    StandaloneCompiler.compile_source(
+        &StandaloneSourceBytes::copied_from(source),
+        options,
+        verter_options,
+        macro_semantics,
+    )
+}
 
 struct VueFile {
     path: String,

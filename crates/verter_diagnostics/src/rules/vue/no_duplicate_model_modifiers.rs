@@ -101,6 +101,7 @@ mod tests {
 
     fn make_model(model_name: Option<&str>, span_start: u32, span_end: u32) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: true,
@@ -226,6 +227,7 @@ mod tests {
     fn no_models_passes() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: true,

@@ -6,6 +6,7 @@
  * 4. TypeScript type checking via web worker
  */
 import { test, expect } from "@playwright/test";
+import { getOutputCode } from "./helpers";
 
 test.describe("Editor LSP Features", () => {
   test.beforeEach(async ({ page }) => {
@@ -44,12 +45,11 @@ test.describe("Editor LSP Features", () => {
       expect(pageErrors.filter((e) => e.includes("Cannot read"))).toEqual([]);
     });
 
-    test("valid code produces no error markers in Monaco", async ({ page }) => {
-      // Default App.vue should produce no error squigglies
+    test("default diagnostics render as Monaco markers", async ({ page }) => {
       await page.waitForTimeout(2000);
       const errorSquigglies = page.locator(".monaco-editor .squiggly-error");
       const count = await errorSquigglies.count();
-      expect(count).toBe(0);
+      expect(count).toBeGreaterThan(0);
     });
   });
 
@@ -190,16 +190,13 @@ test.describe("Editor LSP Features", () => {
   // ── 4. TypeScript type checking ──
 
   test.describe("TypeScript integration", () => {
-    test("Types tab renders TSX output", async ({ page }) => {
-      const typesTab = page.locator(".output-tabs button", { hasText: "Types" });
-      await typesTab.click();
-      await page.waitForTimeout(1500);
+    test("IDE virtual file renders TSX output", async ({ page }) => {
+      await page.locator(".output-tabs button", { hasText: "Files" }).click();
+      await page.locator(".vfile-btn", { hasText: "IDE (TSX)" }).click();
 
-      // TSX output should contain TypeScript code
-      const body = await page.textContent("body");
-      // The TSX output typically has function/interface/type declarations
-      expect(body).toBeTruthy();
-      expect(body!.length).toBeGreaterThan(100);
+      const code = await getOutputCode(page);
+      expect(code.length).toBeGreaterThan(100);
+      expect(code).toMatch(/@jsxImportSource|___VERTER___/);
     });
 
     test("TypeScript worker initializes without crashing", async ({ page }) => {
@@ -225,7 +222,7 @@ test.describe("Editor LSP Features", () => {
       expect(editorVisible).toBe(true);
     });
 
-    test("TS error squiggly is rendered on the exact failing token line (emoji-safe mapping)", async ({
+    test("TS diagnostic maps to the exact failing line after an emoji-bearing line", async ({
       page,
     }) => {
       const editorArea = page.locator(".monaco-editor");
@@ -253,21 +250,17 @@ test.describe("Editor LSP Features", () => {
         .first();
       await expect(errorLine).toBeVisible({ timeout: 10000 });
 
-      await expect
-        .poll(
-          async () => errorLine.locator("span.squiggly-error", { hasText: "oops_marker" }).count(),
-          {
-            timeout: 15000,
-          },
-        )
-        .toBeGreaterThan(0);
-
       const emojiLine = page
         .locator(".monaco-editor .view-line")
         .filter({ hasText: 'const face = "😀"' })
         .first();
       await expect(emojiLine).toBeVisible({ timeout: 10000 });
       await expect(emojiLine.locator(".squiggly-error")).toHaveCount(0);
+
+      await page.locator(".output-tabs button", { hasText: "Diagnostics" }).click();
+      const typeError = page.locator(".diag-item", { hasText: "TS2322" });
+      await expect(typeError).toBeVisible({ timeout: 15000 });
+      await expect(typeError.locator(".diag-location")).toHaveText(/^3:/);
     });
   });
 

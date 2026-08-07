@@ -131,7 +131,7 @@ Ambient declaration augmentation (`declare module "X" { ... }` / `declare global
 
 Cross-file augmentation merge is the SAME `MergedDecl` peer-merge path as same-file merging — NOT a second merge engine: `stitch_module_augmentations` finds every augmenter via `FileArtifactStore::ensure_augmentation_index_populated`, lowers each augmenter's RETAINED inner body in its own file context, and folds base ∪ augmenter contributions into ONE `SemanticNodeData::MergedDecl` carrier; augmenter order is the stable `(canonical, parse_stable_hash)` key — discovery-order-independent.
 
-Facts rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` fingerprint plus one `FileWholeHash` per contributing file and records `self_root_canonicals = {base} ∪ {augmenters}` — a content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`. Query keys stay content-free (R6). The index is OVERLAY-AWARE (`AugmentationPopulation {Base, Session(overlay-set fingerprint)}`): overlay augmenters NEVER poison the base index and NEVER cross sessions, and there is NO base-only session assert on the augmentation-index / `EffectiveExportSet` surface — a session view is accepted under `Session` scope.
+Facts rail: the cold stitch observes one `FactKey::ModuleAugmentationIndexShape` fingerprint plus one `FileWholeHash` per contributing file and records `self_root_canonicals = {base} ∪ {augmenters}` — a content edit to ANY contributor misses the warm read; torn/partial routes through `ReturnOnly`. Query keys stay content-free (R6). The index is OVERLAY-AWARE (`AugmentationPopulation {Base, Session(overlay-set fingerprint)}`): overlay augmenters NEVER poison the base index and NEVER cross sessions, and there is NO base-only session assert on the augmentation-index surface — a session view is accepted under `Session` scope.
 
 Guards: `session_overlay_augmenter_isolated_from_base_index`, `session_overlay_augmentation_isolated_from_base_meta`.
 
@@ -265,7 +265,7 @@ Each crate exposes AT MOST one `tests/main.rs` integration-test binary; extra ca
 
 Dual guard: the fast-fail CI Node check `scripts/check-integration-test-layout.mjs` (runs before the Rust gate) and the in-gate Rust mirror (`crates/verter_session/tests/cases/integration_test_layout_guard.rs`), both reading the same allowlist.
 
-Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_two_known_process_isolated_targets`.
+Guards: `integration_test_layout_is_consolidated`, `layout_checker_discriminates_stray_and_stale`, `allowlist_is_the_known_standalone_targets`.
 
 ### Framework Adapter Substrate (CRITICAL)
 
@@ -283,6 +283,12 @@ Closed-contract rules:
 - **No re-export shim for relocated Vue resolution.** The Vue resolution bodies relocated to `framework_surface::vue_exec`; `typeinfo/adapters/vue/{public_type,surface,store}.rs` are DELETED with no re-export shim or alias under `adapters::vue`, and `VueShallowMetadataStore` / `VueMacroDtoKey` are retired. Guards `vue_relocation_no_shim` + `retired_symbols_absent_from_production_source`.
 
 See the `/framework-adapters` skill for the substrate's module map, the descriptor/registry/ctx/executor contracts, the script-fact seam, and Vue as the reference adapter.
+
+### Carrier Geometry From Registered Facts (MANDATORY)
+
+The carrier parser is the only production owner allowed to discover carrier structure from raw source. Downstream production code must not infer carrier geometry, section dialect, or block identity from text: for example, by searching for tags or delimiters, applying regex dialect heuristics, or recounting source order. Consume registered `RegisteredFileStructure`/`CarrierBlockInventory` projections and parser-minted facts, refs, or tokens; any retained compatibility ordinal is projected from that inventory, never reconstructed from text.
+
+Local edit-time lexing may classify a bounded token or recovery window, but it must not become an alternate structure parser; any geometry-sensitive window is bounded by parser/inventory facts, including parser-unowned gaps bounded by registered parse boundaries. Tests may scan fixture text for setup, decoys, and assertions. This rule is review-enforced alongside the existing structural boundaries; do not add scanner-detection CI jobs or name-keyed source-tree guard scanners.
 
 ### Project-Bound External-TS Contract (CRITICAL)
 

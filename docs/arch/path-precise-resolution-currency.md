@@ -1172,6 +1172,99 @@ Source-env and project selection are now sealed on `project_env_root`.
 
 ## Complexity and ownership
 
+### Resolution decision DAG — mutation cost
+
+The decision graph lives inside `ResolutionFactRoot`, which is embedded in
+both `ResolutionWorldRoot` and `ResolutionSessionRoot`. Its forward
+(`node -> direct dependencies`) and reverse (`dependency -> direct derived
+dependents`) maps are `im` HAMTs, so the bounds are the persistent-map
+ones and NOT a root-sized copy:
+
+| Operation | Bound |
+|---|---|
+| Immutable root clone (base or session) | `O(1)` structural share — the HAMT nodes are shared, never deep-copied |
+| Persistent root mutation | `O(changed keys × log n)` |
+| Cold decision build | `O(direct primitive observations + direct child decisions)` |
+| Warm decision reuse | one decision observation plus ordinary signature validation |
+| Resolution graph storage | `O(D + E)` per base/session root |
+| Atomic direct-edge replacement | `O((old edges + new edges) × log n)` |
+| Derived propagation, one batch | `O((changed leaves + reachable nodes + reachable edges) × log n)` |
+| Base-to-session propagation | the same bound summed over affected LIVE session roots |
+| Deep appearance | `O(path depth × point lookup)` — the absent-ancestor `Realpath` walk uses point lookups in the maps already present and adds no index |
+| Context publish enumeration | `O(registered ContextSelection leaves × one membership evaluation)`, publish-time only |
+| Context membership, per path per published index | one walk, then expected `O(1)` |
+
+### Context selection is memoized per published index
+
+`selected_context_for_path` reads the published index's resolver
+membership, its project list and its two per-project tables, and nothing
+else — a pure function of `(index, path)`. `PublishedContextSelection`
+memoizes it on the index, keyed by the canonical id as the caller spelled
+it, and tallies the walks it performed per path. Errors and "no owning
+project" are memoized as the typed values they are; a world with no
+published index answers before the boundary and neither memoizes nor
+tallies.
+
+The owner is `PublishedRoot` deliberately. Not `ResolutionWorldRoot`,
+which is cloned on every mutation — owning it there would either
+re-create the memo per clone or need its own reset discipline; owning it
+on the index makes clone-sharing structural, since the clone carries the
+same `Arc<PublishedRoot>`. And not `WorkspaceSnapshot`, whose `Arc` an
+LSP view-only rebuild reuses across a `PublishedRoot` with recomposed
+per-project identity and environment tables — the selected context
+depends on those tables, so a snapshot-scoped answer could outlive its
+own inputs. The reset at publication is likewise structural rather than
+performed: the memo is private, is absent from every `PublishedRoot`
+constructor's signature, and starts empty.
+
+The row table is bounded at `CONTEXT_MEMBERSHIP_TABLE_CAP` and clears
+whole on overflow, exactly like `OwnersMemo`. The clear is COUNTED,
+because the `CTX-1` tally lives in the same rows: a silent clear would
+restart it and a path walked many times would read "walked once".
+
+Measured, per-path, on the four-demand two-importer contract fixture:
+**six walks per path before the memo, one after.**
+
+Three costs are recorded rather than optimised, because all three are
+structural:
+
+- **The context-publish enumeration is not memoized, and the memo cannot
+  reduce it.** `replace_published` installs a FRESH selection index, so
+  the memo it would consult after the swap is empty by construction and
+  every registered leaf is a distinct path — each post-swap comparison is
+  a genuine first walk. That is also the design: a memo that DID answer
+  there would answer with the previous index's selection, the exact stale
+  answer that makes a changed selection compare equal and seed nothing.
+  The pre-swap half reads the OUTGOING index and may hit its memo, which
+  is correct — the old index's answers are still answers about the old
+  index. The enumeration is bounded by the graph's own registered context
+  edges — never by the project set and never by the whole fact ledger —
+  and it runs only at publication.
+- **The memo does not cover the direct membership callers.** It sits at
+  `selected_context_for_path`. `ProjectResolver::nearest_config_for_path`
+  and `effective_configs_for_path` are also called directly, and those
+  walks stay unmemoized: seven call sites inside `resolver.rs` itself
+  (`:289`, `:298`, `:304`, `:326`, `:420`, `:471`, `:735`) and five in
+  `verter_lsp` (`provider_sync.rs:485` and `:537`,
+  `background_drain_decl_closure.rs:1030`, `background_init.rs:767`,
+  `server_utils.rs:315`). Extending the memo to them needs their own
+  measurement first: they take a different value out of the walk — an
+  `&IdeProjectConfig` or a candidate list, not a `ResolveContextId` — so
+  they are a different memo, not this one applied more widely.
+- **`resolution_sessions` is never pruned.** There is no `.remove` on it
+  anywhere. Production interns exactly one session domain per engine
+  (`default_resolution_session`), so the base-to-session traversal is a
+  single root today. The base-mutation critical section holds the global
+  base publication gate for the whole traversal, so if multi-session ever
+  lands, that window grows linearly with the accumulated, never-reaped
+  domain count.
+
+The propagation EVICTS NOTHING. It advances derived versions inside the
+publication protocol; every dependent cache entry stays where it is and
+becomes cold only when its own recorded derived version fails ordinary
+read-side validation.
+
+
 - World-root capture is O(1), artifact-ROOT capture is O(1), and **full
   StoreView capture is now O(1) in landed behaviour**. `HostStoreView::build`
   performs a fixed number of scalar reads and `Arc` clones into one sealed

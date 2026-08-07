@@ -275,8 +275,11 @@ message ComponentMetaBody {
   ComponentMetaResolution resolution = 20;
   RootInfo root_info = 21;
   PublicInstanceMeta public_instance = 22;
-  SfcBlocksMeta sfc_blocks = 23;
+  reserved 23;
+  reserved "sfc_blocks";
   repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 24;
+  OrderedSfcStructure ordered_sfc_structure = 25;
+  ComponentContractAvailability component_public_contract = 26;
 }
 
 message MacroExpansionDiagnosticEntry {
@@ -304,11 +307,144 @@ message ExpansionDiagnostic {
   uint32 property_name_id = 3;
 }
 
+message TypePublication {
+  TypePublicationKind kind = 1;
+  TypePublicationFailure failure = 2;
+  TypePublicationAbsence absence = 3;
+  TypePublicationProvenance provenance = 4;
+  TypePublicationSemanticAuthority semantic_authority = 5;
+  TypePublicationExactness exactness = 6;
+  TypePublicationReason reason = 7;
+  TypePublicationPolicyReason policy_reason = 8;
+  SymbolicEquivalenceKind symbolic_proof = 9;
+}
+
+message TerminalTypeDisplay {
+  uint32 text_id = 1;
+}
+
+message ComponentContractAvailability {
+  oneof availability {
+    ComponentPublicContract supported = 1;
+    ComponentContractUnsupported unsupported = 2;
+  }
+}
+
+message ComponentContractUnsupported {
+  uint32 adapter_id = 1;
+  ComponentContractUnsupportedReason reason = 2;
+  ComponentMetaOutputLane output_lane = 3;
+  uint32 index = 4;
+  uint32 inner_index = 5;
+  bool has_inner_index = 6;
+  ComponentMetaOutputFailure output_failure = 7;
+  ContractSurface publication_surface = 8;
+  TypePublicationFailure publication_failure = 9;
+  TypePublicationProvenance publication_provenance = 10;
+  repeated ResolutionDiagnostic diagnostics = 11;
+}
+
+message ComponentPublicContract {
+  uint32 adapter_id = 1;
+  ContractExactness exactness = 2;
+  repeated ContractDegradation degradation = 3;
+  ContractProvenance provenance = 4;
+  repeated PublicProp props = 5;
+  repeated PublicEvent events = 6;
+  repeated PublicSlot slots = 7;
+}
+
+message ContractDegradation {
+  ContractSurface surface = 1;
+  ContractDegradationReason reason = 2;
+  repeated ResolutionDiagnostic diagnostics = 3;
+}
+
+message ContractSurface {
+  ContractSurfaceKind kind = 1;
+  uint32 name_id = 2;
+  uint32 binding_id = 3;
+  uint32 overload_index = 4;
+}
+
+message ResolutionDiagnostic {
+  ResolutionDiagnosticKind kind = 1;
+  uint32 context_id = 2;
+  uint32 property_name_id = 3;
+}
+
+message PublicTypeReference {
+  uint32 type_node_id = 1;
+  TypePublication publication = 2;
+  TerminalTypeDisplay terminal_display = 3;
+}
+
+message PublicProp {
+  uint32 name_id = 1;
+  bool optional = 2;
+  bool has_default = 3;
+  PublicTypeReference type = 4;
+  ContractExactness exactness = 5;
+  repeated ContractDegradation degradation = 6;
+  ContractProvenance provenance = 7;
+}
+
+message PublicEvent {
+  uint32 name_id = 1;
+  repeated PublicCallSignature overloads = 2;
+  PublicDerivedHandlerShape derived_handler = 3;
+  ContractExactness exactness = 4;
+  repeated ContractDegradation degradation = 5;
+  ContractProvenance provenance = 6;
+}
+
+message PublicCallSignature {
+  PublicTypeReference source = 1;
+  repeated PublicParameter parameters = 2;
+  uint32 return_type_node_id = 3;
+}
+
+message PublicParameter {
+  uint32 name_id = 1;
+  uint32 type_node_id = 2;
+  bool optional = 3;
+  bool rest = 4;
+}
+
+message PublicDerivedHandlerShape {
+  repeated PublicHandlerSignature overloads = 1;
+}
+
+message PublicHandlerSignature {
+  repeated PublicParameter parameters = 1;
+  uint32 return_type_node_id = 2;
+}
+
+message PublicSlot {
+  uint32 name_id = 1;
+  bool optional = 2;
+  PublicSlotInput input = 3;
+  PublicTypeReference return_type = 4;
+  ContractExactness exactness = 5;
+  repeated ContractDegradation degradation = 6;
+  ContractProvenance provenance = 7;
+}
+
+message PublicSlotInput {
+  repeated PublicSlotBinding bindings = 1;
+}
+
+message PublicSlotBinding {
+  uint32 name_id = 1;
+  PublicTypeReference type = 2;
+}
+
 message PropMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
-  uint32 raw_type_id = 4;
+  reserved 4;
+  reserved "raw_type_id";
   bool required = 5;
   bool has_default = 6;
   uint32 default_value_id = 7;
@@ -321,6 +457,8 @@ message PropMeta {
   // expansion. Consumed by
   // `@verter/component-meta/published-surface`'s `Refined` policy.
   bool declared_in_macro_type_arg = 10;
+  TypePublication publication = 11;
+  TerminalTypeDisplay terminal_display = 12;
 }
 
 message EventMeta {
@@ -330,6 +468,8 @@ message EventMeta {
   uint32 raw_signature_id = 4;
   uint32 description_id = 5;
   repeated JsdocTag tags = 6;
+  TypePublication publication = 7;
+  TerminalTypeDisplay terminal_display = 8;
 }
 
 message SlotMeta {
@@ -346,13 +486,19 @@ message SlotMeta {
   // `@verter/component-meta/published-surface` Compat/Refined slot
   // blocklist — an author-declared slot is never blocked.
   bool declared_in_macro_type_arg = 8;
+  uint32 return_value_node_id = 9;
+  TypePublication return_publication = 10;
+  TerminalTypeDisplay return_terminal_display = 11;
 }
 
 message SlotBindingMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
-  uint32 raw_type_id = 4;
+  reserved 4;
+  reserved "raw_type_id";
+  TypePublication publication = 5;
+  TerminalTypeDisplay terminal_display = 6;
 }
 
 message ModelMeta {
@@ -383,49 +529,254 @@ message PublicInstanceMemberMeta {
   repeated JsdocTag tags = 7;
 }
 
-message SfcBlocksMeta {
-  TemplateBlockMeta template = 1;
-  ScriptBlockMeta script = 2;
-  ScriptBlockMeta script_setup = 3;
-  repeated StyleBlockMeta styles = 4;
-  repeated CustomBlockMeta custom = 5;
+message OrderedSfcStructure {
+  uint32 schema_version = 1;
+  string artifact_token = 2;
+  repeated StructureBlock blocks = 3;
+  repeated MarkupNode markup_nodes = 4;
+  reserved 5;
+  reserved "markup_root_tokens";
 }
 
-message SfcAttributeMeta {
-  uint32 name_id = 1;
-  uint32 value_id = 2;
+message StructureBlock {
+  oneof kind {
+    SectionBlock section = 1;
+    MarkupRootBlock markup_root = 2;
+  }
 }
 
-message TemplateBlockMeta {
-  uint32 lang_id = 1;
-  uint32 src_id = 2;
-  repeated SfcAttributeMeta attributes = 3;
+message SectionBlock {
+  StructureSection common = 1;
+  repeated string markup_root_tokens = 2;
 }
 
-message ScriptBlockMeta {
-  uint32 lang_id = 1;
-  uint32 src_id = 2;
-  uint32 generic_id = 3;
-  uint32 attrs_type_id = 4;
-  repeated SfcAttributeMeta attributes = 5;
+message MarkupRootBlock {
+  string block_token = 1;
+  string markup_root_token = 2;
 }
 
-message StyleBlockMeta {
-  uint32 index = 1;
-  uint32 lang_id = 2;
-  uint32 src_id = 3;
-  bool scoped = 4;
-  bool is_module = 5;
-  uint32 module_name_id = 6;
-  repeated SfcAttributeMeta attributes = 7;
+message BlockContentBasisTokenV1 {
+  string value = 1;
 }
 
-message CustomBlockMeta {
-  uint32 index = 1;
-  uint32 block_type_id = 2;
-  uint32 lang_id = 3;
-  uint32 src_id = 4;
-  repeated SfcAttributeMeta attributes = 5;
+message StructureSection {
+  string block_token = 1;
+  CarrierBlockRole role = 2;
+  AuthoredName authored_name = 3;
+  CanonicalRange opening_range = 4;
+  CanonicalRange opening_name_range = 5;
+  CanonicalRange content_range = 6;
+  CanonicalRange closing_range = 7;
+  CanonicalRange closing_name_range = 8;
+  CanonicalRange full_range = 9;
+  SyntaxTermination termination = 10;
+  reserved 11;
+  reserved "recovery";
+  repeated CarrierAttribute attributes = 12;
+  BlockContentBasisTokenV1 block_content_basis_token = 13;
+  CanonicalRange attribute_insertion_anchor = 14;
+}
+
+message CarrierBlockRole {
+  oneof kind {
+    Empty template_host = 1;
+    ScriptBlockRole script = 2;
+    StyleBlockRole style = 3;
+    CustomBlockRole custom = 4;
+  }
+}
+
+message Empty {}
+message ScriptBlockRole { string role = 1; string dialect = 2; }
+message StyleBlockRole { string dialect = 1; bool scoped = 2; string module = 3; }
+message CustomBlockRole { string normalized_name = 1; }
+
+message AuthoredName {
+  string spelling = 1;
+  string normalized = 2;
+  CanonicalRange range = 3;
+}
+
+message AuthoredSlice {
+  string text = 1;
+  CanonicalRange range = 2;
+}
+
+message CanonicalRange {
+  string source_space_token = 1;
+  PositionEncoding encoding = 2;
+  oneof representation {
+    OffsetRange offset_range = 3;
+    LineCharacterRange line_character_range = 4;
+  }
+  string encoding_session_token = 5;
+}
+
+message OffsetRange { uint32 start = 1; uint32 end = 2; }
+message LineCharacter { uint32 line = 1; uint32 character = 2; }
+message LineCharacterRange { LineCharacter start = 1; LineCharacter end = 2; }
+enum PositionEncoding {
+  POSITION_ENCODING_UNSPECIFIED = 0;
+  POSITION_ENCODING_UTF8_BYTES = 1;
+  POSITION_ENCODING_UTF16_CODE_UNITS = 2;
+  POSITION_ENCODING_UTF32_CODE_POINTS = 3;
+}
+
+message SyntaxTermination {
+  oneof kind {
+    Empty closed = 1;
+    Empty self_closing = 2;
+    Empty void = 3;
+    Empty unclosed_eof = 4;
+    RecoveredTermination recovered = 5;
+  }
+}
+message RecoveredTermination { string reason = 1; CanonicalRange recovery_range = 2; }
+
+message CarrierAttribute {
+  oneof kind {
+    NamedAttribute named = 1;
+    SpreadAttribute spread = 2;
+    DirectiveAttribute directive = 3;
+    AttachAttribute attach = 4;
+  }
+}
+message NamedAttribute {
+  string attribute_token = 1;
+  AuthoredName name = 2;
+  string syntax = 3;
+  AttributeValue value = 4;
+  CanonicalRange full_range = 5;
+  string duplicate_of = 6;
+}
+message SpreadAttribute {
+  string attribute_token = 1;
+  CanonicalRange full_range = 2;
+  CanonicalRange open_range = 3;
+  CanonicalRange expression_range = 4;
+  CanonicalRange close_range = 5;
+  SyntaxTermination termination = 6;
+}
+message AttachAttribute {
+  string attribute_token = 1;
+  CanonicalRange full_range = 2;
+  CanonicalRange keyword_range = 3;
+  CanonicalRange expression_range = 4;
+  CanonicalRange close_range = 5;
+  SyntaxTermination termination = 6;
+}
+message DirectiveAttribute {
+  string attribute_token = 1;
+  string family = 2;
+  CanonicalRange prefix_range = 3;
+  AuthoredName local_name = 4;
+  DirectiveArgument argument = 5;
+  repeated DirectiveModifier modifiers = 6;
+  AttributeValue value = 7;
+  CanonicalRange full_range = 8;
+  string duplicate_of = 9;
+}
+message DirectiveArgument {
+  oneof kind {
+    Empty none = 1;
+    AuthoredName static_name = 2;
+    DynamicAttributeSyntax dynamic = 3;
+  }
+}
+message DirectiveModifier {
+  AuthoredSlice authored = 1;
+  string normalized = 2;
+  CanonicalRange separator_range = 3;
+  CanonicalRange name_range = 4;
+  CanonicalRange full_range = 5;
+}
+message DynamicAttributeSyntax {
+  CanonicalRange full_range = 1;
+  CanonicalRange open_range = 2;
+  CanonicalRange expression_range = 3;
+  CanonicalRange close_range = 4;
+  SyntaxTermination termination = 5;
+}
+message AttributeValue {
+  oneof kind {
+    Empty missing = 1;
+    StaticAttributeValue static_value = 2;
+    DynamicAttributeSyntax expression = 3;
+    MixedAttributeValue mixed = 4;
+  }
+}
+message StaticAttributeValue {
+  AuthoredSlice raw = 1;
+  string decoded = 2;
+  string quote = 3;
+  CanonicalRange value_range = 4;
+  CanonicalRange inner_range = 5;
+}
+message MixedAttributeValue { CanonicalRange full_range = 1; repeated AttributeValuePart parts = 2; }
+message AttributeValuePart {
+  oneof kind {
+    AuthoredSlice static_value = 1;
+    DynamicAttributeSyntax expression = 2;
+  }
+}
+
+message MarkupNode {
+  string node_token = 1;
+  string parent_node_token = 2;
+  repeated string child_node_tokens = 3;
+  reserved 4 to 9;
+  oneof syntax {
+    MarkupElementSyntax element = 10;
+    TextSyntax text = 11;
+    CommentSyntax comment = 12;
+    InterpolationSyntax interpolation = 13;
+    GenericMarkupSyntax svelte_control_block = 14;
+    GenericMarkupSyntax svelte_clause = 15;
+    GenericMarkupSyntax svelte_standalone_tag = 16;
+    RecoveredSyntax recovered = 17;
+    UnknownSyntax unknown = 18;
+  }
+}
+message MarkupElementSyntax {
+  AuthoredName authored_name = 1;
+  string namespace = 2;
+  string kind = 3;
+  CanonicalRange opening_range = 4;
+  CanonicalRange opening_name_range = 5;
+  CanonicalRange attribute_insertion_anchor = 6;
+  CanonicalRange content_range = 7;
+  CanonicalRange closing_range = 8;
+  CanonicalRange closing_name_range = 9;
+  CanonicalRange full_range = 10;
+  bool self_closing = 11;
+  bool void_element = 12;
+  bool raw_text = 13;
+  SyntaxTermination termination = 14;
+  repeated CarrierAttribute attributes = 15;
+}
+message TextSyntax { CanonicalRange content_range = 1; }
+message CommentSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange content_range = 2;
+  CanonicalRange closing_range = 3; CanonicalRange full_range = 4;
+  SyntaxTermination termination = 5;
+}
+message InterpolationSyntax {
+  string family = 1; CanonicalRange opening_range = 2;
+  CanonicalRange expression_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange full_range = 5; SyntaxTermination termination = 6;
+}
+message GenericMarkupSyntax { CanonicalRange full_range = 1; SyntaxTermination termination = 2; }
+message RecoveredSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange opening_name_range = 2;
+  CanonicalRange content_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange closing_name_range = 5; CanonicalRange full_range = 6;
+  SyntaxTermination termination = 7; string expected = 8; string reason = 9;
+}
+message UnknownSyntax {
+  CanonicalRange opening_range = 1; CanonicalRange opening_name_range = 2;
+  CanonicalRange content_range = 3; CanonicalRange closing_range = 4;
+  CanonicalRange closing_name_range = 5; CanonicalRange full_range = 6;
+  SyntaxTermination termination = 7; AuthoredSlice authored_head = 8; string reason = 9;
 }
 
 message ResolvedTypeDeclaration {
@@ -499,6 +850,15 @@ message BindingMeta {
   uint32 type_annotation_id = 4;
   bool used_in_template = 5;
   bool used_in_style = 6;
+  // The demand-resolved whole-return reactive-wrapper role of a composable
+  // binding, interned from a CLOSED vocabulary. Id 0 means the role was never
+  // demanded for this binding — distinct from the "none" discriminant, which is
+  // a completed non-wrapper proof.
+  uint32 return_wrapper_role_id = 7;
+  // The exact typed degradation reason, present only alongside the
+  // "unresolved" role. Carried separately so a reason can never collapse onto
+  // the bare role discriminant.
+  uint32 return_wrapper_unresolved_reason_id = 8;
 }
 
 message VueApiCallMeta {
@@ -544,11 +904,14 @@ message ComponentFlags {
 message AcceptedPropMeta {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
-  uint32 raw_type_id = 3;
+  reserved 3;
+  reserved "raw_type_id";
   bool required = 4;
   MemberProvenance provenance = 5;
   MemberAvailability availability = 6;
   AcceptedPropKind kind = 7;
+  TypePublication publication = 8;
+  TerminalTypeDisplay terminal_display = 9;
 }
 
 message AcceptedEventMeta {
@@ -636,8 +999,11 @@ message FallthroughBranch {
 message FallthroughPropEntry {
   uint32 name_id = 1;
   uint32 type_node_id = 2;
-  uint32 raw_type_id = 3;
+  reserved 3;
+  reserved "raw_type_id";
   repeated InheritedSource sources = 4;
+  TypePublication publication = 5;
+  TerminalTypeDisplay terminal_display = 6;
 }
 
 message FallthroughEventEntry {
@@ -932,4 +1298,147 @@ enum ResolvedRootStepKind {
   RESOLVED_ROOT_STEP_KIND_NATIVE_TAG = 1;
   RESOLVED_ROOT_STEP_KIND_COMPONENT = 2;
   RESOLVED_ROOT_STEP_KIND_UNRESOLVED = 3;
+}
+
+enum TypePublicationKind {
+  TYPE_PUBLICATION_KIND_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_KIND_FAILED = 1;
+  TYPE_PUBLICATION_KIND_ABSENT = 2;
+  TYPE_PUBLICATION_KIND_PUBLISHED = 3;
+}
+
+enum TypePublicationFailure {
+  TYPE_PUBLICATION_FAILURE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_FAILURE_UNREPRESENTABLE_REQUIRED_MEMBER_VALUE = 1;
+  TYPE_PUBLICATION_FAILURE_UNREPRESENTABLE_REQUIRED_PAYLOAD = 2;
+}
+
+enum TypePublicationAbsence {
+  TYPE_PUBLICATION_ABSENCE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_ABSENCE_UNANNOTATED = 1;
+  TYPE_PUBLICATION_ABSENCE_BRANCH_DIVERGENT = 2;
+}
+
+enum TypePublicationProvenance {
+  TYPE_PUBLICATION_PROVENANCE_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_PROVENANCE_SEMANTIC_EVALUATOR = 1;
+  TYPE_PUBLICATION_PROVENANCE_SESSION_PROJECTOR = 2;
+  TYPE_PUBLICATION_PROVENANCE_FRAMEWORK_SURFACE = 3;
+  TYPE_PUBLICATION_PROVENANCE_FALLTHROUGH_INHERITANCE = 4;
+  TYPE_PUBLICATION_PROVENANCE_SCHEMA = 5;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_MACRO_PAYLOAD = 6;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_DECLARATION_BODY = 7;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_AUGMENTATION_BODY = 8;
+  TYPE_PUBLICATION_PROVENANCE_AUTHORED_JSDOC_TYPEDEF_BODY = 9;
+}
+
+enum TypePublicationSemanticAuthority {
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_RESOLVED = 1;
+  TYPE_PUBLICATION_SEMANTIC_AUTHORITY_AUTHORED_FALLBACK = 2;
+}
+
+enum TypePublicationExactness {
+  TYPE_PUBLICATION_EXACTNESS_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_EXACTNESS_EXACT_CONCRETE = 1;
+  TYPE_PUBLICATION_EXACTNESS_EXACT_SYMBOLIC = 2;
+  TYPE_PUBLICATION_EXACTNESS_INCOMPLETE = 3;
+}
+
+enum TypePublicationReason {
+  TYPE_PUBLICATION_REASON_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_REASON_RESOLVED_EXACT_CONCRETE = 1;
+  TYPE_PUBLICATION_REASON_RESOLVED_EXACT_SYMBOLIC = 2;
+  TYPE_PUBLICATION_REASON_RESOLVED_INCOMPLETE = 3;
+  TYPE_PUBLICATION_REASON_AUTHORED_FOR_INCOMPLETE = 4;
+  TYPE_PUBLICATION_REASON_AUTHORED_SYMBOLIC_REPRESENTATION = 5;
+}
+
+enum TypePublicationPolicyReason {
+  TYPE_PUBLICATION_POLICY_REASON_UNSPECIFIED = 0;
+  TYPE_PUBLICATION_POLICY_REASON_IMPORTED_MACRO_COMPOUND = 1;
+  TYPE_PUBLICATION_POLICY_REASON_IMPORTED_INDEXED_ACCESS = 2;
+}
+
+enum SymbolicEquivalenceKind {
+  SYMBOLIC_EQUIVALENCE_KIND_UNSPECIFIED = 0;
+  SYMBOLIC_EQUIVALENCE_KIND_IMPORTED_MACRO_COMPOUND = 1;
+  SYMBOLIC_EQUIVALENCE_KIND_IMPORTED_INDEXED_ACCESS = 2;
+}
+
+enum ComponentContractUnsupportedReason {
+  COMPONENT_CONTRACT_UNSUPPORTED_REASON_UNSPECIFIED = 0;
+  COMPONENT_CONTRACT_UNSUPPORTED_REASON_ADAPTER_UNAVAILABLE = 1;
+  COMPONENT_CONTRACT_UNSUPPORTED_REASON_COMPONENT_META_UNAVAILABLE = 2;
+  COMPONENT_CONTRACT_UNSUPPORTED_REASON_OUTPUT_MATERIALIZATION_FAILED = 3;
+  COMPONENT_CONTRACT_UNSUPPORTED_REASON_PUBLICATION_FAILED = 4;
+}
+
+enum ComponentMetaOutputLane {
+  COMPONENT_META_OUTPUT_LANE_UNSPECIFIED = 0;
+  COMPONENT_META_OUTPUT_LANE_PROP = 1;
+  COMPONENT_META_OUTPUT_LANE_EVENT_PAYLOAD = 2;
+  COMPONENT_META_OUTPUT_LANE_SLOT_BINDING = 3;
+  COMPONENT_META_OUTPUT_LANE_SLOT_RETURN = 4;
+  COMPONENT_META_OUTPUT_LANE_MODEL = 5;
+  COMPONENT_META_OUTPUT_LANE_EXPOSED = 6;
+  COMPONENT_META_OUTPUT_LANE_PUBLIC_INSTANCE_MEMBER = 7;
+  COMPONENT_META_OUTPUT_LANE_TYPE_REGISTRY_ENTRY = 8;
+  COMPONENT_META_OUTPUT_LANE_ACCEPTED_PROP = 9;
+  COMPONENT_META_OUTPUT_LANE_ACCEPTED_EVENT_PAYLOAD = 10;
+  COMPONENT_META_OUTPUT_LANE_FALLTHROUGH_PROP = 11;
+  COMPONENT_META_OUTPUT_LANE_FALLTHROUGH_EVENT_PAYLOAD = 12;
+  COMPONENT_META_OUTPUT_LANE_EVENT_RETURN = 13;
+}
+
+enum ComponentMetaOutputFailure {
+  COMPONENT_META_OUTPUT_FAILURE_UNSPECIFIED = 0;
+  COMPONENT_META_OUTPUT_FAILURE_UNRAISABLE_SOURCE = 1;
+  COMPONENT_META_OUTPUT_FAILURE_REQUIRED_SOURCE_UNAVAILABLE = 2;
+  COMPONENT_META_OUTPUT_FAILURE_INTERIOR_SOURCE_MISS = 3;
+  COMPONENT_META_OUTPUT_FAILURE_SHELL_MATERIALIZATION_MISS = 4;
+  COMPONENT_META_OUTPUT_FAILURE_UNKNOWN_MATERIALIZING_SOURCE_INTERIOR = 5;
+}
+
+enum ContractExactness {
+  CONTRACT_EXACTNESS_UNSPECIFIED = 0;
+  CONTRACT_EXACTNESS_EXACT = 1;
+  CONTRACT_EXACTNESS_DEGRADED = 2;
+}
+
+enum ContractProvenance {
+  CONTRACT_PROVENANCE_UNSPECIFIED = 0;
+  CONTRACT_PROVENANCE_COMPONENT_META_OUTPUT = 1;
+}
+
+enum ContractDegradationReason {
+  CONTRACT_DEGRADATION_REASON_UNSPECIFIED = 0;
+  CONTRACT_DEGRADATION_REASON_ABSENT = 1;
+  CONTRACT_DEGRADATION_REASON_INCOMPLETE = 2;
+}
+
+enum ContractSurfaceKind {
+  CONTRACT_SURFACE_KIND_UNSPECIFIED = 0;
+  CONTRACT_SURFACE_KIND_PROP = 1;
+  CONTRACT_SURFACE_KIND_EVENT = 2;
+  CONTRACT_SURFACE_KIND_SLOT_BINDING = 3;
+  CONTRACT_SURFACE_KIND_SLOT_RETURN = 4;
+}
+
+enum ResolutionDiagnosticKind {
+  RESOLUTION_DIAGNOSTIC_KIND_UNSPECIFIED = 0;
+  RESOLUTION_DIAGNOSTIC_KIND_BUDGET_EXCEEDED = 1;
+  RESOLUTION_DIAGNOSTIC_KIND_PROJECTION_WORK_LIMIT = 2;
+  RESOLUTION_DIAGNOSTIC_KIND_CONNECTED_QUERY_DEPTH_LIMIT = 3;
+  RESOLUTION_DIAGNOSTIC_KIND_MAPPED_DEPTH_EXCEEDED = 4;
+  RESOLUTION_DIAGNOSTIC_KIND_UNRESOLVED_REFERENCE = 5;
+  RESOLUTION_DIAGNOSTIC_KIND_INDETERMINATE_CONDITIONAL = 6;
+  RESOLUTION_DIAGNOSTIC_KIND_INFINITE_KEY_SPACE = 7;
+  RESOLUTION_DIAGNOSTIC_KIND_UNSUPPORTED_OPERATOR = 8;
+  RESOLUTION_DIAGNOSTIC_KIND_CONDITIONAL_CONTEXT_TRUNCATED = 9;
+  RESOLUTION_DIAGNOSTIC_KIND_IDEMPOTENT_ARM = 10;
+  RESOLUTION_DIAGNOSTIC_KIND_CYCLIC_REFERENCE = 11;
+  RESOLUTION_DIAGNOSTIC_KIND_CYCLIC_INSTANTIATION = 12;
+  RESOLUTION_DIAGNOSTIC_KIND_INSTANTIATION_ERROR = 13;
+  RESOLUTION_DIAGNOSTIC_KIND_EMPTY_UNION_ARM = 14;
 }

@@ -2,7 +2,13 @@
  * Pure functions computing Monaco decoration arrays from Verter analysis data.
  * No Monaco dependency — returns plain objects that Editor.vue maps to Monaco types.
  */
-import type { FileAnalysis, AnalysisBinding } from "../core/types";
+import type {
+  FileAnalysis,
+  AnalysisBinding,
+  AnalysisStyleBlock,
+  OrderedSfcStructure,
+} from "../core/types";
+import { utf8ToUtf16Offset } from "./offsets";
 
 /** Decoration descriptor for a binding in the script block. */
 export interface BindingDecoration {
@@ -148,13 +154,22 @@ export function computeCssClassDecorations(analysis: FileAnalysis): CssClassDeco
  * Compute CodeLens summaries for SFC blocks.
  * Returns one code lens per block with a summary of its contents.
  */
-export function computeCodeLenses(source: string, analysis: FileAnalysis): BlockCodeLens[] {
+export function computeCodeLenses(
+  source: string,
+  analysis: FileAnalysis,
+  structure: OrderedSfcStructure | null,
+): BlockCodeLens[] {
   const lenses: BlockCodeLens[] = [];
 
   // Script setup block summary
-  const scriptMatch = /<script[^>]*\bsetup\b[^>]*>/i.exec(source);
-  if (scriptMatch) {
-    const line = countLines(source, scriptMatch.index);
+  const scriptBlock = structure?.blocks.find(
+    (block) => block.kind === "section" && block.section.role.kind === "script",
+  );
+  if (scriptBlock?.kind === "section") {
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, scriptBlock.section.openingRange.start),
+    );
     const parts: string[] = [];
 
     const bindingCount = analysis.bindings.filter((b) => !b.name.startsWith("___VERTER___")).length;
@@ -179,39 +194,55 @@ export function computeCodeLenses(source: string, analysis: FileAnalysis): Block
   }
 
   // Template block summary
-  const templateMatch = /<template\b[^>]*>/i.exec(source);
-  if (templateMatch) {
-    const line = countLines(source, templateMatch.index);
+  const templateBlock = structure?.blocks.find(
+    (block) => block.kind === "section" && block.section.role.kind === "templateHost",
+  );
+  if (templateBlock?.kind === "section") {
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, templateBlock.section.openingRange.start),
+    );
     // We don't have template element count from analysis yet
     lenses.push({ line, title: "template" });
   }
 
-  // Style block summaries
-  const styleRegex = /<style\b([^>]*)>/gi;
-  let styleMatch;
-  let styleIdx = 0;
-  while ((styleMatch = styleRegex.exec(source)) !== null) {
-    const line = countLines(source, styleMatch.index);
-    const styleAnalysis = analysis.styles[styleIdx];
+  // Style block summaries. Analyses are associated to structure blocks
+  // EXCLUSIVELY through the opaque sealed block token — never by ordinal.
+  // A style block whose token has no analysis match is typed unavailable:
+  // it gets no analysis-derived summary.
+  const stylesByToken = new Map<string, AnalysisStyleBlock>();
+  for (const style of analysis.styles) {
+    if (style.blockToken !== undefined && style.blockToken !== null) {
+      stylesByToken.set(style.blockToken, style);
+    }
+  }
+  for (const styleBlock of structure?.blocks.filter(
+    (block) => block.kind === "section" && block.section.role.kind === "style",
+  ) ?? []) {
+    if (styleBlock.kind !== "section") continue;
+    const line = countLines(
+      source,
+      utf8ToUtf16Offset(source, styleBlock.section.openingRange.start),
+    );
+    const styleAnalysis = stylesByToken.get(styleBlock.section.blockToken);
+    if (!styleAnalysis) continue;
     const parts: string[] = [];
 
-    if (styleAnalysis?.scoped) parts.push("scoped");
-    if (styleAnalysis?.isModule) parts.push("module");
-    if (styleAnalysis?.css) {
+    if (styleAnalysis.scoped) parts.push("scoped");
+    if (styleAnalysis.isModule) parts.push("module");
+    if (styleAnalysis.css) {
       const classCount = styleAnalysis.css.classes.length;
       if (classCount > 0) parts.push(`${classCount} class${classCount !== 1 ? "es" : ""}`);
       const ruleCount = styleAnalysis.css.ruleCount;
       if (ruleCount > 0) parts.push(`${ruleCount} rule${ruleCount !== 1 ? "s" : ""}`);
     }
-    if (styleAnalysis?.vBinds.length) {
+    if (styleAnalysis.vBinds.length) {
       parts.push(`${styleAnalysis.vBinds.length} v-bind`);
     }
 
     if (parts.length > 0) {
       lenses.push({ line, title: parts.join(" · ") });
     }
-
-    styleIdx++;
   }
 
   return lenses;
@@ -297,7 +328,8 @@ export function getDecorationStyles(): string {
 
 // ── Helpers ──
 
-/** Count lines (1-based) up to a byte offset. */
+/** Count lines (1-based) up to a UTF-16 code-unit offset. Structure BYTE
+ * offsets must be converted via `utf8ToUtf16Offset` before calling. */
 function countLines(source: string, offset: number): number {
   let count = 1;
   for (let i = 0; i < offset && i < source.length; i++) {

@@ -7,7 +7,7 @@
 //! is invalidated when the augmentation index fingerprint shifts.
 //!
 //! This is the R21 lib_env / project-identity scoping rule on the
-//! route-surface tier: the `EffectiveExportSet` cache validates
+//! route-surface tier: a route-surface consumer validates its
 //! `RouteSurface(ModuleAugmentationIndexShape)` anchors before
 //! handing out a warm result.
 

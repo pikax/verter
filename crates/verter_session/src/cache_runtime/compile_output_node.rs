@@ -107,7 +107,7 @@ pub(crate) struct CompileOutputSessionKey {
 /// Cached compile output. Mirrors the publishable subset of
 /// [`CompileSlot`] used by both typed nodes — virtual-file outputs,
 /// diagnostics, optional fallback / IDE artifacts, and the captured
-/// hashes that the legacy warm-hit pre-filter consults. The fact rail
+/// hashes that the warm-hit pre-filter consults. The fact rail
 /// lives separately on the [`ArtifactNode::Value`] / [`Candidate`]
 /// envelope, NOT inside the value (so the value is identical between
 /// pure-content and session-mode entries).
@@ -115,8 +115,6 @@ pub(crate) struct CompileOutputSessionKey {
 pub(crate) struct CompileOutputValue {
     /// Cached semantic hash of the source content at compile time.
     pub semantic_hash: Hash16,
-    /// Cached style-override hash captured at publish.
-    pub style_override_hash: u64,
     /// Cached content-override hash captured at publish.
     pub content_override_hash: u64,
     /// The resolved Svelte `cssHash` override captured at publish (byte-exact;
@@ -147,11 +145,10 @@ pub(crate) struct CompileOutputValue {
 
 impl CompileOutputValue {
     /// Build a value from a compile-tier publish record. Threads the
-    /// override + semantic hashes and the per-kind outputs unchanged.
+    /// content-override + semantic hashes and the per-kind outputs unchanged.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_compile_record(
         semantic_hash: Hash16,
-        style_override_hash: u64,
         content_override_hash: u64,
         css_hash_override: Option<Arc<str>>,
         outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
@@ -163,7 +160,6 @@ impl CompileOutputValue {
     ) -> Self {
         Self {
             semantic_hash,
-            style_override_hash,
             content_override_hash,
             css_hash_override,
             outputs,
@@ -485,8 +481,8 @@ impl CompileOutputNodeFactValidatedSession {
     /// 1. A slot exists for `profile_hash`.
     /// 2. The slot's carrier is `Cacheable` (i.e. not an overflowed
     ///    signature that snuck in).
-    /// 3. The slot's `semantic_hash`, `style_override_hash`, and
-    ///    `content_override_hash` match the supplied references.
+    /// 3. The slot's `semantic_hash` and `content_override_hash` match
+    ///    the supplied references.
     /// 4. `acquire_view` yields a proven-current view (it returns
     ///    `None` when the manager could not prove the view current,
     ///    which misses to cold).
@@ -514,7 +510,6 @@ impl CompileOutputNodeFactValidatedSession {
         profile_state: &ProfileState,
         profile_hash: u64,
         live_semantic_hash: &Hash16,
-        live_style_override_hash: u64,
         live_content_override_hash: u64,
         live_css_hash_override: Option<&str>,
         acquire_view: A,
@@ -534,7 +529,6 @@ impl CompileOutputNodeFactValidatedSession {
             return None;
         }
         if slot.semantic_hash != *live_semantic_hash
-            || slot.style_override_hash != live_style_override_hash
             || slot.content_override_hash != live_content_override_hash
         {
             return None;
@@ -589,7 +583,6 @@ impl CompileOutputNodeFactValidatedSession {
             SignatureAdmission::Cacheable(signature) => {
                 let slot = CompileSlot {
                     semantic_hash: value.semantic_hash,
-                    style_override_hash: value.style_override_hash,
                     content_override_hash: value.content_override_hash,
                     css_hash_override: value.css_hash_override,
                     outputs: value.outputs,

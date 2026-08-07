@@ -75,6 +75,25 @@ enum BundleMaterialization {
     SurfaceEmpty { serve_published: bool },
 }
 
+/// A prepared-decl bundle read together with the
+/// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) of the value
+/// that produced it.
+///
+/// The two halves answer different questions and must not be collapsed:
+/// `bundle` is the ANSWER (a refused bundle is still served — the
+/// refusal is about admission, never about the answer), while `reuse` is
+/// how far that answer may travel. A `RequestOnly` outcome carries the
+/// exact [`NonCacheableRefusal`](crate::resolver_core::reuse::NonCacheableRefusal)
+/// its compute observed, which is strictly more than tracer finalisation
+/// exposes: the tracer records only that the enclosing compute is
+/// non-cacheable, never why.
+#[cfg(test)]
+pub(crate) struct BundleReuseOutcome {
+    pub(crate) bundle:
+        Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
+    pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
+}
+
 impl VerterHost {
     // -----------------------------------------------------------------------
     // Fact-validated PreparedDeclBundle cache
@@ -116,10 +135,8 @@ impl VerterHost {
     /// Inspects `rejected_fact` (the first fact that failed validation
     /// in the most-recent candidate, as returned by
     /// [`crate::resolver_core::ValidatedFactCache::get_if_valid_self_rooted_attributed`])
-    /// and consults the view's direct accessors
-    /// ([`crate::resolver_core::StoreView::tracks_file`] for the self-root
-    /// arm; [`crate::resolver_core::StoreView::derived_hash_for`] for the
-    /// `ImportRoute` arm) to determine WHICH check rejected. Fires
+    /// and consults [`crate::resolver_core::StoreView::tracks_file`] for the
+    /// self-root arm to determine WHICH check rejected. Fires
     /// exactly one audit event per call:
     ///
     /// * `PreparedDeclBundleRejectEntryMissing` — `rejected_fact ==
@@ -128,13 +145,15 @@ impl VerterHost {
     ///   self-root, `view.tracks_file(canonical)` is `false`.
     /// * `PreparedDeclBundleRejectSelfRootHashMismatch` —
     ///   `FileWholeHash` self-root, tracked but stored hash differs.
-    /// * `PreparedDeclBundleRejectImportRouteAbsent` —
-    ///   `DerivedFactHash { kind: ImportRoute }` for the bundle's
-    ///   canonical, `view.derived_hash_for` returns `None`.
-    /// * `PreparedDeclBundleRejectImportRouteMismatch` — same but the
-    ///   stored hash differs from the view's hash.
+    /// * `PreparedDeclBundleRejectImportRouteMismatch` — historical audit
+    ///   event name retained for a moved path-precise resolution witness.
     /// * `PreparedDeclBundleRejectOther` — fallthrough; must stay 0
-    ///   in steady state.
+    ///   in steady state, with one known exception: a rejecting
+    ///   `DomainGeneration` has no named cause of its own, so a
+    ///   compacted candidate's rejection attributes here. That is a
+    ///   diagnostic-precision gap, not a validity one — the rejection
+    ///   itself is decided by `validates_domain_aggregate`, which is
+    ///   exhaustive and fail-closed per domain.
     fn attribute_prepared_decl_bundle_rejection(
         view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
@@ -180,19 +199,87 @@ impl VerterHost {
     ///
     /// `view` is a borrow into the request-bound [`HostStoreView`] built
     /// at the request entry point. The warm-hit path validates against
-    /// this view instead of building a fresh one — eliminating the
-    /// per-call full-workspace snapshot the pre-6.c rail performed.
+    /// this view instead of requesting another root capture.
     ///
     /// Same strict self-root validation contract as
     /// [`Self::prepared_decl_bundle`]: a deleted (now-untracked) keyed
     /// canonical rejects the stale bundle.
+    ///
+    /// `memo` is the request's [`RequestBundleMemo`](crate::resolver_core::request_store_view::RequestBundleMemo)
+    /// — the request-world reuse tier. `None` means "no request scope":
+    /// the read still serves correctly, it just cannot reuse a value the
+    /// shared cache is not allowed to hold.
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        self.prepared_decl_bundle_classified(view, memo, canonical_id)
+            .0
+    }
+
+    /// Fixture-facing mirror of [`Self::prepared_decl_bundle_classified`]
+    /// so a discriminating test can assert the exact
+    /// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) — and, for
+    /// a `RequestOnly` value, the exact refusal reason and propagation —
+    /// that the shared implementation earned. Production reads take the
+    /// projection above; the class governs admission INSIDE the
+    /// implementation (the request memo's structural gate and the
+    /// shared-cache gate), so no production caller needs to inspect it.
+    #[cfg(test)]
+    pub(crate) fn prepared_decl_bundle_with_reuse_class(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
+        canonical_id: &str,
+    ) -> BundleReuseOutcome {
+        let (bundle, reuse) = self.prepared_decl_bundle_classified(view, memo, canonical_id);
+        BundleReuseOutcome { bundle, reuse }
+    }
+
+    /// The ONE implementation behind every prepared-decl bundle read:
+    /// request-memo tier, then the fact-validated shared cache, then the
+    /// singleflight cold lane.
+    ///
+    /// Returns the bundle together with the
+    /// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) its
+    /// producing path earned. The class is what decides admission on the
+    /// way out — the request memo takes only a request-reusable value,
+    /// and a `RequestOnly` value replays its refusal into the caller's
+    /// tracer on EVERY return (cold, memo hit, singleflight follower)
+    /// before the bundle is handed over.
+    fn prepared_decl_bundle_classified(
+        &self,
+        view: &dyn crate::resolver_core::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
+        canonical_id: &str,
+    ) -> (
+        Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
+        crate::resolver_core::reuse::ReuseClass,
+    ) {
+        use crate::resolver_core::request_store_view::BundleMemoWorld;
+        use crate::resolver_core::reuse::{
+            classify_reuse, NoReuseCause, ObservedRefusal, ReuseClass,
+        };
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
+        let token = view.compat_token();
+
+        // Request-world reuse tier, ahead of the shared cache: it is the
+        // cheapest read (one map lookup against one token) AND the only
+        // tier that can serve a `RequestOnly` value at all. A hit replays
+        // the stored refusal so the reuse cannot launder the taint the
+        // cold return carried.
+        if let Some(memo) = memo {
+            if let Some((bundle, reuse)) = memo.get(canonical_id, BundleMemoWorld::Base, token) {
+                self.provenance
+                    .bundle_request_memo_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                reuse.replay_refusal();
+                return (Some(bundle), reuse);
+            }
+        }
 
         // Fast path: fact-validated cache hit. The bundle's keyed
         // canonical is its self-root — validated **strictly** so a
@@ -216,7 +303,19 @@ impl VerterHost {
                 if let Some(obs) = verter_audit::current_observer() {
                     obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
                 }
-                return Some(bundle);
+                // A warm hit came out of the SHARED cache, so it was
+                // admitted: `Shared` by construction. Nothing was
+                // refused on this read, so there is nothing to replay.
+                if let Some(memo) = memo {
+                    memo.insert(
+                        canonical_id,
+                        BundleMemoWorld::Base,
+                        token,
+                        ReuseClass::Shared,
+                        std::sync::Arc::clone(&bundle),
+                    );
+                }
+                return (Some(bundle), ReuseClass::Shared);
             }
             Err((rejected_fact, candidate_count)) => {
                 Self::attribute_prepared_decl_bundle_rejection(
@@ -230,7 +329,6 @@ impl VerterHost {
 
         // Cold path with singleflight: coalesce concurrent materializations
         // for the same canonical_id + store-view compat token.
-        let token = view.compat_token();
         let singleflight = bundles.singleflight();
         let flight_body = || {
             // Re-check cache inside the singleflight leader closure (another
@@ -250,7 +348,7 @@ impl VerterHost {
                     // a partial-completeness lattice — a served bundle is
                     // complete.
                     completeness: crate::semantic_query::ResultCompleteness::Complete,
-                    cache_refusal: None,
+                    reuse: ReuseClass::Shared,
                 });
             }
             // Per-request audit attribution: cold materialisation of
@@ -280,6 +378,13 @@ impl VerterHost {
             let mut note_empty = |serve_published: bool| {
                 miss_serve_published &= serve_published;
             };
+            // Observe the TYPED non-cacheable reasons this materialisation
+            // consumes. The producers below fan them through the shared
+            // marking chokepoint, which records the reason into every
+            // active scope — so the classification below reads what was
+            // actually refused instead of inferring it from a boolean a
+            // fenced serve and a broken lease set identically.
+            let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
             let built = match self
                 .materialize_prepared_decl_bundle_from_routed_shallow(view, canonical_id)
             {
@@ -316,9 +421,34 @@ impl VerterHost {
             // surface as bundle-less. A `None` with no serve consumed
             // (unloadable canonical) is a reproducible miss and stays
             // joinable.
-            let (value, stable) = match built {
-                Some((arc, admitted)) => ((Some((*arc).clone())), admitted),
-                None => (None, miss_serve_published),
+            let observed = match refusals.observed() {
+                Some(reason) => ObservedRefusal::Typed(reason),
+                None => ObservedRefusal::None,
+            };
+            drop(refusals);
+            let (value, stable, reuse) = match built {
+                Some((arc, admitted)) => {
+                    // A BUILT bundle is Complete; the class is decided by
+                    // what its materialisation observed. `admitted` is a
+                    // separate axis — it governs the SHARED rendezvous,
+                    // not request-scoped reuse.
+                    let reuse = classify_reuse(observed, true);
+                    (Some((*arc).clone()), admitted, reuse)
+                }
+                None => {
+                    // A MISS is only as reusable as it is reproducible: a
+                    // fenced serve's surface-emptiness describes the
+                    // superseded artifact, so reusing it would answer
+                    // "nothing here" for a canonical that has live
+                    // content — a wrong ANSWER, which no replayed taint
+                    // repairs.
+                    let reuse = if miss_serve_published {
+                        classify_reuse(observed, true)
+                    } else {
+                        ReuseClass::NoReuse(NoReuseCause::NonReproducibleMiss)
+                    };
+                    (None, miss_serve_published, reuse)
+                }
             };
             Ok(crate::resolver_core::StableExecutionValue {
                 value,
@@ -328,7 +458,7 @@ impl VerterHost {
                 // Prepared-decl bundles gate on `stable`/`admitted`, not a
                 // partial-completeness lattice.
                 completeness: crate::semantic_query::ResultCompleteness::Complete,
-                cache_refusal: None,
+                reuse,
             })
         };
         // Bounded re-validation loop, mirroring the IndexedReady lane:
@@ -344,17 +474,37 @@ impl VerterHost {
         // request-sticky and traced-scope rails (the original fenced
         // ensure ran on the leader's thread, not this one).
         const MAX_FLIGHT_ATTEMPTS: usize = 3;
-        let mut last_unpublished: Option<crate::resolver_core::prepared_decl::PreparedDeclBundle> =
-            None;
+        let mut last_unpublished: Option<(
+            Option<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+            ReuseClass,
+        )> = None;
         for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
             let run_result =
                 match singleflight.run_retaining(key.clone(), token, flight_body, |sev| sev.stable)
                 {
                     Ok(run_result) => run_result,
-                    Err(()) => return None,
+                    Err(()) => return (None, ReuseClass::NoReuse(NoReuseCause::Incomplete)),
                 };
             if run_result.value.stable {
-                return run_result.value.value.clone().map(std::sync::Arc::new);
+                // A STABLE rendezvous is joinable, so this return reaches
+                // the LEADER and every FOLLOWER that adopted it. A
+                // follower performed no materialisation, so the leader's
+                // fan-out never touched THIS thread's tracer stack —
+                // replaying the carried refusal is the only thing that
+                // keeps the taint attached to the value it describes.
+                let flight = &run_result.value;
+                flight.reuse.replay_refusal();
+                let bundle = flight.value.clone().map(std::sync::Arc::new);
+                if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
+                    memo.insert(
+                        canonical_id,
+                        BundleMemoWorld::Base,
+                        token,
+                        flight.reuse,
+                        std::sync::Arc::clone(bundle),
+                    );
+                }
+                return (bundle, flight.reuse);
             }
             if matches!(
                 run_result.role,
@@ -362,23 +512,48 @@ impl VerterHost {
             ) {
                 // Fenced-derived leader: serve its own caller. The inner
                 // fenced `ensure_indexed_ready_serve` already marked this
-                // thread's request-sticky and traced-scope rails.
-                return run_result.value.value.clone().map(std::sync::Arc::new);
+                // thread's rails; the replay is idempotent and keeps the
+                // return path uniform across roles.
+                let flight = &run_result.value;
+                flight.reuse.replay_refusal();
+                let bundle = flight.value.clone().map(std::sync::Arc::new);
+                if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
+                    memo.insert(
+                        canonical_id,
+                        BundleMemoWorld::Base,
+                        token,
+                        flight.reuse,
+                        std::sync::Arc::clone(bundle),
+                    );
+                }
+                return (bundle, flight.reuse);
             }
-            last_unpublished = run_result.value.value.clone();
+            last_unpublished = Some((run_result.value.value.clone(), run_result.value.reuse));
         }
-        if last_unpublished.is_some() {
-            // Sustained-churn bounded fallback (FOLLOWER adoption): the
-            // adopted bundle is fenced-derived and this thread never saw
-            // the original fenced serve — carry the non-cacheability by
-            // hand onto every enclosing traced compute's suppress rail. A
-            // fenced-but-VALID serve is Complete, NOT partial: it refuses
-            // shared-cache admission only, never marks request partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
-            );
+        // Sustained-churn bounded fallback (FOLLOWER adoption): the
+        // adopted bundle is fenced-derived and this thread never saw the
+        // original fenced serve — carry the non-cacheability onto every
+        // enclosing traced compute's suppress rail through the value's
+        // own refusal. A fenced-but-VALID serve is Complete, NOT partial:
+        // it refuses shared-cache admission only, never marks request
+        // partiality.
+        match last_unpublished {
+            Some((bundle, reuse)) if bundle.is_some() => {
+                reuse.replay_refusal();
+                let bundle = bundle.map(std::sync::Arc::new);
+                if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
+                    memo.insert(
+                        canonical_id,
+                        BundleMemoWorld::Base,
+                        token,
+                        reuse,
+                        std::sync::Arc::clone(bundle),
+                    );
+                }
+                (bundle, reuse)
+            }
+            _ => (None, ReuseClass::NoReuse(NoReuseCause::NonReproducibleMiss)),
         }
-        last_unpublished.map(std::sync::Arc::new)
     }
 
     /// View-aware prepared-decl bundle lookup.
@@ -401,6 +576,8 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+        use crate::resolver_core::request_store_view::BundleMemoWorld;
+        use crate::resolver_core::reuse::{classify_reuse, ObservedRefusal};
         // Two-identity split. `canonical_id` is the RAW requested
         // canonical; the overlay-detection gate + tombstone check below
         // MUST run on it because the `SessionView` overlay maps +
@@ -450,64 +627,79 @@ impl VerterHost {
             // actual overlay-Upsert, so an unmasked canonical keeps its
             // warm-bundle reuse on the base path.
             if let Some(overlay_hash) = view.overlay_content_hash_for(canonical_id) {
-                // Request-scoped, SUCCESS-ONLY memo (the R17-compliant
-                // reuse tier). R17 keeps this bundle OUT of the shared
-                // `prepared_decl_bundles` cache, so pre-memo every touch
-                // re-ran the full materialisation — including the
-                // per-import re-export-chain walk
-                // (`build_prepared_import_canonicalization`). The memo
-                // lives on the request's `CanonicalCompletionOverlay`
-                // (dies with the request; never a host/shared cache) and
-                // keys on `(raw owner, overlay content hash, store-view
-                // compat token)` — the token pins entries to ONE
-                // externally-coherent world so a stability-retry attempt
-                // under a fresh view misses and re-materialises. See the
-                // memo field docs on `CanonicalCompletionOverlay`.
-                let memo = ctx.request_completion_overlay();
+                // The OVERLAY namespace of the request-world bundle memo.
+                // R17 keeps this bundle OUT of the shared
+                // `prepared_decl_bundles` cache (that slot is keyed by
+                // canonical alone and would alias the base bundle), so
+                // without the memo every touch re-ran the full
+                // materialisation — including the per-import
+                // re-export-chain walk
+                // (`build_prepared_import_canonicalization`). See
+                // `RequestBundleMemo` for the identity contract.
+                let memo = ctx
+                    .request_completion_overlay()
+                    .map(|overlay| overlay.bundle_memo());
+                let world = BundleMemoWorld::Overlay(overlay_hash);
                 let token = ctx.store_view().compat_token();
                 if let Some(memo) = memo {
-                    if let Some(bundle) =
-                        memo.overlay_bundle_memo_get(canonical_id, overlay_hash, token)
-                    {
+                    if let Some((bundle, reuse)) = memo.get(canonical_id, world, token) {
                         self.provenance
-                            .overlay_bundle_memo_hits
+                            .bundle_request_memo_hits
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        reuse.replay_refusal();
                         return Some(bundle);
                     }
                 }
-                // Cacheability bracket around the materialisation: the
-                // nested scope observes the same non-cacheable fan-out
-                // every enclosing tracer receives (fan-out reaches ALL
-                // active scopes, so enclosing verdicts are unchanged) and
-                // gates memo admission. A materialisation that consumed a
-                // FENCED overlay serve, an UNROOTABLE route, or a broken
-                // decl-body lease is served to THIS caller but never
-                // memoised — the per-call re-materialisation (and its
-                // per-call fan-out into whatever tracer scopes enclose
-                // each later touch) is load-bearing for that class.
+                // Two observers bracket the materialisation. The TYPED
+                // one records which non-cacheable reads the compute
+                // consumed, so a deterministic refusal (a FENCED overlay
+                // serve) classifies `RequestOnly` and stays reusable
+                // inside the request while a transient one (a broken
+                // decl-body lease) does not. The cacheability scope
+                // supplies the UNATTRIBUTED half — a fact-signature
+                // overflow or a mutation-instability verdict names no
+                // reason, and the conservative class is the only sound
+                // answer for it.
+                let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
                 let (bundle, non_cacheable) =
-                    crate::fact_signature_helpers::with_cacheability_scope(self, |_probe| {
-                        self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity)
-                    });
+                    crate::fact_signature_helpers::with_cacheability_scope(
+                        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                        |_probe| self.materialize_prepared_decl_bundle_via_ctx(ctx, &identity),
+                    );
+                let observed = match refusals.observed() {
+                    Some(reason) => ObservedRefusal::Typed(reason),
+                    None if non_cacheable => ObservedRefusal::Unattributed,
+                    None => ObservedRefusal::None,
+                };
+                drop(refusals);
                 let bundle = bundle?;
-                if !non_cacheable {
-                    if let Some(memo) = memo {
-                        memo.overlay_bundle_memo_insert(
-                            canonical_id,
-                            overlay_hash,
-                            token,
-                            std::sync::Arc::clone(&bundle),
-                        );
-                    }
+                let reuse = classify_reuse(observed, true);
+                if let Some(memo) = memo {
+                    // `insert` is the structural gate: a non-reusable
+                    // class is refused inside the memo, not by this
+                    // caller's convention.
+                    memo.insert(
+                        canonical_id,
+                        world,
+                        token,
+                        reuse,
+                        std::sync::Arc::clone(&bundle),
+                    );
                 }
                 return Some(bundle);
             }
         }
         // Per-request hoist: route the non-overlay fall-through
         // through the view-bound helper, threading `ctx.store_view()`
-        // (the request-bound borrow) instead of building a fresh owned
-        // snapshot via `self.prepared_decl_bundle(canonical_id)`.
-        self.prepared_decl_bundle_with_store_view(ctx.store_view(), canonical_id)
+        // (the request-bound borrow) and the request's bundle memo
+        // instead of building a fresh owned snapshot via
+        // `self.prepared_decl_bundle(canonical_id)`.
+        self.prepared_decl_bundle_with_store_view(
+            ctx.store_view(),
+            ctx.request_completion_overlay()
+                .map(|overlay| overlay.bundle_memo()),
+            canonical_id,
+        )
     }
 
     /// Materialise a fresh prepared-decl bundle rooted at the overlay's
@@ -1158,6 +1350,7 @@ impl VerterHost {
     pub(crate) fn prepared_type_decl_in_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -1165,7 +1358,8 @@ impl VerterHost {
         Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
-        let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, canonical_id) else {
+        let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
+        else {
             return Ok(None);
         };
         let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
@@ -1214,11 +1408,12 @@ impl VerterHost {
     pub(crate) fn prepared_value_decl_in_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,
+        memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let bundle = self.prepared_decl_bundle_with_store_view(view, canonical_id)?;
+        let bundle = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)?;
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -1781,7 +1976,7 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, mut framework_parse, whole_hash) = {
+            let (raw_source, framework_parse, whole_hash) = {
                 let state = match self.effective_file_state(canonical_id, None) {
                     Some(state) => state,
                     None => {
@@ -1813,11 +2008,7 @@ impl VerterHost {
             // parser; everything downstream (eval source, snapshot, env,
             // analysis) reuses its framework-neutral artifact.
             if framework_parse.is_none() && file_language.is_framework_carrier() {
-                framework_parse = crate::parse::build_carrier_parse_artifact_from_source(
-                    &file_language,
-                    &raw_source,
-                    &self.provenance,
-                );
+                return None;
             }
             let framework_parse = framework_parse;
 
@@ -1952,6 +2143,9 @@ impl VerterHost {
                             job_raw_source.as_ref(),
                             job_scope,
                             parsed_sfc,
+                            job_framework_parse
+                                .as_deref()
+                                .expect("Vue parse came from this framework artifact"),
                             &job_provenance,
                             VerterHost::vue_flight_script_program(
                                 eval_is_extracted_script,
@@ -2568,14 +2762,12 @@ impl VerterHost {
                                     hash: source_data.parse.whole_hash,
                                 }];
                             // Cross-file ROUTE fact — recorded ONLY from an
-                            // ALREADY-materialized, content-pinned, edge-current
+                            // already-materialized, content-pinned, parse-current
                             // artifact (a `get`, never an `ensure`): the fast
                             // path must not index the dependency just to derive
-                            // the hash (that mid-resolution index is exactly
-                            // what the bundle's dynamic-import-route-hash
-                            // discipline forbids). When available, the fact
+                            // the hash. When available, the fact
                             // uses the SAME `hash_route_surface` derivation the
-                            // store-view snapshot publishes, so warm validation
+                            // store-view root lookup publishes, so warm validation
                             // round-trips; when the artifact is absent, the
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
@@ -2777,8 +2969,7 @@ impl VerterHost {
     /// View-bound variant of [`Self::owner_import_surface`].
     ///
     /// Validates the cached surface against the supplied request-bound
-    /// view instead of building a fresh one — eliminating the per-call
-    /// full-workspace snapshot the legacy rail performed at this site.
+    /// view instead of requesting another root capture.
     /// Same correctness contract: R3/R26/R28 fact-validation rejects a
     /// stale entry on the next read; the producer's
     /// `validated_at_generation` ProjectGeneration fencing is

@@ -84,7 +84,12 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
                 function.canonical_id.as_ref() == canonical_id
             }
         },
-        FactVersionRef::ProjectGeneration { .. } => false,
+        // None is file-scoped: each is a whole-project scalar, a
+        // whole-domain aggregate, or a strict self-root world witness —
+        // all name no canonical, so none can reference one.
+        FactVersionRef::ProjectGeneration { .. }
+        | FactVersionRef::DomainGeneration(_)
+        | FactVersionRef::StrictSelfRootWorld(_) => false,
     }
 }
 

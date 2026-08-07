@@ -15,6 +15,7 @@ pub(crate) mod resolved_surface_access;
 pub mod results;
 pub(crate) mod scope;
 mod spread_program_export;
+pub(crate) mod svelte_callable_role;
 pub(crate) mod svelte_exec;
 pub mod vue_exec;
 
@@ -33,7 +34,7 @@ pub use plan::{
 pub use results::{
     EmitsSurface, ExposeSurface, MacroDtosRead, MacroSurfaceDtos, ModelBinding, ModelSurface,
     NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface, NormalizedSurfaces, OptionsSurface,
-    PropsSurface, ResolvedEmitField, ResolvedMacroPayload, ResolvedOutcome,
+    PropsSurface, ResolvedEmitOccurrence, ResolvedMacroPayload, ResolvedOutcome,
 };
 
 /// One framework's plan/normalize adapter.

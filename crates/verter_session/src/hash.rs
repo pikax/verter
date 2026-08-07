@@ -1,4 +1,4 @@
-//! xxh3-based content hashing, semantic hashing, and profile/style-override hashing.
+//! xxh3-based content hashing, semantic hashing, and profile hashing.
 //!
 //! ## Hash Algorithm Rationale
 //!
@@ -8,7 +8,7 @@
 //! |-----------|---------|---------|------------|
 //! | **XXH3-128** | `verter_session` | Content and semantic hashing for compile cache invalidation | No (in-process only) |
 //! | **SHA-256** | `verter_compiler`, `verter_semantic::analysis` | Scope IDs (`data-v-{hash}`), CSS Modules class names, export signatures, type resolution fingerprinting | Scope IDs and CSS Modules output **yes** (embedded in compiled CSS/HTML); export/type sigs **no** |
-//! | **DefaultHasher** | `verter_session` | `CompileProfile` and `StyleOverride` cache keys | No (in-process, non-deterministic across Rust versions) |
+//! | **DefaultHasher** | `verter_session` | `CompileProfile` cache keys | No (in-process, non-deterministic across Rust versions) |
 //!
 //! SHA-256 is used for scope IDs and CSS Modules to match `@vue/compiler-sfc` output.
 //! XXH3 is used for internal cache invalidation where speed matters more than compatibility.
@@ -17,11 +17,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use rustc_hash::FxHashMap;
-
-use crate::types::{
-    CompileProfile, ContentOverride, DescriptorMin, Hash16, SliceHashes, StyleOverrideEntry,
-};
+use crate::types::{CompileProfile, DescriptorMin, Hash16, SliceHashes};
 
 pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
     xxhash_rust::xxh3::xxh3_128(input).to_le_bytes()
@@ -72,44 +68,6 @@ pub(crate) fn semantic_hash(slices: &SliceHashes, descriptor: &DescriptorMin) ->
 pub(crate) fn compile_profile_hash(profile: &CompileProfile) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     profile.hash(&mut hasher);
-    hasher.finish()
-}
-
-pub(crate) fn style_override_hash(overrides: &FxHashMap<usize, StyleOverrideEntry>) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let mut entries: Vec<_> = overrides.iter().collect();
-    entries.sort_by_key(|(idx, _)| **idx);
-    for (idx, entry) in entries {
-        idx.hash(&mut hasher);
-        entry.code.as_ref().hash(&mut hasher);
-        if let Some(sm) = &entry.source_map {
-            sm.as_ref().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-/// Hash the content of template/script overrides for cache invalidation.
-pub(crate) fn content_override_hash(
-    template: Option<&ContentOverride>,
-    script: Option<&ContentOverride>,
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if let Some(t) = template {
-        "template".hash(&mut hasher);
-        t.code.as_ref().hash(&mut hasher);
-        if let Some(sm) = &t.source_map {
-            sm.as_ref().hash(&mut hasher);
-        }
-    }
-    if let Some(s) = script {
-        "script".hash(&mut hasher);
-        s.code.as_ref().hash(&mut hasher);
-        if let Some(sm) = &s.source_map {
-            sm.as_ref().hash(&mut hasher);
-        }
-    }
     hasher.finish()
 }
 
@@ -166,8 +124,6 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
     // Additional hash tests
     // ═══════════════════════════════════════════════════════════
-
-    use std::sync::Arc;
 
     /// @ai-generated - semantic_hash: None script ≠ Some(empty) script
     #[test]
@@ -311,47 +267,5 @@ mod tests {
         );
         // Determinism: the same override hashes identically.
         assert_eq!(h_a, compile_profile_hash(&override_a));
-    }
-
-    /// @ai-generated - style_override_hash: insertion order doesn't matter
-    #[test]
-    fn style_override_hash_order_independent() {
-        let mut map1 = FxHashMap::default();
-        map1.insert(
-            0,
-            StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".a{}"),
-                source_map: None,
-            },
-        );
-        map1.insert(
-            1,
-            StyleOverrideEntry {
-                index: 1,
-                code: Arc::from(".b{}"),
-                source_map: None,
-            },
-        );
-
-        let mut map2 = FxHashMap::default();
-        map2.insert(
-            1,
-            StyleOverrideEntry {
-                index: 1,
-                code: Arc::from(".b{}"),
-                source_map: None,
-            },
-        );
-        map2.insert(
-            0,
-            StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".a{}"),
-                source_map: None,
-            },
-        );
-
-        assert_eq!(style_override_hash(&map1), style_override_hash(&map2));
     }
 }

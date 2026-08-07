@@ -1,4 +1,4 @@
-﻿//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
+//! Quick fix: convert a runtime `defineEmits(...)` to type-based `defineEmits<{...}>()`.
 //!
 //! Handles: `define-emits-declaration`
 //!
@@ -104,6 +104,7 @@ mod tests {
         AnalyzedEmitField {
             name: name.to_string(),
             span: Span::new(0, 0),
+            call_signature_span: None,
             payload_type: None,
             description: None,
             tags: vec![],
@@ -114,6 +115,7 @@ mod tests {
 
     fn make_macro(emit_fields: Vec<AnalyzedEmitField>, span: Span) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: false,
@@ -152,6 +154,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1, "should produce one fix");
@@ -184,6 +187,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -215,6 +219,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not offer fix for empty emits");
@@ -239,6 +244,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not fix when spans do not match");
@@ -263,6 +269,7 @@ mod tests {
             template: None,
             script: Some(&script),
             styles: &[],
+            blocks: &[],
         };
         let actions = ConvertToTypedEmits.fixes_for_diagnostic(&diag, &ctx);
         assert!(actions.is_empty(), "should not handle unrelated rules");

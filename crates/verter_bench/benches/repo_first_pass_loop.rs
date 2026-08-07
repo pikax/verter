@@ -22,8 +22,8 @@
 //!   previous window's p50 (allowing 10% tolerance for measurement
 //!   noise). This is the "strictly decreasing trend" predicate.
 //! - The aggregate warm-hit rate (computed via
-//!   `RouteDb.routes`/`barrel_surfaces`/`effective_export_sets`/
-//!   `ImportedRootDb.roots` admission counters; the warm-hit count
+//!   `RouteDb.routes`/`barrel_surfaces`/`ImportedRootDb.roots`
+//!   admission counters; the warm-hit count
 //!   accumulated through `ValidatedFactCache` divided by total
 //!   `validations_attempted`) must reach ≥ 98 % by the final batch.
 //!

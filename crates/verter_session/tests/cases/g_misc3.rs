@@ -10,8 +10,6 @@ mod correctness;
 mod derived_raw_state_cached_fallthrough_matrix_member;
 #[path = "g_misc3/derived_raw_state_cached_meta_payload_matrix_import_ref.rs"]
 mod derived_raw_state_cached_meta_payload_matrix_import_ref;
-#[path = "g_misc3/derived_raw_state_cached_meta_payload_matrix_route_surface.rs"]
-mod derived_raw_state_cached_meta_payload_matrix_route_surface;
 #[path = "g_misc3/derived_raw_state_cached_resolved_meta_matrix_member_presence.rs"]
 mod derived_raw_state_cached_resolved_meta_matrix_member_presence;
 #[path = "g_misc3/external_corpus_drift.rs"]

@@ -1,34 +1,5 @@
 use super::*;
 
-/// Extract a TypeScript type annotation from a hover markdown string.
-///
-/// Handles formats like:
-/// - "```typescript\nconst x: number\n```"
-/// - "(property) x: string"
-/// - "let x: Ref<number>"
-pub(in crate::server) fn extract_type_from_hover(
-    contents: &str,
-    binding_name: &str,
-) -> Option<String> {
-    // Look for pattern: `name: type` or `name = value`
-    let patterns = [format!("{binding_name}: "), format!("{binding_name}:")];
-
-    for line in contents.lines() {
-        let trimmed = line.trim().trim_start_matches("```typescript").trim();
-        for pattern in &patterns {
-            if let Some(idx) = trimmed.find(pattern.as_str()) {
-                let after = &trimmed[idx + pattern.len()..];
-                let type_str = after.trim().trim_end_matches("```").trim();
-                if !type_str.is_empty() {
-                    return Some(type_str.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
 pub(in crate::server) fn identifier_prefix_before_offset(
     content: &str,
     offset: usize,

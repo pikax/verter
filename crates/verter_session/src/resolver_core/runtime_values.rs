@@ -233,6 +233,7 @@ mod tests {
             annotation: Some(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
                 LeafTypeFact::StringLiteral(lit.to_string()),
             ))),
+            reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
         }
     }
 
@@ -708,6 +709,7 @@ mod tests {
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
+                reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             },
             signatures: Vec::new(),
             object_shape: None,

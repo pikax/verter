@@ -8,6 +8,50 @@
 // This file must remain environment-agnostic (no Node.js or browser-only types).
 // =============================================================================
 
+declare const blockContentOpaqueBrand: unique symbol;
+
+/** Opaque string issued or validated by the native-content handoff boundary. */
+type BlockContentOpaque<Name extends string> = string & {
+  readonly [blockContentOpaqueBrand]: Name;
+};
+
+export type ArtifactBlockToken = BlockContentOpaque<"ArtifactBlockToken">;
+export type FrameworkArtifactToken = BlockContentOpaque<"FrameworkArtifactToken">;
+export type BlockContentOwnerRevisionToken = BlockContentOpaque<"BlockContentOwnerRevisionToken">;
+export type BlockContentBasisToken = BlockContentOpaque<"BlockContentBasisToken">;
+export type BlockContentCorrelationToken = BlockContentOpaque<"BlockContentCorrelationToken">;
+export type BlockContentSourceSpaceToken = BlockContentOpaque<"BlockContentSourceSpaceToken">;
+export type BlockContentArtifactToken = BlockContentOpaque<"BlockContentArtifactToken">;
+export type BlockContentHashToken = BlockContentOpaque<"BlockContentHashToken">;
+
+/**
+ * Exact captured-echo fields carried by each flattened JS wire entry.
+ *
+ * The canonical ID lives on the surrounding update/apply request. All other
+ * captured fields are copied unchanged between `HostPreprocessorRequest` and
+ * `HostBlockOverrideEntry`.
+ */
+export interface HostBlockContentCapturedEchoFields {
+  readonly correlationToken: BlockContentCorrelationToken;
+  readonly blockToken: ArtifactBlockToken;
+  readonly ownerRevision: BlockContentOwnerRevisionToken;
+  readonly artifactToken: FrameworkArtifactToken;
+  readonly expectedLanguage: string;
+  readonly priorBasisToken?: BlockContentBasisToken;
+  readonly basisToken: BlockContentBasisToken;
+}
+
+/** Logical pre-capture echo before its basis is minted. */
+export type HostBlockContentPreCaptureEcho = Readonly<
+  Omit<HostBlockContentCapturedEchoFields, "basisToken"> & { canonicalId: string }
+>;
+
+/** Logical, unflattened form of the host-captured request echo. */
+export interface HostBlockContentCapturedEcho {
+  readonly request: HostBlockContentPreCaptureEcho;
+  readonly basisToken: BlockContentBasisToken;
+}
+
 /**
  * Caller-requested compile cache mode. `"session"` (the default)
  * consults the fact-validated session cache; `"content"` the pure
@@ -22,7 +66,6 @@ export type DowngradeReason =
   | "HasWorkspaceAlias"
   | "HasModuleAugmentation"
   | "HasBlockOverride"
-  | "HasStyleOverride"
   | "HasIdeOnlyAnalysis"
   | "HasDevLastGood";
 
@@ -153,9 +196,12 @@ export interface HostDiagnosticsSnapshot {
 export interface HostExternalSourceRequest {
   ownerCanonicalId: string;
   blockKind: "script" | "template" | "style" | "custom";
-  index: number;
   specifier: string;
   resolvedCanonicalId: string;
+  blockToken: ArtifactBlockToken;
+  ownerRevision: BlockContentOwnerRevisionToken;
+  artifactToken: FrameworkArtifactToken;
+  carrierSourceSpaceToken: BlockContentSourceSpaceToken;
 }
 
 export interface HostScriptImportInfo {
@@ -179,26 +225,33 @@ export interface HostModuleReference {
   exprSpanEnd: number;
 }
 
-export interface HostPreprocessorRequest {
-  /** Block type: "template", "script", "style", or "custom". */
-  blockType: "template" | "script" | "style" | "custom";
-  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
-  index: number;
+export interface HostPreprocessorRequest extends HostBlockContentCapturedEchoFields {
+  contentClass: "template" | "script" | "style" | "custom";
   /** The `lang` attribute value (e.g., "pug", "coffee", "scss"). */
   lang: string;
   /** Raw content of the block that needs preprocessing. */
   content: string;
+  availability:
+    | "nativeAvailable"
+    | "processedContentRequired"
+    | "suppliedAvailable"
+    | "missing"
+    | "conflict"
+    | "stale";
+  sourceSpaceToken: BlockContentSourceSpaceToken;
+  contentHash: BlockContentHashToken;
+  customType?: string;
 }
 
-export interface HostBlockOverrideEntry {
-  /** Block type: "template", "script", "style", or "custom". */
-  blockType: "template" | "script" | "style" | "custom";
-  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
-  index: number;
+export interface HostBlockOverrideEntry extends HostBlockContentCapturedEchoFields {
+  sourceSpaceToken: BlockContentSourceSpaceToken;
   /** Preprocessed code. */
   code: string;
+  codeHash: BlockContentHashToken;
   /** Source map from the preprocessor, if available. */
   sourceMap?: string;
+  sourceMapHash?: BlockContentHashToken;
+  suppliedProvenance?: string;
 }
 
 export interface HostBlockOverrideRequest {
@@ -251,8 +304,6 @@ export interface HostResolvedId {
 export interface HostVirtualMeta {
   scopeId?: string;
   blockType?: string;
-  styleIndex?: number;
-  customIndex?: number;
 }
 
 export interface HostVirtualFileResponse {
@@ -282,18 +333,6 @@ export interface HostUpsertRequest {
   source: string;
   fileKind?: "vue" | "sfc" | "vue_sfc" | "svelte" | "non_sfc" | "text" | "file";
   aliases?: string[];
-}
-
-export interface HostStyleOverrideEntry {
-  index: number;
-  code: string;
-  sourceMap?: string;
-}
-
-export interface HostStyleOverrideRequest {
-  canonicalId: string;
-  compileProfile?: HostCompileProfile;
-  overrides: HostStyleOverrideEntry[];
 }
 
 export interface HostVirtualQuery {

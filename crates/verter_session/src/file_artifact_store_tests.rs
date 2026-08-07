@@ -91,11 +91,11 @@ fn empty_store_returns_none() {
 }
 
 #[test]
-fn parser_v2_artifact_is_rejected_by_v3_base_key() {
+fn parser_v3_artifact_is_rejected_by_v4_base_key() {
     use super::CURRENT_PARSER_VERSION;
 
-    const PREVIOUS_PARSER_VERSION: u32 = 2;
-    assert_eq!(CURRENT_PARSER_VERSION, PREVIOUS_PARSER_VERSION + 1);
+    const PREVIOUS_PARSER_VERSION: u32 = 3;
+    const _: () = assert!(CURRENT_PARSER_VERSION > PREVIOUS_PARSER_VERSION);
 
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base(Arc::from("/owner-exact.ts"), [3u8; 16]);
@@ -110,14 +110,14 @@ fn parser_v2_artifact_is_rejected_by_v3_base_key() {
         Arc::ptr_eq(
             &store
                 .get_artifacts(&stale)
-                .expect("the planted v2 row exists by exact stale key"),
+                .expect("the planted v3 row exists by exact stale key"),
             &stale_payload
         ),
         "test precondition: exact stale-key reads remain content-addressable"
     );
     assert!(
         store.get_any("/owner-exact.ts").is_none(),
-        "the base read rejects a v2 artifact under the owner-exact v3 parser schema"
+        "the base read continues to reject a v3 artifact under the current parser schema"
     );
 
     let current_payload = synth_artifacts(3);
@@ -125,7 +125,45 @@ fn parser_v2_artifact_is_rejected_by_v3_base_key() {
     assert!(Arc::ptr_eq(
         &store
             .get_any("/owner-exact.ts")
-            .expect("a v3 artifact roundtrips through the current base key"),
+            .expect("a current artifact roundtrips through the current base key"),
+        &current_payload.indexed
+    ));
+}
+
+// @ai-generated - Pins the authored-only import-target parser invalidation boundary.
+#[test]
+fn parser_v4_artifact_is_rejected_by_v5_base_key() {
+    use super::CURRENT_PARSER_VERSION;
+
+    const PREVIOUS_PARSER_VERSION: u32 = 4;
+    assert_eq!(CURRENT_PARSER_VERSION, PREVIOUS_PARSER_VERSION + 1);
+
+    let store = FileArtifactStore::new();
+    let current = FileArtifactKey::base(Arc::from("/authored-import.ts"), [4u8; 16]);
+    let stale = FileArtifactKey {
+        parser_version: PREVIOUS_PARSER_VERSION,
+        ..current.clone()
+    };
+    let stale_payload = synth_artifacts(4);
+    store.insert_artifacts(stale.clone(), Arc::clone(&stale_payload));
+
+    assert!(Arc::ptr_eq(
+        &store
+            .get_artifacts(&stale)
+            .expect("the planted v4 row exists by exact stale key"),
+        &stale_payload
+    ));
+    assert!(
+        store.get_any("/authored-import.ts").is_none(),
+        "the authored-import-only v5 base read rejects a v4 artifact"
+    );
+
+    let current_payload = synth_artifacts(4);
+    store.insert_artifacts(current, Arc::clone(&current_payload));
+    assert!(Arc::ptr_eq(
+        &store
+            .get_any("/authored-import.ts")
+            .expect("a v5 artifact roundtrips through the current base key"),
         &current_payload.indexed
     ));
 }

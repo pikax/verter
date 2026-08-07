@@ -3591,7 +3591,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let normalized = match self.graph().node_data(normalized).as_deref() {
             Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
                 let transit = ProjectionReductionContext::structural_transit();
-                let (resolved, _) =
+                let (resolved, _, _) =
                     self.resolve_carrier_subject_node_capturing_suppress(normalized, transit);
                 resolved
             }

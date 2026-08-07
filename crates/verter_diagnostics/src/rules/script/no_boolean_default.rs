@@ -60,6 +60,7 @@ mod tests {
     fn make_prop(name: &str, is_boolean: bool, has_default: bool) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
             type_annotation: if is_boolean {
                 Some("boolean".to_string())
             } else {

@@ -20,10 +20,11 @@ use super::template_ast::{
     script_body_grammar_for_source, CloseTagViolation, CloseTagViolationKind,
     OptionsCustomElementProbe, OptionsCustomElementTextTag, ParsedSvelte, ScriptBodyGrammar,
     ScriptBodyProbe, StyleBodyProbe, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
-    SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective,
-    SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic,
-    SvelteParseRejectFact, SvelteParseRejectKind, SvelteScript, SvelteSpecialKind,
-    SvelteStrictParseError, SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
+    SvelteAwaitInline, SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind,
+    SvelteDirective, SvelteDirectiveKind, SvelteElement, SvelteElementKind,
+    SvelteMixedAttributePart, SvelteNode, SvelteParseDiagnostic, SvelteParseRejectFact,
+    SvelteParseRejectKind, SvelteScript, SvelteSpecialKind, SvelteStrictParseError,
+    SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
 };
 use super::tokenizer_scan::{
     classify_element, declaration_tag_kind, duplicate_attribute_key, find_matching_brace_in,
@@ -938,6 +939,7 @@ impl<'a> SvelteParser<'a> {
         let (attributes, open_end, self_closing) =
             self.parse_open_tag_attributes_or_recover(open_start, self.pos + 6)?;
         let tag_open = Span::new(open_start as u32, open_end as u32);
+        let lang = attr_text_value(&attributes, self, "lang");
         if self_closing {
             // A SELF-CLOSING `<style />` is not a valid raw-text element — official expects
             // a `>` (then the raw CSS body), so a bare `/>` is `expected_token`. Record the
@@ -953,6 +955,7 @@ impl<'a> SvelteParser<'a> {
                 content: None,
                 tag_close: None,
                 attributes,
+                lang,
             });
         }
         self.pos = open_end;
@@ -967,6 +970,7 @@ impl<'a> SvelteParser<'a> {
                     content: Some(Span::new(content_start as u32, content_end as u32)),
                     tag_close: Some(Span::new(content_end as u32, after as u32)),
                     attributes,
+                    lang,
                 })
             }
             None => {
@@ -982,6 +986,7 @@ impl<'a> SvelteParser<'a> {
                     content: Some(Span::new(content_start as u32, self.len() as u32)),
                     tag_close: None,
                     attributes,
+                    lang,
                 })
             }
         }
@@ -1718,6 +1723,7 @@ impl<'a> SvelteParser<'a> {
             SvelteAttribute {
                 kind: SvelteAttributeKind::Spread(inner),
                 span,
+                mixed_parts: Vec::new(),
             }
         } else if let Some(expr_span) = attach_attribute_expr_span(self.src, inner) {
             // `{@attach expr}` in ATTRIBUTE position — the official 5.29 `AttachTag`
@@ -1728,6 +1734,7 @@ impl<'a> SvelteParser<'a> {
             SvelteAttribute {
                 kind: SvelteAttributeKind::Attach { expr_span },
                 span,
+                mixed_parts: Vec::new(),
             }
         } else if body.starts_with('@') || body.starts_with('#') || body.starts_with('/') {
             // A NON-attach tag sigil used in attribute position — record as a plain
@@ -1740,6 +1747,7 @@ impl<'a> SvelteParser<'a> {
                     value: Some(SvelteAttributeValue::Expression(inner)),
                 },
                 span,
+                mixed_parts: Vec::new(),
             }
         } else {
             // Attribute-value shorthand `{name}` → name == value expression. The
@@ -1755,6 +1763,7 @@ impl<'a> SvelteParser<'a> {
                     value: Some(SvelteAttributeValue::Expression(inner)),
                 },
                 span,
+                mixed_parts: Vec::new(),
             }
         };
         (attr, (end + 1).min(self.len()))
@@ -1787,6 +1796,7 @@ impl<'a> SvelteParser<'a> {
 
         // Optional value.
         let mut value: Option<SvelteAttributeValue> = None;
+        let mut mixed_parts = Vec::new();
         let mut after = p;
         // skip ws before '='
         let mut q = p;
@@ -1816,8 +1826,9 @@ impl<'a> SvelteParser<'a> {
             } else if self.at(q) == b'>' {
                 self.record_empty_attribute_value(Span::new(from as u32, (eq_pos + 1) as u32));
             }
-            let (val, next) = self.parse_attribute_value(q);
+            let (val, next, parts) = self.parse_attribute_value(q);
             value = val;
+            mixed_parts = parts;
             after = next;
         }
 
@@ -1829,17 +1840,39 @@ impl<'a> SvelteParser<'a> {
             let mut parts = rest.split('|');
             let local = parts.next().unwrap_or("").to_string();
             let modifiers: Vec<String> = parts.map(|s| s.to_string()).collect();
+            let mut modifier_start = from + colon + 1 + local.len();
+            let modifier_spans = modifiers
+                .iter()
+                .map(|modifier| {
+                    modifier_start += 1;
+                    let span = Span::new(
+                        modifier_start as u32,
+                        (modifier_start + modifier.len()) as u32,
+                    );
+                    modifier_start += modifier.len();
+                    span
+                })
+                .collect();
             let dkind = SvelteDirectiveKind::from_prefix(prefix);
             // `svelte:` is an element namespace, never a directive — but element
             // names are handled before this point, so a `svelte:` here is an odd
             // attribute; classify as Unknown directive (parse-without-crash).
             let kind = SvelteAttributeKind::Directive(SvelteDirective {
+                prefix: prefix.to_string(),
                 kind: dkind,
                 local,
                 modifiers,
+                modifier_spans,
                 value,
             });
-            return (SvelteAttribute { kind, span }, after);
+            return (
+                SvelteAttribute {
+                    kind,
+                    span,
+                    mixed_parts,
+                },
+                after,
+            );
         }
 
         (
@@ -1850,6 +1883,7 @@ impl<'a> SvelteParser<'a> {
                     value,
                 },
                 span,
+                mixed_parts,
             },
             after,
         )
@@ -1857,18 +1891,46 @@ impl<'a> SvelteParser<'a> {
 
     /// Parse an attribute value at `from` (a quoted string, a `{expr}`, or a
     /// mixed run). Returns the value and the position after it.
-    fn parse_attribute_value(&mut self, from: usize) -> (Option<SvelteAttributeValue>, usize) {
+    fn parse_attribute_value(
+        &mut self,
+        from: usize,
+    ) -> (
+        Option<SvelteAttributeValue>,
+        usize,
+        Vec<SvelteMixedAttributePart>,
+    ) {
         let b = self.at(from);
         if b == b'"' || b == b'\'' {
             let quote = b;
             let body_start = from + 1;
             let mut p = body_start;
-            let mut saw_brace = false;
+            let mut mixed_parts = Vec::new();
+            let mut text_start = body_start;
             while p < self.len() && self.at(p) != quote {
                 if self.at(p) == b'{' {
-                    saw_brace = true;
+                    if text_start < p {
+                        mixed_parts.push(SvelteMixedAttributePart::Text(Span::new(
+                            text_start as u32,
+                            p as u32,
+                        )));
+                    }
+                    let expression_start = p + 1;
+                    let expression_end = self.find_matching_brace(expression_start);
+                    mixed_parts.push(SvelteMixedAttributePart::Expression(Span::new(
+                        expression_start as u32,
+                        expression_end as u32,
+                    )));
+                    p = (expression_end + 1).min(self.len());
+                    text_start = p;
+                    continue;
                 }
                 p += 1;
+            }
+            if text_start < p {
+                mixed_parts.push(SvelteMixedAttributePart::Text(Span::new(
+                    text_start as u32,
+                    p as u32,
+                )));
             }
             if p >= self.len() {
                 // Reached EOF without the closing quote (`id="oops`) — official
@@ -1877,12 +1939,15 @@ impl<'a> SvelteParser<'a> {
             }
             let body = Span::new(body_start as u32, p as u32);
             let after = (p + 1).min(self.len());
-            let value = if saw_brace {
+            let value = if mixed_parts
+                .iter()
+                .any(|part| matches!(part, SvelteMixedAttributePart::Expression(_)))
+            {
                 SvelteAttributeValue::Mixed(body)
             } else {
                 SvelteAttributeValue::Text(body)
             };
-            (Some(value), after)
+            (Some(value), after, mixed_parts)
         } else if b == b'{' {
             let inner_start = from + 1;
             let end = self.find_matching_brace(inner_start);
@@ -1897,6 +1962,7 @@ impl<'a> SvelteParser<'a> {
             (
                 Some(SvelteAttributeValue::Expression(inner)),
                 (end + 1).min(self.len()),
+                Vec::new(),
             )
         } else {
             // Unquoted value: every byte that is not whitespace / `>` / quote belongs to
@@ -1921,6 +1987,7 @@ impl<'a> SvelteParser<'a> {
             (
                 Some(SvelteAttributeValue::Text(Span::new(from as u32, p as u32))),
                 p,
+                Vec::new(),
             )
         }
     }
@@ -1973,13 +2040,18 @@ impl<'a> SvelteParser<'a> {
                         3
                     };
                     let lead_ws = body.len() - body.trim_start().len();
-                    let decl_inner_start = inner.start as usize + lead_ws + keyword_len;
+                    let keyword_start = inner.start as usize + lead_ws;
+                    let decl_inner_start = keyword_start + keyword_len;
                     vec![SvelteNode::Tag(SvelteTag {
                         kind,
                         span: Span::new(start as u32, self.pos as u32),
                         inner: Span::new(
                             decl_inner_start.min(inner.end as usize) as u32,
                             inner.end,
+                        ),
+                        keyword: Span::new(
+                            keyword_start.min(inner.end as usize) as u32,
+                            decl_inner_start.min(inner.end as usize) as u32,
                         ),
                     })]
                 } else {
@@ -2019,16 +2091,23 @@ impl<'a> SvelteParser<'a> {
                 );
                 // Best-effort: scan children until a matching `{/keyword}`.
                 let kw = keyword.to_string();
+                let keyword_span = Span::new(
+                    head_inner_start as u32,
+                    (head_inner_start + keyword_end) as u32,
+                );
                 let head_span = Span::new(start as u32, self.pos as u32);
                 let children = self.parse_block_children(&[]);
-                self.consume_block_close(&kw);
+                let close_tag = self.consume_block_close(&kw);
                 vec![SvelteNode::Block(SvelteBlock {
-                    kind: SvelteBlockKind::Key,
+                    kind: SvelteBlockKind::Unknown {
+                        keyword: keyword_span,
+                    },
                     span: Span::new(start as u32, self.pos as u32),
                     head_span,
                     head_expr: None,
                     children,
                     clauses: Vec::new(),
+                    close_tag,
                 })]
             }
         }
@@ -2061,7 +2140,7 @@ impl<'a> SvelteParser<'a> {
                 _ => break,
             }
         }
-        self.consume_block_close("if");
+        let close_tag = self.consume_block_close("if");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::If,
             span: Span::new(start as u32, self.pos as u32),
@@ -2069,6 +2148,7 @@ impl<'a> SvelteParser<'a> {
             head_expr,
             children,
             clauses,
+            close_tag,
         })]
     }
 
@@ -2093,7 +2173,7 @@ impl<'a> SvelteParser<'a> {
                 children: body,
             });
         }
-        self.consume_block_close("each");
+        let close_tag = self.consume_block_close("each");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Each { item, index, key },
             span: Span::new(start as u32, self.pos as u32),
@@ -2101,6 +2181,7 @@ impl<'a> SvelteParser<'a> {
             head_expr: list_expr,
             children,
             clauses,
+            close_tag,
         })]
     }
 
@@ -2113,11 +2194,17 @@ impl<'a> SvelteParser<'a> {
         let head_span = Span::new(start as u32, self.pos as u32);
         // `{#await expr}` or `{#await expr then v}` or `{#await expr catch e}`.
         let trimmed = head_rest.trim();
-        let (promise_expr, then_inline, catch_inline) =
+        let (promise_expr, inline_branch) =
             super::block_head::parse_await_head(head_rest_start, head_rest);
         let _ = trimmed;
-        let mut then_binding = then_inline;
-        let mut catch_binding = catch_inline;
+        let mut then_binding = match inline_branch {
+            SvelteAwaitInline::Then { binding, .. } => binding,
+            _ => None,
+        };
+        let mut catch_binding = match inline_branch {
+            SvelteAwaitInline::Catch { binding, .. } => binding,
+            _ => None,
+        };
         let children = self.parse_block_children(&["then", "catch", "/await"]);
         let mut clauses = Vec::new();
         loop {
@@ -2145,17 +2232,19 @@ impl<'a> SvelteParser<'a> {
                 _ => break,
             }
         }
-        self.consume_block_close("await");
+        let close_tag = self.consume_block_close("await");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Await {
                 then_binding,
                 catch_binding,
+                inline_branch,
             },
             span: Span::new(start as u32, self.pos as u32),
             head_span,
             head_expr: promise_expr,
             children,
             clauses,
+            close_tag,
         })]
     }
 
@@ -2168,7 +2257,7 @@ impl<'a> SvelteParser<'a> {
         let head_span = Span::new(start as u32, self.pos as u32);
         let head_expr = nonempty_span(head_rest_start, head_rest);
         let children = self.parse_block_children(&["/key"]);
-        self.consume_block_close("key");
+        let close_tag = self.consume_block_close("key");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Key,
             span: Span::new(start as u32, self.pos as u32),
@@ -2176,6 +2265,7 @@ impl<'a> SvelteParser<'a> {
             head_expr,
             children,
             clauses: Vec::new(),
+            close_tag,
         })]
     }
 
@@ -2190,7 +2280,7 @@ impl<'a> SvelteParser<'a> {
         let (name_span, name_text, params) =
             super::block_head::parse_snippet_head(head_rest_start, head_rest);
         let children = self.parse_block_children(&["/snippet"]);
-        self.consume_block_close("snippet");
+        let close_tag = self.consume_block_close("snippet");
         vec![SvelteNode::Block(SvelteBlock {
             kind: SvelteBlockKind::Snippet {
                 name: name_span,
@@ -2202,6 +2292,7 @@ impl<'a> SvelteParser<'a> {
             head_expr: None,
             children,
             clauses: Vec::new(),
+            close_tag,
         })]
     }
 
@@ -2336,14 +2427,18 @@ impl<'a> SvelteParser<'a> {
     }
 
     /// Consume the matching `{/keyword}` close, warning if it is missing.
-    fn consume_block_close(&mut self, keyword: &str) {
+    /// Returns the consumed close-tag span (`{/keyword}` inclusive), or `None`
+    /// when the close marker is missing so callers record the recovery fact
+    /// instead of fabricating a closed block.
+    fn consume_block_close(&mut self, keyword: &str) -> Option<Span> {
         if self.cur() == b'{' && self.at(self.pos + 1) == b'/' {
+            let close_start = self.pos;
             let inner_start = self.pos + 2;
             let head_end = self.find_matching_brace(inner_start);
             let name = self.slice(Span::new(inner_start as u32, head_end as u32));
             if name.trim() == keyword {
                 self.pos = (head_end + 1).min(self.len());
-                return;
+                return Some(Span::new(close_start as u32, self.pos as u32));
             }
         }
         self.diag(
@@ -2354,6 +2449,7 @@ impl<'a> SvelteParser<'a> {
                 self.pos.min(self.len()) as u32,
             ),
         );
+        None
     }
 
     /// Parse an `{@...}` tag.
@@ -2394,6 +2490,10 @@ impl<'a> SvelteParser<'a> {
             kind,
             span: Span::new(start as u32, self.pos as u32),
             inner: Span::new(expr_start.min(expr_end) as u32, expr_end as u32),
+            keyword: Span::new(
+                inner_start as u32,
+                (inner_start + 1 + kw_end).min(end) as u32,
+            ),
         })
     }
 

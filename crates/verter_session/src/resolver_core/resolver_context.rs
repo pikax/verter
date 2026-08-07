@@ -378,9 +378,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// instead so the view is built ONCE at the request boundary and
     /// threaded down.
     ///
-    /// `impl ResolverContext for VerterHost::resolver_store_view` rebuilds
-    /// a full workspace snapshot on every call — the cost the per-request hoist
-    /// hoists to per-request scope.
+    /// The host implementation obtains the manager-owned O(1) root capture;
+    /// request contexts retain and reuse that fixed view.
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView;
 
@@ -392,20 +391,14 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// [`crate::resolver_core::HostResolverContext`] (or, for
     /// session-bearing requests, a
     /// [`crate::resolver_core::SessionResolverContext`]).
-    /// Resolver-tier consumers consult the borrow on every cache
-    /// validation; the per-call full-workspace snapshot the pre-6.c
-    /// rail performed is replaced by one snapshot per request.
+    /// Resolver-tier consumers consult the borrow on every cache validation;
+    /// no consumer rebuilds or enumerates the host.
     ///
     /// The bare `impl ResolverContext for VerterHost::store_view` panics —
     /// a bare `&VerterHost` owns no view to borrow. Production code MUST
     /// construct a `HostResolverContext::new(host, &view)` at the request
     /// entry point. Tests / mocks that want the convenience of a bare host
     /// MUST build a view first and wrap it.
-    ///
-    /// `#[allow(dead_code)]` is intentional during the 6.c substrate
-    /// window — the borrow-returning method has no production callers
-    /// yet. The hot-path conversion commit (C) wires consumers; removing
-    /// the allow at that point is a stub-prevention follow-up.
     ///
     /// Returns `&dyn StoreView` (not the concrete [`HostStoreView`]) so
     /// the trait stays dyn-compatible AND so a request-bound implementer
@@ -654,15 +647,15 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// The overlay is the per-request carrier (constructed once at the
     /// request boundary, shared across every context the request builds,
     /// dropped with the request — R18-compliant: passed by explicit
-    /// argument, never via a thread-local). The view-aware prepared-decl
-    /// producer (`prepared_decl_bundle_with_context`) consults it for the
-    /// request-scoped session-overlay bundle memo — the R17-compliant
-    /// home for a value that must never enter host/shared caches.
+    /// argument, never via a thread-local). The prepared-decl producers
+    /// consult it for the request-world bundle memo
+    /// (`CanonicalCompletionOverlay::bundle_memo`) — the R17-compliant
+    /// home for values that must never enter host/shared caches.
     ///
-    /// The default impl returns `None` (bare-host contexts have no
-    /// session overlays, so the overlay-bearing branch that reads the
-    /// memo is unreachable for them); the session-bound context overrides
-    /// it to expose its request overlay.
+    /// The default impl returns `None`: a context with no request scope
+    /// (the bare host) owns no request world, so it can reuse nothing
+    /// beyond what the shared cache already holds. Both request-bound
+    /// contexts override it to expose their request overlay.
     fn request_completion_overlay(
         &self,
     ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
@@ -713,6 +706,26 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// return their inner `&crate::VerterHost`. There is no other
     /// implementer; the seal guarantees the trait contract.
     fn host_for_fact_tracer_install(&self) -> &crate::VerterHost;
+
+    /// This context's contribution to a fact tracer's compaction basis.
+    ///
+    /// Deliberately NOT `self.store_view().aggregate_basis_seed()` at the
+    /// call site. [`Self::store_view`] is a BORROW contract that the bare
+    /// `impl ResolverContext for VerterHost` cannot satisfy — it owns no
+    /// view, so its implementation is an architectural panic in
+    /// production. The tracer chokepoint runs on EVERY cold compute,
+    /// including the ones still reached through a bare host, so reaching
+    /// `store_view()` from there would turn that guard into a live crash.
+    ///
+    /// So the projection is a context-level question with a fail-safe
+    /// default: a context that is not request-bound vouches for nothing,
+    /// its scopes compact nothing and detect no movement. The two
+    /// request-bound implementers override it by forwarding the view they
+    /// already hold — a borrow, never a `StoreViewManager` read.
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        verter_workspace::AggregateBasisSeed::Unvouched
+    }
 }
 
 // Sealed marker — `VerterHost` is the base implementer,
@@ -804,7 +817,9 @@ impl ResolverContext for crate::VerterHost {
         #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, canonical_id)
+            // A bare host is NOT request-bound: it owns no request
+            // world, so it supplies no bundle memo.
+            crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
         }
         #[cfg(not(any(test, feature = "test-support")))]
         {
@@ -832,6 +847,7 @@ impl ResolverContext for crate::VerterHost {
             crate::VerterHost::prepared_type_decl_in_with_store_view(
                 self,
                 &view,
+                None,
                 canonical_id,
                 owner,
                 symbol_name,
@@ -860,6 +876,7 @@ impl ResolverContext for crate::VerterHost {
             crate::VerterHost::prepared_value_decl_in_with_store_view(
                 self,
                 &view,
+                None,
                 canonical_id,
                 owner,
                 symbol_name,
@@ -1320,7 +1337,7 @@ impl NonCacheableReadReason {
     /// declining retention in one cache family, so every current read class
     /// propagates through all enclosing cold-compute scopes.
     #[inline]
-    fn propagation(self) -> super::fact_read_set::NonCacheablePropagation {
+    pub(crate) fn propagation(self) -> super::fact_read_set::NonCacheablePropagation {
         match self {
             Self::FencedServe
             | Self::LeaseMiss
@@ -1331,6 +1348,42 @@ impl NonCacheableReadReason {
             | Self::OutputMaterializationLoss => {
                 super::fact_read_set::NonCacheablePropagation::Transitive
             }
+        }
+    }
+
+    /// Whether a COMPLETE result whose compute consumed this read stays
+    /// deterministic under the request's immutable view — the axis the
+    /// [`ReuseClass`](super::reuse::ReuseClass) splits on.
+    ///
+    /// Exhaustive by design: a new reason cannot be added without
+    /// deciding whether a value built on it may be reused inside the
+    /// request. Defaulting a new arm either way is exactly the silent
+    /// mistake this match exists to prevent — the permissive default
+    /// freezes a recoverable miss, the conservative one re-runs a
+    /// deterministic compute on every touch.
+    #[inline]
+    pub(crate) fn request_reuse(self) -> super::reuse::RequestReuse {
+        match self {
+            // The payload is a definite answer for this view: a
+            // superseded artifact's content, a route whose basis cannot
+            // be fact-rooted, a contributor whose source-env identity is
+            // unobservable. Re-running inside the same request world
+            // reproduces it, so only PUBLICATION is refused.
+            Self::FencedServe | Self::UnrootableRoute | Self::UnobservableSource => {
+                super::reuse::RequestReuse::Deterministic
+            }
+            // The payload is DEGRADED and a later demand may improve it:
+            // a broken decl-body lease recovers under a live lease, a
+            // safety-budget stop and a structural preparation failure
+            // both leave a slot vacant rather than answering it.
+            Self::LeaseMiss | Self::InferenceBudgetExceeded | Self::PreparationFailure => {
+                super::reuse::RequestReuse::Transient
+            }
+            // A materialization loss is a definite answer under the
+            // request's immutable view: the same fold loses the same
+            // degradation sidecar on every re-run, so only warm
+            // PUBLICATION is refused, never intra-request reuse.
+            Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
         }
     }
 }
@@ -1344,6 +1397,11 @@ impl NonCacheableReadReason {
 /// in scope).
 #[inline]
 pub(crate) fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
+    // The typed half: every active `RefusalObservationScope` records the
+    // REASON, so a producer can classify its result's reuse rail instead
+    // of inferring it from a boolean that a fenced serve and a broken
+    // lease set identically.
+    super::reuse::record_refusal(reason);
     note_non_cacheable_propagation(reason.propagation());
 }
 
@@ -1422,11 +1480,15 @@ impl crate::VerterHost {
     /// [`ResolverContext::observe_borrowed_signature`] on the parent
     /// thread to merge the worker's facts.
     #[must_use]
-    pub fn with_fact_tracer<F, R>(&self, f: F) -> (R, crate::resolver_core::FactReadSet)
+    pub fn with_fact_tracer<F, R>(
+        &self,
+        seed: verter_workspace::AggregateBasisSeed,
+        f: F,
+    ) -> (R, crate::resolver_core::FactReadSet)
     where
         F: FnOnce() -> R,
     {
-        self.with_fact_tracer_cell(|_cell| f())
+        self.with_fact_tracer_cell(seed, |_cell| f())
     }
 
     /// [`Self::with_fact_tracer`], handing the traced closure a borrow of
@@ -1438,12 +1500,32 @@ impl crate::VerterHost {
     /// `CacheabilityProbe` on, so a shared-cache admission that happens
     /// INSIDE the traced compute can consult the verdict without popping the
     /// tracer. The borrow cannot escape: it lives only for the closure call.
+    ///
+    /// **The one place a tracer cell is created, and therefore the one
+    /// place a compaction basis is installed.** `with_fact_tracer`
+    /// delegates here, so every scope — the two cacheability/signature
+    /// helpers and every raw consumer that bypasses them — gets its basis
+    /// from this single seam rather than from whichever helper the
+    /// producer happened to open.
+    ///
+    /// `seed` is the already-bound view's captured contribution; the live
+    /// half comes from [`Self::live_aggregate_counters`]. The basis is
+    /// installed BEFORE `f` runs, so the scope's first observation is
+    /// already covered by movement detection.
     #[must_use]
-    pub fn with_fact_tracer_cell<F, R>(&self, f: F) -> (R, crate::resolver_core::FactReadSet)
+    pub fn with_fact_tracer_cell<F, R>(
+        &self,
+        seed: verter_workspace::AggregateBasisSeed,
+        f: F,
+    ) -> (R, crate::resolver_core::FactReadSet)
     where
         F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
     {
         let cell = crate::resolver_core::FactReadSetCell::new();
+        cell.set_aggregate_basis(verter_workspace::AggregateGenerations::from_seed(
+            &seed,
+            &self.live_aggregate_counters(),
+        ));
         // Push onto the tracer stack. The RAII guard pops on drop
         // (including on panic unwind) so no dangling pointer remains.
         fact_tracer_tls::install(&cell);

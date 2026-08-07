@@ -92,6 +92,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let provider = RemoveDirective;
         let actions = provider.fixes_for_diagnostic(&diag, &ctx);
@@ -130,6 +131,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = RemoveDirective.fixes_for_diagnostic(&diag, &ctx);
         assert!(

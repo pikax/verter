@@ -15,16 +15,19 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use verter_compiler::code_transform::CodeTransform;
-use verter_compiler::css::process_style;
-use verter_compiler::css::types::ProcessStyleOptions;
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_compiler::parser::types::StyleLang;
 use verter_compiler::parser::Syntax as NewSyntax;
 use verter_compiler::script::prepared::PreparedScript;
 use verter_compiler::script::{generate_script, ScriptCodeGenOptions};
-use verter_compiler::style::generate_style;
+use verter_compiler::style_planner::{
+    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
+    StyleRewriteOutcome,
+};
 use verter_compiler::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
 use verter_compiler::template::oxc::parse_template_expressions;
 use verter_compiler::tokenizer::byte::tokenize;
+use verter_css_syntax::CssDialect;
 
 fn load_fixture(name: &str) -> String {
     let path = format!(
@@ -57,44 +60,40 @@ fn compile_full(source: &str) -> String {
     // Step 2: style codegen — process each <style> block
     let mut style_outputs = Vec::new();
     for style_node in syntax.style_nodes() {
-        let style_result = generate_style(style_node, source, &alloc, scope_id);
-
         if let Some(content) = &style_node.content {
             let css_source = &source[content.start as usize..content.end as usize];
-            if !style_result.out.overwrites.is_empty() {
-                let mut style_ct = CodeTransform::new(source, &alloc);
-                style_result.out.apply_to(&mut style_ct);
-                let full = style_ct.build_string();
-                let css_str = &full[content.start as usize..content.end as usize];
-                let processed = process_style(
-                    css_str,
-                    &ProcessStyleOptions {
-                        scope_id,
-                        scoped: style_node.scoped,
-                        is_module: style_node.module,
-                        module_name: None,
-                        filename: None,
-                        sourcemap: false,
-                    },
-                );
-                if let Ok(result) = processed {
-                    style_outputs.push(result.code.into_owned());
+            let dialect = match style_node.lang {
+                None | Some(StyleLang::Css) => CssDialect::Css,
+                Some(StyleLang::Scss) => CssDialect::Scss,
+                Some(StyleLang::Sass) => CssDialect::Sass,
+                Some(StyleLang::Less) => CssDialect::Less,
+                Some(StyleLang::Stylus) => CssDialect::Stylus,
+                Some(StyleLang::Unknown) => continue,
+            };
+            if let Ok(stage_one) = transform_vue_v_bind(
+                AuthoredStyleInput::new(css_source, dialect, "bench.vue", "bench", "bench"),
+                scope_id,
+            ) {
+                let mut code = match stage_one {
+                    StyleRewriteOutcome::Unchanged { .. } => css_source.to_string(),
+                    StyleRewriteOutcome::Rewritten { code, .. } => code,
+                };
+                if style_node.scoped && dialect == CssDialect::Css {
+                    let input = PlainCssInput::try_new(
+                        &code,
+                        CssDialect::Css,
+                        "bench.vue",
+                        "bench",
+                        "bench",
+                    )
+                    .expect("CSS selected");
+                    if let Ok(StyleRewriteOutcome::Rewritten { code: scoped, .. }) =
+                        transform_vue_scoped_css(input, scope_id)
+                    {
+                        code = scoped;
+                    }
                 }
-            } else {
-                let processed = process_style(
-                    css_source,
-                    &ProcessStyleOptions {
-                        scope_id,
-                        scoped: style_node.scoped,
-                        is_module: style_node.module,
-                        module_name: None,
-                        filename: None,
-                        sourcemap: false,
-                    },
-                );
-                if let Ok(result) = processed {
-                    style_outputs.push(result.code.into_owned());
-                }
+                style_outputs.push(code);
             }
         }
     }

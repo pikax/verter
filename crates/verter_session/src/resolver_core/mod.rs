@@ -9,6 +9,7 @@ use crate::semantic_query::ResultCompleteness;
 
 pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;
+pub(crate) mod bracketed_generation;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
 pub mod component_meta_registry;
@@ -39,6 +40,7 @@ pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 pub(crate) mod request_store_view;
 pub(crate) mod resolver_context;
+pub(crate) mod reuse;
 pub mod route_db;
 pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
@@ -62,8 +64,7 @@ pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use import_binding::ImportBindingKind;
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{
-    BarrelRouteSurface, BarrelSurfaceKey, EffectiveExportEntry, EffectiveExportSetEntry,
-    EffectiveExportSetKey, EffectiveExportSetScope, RouteDb, RouteNameKey, RouteResult,
+    BarrelRouteSurface, BarrelSurfaceKey, RouteDb, RouteNameKey, RouteResult,
     ROUTE_DB_RESOLVER_VERSION,
 };
 
@@ -296,30 +297,54 @@ pub trait StoreView {
         })
     }
 
-    /// Whether the view tracks a specific file (has its hash in the snapshot).
+    /// Exact O(1) identity of the strict self-root world represented by this
+    /// view, or `None` when the view cannot vouch for one.
+    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        None
+    }
+
+    /// Whether `canonical_id` has a versioned authority that can safely be
+    /// represented by a strict-self-root world witness.
+    fn strict_self_root_is_witnessable(&self, _canonical_id: &str) -> bool {
+        false
+    }
+
+    /// Strictly validate every observed root in one stable authority world and
+    /// mint its terminal witness. The before/after identity comparison closes
+    /// transitions that straddle the validation loop.
+    fn mint_strict_self_root_world(
+        &self,
+        roots: &[(&str, ResolverHash16)],
+    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        let before = self.strict_self_root_world_identity()?;
+        if !roots.iter().all(|(canonical, hash)| {
+            self.strict_self_root_is_witnessable(canonical)
+                && self.validates_self_root_whole_hash(canonical, hash)
+        }) {
+            return None;
+        }
+        (self.strict_self_root_world_identity() == Some(before)).then_some(before)
+    }
+
+    /// Whether the view tracks a specific file through its captured roots.
     ///
-    /// Used by route-derived cache materialization paths to decide whether to
-    /// include `DerivedFactHash::ImportRoute` in validation facts. Untracked
-    /// dependency files never have `set_import_dependencies` called on them,
-    /// so their route facts are safe to omit — eliminating false cache misses.
+    /// Used by self-root attribution and route-derived cache paths to
+    /// distinguish an absent canonical from a hash mismatch.
     fn tracks_file(&self, _canonical_id: &str) -> bool {
         false
     }
 
-    /// Direct read of the view's `DerivedFactHash` snapshot for a
+    /// Direct read of a view's parse-domain `DerivedFactHash` for a
     /// `(canonical, kind)` pair.
     ///
-    /// Returns `Some(hash)` when the view's per-domain producer has
-    /// snapshotted a derived hash for the pair (e.g.
-    /// `HostStoreView::derived_hashes[(canonical, ImportRoute)]`),
-    /// `None` otherwise. Used by per-rejection attribution helpers
+    /// Returns `Some(hash)` when the captured roots answer the pair (currently
+    /// `Route`), `None` otherwise. Used by per-rejection attribution helpers
     /// (e.g. `attribute_prepared_decl_bundle_rejection`) to
     /// distinguish "entry absent" from "entry present, hash differs"
     /// without re-probing the validator with synthetic hashes.
     ///
     /// Default returns `None` so test-only / permissive views inherit
-    /// "no derived snapshot" semantics; production `HostStoreView`
-    /// overrides to return the actual snapshot value.
+    /// "no derived fact" semantics; production `HostStoreView` overrides it.
     fn derived_hash_for(
         &self,
         _canonical_id: &str,
@@ -328,15 +353,101 @@ pub trait StoreView {
         None
     }
 
-    /// Validate every fact in `sig` under this view; return `true` iff
-    /// all entries validate. Empty signatures trivially return `true`.
+    /// This view's contribution to a fact tracer's compaction basis,
+    /// captured ONCE at tracer installation.
     ///
-    /// Default impl calls [`Self::validates`] on each entry.
-    /// Implementers that can short-circuit (e.g. generation-monotone
-    /// views) may override for performance.
+    /// The projection exists so a tracer scope never READS a store view:
+    /// composing a basis needs the two composite stamps' key dimensions
+    /// and the resolution-root identity, which only a view holds, but
+    /// building a view per tracer scope is an `O(store-view read)` cost on
+    /// the installation path and — far hotter — on every admission
+    /// boundary's movement re-check. A caller that already HOLDS a bound
+    /// view borrows it here for free; the live half is composed from the
+    /// host's atomics. See
+    /// [`AggregateGenerations::from_seed`](verter_workspace::AggregateGenerations::from_seed).
+    ///
+    /// The default is [`AggregateBasisSeed::Unvouched`]: a view that does
+    /// not answer vouches for nothing, so scopes it seeds compact nothing
+    /// and detect no movement. That is the fail-safe direction — the
+    /// alternative, a fabricated stamp, is a witness the wrong view can
+    /// satisfy.
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        verter_workspace::AggregateBasisSeed::Unvouched
+    }
+
+    /// **The single whole-signature validation entry point.** Every warm
+    /// read that validates a stored signature goes through here.
+    ///
+    /// Returns `Ok(())` when every fact validates, or `Err(index)` naming
+    /// the FIRST rejecting fact — the attribution the rejection-reporting
+    /// readers need, so they do not re-run the loop to find it.
+    ///
+    /// `self_root_canonicals` names the canonicals whose `FileWholeHash`
+    /// facts are the entry's OWN roots. Those route through the strict
+    /// [`Self::validates_self_root_whole_hash`] — an untracked keyed
+    /// canonical means the entry's own file is gone and the entry must
+    /// miss — while every other fact, INCLUDING a `FileWholeHash` for a
+    /// non-listed cross-file dependency, routes through the lazy
+    /// [`Self::validates`], preserving cross-file permissiveness. An
+    /// empty slice is therefore exactly plain whole-signature validation,
+    /// which is why [`Self::validates_fact_signature`] can be a wrapper
+    /// rather than a second rule.
+    ///
+    /// **Why one method and not eleven loops.** The default body IS
+    /// `sig.iter().all(...)`, so a caller that inlines it is
+    /// indistinguishable TODAY. It stops being indistinguishable the
+    /// moment a view needs a rule the per-fact predicate cannot express —
+    /// a whole-signature overlay snapshot or lease, a mixed-domain
+    /// aggregate refusal — because a view can only state such a rule
+    /// HERE. An inlined loop silently opts its cache out of it, and the
+    /// symptom is a stale serve at one cache and not the others.
+    ///
+    /// Implementers override THIS. The two `bool` forms below are thin
+    /// wrappers and exist so no caller has to spell the `Result`.
+    #[inline]
+    fn validate_fact_signature(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> Result<(), usize> {
+        for (index, fact) in sig.iter().enumerate() {
+            let ok = match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
+                {
+                    self.validates_self_root_whole_hash(canonical_id, hash)
+                }
+                other => self.validates(other),
+            };
+            if !ok {
+                return Err(index);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate every fact in `sig` under this view; `true` iff all
+    /// validate. Empty signatures trivially return `true`.
+    ///
+    /// Wrapper over [`Self::validate_fact_signature`] with no self-roots.
     #[inline]
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
-        sig.iter().all(|f| self.validates(f))
+        self.validate_fact_signature(sig, &[]).is_ok()
+    }
+
+    /// Validate `sig`, treating every `FileWholeHash` whose canonical is
+    /// listed in `self_root_canonicals` as a STRICT self-root.
+    ///
+    /// Wrapper over [`Self::validate_fact_signature`].
+    #[inline]
+    fn validates_fact_signature_with_self_roots(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        self.validate_fact_signature(sig, self_root_canonicals)
+            .is_ok()
     }
 
     /// Promote a lazily-materialised canonical's route facts into the
@@ -449,6 +560,21 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).validates_self_root_whole_hash(canonical_id, hash)
     }
     #[inline]
+    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        (**self).strict_self_root_world_identity()
+    }
+    #[inline]
+    fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+        (**self).strict_self_root_is_witnessable(canonical_id)
+    }
+    #[inline]
+    fn mint_strict_self_root_world(
+        &self,
+        roots: &[(&str, ResolverHash16)],
+    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        (**self).mint_strict_self_root_world(roots)
+    }
+    #[inline]
     fn tracks_file(&self, canonical_id: &str) -> bool {
         (**self).tracks_file(canonical_id)
     }
@@ -461,8 +587,28 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).derived_hash_for(canonical_id, kind)
     }
     #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        (**self).aggregate_basis_seed()
+    }
+    #[inline]
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
         (**self).validates_fact_signature(sig)
+    }
+    #[inline]
+    fn validate_fact_signature(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> Result<(), usize> {
+        (**self).validate_fact_signature(sig, self_root_canonicals)
+    }
+    #[inline]
+    fn validates_fact_signature_with_self_roots(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        (**self).validates_fact_signature_with_self_roots(sig, self_root_canonicals)
     }
     #[inline]
     fn promote_route_completion(
@@ -671,10 +817,22 @@ pub(crate) struct StableExecutionValue<V> {
     /// [`ResultCompleteness::Complete`] for every generic executor, which
     /// leaves their rendezvous byte-identical.
     pub completeness: ResultCompleteness,
-    /// Typed cache-refusal propagation captured from the owner-scoped cold
-    /// compute. `Some` means the value is return-only: it is neither
-    /// published nor retained as a joinable rendezvous.
-    pub cache_refusal: Option<fact_read_set::NonCacheablePropagation>,
+    /// How far this rendezvous value may travel: the typed
+    /// [`ReuseClass`](reuse::ReuseClass) its cold compute earned.
+    ///
+    /// Anything other than [`ReuseClass::Shared`](reuse::ReuseClass::Shared)
+    /// means the value is return-only — neither published nor, for the
+    /// generic driver, retained as a joinable rendezvous. It rides the
+    /// VALUE rather than a side channel so a FOLLOWER that adopts a
+    /// retained rendezvous observes the refusal atomically with the value
+    /// and can [`replay_refusal`](reuse::ReuseClass::replay_refusal) it
+    /// into its OWN tracer stack — the leader's original fan-out ran on
+    /// the leader's thread and never touched the follower's.
+    ///
+    /// Orthogonal to `completeness`: this field is the REFUSAL axis and
+    /// `completeness` is the COMPLETENESS axis; admission requires both
+    /// to be clean.
+    pub reuse: reuse::ReuseClass,
 }
 
 /// Sealed evidence that the stable-request driver observed a current,
@@ -965,7 +1123,9 @@ where
                         computed: false,
                         // A warm hit is complete (partials never warm).
                         completeness: ResultCompleteness::Complete,
-                        cache_refusal: None,
+                        // A warm hit came out of a shared cache: it was
+                        // admitted, so nothing refused it.
+                        reuse: reuse::ReuseClass::Shared,
                     });
                 }
 
@@ -986,7 +1146,7 @@ where
                     stable,
                     computed: true,
                     completeness,
-                    cache_refusal,
+                    reuse: reuse::ReuseClass::from_captured_propagation(cache_refusal),
                 })
             },
             // Retain ONLY stable results as a joinable rendezvous. An
@@ -994,7 +1154,7 @@ where
             // NOT be retained, or the stability-retry loop below — and any
             // concurrent sibling — would join the torn result instead of
             // recomputing against fresh state.
-            |sev| sev.stable && !sev.completeness.is_partial() && sev.cache_refusal.is_none(),
+            |sev| sev.stable && !sev.completeness.is_partial() && sev.reuse.is_shared(),
         )?;
 
         if flight.value.stable {
@@ -1027,9 +1187,7 @@ where
             if matches!(flight.role, SingleflightRole::Follower) {
                 executor.fold_follower_completeness(flight.value.completeness);
             }
-            if let Some(propagation) = flight.value.cache_refusal {
-                resolver_context::note_non_cacheable_propagation(propagation);
-            }
+            flight.value.reuse.replay_refusal();
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
@@ -1047,9 +1205,7 @@ where
         // result now instead of recomputing it every remaining attempt plus
         // the fallback.
         if executor.snapshot_is_immutable() {
-            if let Some(propagation) = flight.value.cache_refusal {
-                resolver_context::note_non_cacheable_propagation(propagation);
-            }
+            flight.value.reuse.replay_refusal();
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
@@ -1295,11 +1451,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            let ok = candidate
-                .fact_dep_signature
-                .iter()
-                .all(|fact| view.validates(fact));
-            if ok {
+            if view.validates_fact_signature(&candidate.fact_dep_signature) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1346,15 +1498,10 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            let ok = candidate.fact_dep_signature.iter().all(|fact| match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                {
-                    view.validates_self_root_whole_hash(canonical_id, hash)
-                }
-                other => view.validates(other),
-            });
-            if ok {
+            if view.validates_fact_signature_with_self_roots(
+                &candidate.fact_dep_signature,
+                self_root_canonicals,
+            ) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some(candidate.value.clone());
@@ -1411,22 +1558,19 @@ where
         // admission order, return the first validating one.
         let mut last_rejected_fact: Option<FactVersionRef> = None;
         for candidate in candidates.iter() {
-            let mut candidate_ok = true;
-            for fact in candidate.fact_dep_signature.iter() {
-                let fact_ok = match fact {
-                    FactVersionRef::FileWholeHash { canonical_id, hash }
-                        if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                    {
-                        view.validates_self_root_whole_hash(canonical_id, hash)
-                    }
-                    other => view.validates(other),
-                };
-                if !fact_ok {
-                    candidate_ok = false;
-                    last_rejected_fact = Some(fact.clone());
-                    break;
+            // The central rail names the FIRST rejecting fact by index,
+            // so the attribution comes out of the same validation the
+            // hit/miss decision came out of — never a second, separately
+            // written loop that could disagree with it.
+            let candidate_ok = match view
+                .validate_fact_signature(&candidate.fact_dep_signature, self_root_canonicals)
+            {
+                Ok(()) => true,
+                Err(index) => {
+                    last_rejected_fact = candidate.fact_dep_signature.get(index).cloned();
+                    false
                 }
-            }
+            };
             if candidate_ok {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1456,11 +1600,7 @@ where
         let entry = self.entries.get(key)?;
         let candidates = entry.candidates.load();
         for candidate in candidates.iter() {
-            let ok = candidate
-                .fact_dep_signature
-                .iter()
-                .all(|fact| view.validates(fact));
-            if ok {
+            if view.validates_fact_signature(&candidate.fact_dep_signature) {
                 self.warm_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Some((
@@ -1674,6 +1814,33 @@ where
                 .load()
                 .iter()
                 .any(|candidate| candidate.fact_dep_signature.as_ref() == facts),
+            None => false,
+        }
+    }
+
+    /// `true` when ONE retained candidate carries BOTH `facts` as its witness
+    /// AND a value equal to `value`.
+    ///
+    /// Correlated and atomic by construction: the slot is loaded ONCE and the
+    /// conjunction is evaluated per candidate. Asking the two questions
+    /// separately — "does any candidate hold this witness" and "is the last
+    /// candidate's value equal to mine" — is unsound twice over: the two
+    /// answers can come from different candidates, and the slot can be mutated
+    /// between the loads. Both make the pair appear retained when no candidate
+    /// holds it.
+    pub fn holds_candidate_with_signature_and_value(
+        &self,
+        key: &K,
+        facts: &[FactVersionRef],
+        value: &V,
+    ) -> bool
+    where
+        V: PartialEq,
+    {
+        match self.entries.get(key) {
+            Some(entry) => entry.candidates.load().iter().any(|candidate| {
+                candidate.fact_dep_signature.as_ref() == facts && candidate.value.as_ref() == value
+            }),
             None => false,
         }
     }
@@ -3112,7 +3279,7 @@ mod tests {
                         stable: true,
                         computed: true,
                         completeness: crate::semantic_query::ResultCompleteness::Complete,
-                        cache_refusal: None,
+                        reuse: reuse::ReuseClass::Shared,
                     })
                 },
                 |sev| sev.stable,
@@ -4875,12 +5042,16 @@ mod file_source_env_fact_rail_tests {
         let forward_sig = match forward.finalise() {
             FactReadSetFinalise::Ok(sig) => sig,
             FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-            FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
+            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+                panic!("two facts overflow nothing and no domain moved in this fixture")
+            }
         };
         let reverse_sig = match reverse.finalise() {
             FactReadSetFinalise::Ok(sig) => sig,
             FactReadSetFinalise::NonCacheable(_) => panic!("fixture unexpectedly non-cacheable"),
-            FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
+            FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+                panic!("two facts overflow nothing and no domain moved in this fixture")
+            }
         };
         assert_eq!(
             forward_sig.as_ref(),
@@ -5082,5 +5253,230 @@ mod fact_signature_fingerprint_pins {
             fp_imports, fp_route,
             "ResolveImports vs RouteSurface must differ"
         );
+    }
+}
+
+/// The centralized whole-signature validation rail.
+///
+/// `StoreView::validate_fact_signature` is the ONE place a view can state
+/// a rule the per-fact `validates` predicate cannot express. A warm reader
+/// that inlines `sig.iter().all(|f| view.validates(f))` is
+/// indistinguishable from it while the default body is that same loop, and
+/// silently opts its cache out the moment a view overrides it — the
+/// symptom being a stale serve at one cache and not the others.
+///
+/// Every reader below is exercised against a view whose ONLY override is
+/// the central rail, so a reader that reverted to its own loop fails here.
+#[cfg(test)]
+mod central_signature_rail_tests {
+    use super::*;
+
+    /// Accepts every fact individually and every self-root individually,
+    /// but REJECTS any signature naming more than one distinct canonical.
+    /// No per-fact predicate can express that.
+    struct WholeSignatureRuleView;
+
+    impl StoreView for WholeSignatureRuleView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            StoreViewCompatToken {
+                epoch: 0,
+                session: None,
+                validity_fingerprint: 0,
+            }
+        }
+        fn validates(&self, _fact: &FactVersionRef) -> bool {
+            true
+        }
+        fn validates_self_root_whole_hash(
+            &self,
+            _canonical_id: &str,
+            _hash: &ResolverHash16,
+        ) -> bool {
+            true
+        }
+        fn validate_fact_signature(
+            &self,
+            sig: &[FactVersionRef],
+            _self_root_canonicals: &[&str],
+        ) -> Result<(), usize> {
+            let mut seen: Vec<&str> = Vec::new();
+            for fact in sig {
+                if let Some(canonical) = fact.canonical_id() {
+                    if !seen.contains(&canonical) {
+                        seen.push(canonical);
+                    }
+                }
+            }
+            if seen.len() <= 1 {
+                Ok(())
+            } else {
+                Err(sig.len() - 1)
+            }
+        }
+    }
+
+    /// Accepts every fact through the lazy rule and rejects every
+    /// SELF-ROOT. Pins that centralizing did not collapse the strict /
+    /// lazy split the self-rooted readers depend on.
+    struct StrictSelfRootRejectingView;
+
+    impl StoreView for StrictSelfRootRejectingView {
+        fn compat_token(&self) -> StoreViewCompatToken {
+            StoreViewCompatToken {
+                epoch: 0,
+                session: None,
+                validity_fingerprint: 0,
+            }
+        }
+        fn validates(&self, _fact: &FactVersionRef) -> bool {
+            true
+        }
+        fn validates_self_root_whole_hash(
+            &self,
+            _canonical_id: &str,
+            _hash: &ResolverHash16,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn whole_hash(canonical: &str, byte: u8) -> FactVersionRef {
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: [byte; 16],
+        }
+    }
+
+    fn cache_with(facts: Vec<FactVersionRef>) -> ValidatedFactCache<String, usize> {
+        let cache: ValidatedFactCache<String, usize> = ValidatedFactCache::default();
+        cache.insert("k".to_string(), 1usize, facts);
+        cache
+    }
+
+    #[test]
+    fn every_validated_fact_cache_reader_honours_the_central_rail() {
+        let cache = cache_with(vec![whole_hash("/a.ts", 1), whole_hash("/b.ts", 2)]);
+        let view = WholeSignatureRuleView;
+        let key = "k".to_string();
+
+        assert!(
+            cache.get_if_valid(&key, &view).is_none(),
+            "`get_if_valid` must decide through `validate_fact_signature`"
+        );
+        assert!(
+            cache.get_if_valid_with_admission(&key, &view).is_none(),
+            "`get_if_valid_with_admission` must decide through `validate_fact_signature`"
+        );
+        assert!(
+            cache.get_if_valid_with_facts(&key, &view).is_none(),
+            "`get_if_valid_with_facts` must decide through `validate_fact_signature`"
+        );
+        assert!(
+            cache.get_if_valid_self_rooted(&key, &view, &[]).is_none(),
+            "`get_if_valid_self_rooted` must decide through `validate_fact_signature`"
+        );
+        assert!(
+            cache
+                .get_if_valid_self_rooted_attributed(&key, &view, &[])
+                .is_err(),
+            "`get_if_valid_self_rooted_attributed` must decide through \
+             `validate_fact_signature`"
+        );
+    }
+
+    #[test]
+    fn the_same_readers_still_hit_a_signature_the_rail_accepts() {
+        // The control. Without it the test above would also pass against a
+        // reader that rejects unconditionally.
+        let cache = cache_with(vec![whole_hash("/a.ts", 1), whole_hash("/a.ts", 9)]);
+        let view = WholeSignatureRuleView;
+        let key = "k".to_string();
+
+        assert!(cache.get_if_valid(&key, &view).is_some());
+        assert!(cache.get_if_valid_with_admission(&key, &view).is_some());
+        assert!(cache.get_if_valid_with_facts(&key, &view).is_some());
+        assert!(cache.get_if_valid_self_rooted(&key, &view, &[]).is_some());
+        assert!(cache
+            .get_if_valid_self_rooted_attributed(&key, &view, &[])
+            .is_ok());
+    }
+
+    #[test]
+    fn centralizing_preserves_the_strict_self_root_split() {
+        let cache = cache_with(vec![whole_hash("/own.ts", 1), whole_hash("/dep.ts", 2)]);
+        let view = StrictSelfRootRejectingView;
+        let key = "k".to_string();
+
+        // `/own.ts` listed as a self-root routes through the STRICT rule,
+        // which this view rejects.
+        assert!(
+            cache
+                .get_if_valid_self_rooted(&key, &view, &["/own.ts"])
+                .is_none(),
+            "a listed self-root must route through `validates_self_root_whole_hash`"
+        );
+        // With no self-roots declared, the same `FileWholeHash` facts route
+        // through the LAZY rule, which this view accepts. Cross-file
+        // permissiveness survives the centralization.
+        assert!(
+            cache.get_if_valid_self_rooted(&key, &view, &[]).is_some(),
+            "an unlisted `FileWholeHash` must keep routing through the lazy \
+             `validates`, or every cross-file dependency becomes strict"
+        );
+        // And `/dep.ts` is not a self-root even though a self-root list is
+        // present, so it stays lazy and the entry still hits.
+        assert!(
+            cache
+                .get_if_valid_self_rooted(&key, &view, &["/absent.ts"])
+                .is_some(),
+            "only LISTED canonicals are strict"
+        );
+    }
+
+    #[test]
+    fn the_attributed_reader_reports_the_rails_first_rejecting_fact() {
+        // Attribution must come out of the SAME validation that decided the
+        // miss. A separately written loop could name a different fact.
+        //
+        // The rejecting fact is deliberately NOT last: an implementation
+        // that reports `facts.last()` — or any position other than the
+        // rail's own rejecting index — is indistinguishable from a correct
+        // one on a two-fact signature whose rejecter happens to sit at the
+        // end, and would pass a test written that way.
+        let cache = cache_with(vec![
+            whole_hash("/root.ts", 3),
+            whole_hash("/tail_a.ts", 4),
+            whole_hash("/tail_b.ts", 5),
+        ]);
+        let view = StrictSelfRootRejectingView;
+
+        let Err((rejected, count)) =
+            cache.get_if_valid_self_rooted_attributed(&"k".to_string(), &view, &["/root.ts"])
+        else {
+            panic!("a rejected self-root must miss");
+        };
+        assert_eq!(count, 1, "one candidate was examined");
+        assert_eq!(
+            rejected,
+            Some(whole_hash("/root.ts", 3)),
+            "the reported fact must be the one the rail rejected at its own \
+             index — `/root.ts` is the listed self-root and sits FIRST; the \
+             two trailing facts validate lazily and must not be reported"
+        );
+    }
+
+    #[test]
+    fn the_plain_wrapper_is_the_self_root_wrapper_with_no_roots() {
+        // The two `bool` forms are wrappers over one rule, not two rules.
+        // If they ever diverge, a caller's choice of entry point silently
+        // changes the answer.
+        let view = StrictSelfRootRejectingView;
+        let sig = [whole_hash("/own.ts", 1), whole_hash("/dep.ts", 2)];
+        assert_eq!(
+            view.validates_fact_signature(&sig),
+            view.validates_fact_signature_with_self_roots(&sig, &[]),
+        );
+        assert!(view.validates_fact_signature(&sig));
+        assert!(!view.validates_fact_signature_with_self_roots(&sig, &["/own.ts"]));
     }
 }

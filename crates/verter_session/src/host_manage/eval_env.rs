@@ -481,6 +481,10 @@ impl VerterHost {
         // `unwrap_or_clone` moves the inner value out without copying (it only
         // deep-copies in the rare case the snapshot is still shared).
         let script_analysis = Arc::unwrap_or_clone(parse.script_analysis);
+        // `whole_hash` is already `hash_16` of the exact bytes this parse (and
+        // therefore this analysis) observed.
+        let anchor_revision =
+            crate::types::AnalysisSourceRevision::from_whole_hash(parse.whole_hash);
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,
@@ -502,6 +506,7 @@ impl VerterHost {
             store_usages: Arc::new(script_analysis.store_usages),
             store_definitions: Arc::new(script_analysis.store_definitions),
             is_typescript: script_analysis.is_typescript,
+            anchor_revision,
         }
     }
 
@@ -520,13 +525,30 @@ impl VerterHost {
         );
         let file_language = self.language_classifier.classify(canonical);
         if file_language.is_vue() {
-            component_meta_trace_custom!("parse_vue_snapshot", format!("owner={canonical}"));
-            let (parse, parsed) = crate::parse::parse_vue_snapshot(
+            let Some(source_snapshot) = self.scheduler.try_get_source(canonical) else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            if source_snapshot.source.as_ref() != source.as_ref() {
+                return (FileAnalysisSnapshot::default(), None);
+            }
+            let Some(host_data) =
+                source_snapshot.downcast_data::<crate::host_executor::HostSourceData>()
+            else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            let Some(parsed) = host_data.framework_parse.clone() else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
+            let Some(parse) = crate::parse::carrier_snapshot_from_artifact(
                 canonical,
                 source,
                 self.config.effective_scope(),
+                &file_language,
                 &self.provenance,
-            );
+                &parsed,
+            ) else {
+                return (FileAnalysisSnapshot::default(), None);
+            };
             component_meta_trace_custom!(
                 "parse_vue_snapshot_result",
                 format!(
@@ -539,12 +561,13 @@ impl VerterHost {
             );
             let template_inputs = crate::types::VueTemplateInputs {
                 source: Arc::clone(source),
+                whole_hash: parse.whole_hash,
                 framework_parse: Some(parsed),
                 store_published,
                 // This builder reads no scheduler node, so it can
                 // never attest a node generation; the computed
                 // template serves the caller but never persists.
-                source_generation: None,
+                source_generation: Some(source_snapshot.generation),
             };
             (
                 Self::build_snapshot_from_parse(parse),
@@ -1330,10 +1353,10 @@ impl VerterHost {
                                                     canonical,
                                                     ctx.macro_index,
                                                 )
-                                                .and_then(|handle| {
+                                                .and_then(|product| {
                                                     crate::project_semantic_dispatch::node_data_for(
                                                         engine.ctx(),
-                                                        handle.node(),
+                                                        product.hot.node(),
                                                     )
                                                 })
                                                 .is_some_and(|data| {

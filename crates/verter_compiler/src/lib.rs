@@ -39,6 +39,8 @@ pub mod framework_common;
 
 pub mod svelte;
 
+pub mod standalone;
+
 /// Shared emitted-module semantic-comment oracle used by the Svelte
 /// conformance comparator and golden-generation tooling.
 #[doc(hidden)]
@@ -59,10 +61,7 @@ pub mod script;
 #[cfg(not(feature = "bench"))]
 pub(crate) mod script;
 
-#[cfg(feature = "bench")]
-pub mod style;
-#[cfg(not(feature = "bench"))]
-pub(crate) mod style;
+pub mod style_planner;
 
 #[cfg(feature = "bench")]
 pub mod template;

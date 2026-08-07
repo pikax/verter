@@ -656,7 +656,7 @@ fn encode_kind_members(
             .emit_fields()
             .iter()
             .map(|f| {
-                let name_id = arena.strings.intern(&f.analysis.name);
+                let name_id = arena.strings.intern(&f.name);
                 // An emit's typed payload is an on-demand LOCATOR
                 // (`AnalyzedEmitField.payload`) — zero-dispatch encoder, so
                 // the value takes the absent/opaque arm (see props above).
@@ -875,9 +875,12 @@ mod tests {
     fn props_surface(fields: Vec<AnalyzedPropField>) -> NormalizedSurfaces {
         let fields = fields
             .into_iter()
-            .map(|analysis| results::ResolvedPropField {
-                analysis,
-                type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            .map(|analysis| {
+                results::ResolvedPropField::from_source_position(
+                    analysis,
+                    verter_type_expr::facts::SourcePosition::unannotated(),
+                    verter_type_expr::PropCallableRole::Other,
+                )
             })
             .collect();
         NormalizedSurfaces {
@@ -1080,10 +1083,11 @@ mod tests {
                 kind: FrameworkSurfaceKind::Props,
                 outcome: ResolvedOutcome::Resolved(MacroSurfaceDtos {
                     props: Some(PropsSurface {
-                        fields: vec![results::ResolvedPropField {
-                            analysis: prop_field("named"),
-                            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
-                        }],
+                        fields: vec![results::ResolvedPropField::from_source_position(
+                            prop_field("named"),
+                            verter_type_expr::facts::SourcePosition::unannotated(),
+                            verter_type_expr::PropCallableRole::Other,
+                        )],
                         index_signatures: vec![ExpandedIndexSignature {
                             key_type: verter_type_expr::facts::SourcePosition::Present(
                                 verter_type_expr::facts::SemanticTypeSource::Closed(

@@ -175,6 +175,7 @@ describe("combineSourceMaps", () => {
       templateMap: makeMapFromSegments(tplSegments),
       templateCode,
       vueSource,
+      templateStartUtf8: vueSource.indexOf("<template>"),
       finalJs,
     });
 
@@ -231,6 +232,7 @@ describe("combineSourceMaps", () => {
       templateMap: makeMapFromSegments(tplSegs),
       templateCode,
       vueSource,
+      templateStartUtf8: vueSource.indexOf("<template>"),
       finalJs,
     });
 

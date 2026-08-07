@@ -287,9 +287,6 @@ pub enum DowngradeReasonTag {
     /// The compile input carries a block override (preprocessed
     /// script / template).
     HasBlockOverride,
-    /// The compile input carries a style override (preprocessed
-    /// CSS).
-    HasStyleOverride,
     /// The compile profile target is IDE-only analysis
     /// (`CompileTarget::TSX` without runtime codegen).
     HasIdeOnlyAnalysis,

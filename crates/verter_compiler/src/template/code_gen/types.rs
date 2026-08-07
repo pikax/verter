@@ -20,6 +20,7 @@ use super::shared::helpers::{
 /// All operations are deferred — nothing is applied until [`apply_to()`](Self::apply_to).
 /// This avoids passing `CodeTransform` through every trait method and enables
 /// a single O(n+m) batch application at the end.
+#[derive(Clone)]
 pub struct CodeGenOutput<'alloc> {
     /// Replace source ranges: (start, end, replacement).
     /// Applied via `ct.batch_overwrite()` in sorted order.
@@ -121,6 +122,28 @@ impl<'alloc> CodeGenOutput<'alloc> {
     pub fn prepend_alloc(&mut self, pos: u32, content: &str) {
         let allocated = self.alloc.alloc_str(content);
         self.prepends.push((pos, allocated));
+    }
+
+    /// Root wrapper insertion for a raw template unit whose synthetic root has
+    /// a zero-width opening tag. It must precede child operations at the same
+    /// byte boundary.
+    pub fn overwrite_or_root_prefix(&mut self, start: u32, end: u32, content: &str) {
+        if start == end {
+            let allocated = self.alloc.alloc_str(content);
+            self.prepends.insert(0, (start, allocated));
+        } else {
+            self.overwrite(start, end, content);
+        }
+    }
+
+    /// Root wrapper close for a raw template unit whose synthetic closing tag
+    /// is a zero-width boundary after all authored bytes.
+    pub fn overwrite_or_root_suffix(&mut self, start: u32, end: u32, content: &str) {
+        if start == end {
+            self.prepend_alloc(start, content);
+        } else {
+            self.overwrite(start, end, content);
+        }
     }
 
     /// Push the leading helper-import preamble as an (unmapped) prepend-left AND record its content

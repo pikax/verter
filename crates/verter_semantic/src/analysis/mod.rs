@@ -17,7 +17,7 @@
 //! - [`ProjectIndex`] — Aggregates file-level usage into cross-file indexes
 //!   (provide/inject validation, component graph, CSS class tracking).
 //! - [`build_css_style_analysis`] / [`build_preprocessor_style_analysis`] —
-//!   Analyse CSS style blocks for selectors, specificity, and Vue-specific
+//!   Analyse five style dialects for selectors, specificity, and Vue-specific
 //!   features (`:deep`, `:global`, `v-bind()`).
 
 mod build;
@@ -31,6 +31,8 @@ pub mod decl_headers;
 mod decl_dependencies_tests;
 mod exports;
 mod fact_projection;
+#[doc(hidden)]
+pub use fact_projection::macro_payload_reference_head_fact;
 pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
@@ -57,7 +59,9 @@ pub mod scope;
 pub mod script_shallow_index;
 pub mod selector_match;
 pub mod style;
+mod style_syntax;
 pub mod template;
+pub mod template_class_facts;
 pub mod top_level_owners;
 pub mod type_eval;
 pub mod type_eval_build;
@@ -107,21 +111,25 @@ pub use routes::{
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
 pub use style::{
-    build_css_style_analysis, build_preprocessor_style_analysis, build_scanned_style_analysis,
-    compute_structured_specificity, parse_selector, AnalyzedSelector, AttributeOperator,
-    AttributeSelector, CompoundSelector, CssScanDialect, SelectorCombinator, SelectorPseudoClass,
-    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
-    StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
+    build_css_style_analysis, build_external_src_style_analysis, build_preprocessor_style_analysis,
+    build_scanned_style_analysis, compute_structured_specificity, parse_selector, AnalyzedSelector,
+    AttributeOperator, AttributeSelector, BlockContentAvailability, CompoundSelector,
+    SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
+    StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
+    VueStyleInput,
 };
 pub use template::{
-    extract_dynamic_class_names, extract_dynamic_class_names_rich, parse_string_literal_union,
-    unwrap_reactive_type, AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition,
-    BindingUsageKind, CommentDirective, CommentDirectiveKind, DefinedSlot, DynamicClassName,
-    ElementNamespace, IfChain, MacroKind, MarkupClassToken, PropValueConstness, SnippetDefinition,
-    SvelteDirectiveInfo, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
-    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
-    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
-    VForDirective, VModelDirective,
+    extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,
+    AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind, CommentDirective,
+    CommentDirectiveKind, DefinedSlot, DynamicClassName, ElementNamespace, IfChain, MacroKind,
+    MarkupClassToken, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo,
+    TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
+    TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
+    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
+};
+pub use template_class_facts::{
+    ReactiveWrapperProof, TemplateClassFactsCompleteness, TemplateClassSemanticFactRow,
+    TemplateClassSemanticFacts, TemplateClassSubject,
 };
 pub use top_level_owners::{
     DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,
@@ -136,9 +144,10 @@ pub use types::{
     AnalyzedSlotFieldBinding, BindingInitializer, ComposableInfo, ComposableReturn,
     ComposableReturnField, CssVarManipulation, CssVarManipulationKind, DomQueryCallSite,
     DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo, LiteralKind,
-    LocalDeclarationEntry, LocalDeclarationKind, MacroTypeDep, MacroTypeDepUsage,
+    LocalDeclarationEntry, LocalDeclarationKind, MacroAnchor, MacroAnchorUnsupported,
+    MacroEditAnchors, MacroTypeDep, MacroTypeDepUsage, MemberListAnchor,
     ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall,
-    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ReturnReactivity, ScriptAnalysisSnapshot,
+    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ScriptAnalysisSnapshot,
     ScriptTypeEnhancements, StableDeclarationId, StoreApiClassification, StoreDefinition,
     StoreUsage, TypeResolutionSource, VueApiClassification,
 };

@@ -90,7 +90,7 @@ fn install_nests_safely_outer_observes_inner_cold_facts() {
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("outer tracer unexpectedly non-cacheable");
         }
-        FactReadSetFinalise::Overflow => {
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
             panic!("outer tracer overflowed unexpectedly");
         }
     }

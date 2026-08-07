@@ -759,7 +759,7 @@ impl ComponentMetaQueryEngine<'_> {
         // the mark still fans out to every enclosing tracer, so the producer's
         // outer scope keeps refusing the shared-cache write.
         let (decl_result, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            self.ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
             |_probe| {
                 let result = bundle.prepared_type_decls.get_in(owner, symbol_name);
                 if let Err(failure) = &result {

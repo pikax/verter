@@ -4775,7 +4775,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             models: Vec::new(),
             exposed: Vec::new(),
             public_instance: None,
-            sfc_blocks: None,
+            ordered_sfc_structure: None,
             type_registry: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),
@@ -5964,8 +5964,10 @@ mod fenced_gate_arm_admission_tests {
             .test_force
             .force_indexed_ready_serve_fence_for_tests
             .store(true, Ordering::Relaxed);
-        let (fenced_after, read_set) =
-            fenced.with_fact_tracer(|| drive_member_seam(&fenced, fenced_scope, fenced_node));
+        let (fenced_after, read_set) = fenced
+            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                drive_member_seam(&fenced, fenced_scope, fenced_node)
+            });
         fenced
             .test_force
             .force_indexed_ready_serve_fence_for_tests
@@ -6246,5 +6248,104 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
         Some("rederived"),
         "the caller-visible value must be the one re-derived against the FRESH view, never the \
          straddling value the funnel refused",
+    );
+}
+
+/// `OwnerResolutionSet` is published by exactly ONE authority: the owner
+/// import surface.
+///
+/// The rail is structural — the session-side call site is a PRIVATE
+/// function in `owner_import_surface.rs`, so `E0603` stops any other
+/// module naming it — and this is its executable half: real resolution
+/// work through the shared engine mints no owner-scoped node, and the
+/// surface's own cold admission is what roots on one.
+///
+/// Mutation recipe: delete the `observe_owner_resolution_set(..)` call
+/// from `OwnerImportSurfaceDb::get_or_compute`. The
+/// surface-observes-the-node assertion fails while the
+/// no-side-effect-mint assertion stays green.
+#[test]
+fn owner_resolution_set_published_only_by_owner_import_surface_db() {
+    use crate::cache_runtime::singleflight::ComputeAdmission;
+    use crate::owner_import_surface::build_owner_import_surface;
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let owner = "/owner_set_authority/owner.ts";
+    upsert(
+        &host,
+        "/owner_set_authority/dep.ts",
+        "export const dep = 1;\n",
+    );
+    upsert(
+        &host,
+        owner,
+        "import { dep } from './dep';\nexport const a = dep;\n",
+    );
+    let owner_whole_hash = host
+        .ensure_indexed_ready(owner)
+        .expect("owner IndexedReady materialises")
+        .whole_hash;
+
+    let owner_set_facts = |signature: &crate::fact_signature_helpers::ReadSetSignature| {
+        signature
+            .facts
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    verter_workspace::FactVersionRef::ResolveImports(
+                        verter_workspace::ResolveImportsFactRef::Resolution(fact),
+                    ) if fact.is_owner_resolution_set()
+                )
+            })
+            .count()
+    };
+
+    // Real resolution work through the shared engine, with no owner
+    // surface in play, must mint no owner-scoped node — otherwise the
+    // "one authority" claim is about a node everything publishes.
+    let route = host.owner_import_route_witness_for_tests(owner);
+    assert!(
+        route.is_some(),
+        "fixture invariant: the owner must resolve its specifiers, so the engine has \
+         published child decisions for an owner set to be able to stand for"
+    );
+    assert_eq!(
+        route
+            .expect("checked above")
+            .iter()
+            .filter(|fact| matches!(
+                fact,
+                verter_workspace::FactVersionRef::ResolveImports(
+                    verter_workspace::ResolveImportsFactRef::Resolution(fact),
+                ) if fact.is_owner_resolution_set()
+            ))
+            .count(),
+        0,
+        "resolving the owner's specifiers must NOT mint or observe an owner set — the \
+         owner import surface is the single publisher"
+    );
+
+    // The surface's own cold admission is where it appears.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let surface = host
+        .project_type_store()
+        .owner_import_surfaces()
+        .get_or_compute(&host, owner, owner_whole_hash, &view, || {
+            ComputeAdmission::Cacheable(build_owner_import_surface(
+                Arc::from(owner),
+                owner_whole_hash,
+                Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
+                Vec::new(),
+                host.project_type_store().current_project_generation(),
+            ))
+        })
+        .expect("the owner surface admits");
+
+    assert_eq!(
+        owner_set_facts(&surface.read_set_signature),
+        1,
+        "the owner import surface must root on exactly ONE owner-scoped node — that node \
+         stands in for every child decision, which is what makes the owner witness bounded"
     );
 }

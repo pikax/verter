@@ -1,0 +1,198 @@
+[
+  {
+    "selector": ":deep(.b)",
+    "expected": "[data-v-sc1] .b"
+  },
+  {
+    "selector": "::v-deep(.b)",
+    "expected": "[data-v-sc1] .b"
+  },
+  {
+    "selector": ":deep()",
+    "expected": "[data-v-sc1]"
+  },
+  {
+    "selector": "::v-deep()",
+    "expected": "[data-v-sc1]"
+  },
+  {
+    "selector": ":deep(.b, .c)",
+    "expected": "[data-v-sc1] .b"
+  },
+  {
+    "selector": "::v-deep(.b, .c)",
+    "expected": "[data-v-sc1] .b"
+  },
+  {
+    "selector": ".a :deep(.b)",
+    "expected": ".a[data-v-sc1] .b"
+  },
+  {
+    "selector": ".a ::v-deep(.b)",
+    "expected": ".a[data-v-sc1] .b"
+  },
+  {
+    "selector": ".a[data-x] :deep(.b)",
+    "expected": ".a[data-x][data-v-sc1] .b"
+  },
+  {
+    "selector": "a:hover :deep(.b)",
+    "expected": "a[data-v-sc1]:hover .b"
+  },
+  {
+    "selector": ".a > :deep(.b)",
+    "expected": ".a[data-v-sc1] >  .b"
+  },
+  {
+    "selector": ".a + ::v-deep(.b)",
+    "expected": ".a[data-v-sc1] +  .b"
+  },
+  {
+    "selector": ":is(:deep(.b))",
+    "expected": ":is([data-v-sc1] .b)"
+  },
+  {
+    "selector": ":where(::v-deep(.b))",
+    "expected": ":where([data-v-sc1] .b)"
+  },
+  {
+    "selector": ":deep(:is(.b, .c))",
+    "expected": "[data-v-sc1] :is(.b, .c)"
+  },
+  {
+    "selector": "::v-deep(:where(.b, .c))",
+    "expected": "[data-v-sc1] :where(.b, .c)"
+  },
+  {
+    "selector": ":slotted(.c)",
+    "expected": ".c[data-v-sc1-s]"
+  },
+  {
+    "selector": "::v-slotted(.c)",
+    "expected": ".c[data-v-sc1-s]"
+  },
+  {
+    "selector": ":slotted(.b, .c)",
+    "expected": ".b[data-v-sc1-s]"
+  },
+  {
+    "selector": "::v-slotted(.b, .c)",
+    "expected": ".b[data-v-sc1-s]"
+  },
+  {
+    "selector": ".a :slotted(.c)",
+    "expected": ".a .c[data-v-sc1-s]"
+  },
+  {
+    "selector": ".a > ::v-slotted(.c)",
+    "expected": ".a > .c[data-v-sc1-s]"
+  },
+  {
+    "selector": ":is(:slotted(.c))",
+    "expected": ":is(.c[data-v-sc1-s])"
+  },
+  {
+    "selector": ":where(::v-slotted(.c))",
+    "expected": ":where(.c[data-v-sc1-s])"
+  },
+  {
+    "selector": ":slotted(:is(.b, .c))",
+    "expected": ":is(.b[data-v-sc1-s], .c[data-v-sc1-s])"
+  },
+  {
+    "selector": ":global(.a)",
+    "expected": ".a"
+  },
+  {
+    "selector": "::v-global(.a)",
+    "expected": ".a"
+  },
+  {
+    "selector": ":global(.a, .b)",
+    "expected": ".a"
+  },
+  {
+    "selector": "::v-global(.a, .b)",
+    "expected": ".a"
+  },
+  {
+    "selector": ":global(.a) .b",
+    "expected": ".a"
+  },
+  {
+    "selector": "::v-global(.a) > .b",
+    "expected": ".a"
+  },
+  {
+    "selector": ".a :global(.b)",
+    "expected": ".b"
+  },
+  {
+    "selector": ".a > ::v-global(.b) + .c",
+    "expected": ".b"
+  },
+  {
+    "selector": ":is(:global(.b))",
+    "expected": ":is(.b)"
+  },
+  {
+    "selector": ":where(::v-global(.b))",
+    "expected": ":where(.b)"
+  },
+  {
+    "selector": "::v-global(:is(.a, .b))",
+    "expected": ":is(.a, .b)"
+  },
+  {
+    "selector": "::slotted(.a)",
+    "expected": "[data-v-sc1]::slotted(.a)"
+  },
+  {
+    "selector": ".a::slotted(.b)",
+    "expected": ".a[data-v-sc1]::slotted(.b)"
+  },
+  {
+    "selector": "::deep(.b)",
+    "expected": "[data-v-sc1]::deep(.b)"
+  },
+  {
+    "selector": "::global(.a)",
+    "expected": "[data-v-sc1]::global(.a)"
+  },
+  {
+    "selector": ":v-deep(.b)",
+    "expected": "[data-v-sc1]:v-deep(.b)"
+  },
+  {
+    "selector": ":v-slotted(.c)",
+    "expected": "[data-v-sc1]:v-slotted(.c)"
+  },
+  {
+    "selector": ":v-global(.a)",
+    "expected": "[data-v-sc1]:v-global(.a)"
+  },
+  {
+    "selector": ".x :deep(.a) .y :deep(.b)",
+    "expected": ".x[data-v-sc1] .a .y :deep(.b)"
+  },
+  {
+    "selector": ":deep(.b) :slotted(.c)",
+    "expected": "[data-v-sc1] .b :slotted(.c)"
+  },
+  {
+    "selector": ":slotted(.b) :slotted(.c)",
+    "expected": ".b[data-v-sc1-s] :slotted(.c)"
+  },
+  {
+    "selector": ".a:deep(.b)",
+    "expected": ".a[data-v-sc1] .b"
+  },
+  {
+    "selector": ".a:hover:deep(.b)",
+    "expected": ".a[data-v-sc1]:hover .b"
+  },
+  {
+    "selector": ":not(:deep(.b))",
+    "expected": ":not([data-v-sc1] .b)"
+  }
+]

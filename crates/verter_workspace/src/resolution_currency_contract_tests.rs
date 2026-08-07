@@ -376,23 +376,29 @@ fn directory_enumeration_inside_probe_enters_the_transaction_signature() {
     reader.insert("/p/dep.ts", "export const value = 1");
 
     let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(signature) = &outcome.admission else {
+    let crate::SignatureAdmission::Cacheable(_) = &outcome.admission else {
         panic!("a fully tracked resolver read must remain cacheable");
     };
     let directory_fact = ResolutionFactKey::DirectoryMembers {
         canonical: CanonicalResolutionId::new("/p"),
         population: ResolutionPopulation::Base,
     };
+    let node = decision_node(&engine, "/p/main.ts", "./dep", ResolutionPopulation::Base)
+        .expect("an admitted resolution publishes its decision node");
+    let edges = engine
+        .decision_direct_dependencies_for_test(ResolutionPopulation::Base, &node)
+        .expect("a published decision carries its direct edge set");
     assert!(
-        signature
-            .resolution_fact_version(&directory_fact)
-            .is_some(),
-        "a directory enumeration performed inside a typed path probe must be visible to TransactionReader"
+        edges.contains(&directory_fact),
+        "a directory enumeration performed inside a typed path probe must be visible to \
+         TransactionReader and become a direct dependency edge of the decision — the \
+         admitted witness names the decision, so this edge is what makes a member change \
+         reach it"
     );
 
     // Mutation recipe: stop draining the reader's directory-observation
     // evidence after probe_path. The result remains correct, but this exact
-    // DirectoryMembers fact disappears from the admitted signature.
+    // DirectoryMembers edge disappears from the published decision.
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -539,6 +545,7 @@ fn published_root_missing_project_tables_is_typed_incomplete_provenance() {
             Arc::new(crate::published_state::PublishedRoot::new_vfs_only(
                 snapshot,
             )),
+            &[],
             || engine.next_resolution_fact_version(),
         );
         ((), true)
@@ -823,13 +830,90 @@ fn every_closed_resolution_fact_family_has_a_live_mutation_rail() {
         "ContextSelection must be a computed fact over the published resolver index"
     );
 
+    // The two DERIVED families. A decision is minted by the resolve
+    // fence's publication; an owner set by its single owner-surface
+    // publisher. Neither is advanced by an observation.
+    let resolve_population = WorkspaceRead::resolution_population(&workspace);
+    let decision_before = engine
+        .cached_resolution_query_for_test("/p/main.ts", "./dep", CONTEXT, resolve_population)
+        .map(ResolutionFactKey::decision);
+    assert!(
+        decision_before.is_none(),
+        "fixture invariant: no decision exists for this demand before it is resolved"
+    );
+    let outcome = engine.resolve_import_outcome_with_evidence(
+        &workspace,
+        crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+        "/p/main.ts",
+        "./dep",
+        CONTEXT,
+    );
+    assert!(matches!(
+        outcome.admission,
+        crate::SignatureAdmission::Cacheable(_)
+    ));
+    let decision_key = engine
+        .cached_resolution_query_for_test("/p/main.ts", "./dep", CONTEXT, resolve_population)
+        .map(ResolutionFactKey::decision)
+        .expect("Decision must be published at its owning publication chokepoint");
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(resolve_population, &decision_key)
+            .is_some(),
+        "Decision must acquire its direct edge set at its owning publication chokepoint — \
+         the edges, not a minted version, are what a resolution publishes"
+    );
+    assert!(
+        engine.remove_derived_node_for_test(resolve_population, &decision_key),
+        "and its owning REMOVAL chokepoint must advance it"
+    );
+    assert_ne!(
+        engine.resolution_fact_version_for_test(resolve_population, &decision_key),
+        ResolutionFactVersion::INITIAL,
+        "Decision must advance at its owning removal chokepoint"
+    );
+
+    // Exhaustiveness is a COMPILE rail, not a list: a new
+    // `ResolutionFactKey` variant cannot be added without stating which
+    // chokepoint above owns it.
+    let inventory = [
+        path_key.clone(),
+        manifest_key.clone(),
+        realpath_key.clone(),
+        directory_key.clone(),
+        recovery_key.clone(),
+        exact_key.clone(),
+        context_key.clone(),
+        decision_key.clone(),
+    ];
+    for key in &inventory {
+        match key {
+            ResolutionFactKey::PathProbe { .. }
+            | ResolutionFactKey::Manifest { .. }
+            | ResolutionFactKey::Realpath { .. }
+            | ResolutionFactKey::DirectoryMembers { .. }
+            | ResolutionFactKey::RecoveryScope { .. }
+            | ResolutionFactKey::ExactResolution { .. }
+            | ResolutionFactKey::ContextSelection { .. }
+            | ResolutionFactKey::Decision { .. } => {}
+            // The owner-set family's publication chokepoint is asserted
+            // by the owner-surface suite, which owns its single publisher.
+            ResolutionFactKey::OwnerResolutionSet { .. } => {}
+        }
+    }
+    assert_eq!(
+        inventory.iter().collect::<BTreeSet<_>>().len(),
+        inventory.len(),
+        "the inventory must name each family once"
+    );
+
     // Mutation recipe: delete any one call to update_base_path_facts,
     // update_base_manifest_fact, replace_world_exact_resolutions, the
-    // DirectoryTreeDirty RecoveryScope advance, or the computed
-    // ContextSelection validator. The matching family remains at its old
-    // version and this seven-family inventory fails. Re-adding RecoveryScope
-    // advances to the precise per-path chokepoint flips the negative
-    // assertion above.
+    // DirectoryTreeDirty RecoveryScope advance, the computed
+    // ContextSelection validator, or the resolve fence's
+    // `publish_resolution_decision`. The matching family remains at its
+    // old version and this inventory fails. Re-adding RecoveryScope advances to
+    // the precise per-path chokepoint flips the negative assertion above.
 }
 
 #[test]
@@ -1475,4 +1559,2182 @@ fn resolution_currency_overlay_reveal_tracks_effective_population_value() {
     WorkspaceAccess::notify_close(&workspace, "/p/dep.ts");
     let before = workspace.vfs_provenance_snapshot();
     assert_memory_workspace_warm(&workspace, before);
+}
+
+// ─── Resolution-currency invalidation invariants ────────────────────────
+//
+// These pin invariants that must survive replacing
+// `ResolutionTransaction::absorb`'s whole-signature flattening with
+// bounded direct-dependency records, and replacing over-threshold
+// precise fact buckets with coarser terminal aggregates. Each is green
+// today and must stay green; a coarser propagation seed, or a
+// dependency record that forgets an intermediate observation, breaks a
+// named one.
+
+/// Each compaction domain's terminal aggregate has a LIVE producer, and
+/// the domains do not ride each other's counters.
+///
+/// An aggregate that never advances is a witness nothing can invalidate —
+/// permanent stale warm, and the exact poisoning class domain-wise
+/// compaction exists to avoid. So each counter is asserted to move at its
+/// own mutation AND to stay put at the other's.
+///
+/// The source-env / content split is the load-bearing half: a config
+/// change republishes the env-hash tables (`parse_env_hash`,
+/// `parser_version`, `file_language_id`) with NO content bump, so a
+/// source-env fact folded into the content domain would survive it.
+///
+/// Mutation recipe, VERIFIED: delete the `bump_source_env_generation()`
+/// call from the `WorkspaceChange::ConfigChanged` arm — the config arm's
+/// `source_env_after > source_env_before` assertion fails. Deleting it
+/// from `publish_snapshot` instead fails the publish arm.
+#[test]
+fn each_engine_owned_compaction_domain_has_a_live_producer() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    let engine = &workspace.engine;
+
+    // Content mutation: content moves, source-env does not.
+    let content_before = engine.current_content_generation();
+    let source_env_before = engine.current_source_env_generation();
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const v = 1"));
+    assert!(
+        engine.current_content_generation() > content_before,
+        "a content mutation must advance the content domain's generation"
+    );
+    assert_eq!(
+        engine.current_source_env_generation(),
+        source_env_before,
+        "a content mutation must NOT advance the source-env domain — the two are \
+         separate domains precisely so an entry compacted on one is not coarsened by \
+         the other"
+    );
+
+    // Config change: source-env moves, and it does so WITHOUT a content
+    // bump — the reason source-env cannot ride `content_generation`.
+    let content_before = engine.current_content_generation();
+    let source_env_before = engine.current_source_env_generation();
+    workspace.apply_changes(vec![WorkspaceChange::ConfigChanged {
+        canonical_id: "/p/tsconfig.json".to_string(),
+    }]);
+    assert!(
+        engine.current_source_env_generation() > source_env_before,
+        "a config change moves parse_env_hash / parser_version / file_language_id, so \
+         the source-env domain's generation MUST advance"
+    );
+    assert_eq!(
+        engine.current_content_generation(),
+        content_before,
+        "fixture invariant: a config change deliberately does NOT bump the content \
+         generation — if this ever starts bumping, the source-env domain's separate \
+         counter is no longer load-bearing and this rationale must be revisited"
+    );
+
+    // Project reconfiguration, which reaches `rebuild_and_publish`.
+    let source_env_before = engine.current_source_env_generation();
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            Some("/p/tsconfig.json".to_string()),
+        )],
+    );
+    assert!(
+        engine.current_source_env_generation() > source_env_before,
+        "`rebuild_and_publish` recomposes env_hashes_by_project, so the source-env \
+         domain's generation must advance"
+    );
+
+    // The OTHER env-table republication path, driven directly: an
+    // externally-supplied snapshot handed to `publish_snapshot` without
+    // going through `rebuild_and_publish`. `FilesystemWorkspace::publish_snapshot`
+    // is the production caller. Without this arm the `publish_snapshot`
+    // bump is an unfalsifiable claim — every other arm reaches
+    // `rebuild_and_publish`, which bumps on its own.
+    let snapshot = workspace
+        .load_published()
+        .expect("the configured workspace publishes a snapshot")
+        .snapshot
+        .clone();
+    let source_env_before = engine.current_source_env_generation();
+    let content_before = engine.current_content_generation();
+    engine.publish_snapshot(crate::published_state::PublishedRoot::new_vfs_only(
+        snapshot,
+    ));
+    assert!(
+        engine.current_source_env_generation() > source_env_before,
+        "`publish_snapshot` republishes the per-project env-hash / identity tables, so \
+         the source-env domain's generation must advance on THIS path too"
+    );
+    assert_eq!(
+        engine.current_content_generation(),
+        content_before,
+        "and it must do so without a content bump — the split is the whole point"
+    );
+}
+
+/// The source-env counter is reachable through the SEAM the session
+/// actually reads — `WorkspaceAccess` — and not only through the engine's
+/// own inherent accessor.
+///
+/// `WorkspaceAccess::source_env_generation` defaults to `None`, which
+/// means "this workspace tracks no source-env generation" and correctly
+/// disarms the domain for a workspace that has no producer. That default
+/// is the hazard: a production workspace that FORGOT to override it would
+/// report `None`, the session would install no source-env stamp, and the
+/// domain would silently stop compacting — no failure, just a permanent
+/// silent regression to precise buckets. So each production workspace is
+/// asserted to answer `Some` AND to track the live counter.
+///
+/// Mutation recipe, VERIFIED: delete the `source_env_generation`
+/// override from `impl WorkspaceAccess for MemoryWorkspace`. The trait
+/// method falls back to the `None` default and the first assertion fails.
+#[test]
+fn memory_workspace_exposes_the_source_env_generation_through_the_access_trait() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+
+    let before = WorkspaceAccess::source_env_generation(&workspace)
+        .expect("a production workspace must expose its source-env producer, not the None default");
+    assert_eq!(
+        before,
+        workspace.engine.current_source_env_generation(),
+        "the trait seam must report the ENGINE's live counter, not a private copy"
+    );
+
+    workspace.apply_changes(vec![WorkspaceChange::ConfigChanged {
+        canonical_id: "/p/tsconfig.json".to_string(),
+    }]);
+
+    let after = WorkspaceAccess::source_env_generation(&workspace)
+        .expect("still Some after a config change");
+    assert!(
+        after > before,
+        "a config change advances the source-env domain, and the trait seam must SEE that \
+         advance — a seam that reported a frozen or private value would let the session mint a \
+         source-env aggregate that no config change can ever invalidate"
+    );
+    assert_eq!(
+        after,
+        workspace.engine.current_source_env_generation(),
+        "the seam and the engine must not drift"
+    );
+}
+
+/// The RESOLUTION domain's aggregate advances at the ledger chokepoint —
+/// on a PRECISE per-path mutation — while the ancestor `RecoveryScope`
+/// stays `INITIAL`.
+///
+/// This is why the resolution aggregate is a NEW family and not
+/// `RecoveryScope`. The engine deliberately refuses to advance a recovery
+/// scope on a precise mutation (advancing an ancestor would destroy every
+/// sibling witness under it), so `RecoveryScope` can never serve as the
+/// resolution domain's aggregate; the aggregate must do the opposite and
+/// move on every resolution mutation, precise ones included.
+///
+/// Mutation recipe, VERIFIED: delete the
+/// `replacement.id = ResolutionWorldId::fresh(...)` mint from the
+/// `WorldWrite::Publish` arm of `mutate_resolution_world_locked`. The
+/// stamp stops moving and this fails with
+/// `ResolutionWorldId(1) -> ResolutionWorldId(1)`.
+///
+/// The `RecoveryScope` assertion is UNAFFECTED by that plant — the two
+/// are genuinely different families, not one renamed — but it is not
+/// literally observable under it: the stamp `assert_ne!` precedes it and
+/// panics first. To see it hold, comment out the stamp assertion and
+/// re-run under the same plant.
+#[test]
+fn resolution_aggregate_advances_on_precise_mutation_leaving_recovery_scope_initial() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+    let recovery = ResolutionFactKey::RecoveryScope {
+        canonical_prefix: CanonicalResolutionId::new("/p"),
+        population: base,
+    };
+
+    let before = engine
+        .captured_resolution_stamp_for_test(base)
+        .expect("the base world always reports a resolution stamp");
+    workspace.inject_file("/p/appears.ts".to_string(), Arc::from("export const v = 1"));
+    let after = engine
+        .captured_resolution_stamp_for_test(base)
+        .expect("the base world always reports a resolution stamp");
+
+    assert_ne!(
+        after, before,
+        "a precise path appearance is a resolution mutation, so the resolution \
+         domain's aggregate stamp MUST move ({before:?} -> {after:?})"
+    );
+    assert_eq!(
+        engine.resolution_fact_version_for_test(base, &recovery),
+        ResolutionFactVersion::INITIAL,
+        "and it must do so WITHOUT advancing the ancestor RecoveryScope — the precise \
+         per-path contract is intact, which is exactly why the resolution aggregate \
+         cannot be RecoveryScope"
+    );
+}
+
+/// The resolution stamp covers `ContextSelection`, which the fact LEDGER
+/// does not.
+///
+/// This is the case that distinguishes the root-identity stamp from a
+/// ledger-mutation counter, and nothing else in the suite does:
+/// `resolution_aggregate_advances_on_precise_mutation_leaving_recovery_scope_initial`
+/// passes under BOTH designs, because a precise path appearance mutates
+/// the ledger as well.
+///
+/// `CapturedResolutionWorld::fact_version` routes a `ContextSelection`
+/// key to `context_version(entry)` — the separate `context_versions` map
+/// — instead of `ResolutionFactRoot::version`. So withdrawing a project
+/// and re-publishing a byte-identical config moves the context version
+/// while `advance`/`remove` are never called: a counter maintained at the
+/// ledger's mutators would read UNCHANGED across it and a compacted
+/// resolution signature would keep validating against a world whose
+/// selected context had been replaced.
+///
+/// The third assertion is the negative control that pins the reason. It
+/// fails the moment the stamp is re-derived from ledger mutation, because
+/// then "the ledger did not move" and "the stamp did move" cannot both
+/// hold.
+///
+/// This is the plan's mutation-matrix row "Project/context replacement".
+///
+/// Mutation recipe: re-derive the stamp from a counter advanced in
+/// `ResolutionFactRoot::advance`/`remove` (the superseded design) — the
+/// stamp assertion fails while the context-version and ledger assertions
+/// keep passing, naming exactly which half is blind.
+#[test]
+fn resolution_stamp_moves_on_context_replacement_the_ledger_never_sees() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+    let project = || {
+        IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            Some("/p/tsconfig.json".to_string()),
+        )
+    };
+
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const v = 1"));
+    WorkspaceAccess::configure_resolver(&workspace, vec![project()]);
+    // Drive one resolution so the context node is registered and the
+    // ledger holds a real path fact to watch.
+    let _ = WorkspaceRead::resolve_import(&workspace, "/p/main.ts", "./dep", CONTEXT);
+
+    let context_key = ResolutionFactKey::context_importer("/p/main.ts", base);
+    // A LEDGER-backed key: its version comes from
+    // `ResolutionFactRoot::version`, so it moves only when `advance` /
+    // `remove` run.
+    let ledger_key = ResolutionFactKey::PathProbe {
+        canonical: CanonicalResolutionId::new("/p/dep.ts"),
+        population: base,
+    };
+
+    let context_before = engine.resolution_fact_version_for_test(base, &context_key);
+    let ledger_before = engine.resolution_fact_version_for_test(base, &ledger_key);
+    let stamp_before = engine
+        .captured_resolution_stamp_for_test(base)
+        .expect("the base world always reports a resolution stamp");
+
+    // Withdraw the project, then re-publish a BYTE-IDENTICAL config. No
+    // file content moves; only the published context does.
+    WorkspaceAccess::configure_resolver(&workspace, vec![]);
+    WorkspaceAccess::configure_resolver(&workspace, vec![project()]);
+
+    let context_after = engine.resolution_fact_version_for_test(base, &context_key);
+    let ledger_after = engine.resolution_fact_version_for_test(base, &ledger_key);
+    let stamp_after = engine
+        .captured_resolution_stamp_for_test(base)
+        .expect("the base world always reports a resolution stamp");
+
+    assert_ne!(
+        context_after, context_before,
+        "fixture invariant: replacing the published context must mint a fresh \
+         ContextSelection version, or this case exercises nothing"
+    );
+    assert_ne!(
+        stamp_after, stamp_before,
+        "the resolution domain's aggregate stamp MUST move across a context \
+         replacement ({stamp_before:?} -> {stamp_after:?}) — a compacted signature \
+         stands in for every resolution fact the scope observed, ContextSelection \
+         included"
+    );
+    assert_eq!(
+        ledger_after, ledger_before,
+        "NEGATIVE CONTROL: the fact LEDGER was not mutated on this path. That is \
+         precisely why the stamp cannot be a counter maintained in \
+         `ResolutionFactRoot::advance`/`remove` — such a counter reads unchanged \
+         here, and a resolution-compacted entry would stale-serve across a context \
+         replacement"
+    );
+}
+
+/// Two owners resolving the SAME helper share its resolution inputs.
+///
+/// Both stay warm across an unrelated mutation, and BOTH recompute when a
+/// higher-priority sibling of the shared helper appears. The warm arm is
+/// the one a coarse resolution-domain generation counter threatens: a
+/// counter advanced by ANY resolution-fact change would recompute both
+/// owners here, so any scheme that compacts this signature must still
+/// leave the pair warm.
+///
+/// Mutation recipe, VERIFIED (invalidation arm): early-return from
+/// `ResolutionTransaction::observe_path` when the outcome is
+/// `PathProbe::Absent`. Both owners then keep resolving to
+/// `/p/helper.tsx` after the higher-priority sibling appears, and this
+/// fails at the first `assert_recomputed_once`.
+///
+/// Mutation recipe, STATED (warm arm, not yet plant-verified because the
+/// mechanism does not exist on this tree): seed derived propagation from
+/// a coarse resolution-domain counter instead of the changed leaves —
+/// the `+2 hits / +0 misses` unrelated arm becomes `+0 / +2`. That is
+/// the regression a domain-wide generation counter could introduce, and
+/// this arm is here to catch it.
+#[test]
+fn resolution_currency_shared_helper_owners_invalidate_and_stay_warm_together() {
+    let engine = Engine::new();
+    let reader = ContractReader::new();
+    reader.insert("/p/helper.tsx", "export const h = 1");
+    assert_eq!(
+        warm_positive(&engine, &reader, "/p/a.ts", "./helper.js"),
+        "/p/helper.tsx"
+    );
+    assert_eq!(
+        warm_positive(&engine, &reader, "/p/b.ts", "./helper.js"),
+        "/p/helper.tsx"
+    );
+
+    // Unrelated appearance: BOTH owners stay warm.
+    reader.insert("/elsewhere/new.ts", "export const unrelated = 1");
+    engine.bump_content_generation_for("/elsewhere/new.ts");
+    assert_warm_hit(&engine, &reader, "/p/a.ts", "./helper.js", "/p/helper.tsx");
+    assert_warm_hit(&engine, &reader, "/p/b.ts", "./helper.js", "/p/helper.tsx");
+
+    // The shared helper retargets: BOTH owners recompute, exactly once
+    // each, onto the higher-priority sibling.
+    reader.insert("/p/helper.ts", "export const h = 2");
+    engine.bump_content_generation_for("/p/helper.ts");
+    assert_recomputed_once(&engine, &reader, "/p/a.ts", "./helper.js", "/p/helper.ts");
+    assert_recomputed_once(&engine, &reader, "/p/b.ts", "./helper.js", "/p/helper.ts");
+}
+
+/// A positively-resolving specifier re-resolved after warming takes the
+/// REUSE arm — `ResolutionTransaction::absorb`, which inherits the warm
+/// candidate's whole signature by reference.
+///
+/// This is the mechanism the owner-witness growth fixture in
+/// `verter_session::resolution_signature_growth_tests` measures at scale:
+/// nothing about the reused signature is scoped to the query, so a
+/// consumer unioning many of them grows linearly. A bounded direct
+/// dependency edge is what must replace the absorb; this case pins that
+/// the second resolution is genuinely the reuse arm and not a silent
+/// recompute, so a change to that arm cannot go unnoticed.
+///
+/// Mutation recipe, VERIFIED: replace the warm-candidate `reusable`
+/// search in `resolve_import_outcome_in_published` with a hard `None`.
+/// The second resolution becomes a miss (`import_resolution_cache_miss_count`
+/// 1 -> 2) and `assert_warm_hit` fails.
+#[test]
+fn resolution_currency_declaration_companion_positive_reuses_its_warm_candidate() {
+    let engine = Engine::new();
+    let reader = ContractReader::new();
+    // The corpus shape: the runtime `.mjs` is absent, the `.d.mts`
+    // declaration companion is present.
+    reader.insert("/p/_chunks/c0.d.mts", "export declare const V0: number;");
+    assert_eq!(
+        warm_positive(&engine, &reader, "/p/owner.ts", "./_chunks/c0.mjs"),
+        "/p/_chunks/c0.d.mts"
+    );
+    assert_warm_hit(
+        &engine,
+        &reader,
+        "/p/owner.ts",
+        "./_chunks/c0.mjs",
+        "/p/_chunks/c0.d.mts",
+    );
+}
+
+/// An ancestor lookup path that was ABSENT when the resolution was
+/// recorded invalidates that resolution the moment it appears.
+///
+/// The importer sits at `/repo/src/deep/nested/`, so resolving `pkg`
+/// walks — and observes — every ancestor `node_modules` candidate,
+/// including ones that do not exist. A nearer `node_modules/pkg`
+/// appearing beneath a previously-absent ancestor must retarget the
+/// resolution; the importer's own bytes never move, so nothing but the
+/// recorded absent-ancestor observation can catch it.
+///
+/// The required re-observation set for a deep appearance is the exact
+/// `PathProbe`, the parent `DirectoryMembers`, and every previously
+/// recorded absent-ancestor `Realpath`. This pins the behaviour the tree
+/// already has, so a rewrite of the observation set cannot lose it.
+///
+/// Mutation recipe, VERIFIED: early-return from
+/// `ResolutionTransaction::observe_path` when the outcome is
+/// `PathProbe::Absent`. The nearer package's appearance no longer
+/// invalidates and the importer keeps resolving to
+/// `/repo/node_modules/pkg/far.d.ts`.
+#[test]
+fn resolution_currency_absent_ancestor_appearance_retargets_a_deep_importer() {
+    let engine = Engine::new();
+    let reader = ContractReader::new();
+    reader.insert(
+        "/repo/node_modules/pkg/package.json",
+        r#"{"name":"pkg","types":"far.d.ts"}"#,
+    );
+    reader.insert("/repo/node_modules/pkg/far.d.ts", "export interface Far {}");
+    assert_eq!(
+        warm_positive(&engine, &reader, "/repo/src/deep/nested/main.ts", "pkg"),
+        "/repo/node_modules/pkg/far.d.ts"
+    );
+
+    // A nearer `node_modules` appears under an ancestor directory that
+    // did not exist when the resolution above was recorded.
+    reader.insert(
+        "/repo/src/deep/node_modules/pkg/package.json",
+        r#"{"name":"pkg","types":"near.d.ts"}"#,
+    );
+    reader.insert(
+        "/repo/src/deep/node_modules/pkg/near.d.ts",
+        "export interface Near {}",
+    );
+    engine.bump_content_generation_for("/repo/src/deep/node_modules/pkg/package.json");
+    engine.bump_content_generation_for("/repo/src/deep/node_modules/pkg/near.d.ts");
+
+    assert_recomputed_once(
+        &engine,
+        &reader,
+        "/repo/src/deep/nested/main.ts",
+        "pkg",
+        "/repo/src/deep/node_modules/pkg/near.d.ts",
+    );
+}
+
+/// Removal followed by reintroduction mints a FRESH fact version — the
+/// reintroduced path never validates against the version recorded before
+/// the removal.
+///
+/// Any derived resolution record built over these primitives inherits
+/// the property, so it is pinned here on the `PathProbe` leaf itself. A
+/// version scheme that returned to the pre-removal value would let a
+/// witness recorded before the removal validate against the world after
+/// it.
+///
+/// Mutation recipe, VERIFIED: in `Engine::update_base_path_facts`, mint
+/// the version from the probe OUTCOME (a content-addressed stamp:
+/// `File => 11`, `Absent => 13`, …) instead of
+/// `next_resolution_fact_version()`. The present and reintroduced
+/// versions both become `ResolutionFactVersion(11)` and the ABA
+/// assertion fails.
+#[test]
+fn resolution_currency_removal_then_reintroduction_mints_a_fresh_version() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+    let probe = ResolutionFactKey::PathProbe {
+        canonical: CanonicalResolutionId::new("/p/mod.ts"),
+        population: base,
+    };
+
+    workspace.inject_file("/p/mod.ts".to_string(), Arc::from("export const v = 1"));
+    let present = engine.resolution_fact_version_for_test(base, &probe);
+    assert_ne!(
+        present,
+        ResolutionFactVersion::INITIAL,
+        "fixture invariant: the appearance must advance the probe fact"
+    );
+
+    workspace.apply_changes(vec![WorkspaceChange::FileDeleted {
+        canonical_id: "/p/mod.ts".to_string(),
+    }]);
+    let removed = engine.resolution_fact_version_for_test(base, &probe);
+    assert_ne!(
+        removed, present,
+        "removal must advance the probe fact away from its present-version"
+    );
+
+    workspace.inject_file("/p/mod.ts".to_string(), Arc::from("export const v = 1"));
+    let reintroduced = engine.resolution_fact_version_for_test(base, &probe);
+    assert_ne!(
+        reintroduced, removed,
+        "reintroduction must advance the probe fact away from its removed-version"
+    );
+    assert_ne!(
+        reintroduced, present,
+        "ABA: reintroducing byte-identical content must mint a FRESH version, never return \
+         to the pre-removal one — a witness recorded before the removal must not validate \
+         against the world after it"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Resolution decision DAG
+// ---------------------------------------------------------------------
+
+/// The published decision node for one importer/specifier demand, or
+/// `None` when that demand never admitted a candidate.
+fn decision_node(
+    engine: &Engine,
+    importer_id: &str,
+    specifier: &str,
+    population: ResolutionPopulation,
+) -> Option<ResolutionFactKey> {
+    engine
+        .cached_resolution_query_for_test(importer_id, specifier, CONTEXT, population)
+        .map(ResolutionFactKey::decision)
+}
+
+fn resolution_facts(signature: &crate::ReadSetSignature) -> Vec<ResolutionFactKey> {
+    signature
+        .facts
+        .iter()
+        .filter_map(|fact| match fact {
+            crate::FactVersionRef::ResolveImports(crate::ResolveImportsFactRef::Resolution(
+                fact,
+            )) => Some(fact.key.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cacheable_signature(outcome: &crate::ResolutionOutcome) -> crate::ReadSetSignature {
+    match &outcome.admission {
+        crate::SignatureAdmission::Cacheable(signature) => signature.clone(),
+        other => panic!("expected a cacheable resolution, got {other:?}"),
+    }
+}
+
+/// `RC-2` / `DAG-1`: an admitted resolution's witness is its DECISION
+/// node — one typed derived fact — and never the leaf set the attempt
+/// observed, cold or warm.
+///
+/// This is the growth fix stated as an invariant. Before the DAG a warm
+/// answer fed the reused candidate's ENTIRE signature into the caller's
+/// witness by reference, so every consumer of a resolution inherited the
+/// whole transitive leaf set and an owner's witness grew with the closure
+/// of everything its specifiers reached.
+///
+/// The cold and warm witnesses must be IDENTICAL: a producer that dedupes
+/// an identical recomputation compares witnesses, so a witness that
+/// depended on cache warmth would make every second computation look like
+/// a new one.
+///
+/// Mutation recipe: drop the decision-witness substitution at the resolve
+/// fence, so a cacheable outcome carries the attempt's own observation set
+/// again. The leaf-absence and cold/warm-equality assertions fail.
+#[test]
+fn resolution_decision_positive_reused_candidate_depends_on_child_decision() {
+    let engine = engine_with_fallback_project("/p");
+    let reader = ContractReader::new();
+    reader.insert("/p/dep.ts", "export const value = 1");
+    let base = ResolutionPopulation::Base;
+
+    let cold = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    let cold_witness = cacheable_signature(&cold);
+    let node = decision_node(&engine, "/p/main.ts", "./dep", base)
+        .expect("an admitted cold resolution publishes its decision node");
+
+    assert_eq!(
+        resolution_facts(&cold_witness),
+        vec![node.clone()],
+        "an admitted resolution roots on its decision node ALONE"
+    );
+
+    let edges = engine
+        .decision_direct_dependencies_for_test(base, &node)
+        .expect("a published decision carries its direct edge set");
+    let probes: Vec<_> = edges
+        .iter()
+        .filter(|key| matches!(key, ResolutionFactKey::PathProbe { .. }))
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "fixture invariant: the attempt must have observed primitive path probes, so the \
+         leaf-absence assertion below has something to be about"
+    );
+    for probe in probes {
+        assert!(
+            !resolution_facts(&cold_witness).contains(probe),
+            "RC-2: {probe:?} is a direct EDGE of the decision, not a member of the witness \
+             — flattening it back into the witness is what makes a consumer's root grow \
+             with the whole transitive closure"
+        );
+    }
+
+    let warm = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    assert!(
+        warm.trace().reused(),
+        "fixture invariant: the second attempt must reuse the warm candidate"
+    );
+    assert_eq!(
+        cacheable_signature(&warm).facts.as_ref(),
+        cold_witness.facts.as_ref(),
+        "the cold and warm witnesses for one demand must be IDENTICAL — a witness that \
+         depends on cache warmth defeats every identical-recomputation dedupe downstream"
+    );
+}
+
+/// `RC-2`: a decision's recorded direct edge set is exactly the primitive
+/// facts the query observed plus the child decisions it reused — never a
+/// child's transitive leaves, and never the node itself.
+///
+/// Mutation recipe: make `ResolutionTransaction::direct_edges` return the
+/// whole observation set including terminal facts, or drop the
+/// self-dependency guard in `publish_derived`. The set-equality and
+/// self-edge assertions fail respectively.
+#[test]
+fn resolution_decision_records_only_direct_dependencies() {
+    let engine = engine_with_fallback_project("/p");
+    let reader = ContractReader::new();
+    reader.insert("/p/dep.ts", "export const value = 1");
+    let base = ResolutionPopulation::Base;
+
+    let cold = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    assert!(matches!(
+        cold.admission,
+        crate::SignatureAdmission::Cacheable(_)
+    ));
+    let node = decision_node(&engine, "/p/main.ts", "./dep", base).expect("published decision");
+
+    let edges: BTreeSet<ResolutionFactKey> = engine
+        .decision_direct_dependencies_for_test(base, &node)
+        .expect("a published decision carries its complete direct edge set")
+        .into_iter()
+        .collect();
+
+    // Every edge names this demand's own inputs: the exact-resolution
+    // row, the selected context, and the paths the resolver probed.
+    assert!(
+        edges.contains(&ResolutionFactKey::exact_importer(
+            "/p/main.ts",
+            "./dep",
+            CONTEXT,
+            base
+        )),
+        "the demand's own exact-resolution row is a direct dependency"
+    );
+    assert!(
+        edges.contains(&ResolutionFactKey::context_importer("/p/main.ts", base)),
+        "the demand's own selected context is a direct dependency"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|key| matches!(key, ResolutionFactKey::PathProbe { .. })),
+        "the paths the resolver probed are direct dependencies"
+    );
+    assert!(
+        !edges.contains(&node),
+        "a decision is never its own dependency: a self-edge would make propagation \
+         advance the node that seeded it"
+    );
+    assert!(
+        edges
+            .iter()
+            .all(|key| !matches!(key, ResolutionFactKey::Decision { .. })),
+        "this query reused no child decision, so no derived edge may be recorded"
+    );
+}
+
+/// `RC-3`: removing a decision ADVANCES it away from every version a
+/// witness can hold, and a reintroduction keeps that tombstone rather
+/// than reverting to it.
+///
+/// Publication mints nothing, so `INITIAL` is a version witnesses DO
+/// hold — which is exactly why removal, not publication, is where the
+/// fresh version is minted. Reverting to `INITIAL` on reintroduction
+/// would re-validate every witness the removal invalidated.
+///
+/// Mutation recipe: make `ResolutionFactRoot::remove_derived` drop the
+/// edges without advancing the version. The tombstone assertion fails.
+#[test]
+fn resolution_decision_reintroduction_mints_fresh_version() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const value = 1"));
+    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    WorkspaceAccess::configure_resolver(&workspace, vec![project]);
+    let engine = &workspace.engine;
+    let population = WorkspaceRead::resolution_population(&workspace);
+    let resolve = || {
+        engine.resolve_import_outcome_with_evidence(
+            &workspace,
+            crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+            "/p/main.ts",
+            "./dep",
+            CONTEXT,
+        )
+    };
+
+    let first = resolve();
+    let first_witness = cacheable_signature(&first);
+    let node = decision_node(engine, "/p/main.ts", "./dep", population)
+        .expect("an admitted cold resolution publishes its decision node");
+    assert_eq!(
+        engine.resolution_fact_version_for_test(population, &node),
+        ResolutionFactVersion::INITIAL,
+        "publication mints no version: the node reads exactly what the publishing \
+         request's own captured world says"
+    );
+
+    assert!(engine.remove_derived_node_for_test(population, &node));
+    let tombstone = engine.resolution_fact_version_for_test(population, &node);
+    assert_ne!(
+        tombstone,
+        ResolutionFactVersion::INITIAL,
+        "removal must advance the node away from the version its witnesses hold"
+    );
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .is_none(),
+        "removal must drop the node's edges in the same operation as its version advance"
+    );
+    let after_removal = engine
+        .capture_published_resolution_world(population)
+        .expect("a settled world");
+    assert!(
+        !first_witness.validates(after_removal.as_ref()),
+        "the witness recorded before the removal must stop validating"
+    );
+
+    // Reintroduce the same demand: advance a leaf the candidate observed
+    // so the slot stops validating and the next attempt recomputes.
+    workspace.remove_file("/p/dep.ts");
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const value = 1"));
+    resolve();
+
+    let reintroduced_node = decision_node(engine, "/p/main.ts", "./dep", population)
+        .expect("the recomputation republishes a decision");
+    assert_eq!(
+        reintroduced_node, node,
+        "fixture invariant: the same demand keeps the same node IDENTITY, so the version \
+         comparison below is about the version and not about two different nodes"
+    );
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .is_some(),
+        "the reintroduction must republish the node's edges"
+    );
+    let reintroduced = engine.resolution_fact_version_for_test(population, &node);
+    assert_ne!(
+        reintroduced,
+        ResolutionFactVersion::INITIAL,
+        "ABA: a removed-and-reintroduced decision must NEVER revert to INITIAL — that is \
+         the version every witness recorded before the removal holds"
+    );
+    assert!(
+        !first_witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "and the pre-removal witness must still be invalid after the reintroduction"
+    );
+}
+
+/// `RC-3`: a witness recorded against a decision that is later removed
+/// stops validating, without any cache entry being evicted.
+///
+/// Mutation recipe: make `remove_derived` a no-op for the version ledger.
+/// The post-removal validation assertion fails.
+#[test]
+fn resolution_decision_removal_invalidates_old_witness() {
+    let engine = engine_with_fallback_project("/p");
+    let reader = ContractReader::new();
+    reader.insert("/p/dep.ts", "export const value = 1");
+    let base = ResolutionPopulation::Base;
+
+    engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    let warm = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    assert!(
+        warm.trace().reused(),
+        "fixture invariant: the second attempt reuses"
+    );
+    let witness = cacheable_signature(&warm);
+    let node = decision_node(&engine, "/p/main.ts", "./dep", base).expect("published decision");
+    assert!(resolution_facts(&witness).contains(&node));
+
+    let before = engine
+        .capture_published_resolution_world(base)
+        .expect("a settled world");
+    assert!(
+        witness.validates(before.as_ref()),
+        "fixture invariant: the warm witness must validate before the removal"
+    );
+
+    assert!(engine.remove_derived_node_for_test(base, &node));
+    let after = engine
+        .capture_published_resolution_world(base)
+        .expect("a settled world");
+    assert!(
+        !witness.validates(after.as_ref()),
+        "a witness rooted on a removed decision must stop validating"
+    );
+}
+
+/// `RC-4`: a session-population decision is a different node from the
+/// base-population decision for the same demand, and neither validates
+/// as the other.
+///
+/// Mutation recipe: drop the `population` rewrite from
+/// `ResolutionFactKey::in_population`'s `Decision` arm, or drop the
+/// population component from `ResolutionQueryKey`. The two nodes then
+/// collide and the inequality assertions fail.
+#[test]
+fn resolution_decision_overlay_never_validates_as_base() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const base = 1"));
+    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    WorkspaceAccess::configure_resolver(&workspace, vec![project]);
+    let engine = &workspace.engine;
+    let population = WorkspaceRead::resolution_population(&workspace);
+    let ResolutionPopulation::Session(_) = population else {
+        panic!("an engine-backed editor workspace resolves through a session population");
+    };
+
+    let session_outcome = engine.resolve_import_outcome_with_evidence(
+        &workspace,
+        crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+        "/p/main.ts",
+        "./dep",
+        CONTEXT,
+    );
+    assert!(matches!(
+        session_outcome.admission,
+        crate::SignatureAdmission::Cacheable(_)
+    ));
+
+    let session_node = decision_node(engine, "/p/main.ts", "./dep", population)
+        .expect("the session resolution publishes its decision node");
+    let base_node = session_node.in_population(ResolutionPopulation::Base);
+    assert_ne!(
+        session_node, base_node,
+        "RC-4: a decision node carries its population, so the base and session nodes for \
+         one demand are distinct keys"
+    );
+
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &session_node)
+            .is_some(),
+        "the session root must hold the session decision's edges"
+    );
+
+    // The witness the session resolution handed back names the SESSION
+    // node. A base capture must refuse it outright rather than settle it
+    // against a version it cannot answer for.
+    let witness = cacheable_signature(&session_outcome);
+    assert_eq!(resolution_facts(&witness), vec![session_node.clone()]);
+    let base_capture = engine
+        .capture_published_resolution_world(ResolutionPopulation::Base)
+        .expect("a settled base world");
+    assert!(
+        !witness.validates(base_capture.as_ref()),
+        "RC-4: a session-population witness must NOT validate against a base capture — a \
+         base world composes no overlay, so answering for the session population at all \
+         would settle the question with the never-advanced version and serve overlay-rooted \
+         work to a base reader"
+    );
+    assert!(
+        witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled session world")
+                .as_ref()
+        ),
+        "and it must validate against its own session capture"
+    );
+
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(ResolutionPopulation::Base, &base_node)
+            .is_none(),
+        "the base graph must hold no edges for a session-only decision"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Root-owned DAG propagation
+// ---------------------------------------------------------------------
+
+/// A memory workspace with one configured project and one dependency,
+/// plus the session population its resolutions run under.
+fn propagation_fixture() -> (crate::memory::MemoryWorkspace, ResolutionPopulation) {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const value = 1"));
+    workspace.inject_file(
+        "/p/other.ts".to_string(),
+        Arc::from("export const other = 1"),
+    );
+    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    WorkspaceAccess::configure_resolver(&workspace, vec![project]);
+    let population = WorkspaceRead::resolution_population(&workspace);
+    (workspace, population)
+}
+
+fn resolve_in(
+    workspace: &crate::memory::MemoryWorkspace,
+    importer: &str,
+    specifier: &str,
+) -> crate::ResolutionOutcome {
+    workspace.engine.resolve_import_outcome_with_evidence(
+        workspace,
+        crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
+        importer,
+        specifier,
+        CONTEXT,
+    )
+}
+
+/// `RC-1` / `RC-3`: advancing a fact a decision directly depends on
+/// advances that decision, and advances it EXACTLY ONCE for the whole
+/// mutation batch even though the batch moves several of its edges.
+///
+/// The once-per-batch half is measured against a control workspace that
+/// performs the identical mutation with no decision published: the
+/// difference between the two observable-advance deltas is the number of
+/// derived advances the propagation performed.
+///
+/// Mutation recipe: delete the `visited` guard in
+/// `ResolutionFactRoot::propagate` so a node can be re-advanced through a
+/// second reverse edge. The delta-difference assertion fails.
+#[test]
+fn resolution_decision_child_advance_advances_parent_once() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    let cold = resolve_in(&workspace, "/p/main.ts", "./dep");
+    let witness = cacheable_signature(&cold);
+    let node = decision_node(engine, "/p/main.ts", "./dep", population)
+        .expect("an admitted cold resolution publishes its decision node");
+    let edges = engine
+        .decision_direct_dependencies_for_test(population, &node)
+        .expect("edges");
+    let dep_edges = edges
+        .iter()
+        .filter(|key| key.canonical_id() == Some("/p/dep.ts"))
+        .count();
+    assert!(
+        dep_edges > 1,
+        "fixture invariant: the batch below advances SEVERAL of this decision's edges \
+         (probe, realpath, …) — with only one edge the once-per-batch claim would be \
+         vacuous; got {dep_edges}"
+    );
+
+    // Control: an identical mutation on a workspace with no decision.
+    let (control, _) = propagation_fixture();
+    let control_before = control.engine.current_resolution_fact_generation();
+    control.remove_file("/p/dep.ts");
+    let control_delta = control.engine.current_resolution_fact_generation() - control_before;
+
+    let before = engine.current_resolution_fact_generation();
+    workspace.remove_file("/p/dep.ts");
+    let delta = engine.current_resolution_fact_generation() - before;
+
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "RC-1: a mutation of a fact the decision depends on must invalidate every witness \
+         rooted on that decision"
+    );
+    assert_eq!(
+        delta - control_delta,
+        1,
+        "RC-3: the batch advanced {dep_edges} of the decision's direct edges and the \
+         decision must advance ONCE for all of them; control delta {control_delta}, \
+         observed {delta}"
+    );
+}
+
+/// `RC-3`: a mutation that touches none of a decision's direct edges
+/// leaves its witness valid.
+///
+/// Mutation recipe: seed propagation from every key in the reverse map
+/// instead of the batch's own advanced keys. This fails.
+#[test]
+fn resolution_decision_unrelated_mutation_stays_valid() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    let cold = resolve_in(&workspace, "/p/main.ts", "./dep");
+    let witness = cacheable_signature(&cold);
+
+    workspace.inject_file(
+        "/p/unrelated.ts".to_string(),
+        Arc::from("export const unrelated = 1"),
+    );
+
+    assert!(
+        witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a mutation of a path this decision never observed must leave its witness valid — \
+         coarse invalidation here destroys exactly the warm reuse the DAG exists to give"
+    );
+}
+
+/// `RC-1`: a BASE mutation advances a SESSION decision that depends on
+/// it. The session graph records session-population edges whose versions
+/// fall back to the base root, so the base publication protocol must
+/// translate its changed keys into every live session population.
+///
+/// Mutation recipe: delete the
+/// `propagate_base_changes_into_sessions(..)` call from
+/// `mutate_resolution_world_locked`. This fails while the base-only and
+/// session-only siblings stay green — which is what pins the fan-out
+/// rather than propagation in general.
+#[test]
+fn resolution_base_mutation_advances_dependent_session_decision() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    assert!(
+        matches!(population, ResolutionPopulation::Session(_)),
+        "fixture invariant: the decision must live in a SESSION root"
+    );
+
+    let cold = resolve_in(&workspace, "/p/main.ts", "./dep");
+    let witness = cacheable_signature(&cold);
+    let node = decision_node(engine, "/p/main.ts", "./dep", population).expect("session decision");
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .is_some(),
+        "fixture invariant: the session root owns the decision's edges"
+    );
+
+    workspace.remove_file("/p/dep.ts");
+
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a base mutation must reach a session decision that depends on it"
+    );
+}
+
+/// A resolution admission that discovers newer base evidence while holding a
+/// session publication gate must reuse that gate during base-to-session
+/// propagation. `parking_lot::Mutex` is not reentrant, so losing the held
+/// session witness deadlocks before the admission can retry.
+///
+/// Mutation recipe: pass `None` instead of the captured session fingerprint
+/// to the evidence fold in `resolve_import_outcome_in_published`. The worker
+/// never reports completion and the watchdog assertion fails.
+#[test]
+fn resolution_admission_conflict_reuses_held_session_gate() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+    std::thread::spawn(move || {
+        let (workspace, population) = propagation_fixture();
+        assert!(
+            matches!(population, ResolutionPopulation::Session(_)),
+            "fixture invariant: admission must hold a session publication gate"
+        );
+
+        let cold = resolve_in(&workspace, "/p/main.ts", "./dep");
+        assert!(
+            cold.result().is_some(),
+            "fixture invariant: the initial resolution must publish a session decision"
+        );
+        assert_eq!(
+            workspace.engine.lazy_resolution_slot_len_for_test(
+                "/p/main.ts",
+                "./dep",
+                CONTEXT,
+                population,
+            ),
+            1,
+            "fixture invariant: the first resolution must populate the candidate slot"
+        );
+
+        workspace.engine.lazy_resolution_cache.write().clear();
+        assert!(
+            workspace.engine.snapshot.write().remove("/p/dep.ts"),
+            "fixture invariant: the reader must reveal evidence newer than the recorded base"
+        );
+
+        let outcome = resolve_in(&workspace, "/p/main.ts", "./dep");
+        done_tx
+            .send(outcome.result().is_none())
+            .expect("test receiver must remain alive");
+    });
+
+    let resolved_absent = done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("conflicting evidence admission must not re-lock its held session gate");
+    assert!(
+        resolved_absent,
+        "after retrying against the newer base evidence, the removed dependency must not resolve"
+    );
+}
+
+/// `RC-4`: a session-only mutation advances no base decision.
+///
+/// Mutation recipe: publish the session overlay's fact advances into the
+/// base root. The base witness then stops validating and this fails.
+#[test]
+fn resolution_session_mutation_does_not_advance_base_decision() {
+    let (workspace, session) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    // A BASE-population decision, resolved through a base-population
+    // reader rather than the workspace's session one.
+    let reader = ContractReader::new();
+    reader.insert("/p/dep.ts", "export const value = 1");
+    let base_outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+    let base_witness = cacheable_signature(&base_outcome);
+    let base_node = decision_node(engine, "/p/main.ts", "./dep", ResolutionPopulation::Base)
+        .expect("base decision");
+    assert_eq!(base_node.population(), ResolutionPopulation::Base);
+
+    WorkspaceAccess::notify_upsert(&workspace, "/p/dep.ts", Arc::from("export const open = 1"));
+
+    assert!(
+        base_witness.validates(
+            engine
+                .capture_published_resolution_world(ResolutionPopulation::Base)
+                .expect("a settled base world")
+                .as_ref()
+        ),
+        "RC-4: an overlay edit lives in its own session root and must not advance a BASE \
+         decision — a base reader sees no overlay at all"
+    );
+    assert!(
+        matches!(session, ResolutionPopulation::Session(_)),
+        "fixture invariant: the overlay edit landed in a session population"
+    );
+}
+
+/// `RULE-1`: propagation advances derived versions and EVICTS NOTHING.
+///
+/// The reverse graph is currency propagation, not cache-invalidation
+/// authority: the resolution slot keeps every candidate it held, and each
+/// entry goes cold only when its own recorded facts fail ordinary
+/// read-side validation.
+///
+/// Mutation recipe: make the propagation step drain the affected
+/// `lazy_resolution_cache` slots. The retained-candidate assertion fails.
+#[test]
+fn reverse_decision_propagation_does_not_evict_cache_entries() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    resolve_in(&workspace, "/p/main.ts", "./dep");
+    let before =
+        engine.lazy_resolution_slot_len_for_test("/p/main.ts", "./dep", CONTEXT, population);
+    assert_eq!(
+        before, 1,
+        "fixture invariant: the slot must hold the admitted candidate"
+    );
+
+    workspace.remove_file("/p/dep.ts");
+
+    assert_eq!(
+        engine.lazy_resolution_slot_len_for_test("/p/main.ts", "./dep", CONTEXT, population),
+        before,
+        "RULE-1: propagation must not drain a single dependent entry — it advances the \
+         derived version and leaves every candidate exactly where it is"
+    );
+    let node = decision_node(engine, "/p/main.ts", "./dep", population).expect("decision");
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .is_some(),
+        "and the decision keeps its edges, so the next mutation still reaches it"
+    );
+}
+
+/// The mutation-to-decision-family matrix: for every mutation family the
+/// plan enumerates, a decision that depends on it is advanced and a
+/// decision that does not is left alone.
+///
+/// Each row names the demand it depends on, so the appearance row roots
+/// on a decision that genuinely probed the appearing path (a resolved
+/// demand stops at its first hit and never probes it).
+///
+/// Mutation recipe: drop any one family's advance from its owning
+/// chokepoint (see
+/// `every_closed_resolution_fact_family_has_a_live_mutation_rail`). That
+/// row's "must advance" assertion fails while the others stay green.
+#[test]
+fn resolution_decision_mutation_matrix_advances_exactly_the_dependent_decisions() {
+    type Mutate = Box<dyn Fn(&crate::memory::MemoryWorkspace)>;
+    let rows: Vec<(&str, &str, Mutate)> = vec![
+        (
+            "content edit of the resolved target",
+            "./dep",
+            Box::new(|workspace: &crate::memory::MemoryWorkspace| {
+                workspace.remove_file("/p/dep.ts");
+            }),
+        ),
+        (
+            "precise appearance beneath a previously-absent probe",
+            "./missing",
+            Box::new(|workspace: &crate::memory::MemoryWorkspace| {
+                workspace.inject_file(
+                    "/p/missing.ts".to_string(),
+                    Arc::from("export const missing = 1"),
+                );
+            }),
+        ),
+        (
+            "DirectoryTreeDirty over the owner's scope",
+            "./dep",
+            Box::new(|workspace: &crate::memory::MemoryWorkspace| {
+                workspace.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty {
+                    prefix: "/p".to_string(),
+                }]);
+            }),
+        ),
+        (
+            "caller-supplied exact-resolution retarget",
+            "./dep",
+            Box::new(|workspace: &crate::memory::MemoryWorkspace| {
+                workspace.engine.set_exact_resolutions(
+                    "/p/main.ts",
+                    vec![ExactResolution {
+                        specifier: "./dep".to_string(),
+                        phase: CONTEXT.phase,
+                        kind: CONTEXT.kind,
+                        resolved_canonical_id: Some("/p/other.ts".to_string()),
+                        possible_canonical_ids: vec!["/p/other.ts".to_string()],
+                    }],
+                );
+            }),
+        ),
+        (
+            "project/context replacement",
+            "./dep",
+            Box::new(|workspace: &crate::memory::MemoryWorkspace| {
+                WorkspaceAccess::configure_resolver(
+                    workspace,
+                    vec![IdeProjectConfig::new(
+                        "/p".to_string(),
+                        "/".to_string(),
+                        Some("/p/tsconfig.json".to_string()),
+                    )],
+                );
+            }),
+        ),
+    ];
+
+    for (family, specifier, mutate) in rows {
+        let (workspace, population) = propagation_fixture();
+        let engine = &workspace.engine;
+
+        let dependent = cacheable_signature(&resolve_in(&workspace, "/p/main.ts", specifier));
+        // An owner in a DIFFERENT directory, so no ancestor scope, probe
+        // or directory-member fact is shared with the row's mutation.
+        workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));
+        workspace.inject_file(
+            "/q/main.ts".to_string(),
+            Arc::from("import { far } from './far'"),
+        );
+        let unrelated = cacheable_signature(&resolve_in(&workspace, "/q/main.ts", "./far"));
+
+        mutate(&workspace);
+        let world = engine
+            .capture_published_resolution_world(population)
+            .expect("a settled world");
+
+        assert!(
+            !dependent.validates(world.as_ref()),
+            "{family}: a decision depending on this mutation must be advanced"
+        );
+        assert!(
+            unrelated.validates(world.as_ref()),
+            "{family}: a decision depending on none of it must stay valid"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Context-change and deep-appearance propagation
+// ---------------------------------------------------------------------
+
+/// `RC-1`: a publication that changes an entry's SELECTED context
+/// advances every decision depending on that context leaf.
+///
+/// `ContextSelection` is versioned in a map the fact ledger's mutators
+/// never touch, so nothing advances to seed from — the publication has to
+/// enumerate the registered context leaves across the swap itself.
+///
+/// Mutation recipe: delete the before/after comparison loop at the end of
+/// `ResolutionWorldRoot::replace_published`. This fails while its
+/// unchanged-selection sibling stays green.
+#[test]
+fn resolution_decision_context_replace_advances_version() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let witness = cacheable_signature(&resolve_in(&workspace, "/p/main.ts", "./dep"));
+
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            Some("/p/tsconfig.json".to_string()),
+        )],
+    );
+
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a changed selected context must advance the decisions that observed it"
+    );
+}
+
+/// …and a republication that changes NO selection leaves them valid.
+///
+/// Mutation recipe: seed every registered context leaf unconditionally
+/// instead of only the changed ones. This fails while its sibling above
+/// stays green — the pair is what distinguishes "enumerates" from
+/// "invalidates on every publish".
+#[test]
+fn resolution_decision_context_replace_unchanged_selection_stays_valid() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let witness = cacheable_signature(&resolve_in(&workspace, "/p/main.ts", "./dep"));
+
+    // The identical project set, republished.
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            None,
+        )],
+    );
+
+    assert!(
+        witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a republication that changes no selection must leave every decision valid — a \
+         publish-time blanket invalidation would make every project touch a full recompute"
+    );
+}
+
+/// `RC-1`: a dependency APPEARING beneath a probe a miss recorded as
+/// absent advances that miss's decision, with no `DirectoryTreeDirty` and
+/// no recovery-scope advance anywhere.
+///
+/// Mutation recipe: stop advancing the exact `PathProbe` in
+/// `update_base_path_facts`. This fails.
+#[test]
+fn resolution_decision_negative_deep_appearance_advances_without_tree_dirty() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+
+    let miss = resolve_in(&workspace, "/p/main.ts", "./missing");
+    assert!(
+        miss.result().is_none(),
+        "fixture invariant: the demand must be an admitted MISS"
+    );
+    let witness = cacheable_signature(&miss);
+
+    let recovery = ResolutionFactKey::RecoveryScope {
+        canonical_prefix: CanonicalResolutionId::new("/p"),
+        population: base,
+    };
+    let recovery_before = engine.resolution_fact_version_for_test(base, &recovery);
+
+    workspace.inject_file(
+        "/p/missing.ts".to_string(),
+        Arc::from("export const missing = 1"),
+    );
+
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "the appearance moved the exact probe the miss observed, so its decision must advance"
+    );
+    assert_eq!(
+        engine.resolution_fact_version_for_test(base, &recovery),
+        recovery_before,
+        "and it must reach the decision through the PRECISE probe — advancing the ancestor \
+         recovery scope would destroy every sibling witness under /p"
+    );
+}
+
+/// `RC-1`: a path appearing beneath an ancestor recorded as having NO
+/// realpath advances that ancestor's `Realpath` fact.
+///
+/// Mutation recipe: delete the `advance_absent_realpath_ancestors` call
+/// from `update_base_path_facts`. This fails.
+#[test]
+fn resolution_decision_absent_realpath_ancestor_appearance_advances() {
+    let workspace = crate::memory::MemoryWorkspace::new(Default::default());
+    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    WorkspaceAccess::configure_resolver(&workspace, vec![project]);
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+    let ancestor = ResolutionFactKey::Realpath {
+        requested: CanonicalResolutionId::new("/p/nested"),
+        population: base,
+    };
+
+    let miss = resolve_in(&workspace, "/p/main.ts", "./nested/dep");
+    assert!(
+        miss.result().is_none(),
+        "fixture invariant: nothing exists under /p/nested yet"
+    );
+    // Record the ancestor as KNOWN-ABSENT. Staged explicitly rather than
+    // hoped for: the resolver realpaths candidate FILES, so whether it
+    // ever records a directory ancestor is incidental, and a fixture that
+    // depended on it would silently stop staging the precondition. The
+    // write is a Retain — recording a baseline advances nothing.
+    engine.mutate_resolution_world(|world| {
+        world.realpaths.insert("/p/nested".to_string(), None);
+        ((), crate::engine::WorldWrite::Retain)
+    });
+    assert!(
+        matches!(
+            engine
+                .capture_published_resolution_world(base)
+                .expect("a settled world")
+                .base
+                .realpaths
+                .get("/p/nested"),
+            Some(None)
+        ),
+        "fixture invariant: the ancestor must be recorded as KNOWN-ABSENT — an unrecorded \
+         ancestor contradicts nothing and must NOT advance"
+    );
+    let before = engine.resolution_fact_version_for_test(base, &ancestor);
+
+    workspace.inject_file(
+        "/p/nested/dep.ts".to_string(),
+        Arc::from("export const nested = 1"),
+    );
+
+    assert_ne!(
+        engine.resolution_fact_version_for_test(base, &ancestor),
+        before,
+        "the appearance made /p/nested exist, so an ancestor recorded as having NO realpath \
+         must advance — a witness that observed it absent is otherwise never invalidated"
+    );
+
+    // The negative half: an ancestor that was never recorded contradicts
+    // nothing and must stay untouched.
+    let unrecorded = ResolutionFactKey::Realpath {
+        requested: CanonicalResolutionId::new("/p/other-nested"),
+        population: base,
+    };
+    assert_eq!(
+        engine.resolution_fact_version_for_test(base, &unrecorded),
+        ResolutionFactVersion::INITIAL,
+        "an ancestor with no recorded value must not be advanced by an appearance"
+    );
+}
+
+/// `RC-1`: an IMPRECISE watcher recovery advances the ancestor recovery
+/// scope, and through it every decision beneath.
+///
+/// Mutation recipe: delete the `RecoveryScope` advance from
+/// `mutate_content_subtree`. This fails while
+/// `precise_path_mutation_preserves_recovery_scope_initial` stays green —
+/// the pair is what keeps the two mutation classes apart.
+#[test]
+fn resolution_decision_directory_tree_dirty_advances_via_recovery_scope() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+    let recovery = ResolutionFactKey::RecoveryScope {
+        canonical_prefix: CanonicalResolutionId::new("/p"),
+        population: base,
+    };
+
+    let witness = cacheable_signature(&resolve_in(&workspace, "/p/main.ts", "./dep"));
+    let before = engine.resolution_fact_version_for_test(base, &recovery);
+
+    workspace.apply_changes(vec![WorkspaceChange::DirectoryTreeDirty {
+        prefix: "/p".to_string(),
+    }]);
+
+    assert_ne!(
+        engine.resolution_fact_version_for_test(base, &recovery),
+        before,
+        "an imprecise recovery advances the scope it names"
+    );
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "and the scope reaches every decision that observed it"
+    );
+}
+
+/// The negative half: a PRECISE per-path mutation leaves every ancestor
+/// recovery scope at `INITIAL`.
+///
+/// Mutation recipe: add the ancestor `RecoveryScope` keys to
+/// `Engine::path_fact_keys`. This fails.
+#[test]
+fn precise_path_mutation_preserves_recovery_scope_initial() {
+    let (workspace, _population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let base = ResolutionPopulation::Base;
+
+    resolve_in(&workspace, "/p/main.ts", "./dep");
+    workspace.inject_file(
+        "/p/precise.ts".to_string(),
+        Arc::from("export const precise = 1"),
+    );
+
+    for prefix in ["/p", "/"] {
+        assert_eq!(
+            engine.resolution_fact_version_for_test(
+                base,
+                &ResolutionFactKey::RecoveryScope {
+                    canonical_prefix: CanonicalResolutionId::new(prefix),
+                    population: base,
+                }
+            ),
+            ResolutionFactVersion::INITIAL,
+            "a precise appearance must advance NO ancestor recovery scope ({prefix}) — \
+             witnesses OBSERVE recovery scopes, and only an imprecise watcher mutation \
+             advances them"
+        );
+    }
+}
+
+/// A precise mutation of a path no decision observed leaves it valid.
+///
+/// The sibling of `resolution_decision_unrelated_mutation_stays_valid`
+/// scoped to the PATH families specifically: the appearance advances real
+/// probe/realpath/directory facts, and none of them is an edge here.
+///
+/// Mutation recipe: advance the ancestor `RecoveryScope` on a precise
+/// mutation. Every decision under `/` then depends on it and this fails.
+#[test]
+fn resolution_decision_unrelated_path_mutation_stays_valid() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));
+    let witness = cacheable_signature(&resolve_in(&workspace, "/q/main.ts", "./far"));
+
+    workspace.inject_file(
+        "/p/elsewhere.ts".to_string(),
+        Arc::from("export const elsewhere = 1"),
+    );
+
+    assert!(
+        witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a precise appearance in an unrelated directory must leave this decision valid"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Owner resolution set
+// ---------------------------------------------------------------------
+
+fn owner_set_key(owner: &str, population: ResolutionPopulation) -> ResolutionFactKey {
+    ResolutionFactKey::owner_resolution_set(owner, population)
+}
+
+fn owner_set_fact(
+    workspace: &crate::memory::MemoryWorkspace,
+    owner: &str,
+) -> Option<crate::FactVersionRef> {
+    WorkspaceAccess::publish_owner_resolution_set(workspace, owner)
+}
+
+/// The owner set records CHILD DECISIONS, never their flattened leaves,
+/// and it exists only once its single publisher mints it.
+///
+/// Mutation recipe: make `Engine::publish_owner_resolution_set` record
+/// each child's own direct edges instead of the child nodes. The
+/// derived-only assertion fails.
+#[test]
+fn owner_resolution_set_records_child_decisions_not_flattened_leaves() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let owner = "/p/main.ts";
+    let node = owner_set_key(owner, population);
+
+    resolve_in(&workspace, owner, "./dep");
+    resolve_in(&workspace, owner, "./other");
+
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .is_none(),
+        "resolving the owner's specifiers must NOT mint an owner set as a side effect — \
+         the node has exactly one publisher"
+    );
+
+    assert!(owner_set_fact(&workspace, owner).is_some());
+    let edges = engine
+        .decision_direct_dependencies_for_test(population, &node)
+        .expect("the publisher mints the node's edges");
+
+    assert!(
+        !edges.is_empty(),
+        "the owner set must record the owner's decisions"
+    );
+    for edge in &edges {
+        assert!(
+            matches!(edge, ResolutionFactKey::Decision { .. }),
+            "every owner-set edge must be a child DECISION; got {edge:?}"
+        );
+    }
+    assert_eq!(
+        edges.len(),
+        2,
+        "one edge per resolved specifier — the witness is bounded by the owner's own \
+         decision count, not by what those decisions transitively reach; got {edges:?}"
+    );
+    for specifier in ["./dep", "./other"] {
+        let child = decision_node(engine, owner, specifier, population).expect("child decision");
+        assert!(edges.contains(&child), "{specifier} must be a child edge");
+    }
+}
+
+/// Any child decision advancing advances the owner set.
+///
+/// Mutation recipe: publish the owner set with an EMPTY edge set. The
+/// advance assertion fails.
+#[test]
+fn owner_resolution_set_advances_with_any_child_decision() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let owner = "/p/main.ts";
+    let node = owner_set_key(owner, population);
+
+    resolve_in(&workspace, owner, "./dep");
+    resolve_in(&workspace, owner, "./other");
+    let fact = owner_set_fact(&workspace, owner).expect("published owner set");
+    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+    assert!(witness.validates(
+        engine
+            .capture_published_resolution_world(population)
+            .expect("a settled world")
+            .as_ref()
+    ));
+
+    // Mutate a leaf under ONE of the two children.
+    workspace.remove_file("/p/other.ts");
+
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "a mutation reaching ANY child decision must advance the owner set — the owner \
+         witness stands in for every one of them"
+    );
+    assert_ne!(
+        engine.resolution_fact_version_for_test(population, &node),
+        ResolutionFactVersion::INITIAL
+    );
+}
+
+/// A decision belonging to a DIFFERENT owner leaves this owner set alone.
+///
+/// Mutation recipe: drop the owner component from the owner-decision
+/// index key, so every decision lands in one bucket. This fails.
+#[test]
+fn owner_resolution_set_unchanged_for_unrelated_decision() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let owner = "/p/main.ts";
+
+    resolve_in(&workspace, owner, "./dep");
+    let fact = owner_set_fact(&workspace, owner).expect("published owner set");
+    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+
+    // A second owner, in its own directory, with its own decision.
+    workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));
+    resolve_in(&workspace, "/q/main.ts", "./far");
+    workspace.remove_file("/q/far.ts");
+
+    assert!(
+        witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "another owner's decision advancing must leave this owner set valid"
+    );
+    let other = owner_set_key("/q/main.ts", population);
+    assert!(
+        engine
+            .decision_direct_dependencies_for_test(population, &other)
+            .is_none(),
+        "and resolving for another owner must not mint an owner set for it either"
+    );
+}
+
+/// The publication is idempotent on an unchanged child set, so asking for
+/// a warm owner surface does not supersede the view that asked.
+///
+/// Mutation recipe: drop the `unchanged` early return in
+/// `Engine::publish_owner_resolution_set`. The republication then
+/// replaces the edges on every call; the world-identity assertion below
+/// still holds (publication is a Retain), but the recorded-edge identity
+/// churns — assert on the edge set to keep the check honest.
+#[test]
+fn owner_resolution_set_publication_is_idempotent_on_an_unchanged_child_set() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+    let owner = "/p/main.ts";
+    let node = owner_set_key(owner, population);
+
+    resolve_in(&workspace, owner, "./dep");
+    let first = owner_set_fact(&workspace, owner).expect("published owner set");
+    let first_edges = engine
+        .decision_direct_dependencies_for_test(population, &node)
+        .expect("edges");
+
+    let second = owner_set_fact(&workspace, owner).expect("republished owner set");
+    let second_edges = engine
+        .decision_direct_dependencies_for_test(population, &node)
+        .expect("edges");
+
+    assert_eq!(
+        first, second,
+        "an unchanged child set must yield the identical fact ref, so a consumer rooting \
+         on it warm-hits through its own view"
+    );
+    assert_eq!(first_edges.len(), second_edges.len());
+
+    // A NEW child decision does change it.
+    resolve_in(&workspace, owner, "./other");
+    owner_set_fact(&workspace, owner).expect("republished owner set");
+    assert_eq!(
+        engine
+            .decision_direct_dependencies_for_test(population, &node)
+            .expect("edges")
+            .len(),
+        2,
+        "a new child decision must enter the owner set"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Context-membership measurement
+// ---------------------------------------------------------------------
+
+/// `CTX-1`: one published index performs ONE project-membership walk per
+/// canonical path, however many resolutions select a context for it.
+///
+/// Selecting a path's resolve context reads the published index's resolver
+/// membership, its project list and its two per-project tables, and
+/// nothing else — so it is a pure function of `(index, path)` and repeating
+/// it is pure waste. Every resolution attempt from an importer selects that
+/// importer's context, so `n` demands from one importer against one index
+/// currently cost `n` walks.
+///
+/// The fixture drives TWO importers, each with two demands, so a service
+/// that only ever recorded its first path would still be caught; and it
+/// asserts a never-demanded path records ZERO, so a service that
+/// pre-seeded or fabricated rows could not make the counts above look
+/// right.
+///
+/// Before the memo this fixture measured SIX walks for every one of the
+/// four paths its four demands touch.
+///
+/// Mutation recipe: delete `row.selected = Some(selected.clone());` from
+/// `PublishedContextSelection::selected`. Every demand walks again, the
+/// tally climbs, and this fails — while
+/// `resolution_decision_context_replace_unchanged_selection_stays_valid`
+/// stays green, because re-walking is waste, not wrong answers.
+#[test]
+fn context_selection_evaluates_membership_once_per_path_per_root() {
+    let (workspace, _population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    resolve_in(&workspace, "/p/main.ts", "./dep");
+    resolve_in(&workspace, "/p/main.ts", "./other");
+    resolve_in(&workspace, "/p/second.ts", "./dep");
+    resolve_in(&workspace, "/p/second.ts", "./other");
+
+    let published = engine
+        .load_published()
+        .expect("a configured engine publishes an index");
+    assert_eq!(
+        published.context_membership_table_clears(),
+        0,
+        "fixture invariant: the per-path table must not have overflowed, or the counts \
+         below are counts since the last clear rather than since publication"
+    );
+    for importer in ["/p/main.ts", "/p/second.ts"] {
+        assert_eq!(
+            published.context_membership_evaluations(importer),
+            1,
+            "{importer}: membership is a pure function of the published index and the \
+             path, so every demand after the first must reuse the recorded selection",
+        );
+    }
+    assert_eq!(
+        published.context_membership_evaluations("/p/never-demanded.ts"),
+        0,
+        "and a path no demand selected must record no walk — a service that pre-seeded \
+         or fabricated rows would make the counts above meaningless"
+    );
+}
+
+/// `CTX-1`: the memo belongs to the published INDEX, so every immutable
+/// world-root clone taken over that index's lifetime shares it.
+///
+/// `mutate_resolution_world` replaces the world root with a clone on every
+/// mutation. A memo owned by the world root would be re-created — or, if
+/// shared by `Arc`, would need its own reset discipline — on each of them.
+/// Owning it on the index makes the sharing structural: the clone carries
+/// the same `Arc<PublishedRoot>`, so a selection recorded before an
+/// unrelated mutation still answers after it.
+///
+/// Mutation recipe: make `impl Default for PublishedContextSelection`
+/// build `Self::with_cap(0)`, so every published index drops its rows on
+/// the next insert and retains nothing across the clone. This fails —
+/// alongside `context_selection_evaluates_membership_once_per_path_per_root`,
+/// since a memo that retains nothing also walks per demand; what this test
+/// adds is the asserted precondition that the immutable root really was
+/// replaced while the index stayed put.
+#[test]
+fn context_selection_memo_shared_by_unrelated_root_clone() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    resolve_in(&workspace, "/p/main.ts", "./dep");
+    let published = engine.load_published().expect("a published index");
+    assert_eq!(
+        published.context_membership_evaluations("/p/main.ts"),
+        1,
+        "fixture invariant: the first demand must warm this index's memo, or there is \
+         nothing for the clone to share"
+    );
+
+    let before = engine
+        .capture_published_resolution_world(population)
+        .expect("a settled world");
+
+    // An UNRELATED mutation: a path no decision here observed. It replaces
+    // the immutable world root while leaving the published index alone.
+    workspace.inject_file(
+        "/p/unrelated.ts".to_string(),
+        Arc::from("export const unrelated = 1"),
+    );
+
+    let after = engine
+        .capture_published_resolution_world(population)
+        .expect("a settled world");
+    assert!(
+        !Arc::ptr_eq(&before.base, &after.base),
+        "fixture invariant: the mutation must actually replace the immutable root, or \
+         the sharing claim is vacuous"
+    );
+    assert!(
+        Arc::ptr_eq(&published, &engine.load_published().expect("index")),
+        "fixture invariant: and it must leave the published index in place — this test \
+         is about the clone, not about republication"
+    );
+
+    resolve_in(&workspace, "/p/main.ts", "./other");
+
+    assert_eq!(
+        published.context_membership_evaluations("/p/main.ts"),
+        1,
+        "the new world root shares the index's memo: a mutation that changed nothing \
+         about project membership must not cost a second membership walk"
+    );
+}
+
+/// `CTX-1`: a publication resets the memo, because the new index owns a
+/// new one.
+///
+/// The reset is structural rather than performed: `replace_published`
+/// installs a different `PublishedRoot`, and a `PublishedRoot`'s memo is
+/// private, is absent from every constructor signature, and starts empty.
+/// What is observable is the consequence — the incoming index answers the
+/// publication's own context enumeration from ITS OWN walk, and the
+/// outgoing index keeps its records.
+///
+/// Mutation recipe: replace `published.context_selection()` in
+/// `selected_context_for_path` with a process-wide
+/// `static SHARED: OnceLock<PublishedContextSelection>`. Every per-index
+/// tally then reads zero and this fails at the first assertion.
+#[test]
+fn replace_published_resets_context_selection_memo() {
+    let (workspace, _population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    resolve_in(&workspace, "/p/main.ts", "./dep");
+    let outgoing = engine.load_published().expect("a published index");
+    assert_eq!(
+        outgoing.context_membership_evaluations("/p/main.ts"),
+        1,
+        "fixture invariant: the outgoing index must be warm for this importer"
+    );
+
+    // Republish the IDENTICAL project set: a new index all the same.
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            None,
+        )],
+    );
+    let incoming = engine.load_published().expect("a published index");
+
+    assert!(
+        !Arc::ptr_eq(&outgoing, &incoming),
+        "fixture invariant: the republication must install a different index"
+    );
+    assert_eq!(
+        incoming.context_membership_evaluations("/p/main.ts"),
+        1,
+        "the incoming index answered the publication's context enumeration from its OWN \
+         walk — a memo carried across the swap would have replayed the outgoing index's \
+         selection and recorded no walk at all"
+    );
+    assert_eq!(
+        outgoing.context_membership_evaluations("/p/main.ts"),
+        1,
+        "and the outgoing index keeps its own records: the reset is per-index, not a \
+         global flush, so the pre-swap half of the enumeration still hits its memo"
+    );
+
+    resolve_in(&workspace, "/p/main.ts", "./other");
+    assert_eq!(
+        incoming.context_membership_evaluations("/p/main.ts"),
+        1,
+        "and the incoming index memoizes from that first walk like any other"
+    );
+}
+
+/// `CTX-1`: a typed provenance error and a complete "no owning project"
+/// are BOTH memoized, as themselves.
+///
+/// The two are opposite kinds of answer — one is a gap in the index, one
+/// is a complete read of a complete index — and a memo that collapsed
+/// either into the other, or declined to store errors and retried them per
+/// demand, would be a correctness bug rather than a slow path: the error
+/// is what refuses admission.
+///
+/// Mutation recipe: store `Ok(ResolveContextId::unowned())` instead of
+/// `selected` in `PublishedContextSelection::selected`. The second demand
+/// then admits a witness whose project identity was never observed, and
+/// both the typed-variant and the non-admission assertions fail.
+#[test]
+fn context_selection_error_and_no_project_are_memoized_typed() {
+    let engine = engine_with_fallback_project("/p");
+    let reader = ContractReader::new();
+    reader.insert("/p/dep.ts", "export const value = 1");
+    reader.insert("/outside/dep.ts", "export const value = 1");
+    let snapshot = engine
+        .load_published()
+        .expect("configured engine publishes a snapshot")
+        .snapshot
+        .clone();
+    // An index with NO project identity / environment rows: an owning
+    // project it cannot complete, and an unowned path it can.
+    engine.mutate_resolution_world(|world| {
+        world.replace_published(
+            Arc::new(crate::published_state::PublishedRoot::new_vfs_only(
+                snapshot,
+            )),
+            &[],
+            || engine.next_resolution_fact_version(),
+        );
+        ((), true)
+    });
+    let world = engine
+        .capture_published_resolution_world(ResolutionPopulation::Base)
+        .expect("a settled world");
+    let published = world
+        .base
+        .published
+        .clone()
+        .expect("the table-less index is installed");
+
+    let owned_first =
+        crate::resolution_currency::selected_context_for_path(world.base.as_ref(), "/p/main.ts");
+    assert_eq!(
+        owned_first,
+        Err(crate::resolution_currency::ContextProvenanceError::ProjectIdentityMissing),
+        "fixture invariant: an owning project with no identity row is a typed gap"
+    );
+    let owned_second =
+        crate::resolution_currency::selected_context_for_path(world.base.as_ref(), "/p/main.ts");
+    assert_eq!(
+        owned_second, owned_first,
+        "the memoized answer must be the SAME typed variant, not a re-derived or \
+         collapsed one"
+    );
+    assert_eq!(
+        published.context_membership_evaluations("/p/main.ts"),
+        1,
+        "and it must be memoized rather than re-walked per demand"
+    );
+
+    let unowned_first = crate::resolution_currency::selected_context_for_path(
+        world.base.as_ref(),
+        "/outside/main.ts",
+    );
+    assert_eq!(
+        unowned_first,
+        Ok(crate::resolution_currency::ResolveContextId::unowned()),
+        "fixture invariant: no owning project is a complete observation, not a gap"
+    );
+    assert_eq!(
+        crate::resolution_currency::selected_context_for_path(
+            world.base.as_ref(),
+            "/outside/main.ts"
+        ),
+        unowned_first,
+        "\"no owning project\" is memoized as the unowned context, not as absence"
+    );
+    assert_eq!(
+        published.context_membership_evaluations("/outside/main.ts"),
+        1,
+        "negative selection is memoized on the same terms as positive selection"
+    );
+
+    // The public boundary: the memoized error must keep refusing admission.
+    for pass in ["first", "second"] {
+        let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance),
+            "{pass} demand: a memoized typed provenance gap must refuse admission every \
+             time — a memo that answered Ok would admit an unprovenanced witness"
+        );
+    }
+    assert_eq!(
+        published.context_membership_evaluations("/p/main.ts"),
+        1,
+        "and those demands rode the memo rather than re-walking membership"
+    );
+}
+
+/// `CTX-1` with `RC-1`: a publication that changes an entry's selected
+/// context still advances the decision that depends on it, WITH the memo
+/// warm beforehand.
+///
+/// This is the memo's regression: `replace_published` decides what
+/// changed by asking for the selection before and after the swap, so a
+/// memo that survived the swap would answer the after-question with the
+/// before-answer, find no change, seed nothing, and leave every dependent
+/// decision valid against a world whose selection had moved. The
+/// pre-publication warm-up is the load-bearing part of the fixture — a
+/// cold memo could not stale-answer even if it were shared.
+///
+/// It rides the inherited machinery end to end: the publication's context
+/// enumeration seeds `ResolutionFactRoot::seed_propagation`, the base
+/// publication protocol propagates over the reverse edges into the live
+/// session graph, and the decision node's own version is what moves.
+///
+/// Two mutation recipes, one per half.
+///
+/// Propagation: replace the whole `for (key, was) in registered … ` seed
+/// loop at the end of `ResolutionWorldRoot::replace_published` with
+/// `let _ = (registered, before);`. The enumeration then asks the incoming
+/// index nothing, so the fresh-walk assertion fires first; neutralise that
+/// one and the decision-node assertion fires next, `ResolutionFactVersion(0)`
+/// against `ResolutionFactVersion(0)` — the decision never leaves INITIAL.
+/// Both halves were run.
+///
+/// Memo scoping: the static-`OnceLock` shared memo from
+/// `replace_published_resets_context_selection_memo`. This test then fails
+/// on its warm-memo precondition, while the inherited
+/// `resolution_decision_context_replace_advances_version` stays GREEN —
+/// that inherited test reaches its verdict through the fresh
+/// `ResolveContextId` the reconfiguration mints, so it cannot see a memo
+/// that is not index-scoped, and this test can. Under both recipes
+/// `resolution_decision_context_replace_unchanged_selection_stays_valid`
+/// stays green: the failure mode is an invisible change, not a noisy one.
+#[test]
+fn context_selection_change_advances_dependent_decision() {
+    let (workspace, population) = propagation_fixture();
+    let engine = &workspace.engine;
+
+    let witness = cacheable_signature(&resolve_in(&workspace, "/p/main.ts", "./dep"));
+    let node = decision_node(engine, "/p/main.ts", "./dep", population)
+        .expect("an admitted cold resolution publishes its decision node");
+    let version_before = engine.resolution_fact_version_for_test(population, &node);
+
+    let outgoing = engine.load_published().expect("a published index");
+    assert_eq!(
+        outgoing.context_membership_evaluations("/p/main.ts"),
+        1,
+        "fixture invariant: the memo must be WARM for this importer before the \
+         publication, or a stale-answering memo would have nothing stale to answer with"
+    );
+
+    // The same project root with a tsconfig: a different selected context.
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![IdeProjectConfig::new(
+            "/p".to_string(),
+            "/".to_string(),
+            Some("/p/tsconfig.json".to_string()),
+        )],
+    );
+
+    let incoming = engine.load_published().expect("a published index");
+    assert!(
+        !Arc::ptr_eq(&outgoing, &incoming),
+        "fixture invariant: the reconfiguration must install a different index"
+    );
+    assert_eq!(
+        incoming.context_membership_evaluations("/p/main.ts"),
+        1,
+        "the enumeration asked the INCOMING index and it walked: that fresh walk is what \
+         lets the comparison see a change at all"
+    );
+    assert_ne!(
+        engine.resolution_fact_version_for_test(population, &node),
+        version_before,
+        "the changed selection must advance the DECISION NODE itself, through the \
+         reverse-edge propagation the publication seeds"
+    );
+    assert!(
+        !witness.validates(
+            engine
+                .capture_published_resolution_world(population)
+                .expect("a settled world")
+                .as_ref()
+        ),
+        "and every witness rooted on that decision must stop validating"
+    );
 }

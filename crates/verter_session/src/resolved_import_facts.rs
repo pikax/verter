@@ -55,6 +55,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::Hash16;
 use verter_workspace::FactVersionRef;
 
+use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::{StoreView, ValidatedFactCache};
 use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
 
@@ -235,6 +236,21 @@ impl ResolvedImportFacts {
 #[derive(Debug, Default)]
 pub struct ResolvedImportFactsDb {
     entries: ValidatedFactCache<ResolvedImportFactsKey, ResolvedImportFacts>,
+    /// Membership generation of the `SemanticImports` compaction domain.
+    ///
+    /// This store is the domain's SOLE write chokepoint, so one counter
+    /// covers it. It is BRACKETED rather than post-incremented: the
+    /// window between a candidate entering a slot and a naive counter
+    /// moving is exactly a window in which a scope can read the new
+    /// membership, re-read the old generation, detect no movement, and
+    /// admit a terminal aggregate asserting the domain held at a
+    /// generation its facts do not come from. See
+    /// [`BracketedGeneration`].
+    ///
+    /// [`Self::admit`] and [`Self::clear`] are the only mutators of
+    /// `entries`, and both run inside the bracket — which is what makes
+    /// the private field a rail rather than a convention.
+    generation: BracketedGeneration,
     /// Producer-admission provenance counter — positive (resolved)
     /// entries successfully admitted.
     ///
@@ -289,34 +305,51 @@ impl ResolvedImportFactsDb {
         self.entries.get_if_valid(key, view)
     }
 
-    /// The bundle currently retained for `key`, whatever its witness.
+    /// `true` when ONE retained candidate carries BOTH `facts` as its
+    /// witness AND a payload equal to `value`.
     ///
-    /// Producer-only: used to recognise a byte-identical recomputation
-    /// and skip it. Readers must go through [`Self::get_if_valid`] —
-    /// this deliberately performs no validation and never serves a
-    /// consumer.
+    /// Producer-only: a recomputation that reproduces a retained
+    /// candidate WHOLE is pure churn, and re-admitting it would age a
+    /// genuinely distinct concurrent candidate out of the bounded slot.
+    /// The conjunction is evaluated per candidate over ONE slot load, so
+    /// the decision can never be satisfied by two different candidates
+    /// and can never straddle a concurrent slot mutation — either would
+    /// make the producer drop a `(witness, payload)` pair that nothing
+    /// retains.
     #[must_use]
-    pub(crate) fn retained_bundle(
+    pub(crate) fn holds_candidate_matching(
+        &self,
+        key: &ResolvedImportFactsKey,
+        facts: &[FactVersionRef],
+        value: &ResolvedImportFacts,
+    ) -> bool {
+        self.entries
+            .holds_candidate_with_signature_and_value(key, facts, value)
+    }
+
+    /// The payload of the LAST candidate retained for `key`, whatever its
+    /// witness. Test-only: fixtures use it to arrange and inspect slot
+    /// state. It performs no validation, correlates nothing, and must
+    /// never inform a production decision — that is precisely the read
+    /// whose uncorrelated use this module's dedupe guard replaced.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn retained_bundle_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
     ) -> Option<Arc<ResolvedImportFacts>> {
         self.entries.lookup_any_candidate(key)
     }
 
-    /// `true` when the slot already retains a candidate admitted under
-    /// exactly `facts`.
-    ///
-    /// Producer-only: a recomputation that reproduces both the retained
-    /// payload and its witness is pure churn, and re-admitting it would
-    /// age a genuinely distinct concurrent candidate out of the bounded
-    /// slot.
+    /// Every retained candidate's witness, in slot order. Test-only slot
+    /// inspection.
+    #[cfg(test)]
     #[must_use]
-    pub(crate) fn holds_candidate_with_signature(
+    pub(crate) fn candidate_signatures_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
-        facts: &[FactVersionRef],
-    ) -> bool {
-        self.entries.holds_candidate_with_signature(key, facts)
+    ) -> Vec<Arc<[FactVersionRef]>> {
+        self.entries.candidate_signatures_for_key(key)
     }
 
     /// Test-support seeding: admit `value` under `facts` unless a
@@ -344,15 +377,44 @@ impl ResolvedImportFactsDb {
     ///
     /// Strict admission: an empty or over-cap witness is refused
     /// (`ReturnOnly`) rather than admitted unrooted.
+    ///
+    /// The whole insertion runs inside the domain's generation bracket,
+    /// and the generation advances for exactly the outcomes that change
+    /// what a recorded fact can depend on:
+    ///
+    /// * a candidate entering the slot ADVANCES — including when it ages
+    ///   the oldest candidate out, because eviction happens inside this
+    ///   same insertion and so is never an admit-free validity flip;
+    /// * a REFUSED admission (empty or over-cap witness) does not — no
+    ///   membership moved;
+    /// * an identical-candidate SKIP does not reach here at all: the
+    ///   producer's dedupe returns before calling this, so a
+    ///   recomputation that reproduces a retained candidate whole costs
+    ///   no reader their compaction.
     pub(crate) fn admit(
         &self,
         key: ResolvedImportFactsKey,
         value: Arc<ResolvedImportFacts>,
         facts: Vec<FactVersionRef>,
     ) -> bool {
-        self.entries
-            .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
-            .is_some()
+        self.generation.mutate(|| {
+            let admitted = self
+                .entries
+                .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
+                .is_some();
+            (admitted, admitted)
+        })
+    }
+
+    /// The domain's current stable membership generation, or `None`
+    /// while an admission is in flight.
+    ///
+    /// `None` disarms compaction for the reading scope rather than
+    /// guessing — the same fail-safe direction as a domain with no
+    /// producer at all.
+    #[must_use]
+    pub(crate) fn stable_generation(&self) -> Option<u64> {
+        self.generation.stable()
     }
 
     /// Number of occupied slots. Used by tests + diagnostics.
@@ -372,8 +434,18 @@ impl ResolvedImportFactsDb {
     }
 
     /// Drop every cached candidate. Used by GC sweeps and test setup.
+    ///
+    /// Advances the domain generation unconditionally, inside the same
+    /// bracket as [`Self::admit`]. A clear removes membership every bit
+    /// as much as an admit adds it, so a compacted witness must not
+    /// survive one; and unlike admission this is not a hot path, so
+    /// there is nothing to gain from distinguishing a clear of an
+    /// already-empty store.
     pub fn clear(&self) {
-        self.entries.clear();
+        self.generation.mutate(|| {
+            self.entries.clear();
+            ((), true)
+        });
     }
 
     /// Bump the positive-admission provenance counter. Called by the
@@ -430,3 +502,7 @@ impl ResolvedImportFactsDb {
         self.namespace_admissions.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+#[path = "resolved_import_facts_generation_tests.rs"]
+mod resolved_import_facts_generation_tests;

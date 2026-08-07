@@ -150,6 +150,7 @@ impl ComponentMetaQueryEngine<'_> {
                         ProjectionMode::Navigate,
                     ),
                 )
+                .at_optional_boundary()
                 .map(|hot: crate::semantic_query::HotTypeRef| hot.node())?
         };
         // The one-level view through the shared empty-path Shallow surface

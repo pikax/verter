@@ -109,8 +109,9 @@ fn shallow_binding_type(
         host,
         owner,
         binding
-            .type_source
-            .present()
+            .publication
+            .result()
+            .selected_source()
             .unwrap_or_else(|| panic!("binding `{}` must publish a typed source", binding.name)),
     )
     .unwrap_or_else(|| {
@@ -134,8 +135,9 @@ fn demand_binding_type(
         host,
         owner,
         binding
-            .type_source
-            .present()
+            .publication
+            .result()
+            .selected_source()
             .unwrap_or_else(|| panic!("binding `{}` must publish a typed source", binding.name)),
     )
     .unwrap_or_else(|| {
@@ -538,7 +540,16 @@ defineSlots<Slots>()
         .expect("component meta");
     let binding = slot_binding(&meta, "default", "value").expect("expected default.value binding");
     assert!(
-        binding.raw_type.is_none() || binding.raw_type.as_deref() != Some("undefined"),
+        binding
+            .publication
+            .evidence()
+            .map(|evidence| evidence.text().to_string())
+            .is_none()
+            || binding
+                .publication
+                .evidence()
+                .map(verter_type_expr::AuthoredTypeEvidence::text)
+                != Some("undefined"),
         "binding raw_type leaked undefined (defensive negative)",
     );
     // Required-wins: under TS intersection, the binding must NOT be
@@ -1277,7 +1288,7 @@ defineSlots<Slots>()
 // `binding.source == SlotBindingSource::GraphNative` for an inline
 // `defineSlots` carrier.
 #[test]
-fn slot_bindings_parser_path_metadata_merged_with_graph_type() {
+fn slot_bindings_parser_display_cannot_replace_graph_authority_or_mint_evidence() {
     let host = build_test_host();
     upsert_vue(
         &host,
@@ -1297,13 +1308,17 @@ defineSlots<{
         .get_component_meta("/src/Comp.vue")
         .expect("component meta");
     let row = slot_binding(&meta, "default", "x").expect("default.x binding must publish");
-    // Parser-path display metadata must survive the merge onto the
-    // graph-native row.
+    // The parser has display text but no locator for this nested binding.
+    // It therefore cannot mint authored evidence or replace graph authority.
     assert_eq!(
-        row.raw_type.as_deref(),
-        Some("string"),
-        "parser-path raw_type must be preserved on the merged row; observed {:?}",
-        row.raw_type,
+        row.publication
+            .evidence()
+            .map(verter_type_expr::AuthoredTypeEvidence::text),
+        None,
+        "display text without a locator is not authored evidence; observed {:?}",
+        row.publication
+            .evidence()
+            .map(|evidence| evidence.text().to_string()),
     );
     // The published typed source stays the shallow SyntheticSlotBinding
     // carrier (shallow-by-default for graph-native no-payload rows).
@@ -1977,8 +1992,9 @@ defineSlots<{ default(props: SlotProps): any }>()
     // Canonical identity is preserved on the published carrier: the
     // authored use-site slot anchors on the DECLARING file + symbol.
     let source = row
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("default.message must publish a typed source");
     let verter_type_expr::facts::SemanticTypeSource::Authored(
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),

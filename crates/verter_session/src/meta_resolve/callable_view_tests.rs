@@ -119,7 +119,7 @@ fn object_surface(
             merge_role: Default::default(),
         })
         .collect();
-    let view = crate::semantic_query::surface_view! {
+    let view = crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -1294,6 +1294,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the exact-owner authored source raises")
         .node();
     assert_eq!(

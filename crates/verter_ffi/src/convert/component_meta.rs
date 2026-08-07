@@ -14,18 +14,17 @@
 use crate::types::*;
 
 use super::fallthrough::{fallthrough_surface_to_ffi, root_info_to_ffi, root_reachability_to_ffi};
-use super::sfc_blocks::{
-    custom_block_to_ffi, script_block_to_ffi, style_block_to_ffi, template_block_to_ffi,
-};
 use super::string_helpers::{
     accepted_event_to_ffi, accepted_prop_to_ffi, accepted_surface_completeness_to_ffi,
     binding_kind_to_string, component_prop_constness_to_string, expansion_exactness_to_string,
     expansion_execution_status_to_string, expansion_metadata_to_ffi,
     expansion_stop_reason_to_string, jsdoc_to_ffi, macro_expansion_kind_to_string,
-    macro_kind_to_string, member_visibility_to_string, projection_mode_to_string,
-    public_instance_completeness_to_string, public_instance_member_kind_to_string,
-    reactivity_kind_to_string, resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi,
-    style_lang_to_string, vue_api_to_string,
+    macro_kind_to_string, materialized_publication_to_ffi, member_visibility_to_string,
+    projection_mode_to_string, public_instance_completeness_to_string,
+    public_instance_member_kind_to_string, reactive_wrapper_role_to_string,
+    reactive_wrapper_unresolved_reason_to_string, reactivity_kind_to_string,
+    resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi, style_lang_to_string,
+    vue_api_to_string,
 };
 
 /// Convert the session-owned output envelope to the FFI boundary DTO.
@@ -37,8 +36,8 @@ use super::string_helpers::{
 pub fn component_meta_output_to_ffi(
     output: verter_session::meta_resolve::ComponentMetaOutput,
 ) -> FfiComponentMeta {
-    let (analysis, resolution, types) = output.into_parts();
-    component_meta_parts_to_ffi(analysis, resolution, types.into_lanes())
+    let (analysis, resolution, types, contract) = output.into_parts_with_contract();
+    component_meta_parts_with_contract_to_ffi(analysis, resolution, types.into_lanes(), contract)
 }
 
 /// HARD wire-boundary alignment guard: refuse the conversion loudly when a
@@ -59,28 +58,415 @@ pub(super) fn require_lane_aligned(lane: &str, analysis_len: usize, lane_len: us
     );
 }
 
+pub fn ordered_structure_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+) -> FfiOrderedSfcStructure {
+    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
+
+    let inventory = structure.inventory.as_ref();
+    let range = |span| structure_range(structure, span);
+    let blocks = inventory
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            CarrierBlock::Section { id, role, syntax } => {
+                let markup_root_tokens = inventory
+                    .markup()
+                    .roots()
+                    .iter()
+                    .filter(|root| {
+                        inventory.markup().nodes()[root.get() as usize].root_block == *id
+                    })
+                    .map(|root| structure.markup_node_tokens[root.get() as usize].clone())
+                    .collect();
+                FfiStructureBlock::Section {
+                    section: Box::new(FfiStructureSection {
+                        block_token: structure.block_tokens[id.get() as usize].clone(),
+                        role: block_role_to_ffi(role),
+                        authored_name: authored_name_to_ffi(
+                            structure,
+                            syntax.authored_name,
+                            syntax.normalized_name,
+                        ),
+                        opening_range: range(syntax.opening_span),
+                        opening_name_range: range(syntax.opening_name_span),
+                        content_range: range(syntax.content_span),
+                        closing_range: syntax.closing_span.map(range),
+                        closing_name_range: syntax.closing_name_span.map(range),
+                        full_range: range(syntax.full_span),
+                        termination: termination_to_ffi(structure, &syntax.termination),
+                        attributes: syntax
+                            .attributes
+                            .iter()
+                            .map(|attribute| attribute_to_ffi(structure, attribute))
+                            .collect(),
+                        block_content_basis_token: None,
+                        attribute_insertion_anchor: range(syntax.attribute_insertion_anchor),
+                    }),
+                    markup_root_tokens,
+                }
+            }
+            CarrierBlock::MarkupRoot { id, node } => FfiStructureBlock::MarkupRoot {
+                block_token: structure.block_tokens[id.get() as usize].clone(),
+                markup_root_token: structure.markup_node_tokens[node.get() as usize].clone(),
+            },
+        })
+        .collect();
+    let markup_nodes = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let syntax = match node.kind() {
+                MarkupNodeKind::Element(element) => FfiMarkupSyntax::Element {
+                    authored_name: authored_name_to_ffi(
+                        structure,
+                        element.authored_name,
+                        element.normalized_name,
+                    ),
+                    namespace: format!("{:?}", element.namespace),
+                    element_kind: format!("{:?}", element.kind),
+                    opening_range: range(element.opening_span),
+                    opening_name_range: range(element.opening_name_span),
+                    attribute_insertion_anchor: range(element.attribute_insertion_anchor),
+                    content_range: range(element.content_span),
+                    closing_range: element.closing_span.map(range),
+                    closing_name_range: element.closing_name_span.map(range),
+                    full_range: range(element.full_span),
+                    self_closing: element.self_closing,
+                    void_element: element.void_element,
+                    raw_text: element.raw_text,
+                    termination: termination_to_ffi(structure, &element.termination),
+                    attributes: element
+                        .attributes
+                        .iter()
+                        .map(|attribute| attribute_to_ffi(structure, attribute))
+                        .collect(),
+                },
+                MarkupNodeKind::Text { content_span } => FfiMarkupSyntax::Text {
+                    content_range: range(*content_span),
+                },
+                MarkupNodeKind::Comment {
+                    opening_span,
+                    content_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Comment {
+                    opening_range: range(*opening_span),
+                    content_range: range(*content_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                },
+                MarkupNodeKind::Interpolation {
+                    family,
+                    opening_span,
+                    expression_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Interpolation {
+                    family: format!("{family:?}"),
+                    opening_range: range(*opening_span),
+                    expression_range: range(*expression_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                },
+                MarkupNodeKind::SvelteControlBlock(value) => FfiMarkupSyntax::SvelteControlBlock {
+                    full_range: range(value.full_span),
+                    termination: termination_to_ffi(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteClause(value) => FfiMarkupSyntax::SvelteClause {
+                    full_range: range(value.full_span),
+                    termination: termination_to_ffi(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteStandaloneTag(value) => {
+                    FfiMarkupSyntax::SvelteStandaloneTag {
+                        full_range: range(value.full_span),
+                        termination: termination_to_ffi(structure, &value.termination),
+                    }
+                }
+                MarkupNodeKind::Recovered {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    expected,
+                    reason,
+                } => FfiMarkupSyntax::Recovered {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                    expected: format!("{expected:?}"),
+                    reason: format!("{reason:?}"),
+                },
+                MarkupNodeKind::Unknown {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    authored_head,
+                    reason,
+                } => FfiMarkupSyntax::Unknown {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: termination_to_ffi(structure, termination),
+                    authored_head: authored_head
+                        .and_then(|slice| inventory.slice(slice).ok())
+                        .map(str::to_owned),
+                    reason: format!("{reason:?}"),
+                },
+            };
+            let children = inventory.markup().child_ids()
+                [node.children.start as usize..node.children.end as usize]
+                .iter()
+                .map(|child| structure.markup_node_tokens[child.get() as usize].clone())
+                .collect();
+            FfiMarkupNode {
+                node_token: structure.markup_node_tokens[node.id.get() as usize].clone(),
+                parent_node_token: node
+                    .parent
+                    .map(|parent| structure.markup_node_tokens[parent.get() as usize].clone()),
+                child_node_tokens: children,
+                syntax,
+            }
+        })
+        .collect();
+    FfiOrderedSfcStructure {
+        schema_version: structure.schema_version,
+        artifact_token: structure.artifact_token.clone(),
+        blocks,
+        markup_nodes,
+    }
+}
+
+/// Project directly from the sole registered envelope owner.
+pub fn registered_structure_to_ffi(
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
+) -> FfiOrderedSfcStructure {
+    ordered_structure_to_ffi(
+        &verter_session::component_meta_host::ordered_sfc_structure_projection(structure),
+    )
+}
+
+fn structure_range(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+) -> FfiStructureRange {
+    FfiStructureRange {
+        source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+fn authored_name_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
+    normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
+) -> FfiAuthoredName {
+    FfiAuthoredName {
+        spelling: structure
+            .inventory
+            .slice(authored)
+            .expect("validated authored name")
+            .to_owned(),
+        normalized: structure
+            .inventory
+            .normalized_name(normalized)
+            .expect("validated normalized name")
+            .to_owned(),
+        range: structure_range(structure, authored.span),
+    }
+}
+
+fn block_role_to_ffi(
+    role: &verter_language::parse_artifact::carrier_inventory::SectionRole,
+) -> FfiCarrierBlockRole {
+    use verter_language::parse_artifact::carrier_inventory::SectionRole;
+    match role {
+        SectionRole::TemplateHost => FfiCarrierBlockRole::TemplateHost,
+        SectionRole::Script { role, dialect } => FfiCarrierBlockRole::Script {
+            role: format!("{role:?}"),
+            dialect: format!("{dialect:?}"),
+        },
+        SectionRole::Style {
+            dialect,
+            scoped,
+            module,
+        } => FfiCarrierBlockRole::Style {
+            dialect: format!("{dialect:?}"),
+            scoped: *scoped,
+            module: format!("{module:?}"),
+        },
+        SectionRole::Custom { normalized_name } => FfiCarrierBlockRole::Custom {
+            normalized_name: normalized_name.to_string(),
+        },
+    }
+}
+
+fn termination_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
+) -> FfiSyntaxTermination {
+    use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
+    match value {
+        SyntaxTermination::Closed => FfiSyntaxTermination::Closed,
+        SyntaxTermination::SelfClosing => FfiSyntaxTermination::SelfClosing,
+        SyntaxTermination::Void => FfiSyntaxTermination::Void,
+        SyntaxTermination::UnclosedEof => FfiSyntaxTermination::UnclosedEof,
+        SyntaxTermination::Recovered {
+            reason,
+            recovery_span,
+        } => FfiSyntaxTermination::Recovered {
+            reason: format!("{reason:?}"),
+            recovery_range: recovery_span.map(|span| structure_range(structure, span)),
+        },
+    }
+}
+
+fn attribute_to_ffi(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
+) -> FfiCarrierAttribute {
+    use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};
+    let (kind, name, value) = match attribute {
+        CarrierAttribute::Named { name, value, .. } => (
+            "named",
+            Some(authored_name_to_ffi(
+                structure,
+                name.authored,
+                name.normalized,
+            )),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Spread { .. } => ("spread", None, None),
+        CarrierAttribute::Directive {
+            local_name, value, ..
+        } => (
+            "directive",
+            local_name
+                .as_ref()
+                .map(|name| authored_name_to_ffi(structure, name.authored, name.normalized)),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Attach { .. } => ("attach", None, None),
+    };
+    FfiCarrierAttribute {
+        attribute_token: structure.attribute_tokens[attribute.id().get() as usize].clone(),
+        kind: kind.to_owned(),
+        name,
+        value,
+        full_range: structure_range(structure, attribute.full_span()),
+        duplicate_of: attribute
+            .duplicate_of()
+            .map(|id| structure.attribute_tokens[id.get() as usize].clone()),
+    }
+}
+
 /// Parts-level mechanical mapping — the body of
 /// [`component_meta_output_to_ffi`] after the envelope's destructive
 /// transfer. Module-private: production code converts ONLY the sealed
 /// envelope; the parts seam exists so converter unit tests can exercise the
 /// mapping with hand-built parts without a live host.
+#[cfg(test)]
 pub(super) fn component_meta_parts_to_ffi(
     analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
     lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
 ) -> FfiComponentMeta {
+    component_meta_parts_with_contract_to_ffi(
+        analysis,
+        resolution,
+        lanes,
+        verter_session::framework::ComponentContractAvailability::Unsupported(
+            verter_session::framework::ComponentContractUnsupported {
+                adapter_id: verter_session::framework::FrameworkAdapterId::new("unregistered"),
+                reason:
+                    verter_session::framework::ComponentContractUnsupportedReason::AdapterUnavailable,
+                diagnostics: std::sync::Arc::from([]),
+            },
+        ),
+    )
+}
+
+pub(super) fn component_meta_parts_with_contract_to_ffi(
+    analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
+    lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
+    contract: verter_session::framework::ComponentContractAvailability,
+) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
+    // Sealed-identity wire tokens for style rows: each style's sealed ref is
+    // revalidated against the ordered structure's inventory before its public
+    // block token is served. Missing structure or a foreign/stale ref yields
+    // no token — consumers treat absence as typed unavailable, never ordinal.
+    let style_token_authority = analysis.ordered_sfc_structure.clone();
+    let style_block_token = move |block_ref: Option<
+        &verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef,
+    >|
+          -> Option<String> {
+        let structure = style_token_authority.as_ref()?;
+        let block_ref = block_ref?;
+        block_ref
+            .validate(&structure.inventory)
+            .then(|| {
+                structure
+                    .block_tokens
+                    .get(block_ref.block_id().get() as usize)
+                    .cloned()
+            })
+            .flatten()
+    };
+    let ordered_sfc_structure = match analysis.ordered_sfc_structure.as_ref() {
+        Some(structure) => ordered_structure_to_ffi(structure),
+        #[cfg(test)]
+        None => FfiOrderedSfcStructure {
+            schema_version: 1,
+            artifact_token: "test-only-unregistered".to_string(),
+            blocks: Vec::new(),
+            markup_nodes: Vec::new(),
+        },
+        #[cfg(not(test))]
+        None => panic!("schema-8 component metadata requires registered structure"),
+    };
 
     require_lane_aligned("props", analysis.props.len(), lanes.props.len());
-    require_lane_aligned(
-        "event-payloads",
-        analysis.events.len(),
-        lanes.event_payloads.len(),
-    );
     require_lane_aligned(
         "slot-bindings",
         analysis.slots.len(),
         lanes.slot_bindings.len(),
+    );
+    require_lane_aligned(
+        "slot-returns",
+        analysis.slots.len(),
+        lanes.slot_returns.len(),
     );
     for (index, (slot, lane)) in analysis
         .slots
@@ -127,6 +513,7 @@ pub(super) fn component_meta_parts_to_ffi(
         lanes.accepted_event_payloads.len(),
     );
     FfiComponentMeta {
+        component_public_contract: component_contract_to_ffi(contract),
         // Typed resolution status: honest on every lane — a payload
         // without the resolution sidecar self-describes as
         // `Unavailable(ResolutionProviderAbsent)`.
@@ -141,55 +528,82 @@ pub(super) fn component_meta_parts_to_ffi(
             .props
             .into_iter()
             .zip(lanes.props)
-            .map(|(p, r#type)| FfiPropMeta {
-                name: p.name,
-                r#type,
-                type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
-                raw_type: p.raw_type,
-                required: p.required,
-                has_default: p.has_default,
-                default_value: p.default_value,
-                description: p.description,
-                tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
-                declared_in_macro_type_arg: p.declared_in_macro_type_arg,
+            .map(|(p, lane)| {
+                let (r#type, publication, terminal_display) = materialized_publication_to_ffi(lane);
+                FfiPropMeta {
+                    name: p.name,
+                    r#type,
+                    publication,
+                    terminal_display,
+                    type_expansion: p.type_expansion.map(expansion_metadata_to_ffi),
+                    required: p.required,
+                    has_default: p.has_default,
+                    default_value: p.default_value,
+                    description: p.description,
+                    tags: p.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                    declared_in_macro_type_arg: p.declared_in_macro_type_arg,
+                }
             })
             .collect(),
-        events: analysis
+        events: lanes
             .events
             .into_iter()
-            .zip(lanes.event_payloads)
-            .map(|(e, payload)| FfiEventMeta {
-                name: e.name,
-                payload,
-                payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),
-                raw_signature: e.raw_signature,
-                description: e.description,
-                tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
+            .map(|occurrence| {
+                let e = occurrence.event;
+                let (payload, publication, terminal_display) =
+                    materialized_publication_to_ffi(occurrence.payload);
+                FfiEventMeta {
+                    name: e.name,
+                    payload: payload
+                        .expect("materialized event occurrence must carry its required payload"),
+                    publication,
+                    terminal_display,
+                    payload_expansion: e.payload_expansion.map(expansion_metadata_to_ffi),
+                    raw_signature: e.raw_signature,
+                    description: e.description,
+                    tags: e.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                }
             })
             .collect(),
         slots: analysis
             .slots
             .into_iter()
             .zip(lanes.slot_bindings)
-            .map(|(s, binding_types)| FfiSlotMeta {
-                name: s.name,
-                is_scoped: s.is_scoped,
-                bindings: s
-                    .bindings
-                    .into_iter()
-                    .zip(binding_types)
-                    .map(|(b, r#type)| FfiSlotBindingMeta {
-                        name: b.name,
-                        r#type,
-                        type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
-                        raw_type: b.raw_type,
-                    })
-                    .collect(),
-                is_required: s.is_required,
-                return_type: s.return_type,
-                description: s.description,
-                tags: s.tags.into_iter().map(jsdoc_to_ffi).collect(),
-                declared_in_macro_type_arg: s.declared_in_macro_type_arg,
+            .zip(lanes.slot_returns)
+            .map(|((s, binding_types), return_lane)| {
+                let (return_value, return_publication, return_terminal_display) = return_lane
+                    .map(materialized_publication_to_ffi)
+                    .map_or((None, None, None), |(ty, publication, display)| {
+                        (ty, Some(publication), Some(display))
+                    });
+                FfiSlotMeta {
+                    name: s.name,
+                    is_scoped: s.is_scoped,
+                    bindings: s
+                        .bindings
+                        .into_iter()
+                        .zip(binding_types)
+                        .map(|(b, lane)| {
+                            let (r#type, publication, terminal_display) =
+                                materialized_publication_to_ffi(lane);
+                            FfiSlotBindingMeta {
+                                name: b.name,
+                                r#type,
+                                publication,
+                                terminal_display,
+                                type_expansion: b.type_expansion.map(expansion_metadata_to_ffi),
+                            }
+                        })
+                        .collect(),
+                    is_required: s.is_required,
+                    return_type: s.return_type,
+                    return_value,
+                    return_publication,
+                    return_terminal_display,
+                    description: s.description,
+                    tags: s.tags.into_iter().map(jsdoc_to_ffi).collect(),
+                    declared_in_macro_type_arg: s.declared_in_macro_type_arg,
+                }
             })
             .collect(),
         models: analysis
@@ -232,13 +646,7 @@ pub(super) fn component_meta_parts_to_ffi(
                     })
                     .collect(),
             }),
-        sfc_blocks: analysis.sfc_blocks.map(|blocks| FfiSfcBlocksMeta {
-            template: blocks.template.map(template_block_to_ffi),
-            script: blocks.script.map(script_block_to_ffi),
-            script_setup: blocks.script_setup.map(script_block_to_ffi),
-            styles: blocks.styles.into_iter().map(style_block_to_ffi).collect(),
-            custom: blocks.custom.into_iter().map(custom_block_to_ffi).collect(),
-        }),
+        ordered_sfc_structure,
         // `analysis.type_registry` already carries the SESSION-owned
         // resolved-registry name-overlay finalize (applied before
         // materialization when the envelope carries a resolution); the lane
@@ -374,6 +782,14 @@ pub(super) fn component_meta_parts_to_ffi(
                 name: binding.name,
                 kind: binding_kind_to_string(binding.kind),
                 reactivity_kind: reactivity_kind_to_string(binding.reactivity_kind),
+                return_wrapper_role: binding
+                    .return_wrapper_role
+                    .as_ref()
+                    .map(reactive_wrapper_role_to_string),
+                return_wrapper_unresolved_reason: binding
+                    .return_wrapper_role
+                    .as_ref()
+                    .and_then(reactive_wrapper_unresolved_reason_to_string),
                 type_annotation: binding.type_annotation,
                 used_in_template: binding.used_in_template,
                 used_in_style: binding.used_in_style,
@@ -395,6 +811,7 @@ pub(super) fn component_meta_parts_to_ffi(
                 scoped: style.scoped,
                 is_module: style.is_module,
                 module_name: style.module_name,
+                block_token: style_block_token(style.block_ref.as_ref()),
                 classes: style.classes,
                 ids: style.ids,
                 custom_properties: style.custom_properties,
@@ -469,6 +886,406 @@ pub(super) fn component_meta_parts_to_ffi(
             .and_then(|resolution| resolution.origin_graph.clone())
             .unwrap_or_default(),
         resolution: resolution.map(|resolution| resolved_component_meta_to_ffi(&resolution)),
+    }
+}
+
+fn component_contract_to_ffi(
+    availability: verter_session::framework::ComponentContractAvailability,
+) -> FfiComponentContractAvailability {
+    use verter_session::framework::ComponentContractAvailability;
+    match availability {
+        ComponentContractAvailability::Supported(contract) => {
+            FfiComponentContractAvailability::Supported {
+                contract: public_contract_to_ffi(contract.as_ref().clone()),
+            }
+        }
+        ComponentContractAvailability::Unsupported(unsupported) => {
+            FfiComponentContractAvailability::Unsupported {
+                unsupported: FfiComponentContractUnsupported {
+                    adapter_id: unsupported.adapter_id.as_str().to_string(),
+                    reason: unsupported_reason_to_ffi(unsupported.reason),
+                    diagnostics: unsupported
+                        .diagnostics
+                        .iter()
+                        .cloned()
+                        .map(resolution_diagnostic_to_ffi)
+                        .collect(),
+                },
+            }
+        }
+    }
+}
+
+fn public_contract_to_ffi(
+    contract: verter_session::framework::ComponentPublicContract,
+) -> FfiComponentPublicContract {
+    FfiComponentPublicContract {
+        adapter_id: contract.adapter_id.as_str().to_string(),
+        exactness: contract_exactness_to_ffi(contract.exactness),
+        degradation: contract
+            .degradation
+            .iter()
+            .cloned()
+            .map(contract_degradation_to_ffi)
+            .collect(),
+        provenance: FfiContractProvenance::ComponentMetaOutput,
+        props: contract
+            .props
+            .iter()
+            .cloned()
+            .map(|prop| FfiPublicProp {
+                name: prop.name.to_string(),
+                optional: prop.optional,
+                has_default: prop.has_default,
+                ty: public_type_reference_to_ffi(prop.ty),
+                exactness: contract_exactness_to_ffi(prop.exactness),
+                degradation: prop
+                    .degradation
+                    .iter()
+                    .cloned()
+                    .map(contract_degradation_to_ffi)
+                    .collect(),
+                provenance: FfiContractProvenance::ComponentMetaOutput,
+            })
+            .collect(),
+        events: contract
+            .events
+            .iter()
+            .map(|event| FfiPublicEvent {
+                name: event.name.to_string(),
+                overloads: event
+                    .overloads
+                    .iter()
+                    .cloned()
+                    .map(public_call_signature_to_ffi)
+                    .collect(),
+                derived_handler: FfiPublicDerivedHandlerShape {
+                    overloads: event
+                        .derived_handler
+                        .overloads
+                        .iter()
+                        .map(|signature| FfiPublicHandlerSignature {
+                            parameters: signature
+                                .parameters
+                                .iter()
+                                .cloned()
+                                .map(public_parameter_to_ffi)
+                                .collect(),
+                            return_type: signature.return_type.clone(),
+                        })
+                        .collect(),
+                },
+                exactness: contract_exactness_to_ffi(event.exactness),
+                degradation: event
+                    .degradation
+                    .iter()
+                    .cloned()
+                    .map(contract_degradation_to_ffi)
+                    .collect(),
+                provenance: FfiContractProvenance::ComponentMetaOutput,
+            })
+            .collect(),
+        slots: contract
+            .slots
+            .iter()
+            .cloned()
+            .map(|slot| FfiPublicSlot {
+                name: slot.name.to_string(),
+                optional: slot.optional,
+                input: FfiPublicSlotInput {
+                    bindings: slot
+                        .input
+                        .bindings
+                        .iter()
+                        .cloned()
+                        .map(|binding| FfiPublicSlotBinding {
+                            name: binding.name.to_string(),
+                            ty: public_type_reference_to_ffi(binding.ty),
+                        })
+                        .collect(),
+                },
+                return_type: slot.return_type.map(public_type_reference_to_ffi),
+                exactness: contract_exactness_to_ffi(slot.exactness),
+                degradation: slot
+                    .degradation
+                    .iter()
+                    .cloned()
+                    .map(contract_degradation_to_ffi)
+                    .collect(),
+                provenance: FfiContractProvenance::ComponentMetaOutput,
+            })
+            .collect(),
+    }
+}
+
+fn public_type_reference_to_ffi(
+    reference: verter_session::framework::PublicTypeReference,
+) -> FfiPublicTypeReference {
+    let (r#type, publication, terminal_display) =
+        materialized_publication_to_ffi(reference.publication);
+    FfiPublicTypeReference {
+        r#type,
+        publication,
+        terminal_display,
+    }
+}
+
+fn public_call_signature_to_ffi(
+    signature: verter_session::framework::PublicCallSignature,
+) -> FfiPublicCallSignature {
+    FfiPublicCallSignature {
+        source: public_type_reference_to_ffi(signature.source),
+        parameters: signature
+            .parameters
+            .iter()
+            .cloned()
+            .map(public_parameter_to_ffi)
+            .collect(),
+        return_type: signature.return_type,
+    }
+}
+
+fn public_parameter_to_ffi(
+    parameter: verter_session::framework::PublicParameter,
+) -> FfiPublicParameter {
+    FfiPublicParameter {
+        name: parameter.name.map(|name| name.to_string()),
+        optional: parameter.optional,
+        rest: parameter.rest,
+        ty: parameter.ty,
+    }
+}
+
+fn contract_exactness_to_ffi(
+    exactness: verter_session::framework::ContractExactness,
+) -> FfiContractExactness {
+    match exactness {
+        verter_session::framework::ContractExactness::Exact => FfiContractExactness::Exact,
+        verter_session::framework::ContractExactness::Degraded => FfiContractExactness::Degraded,
+    }
+}
+
+fn contract_degradation_to_ffi(
+    degradation: verter_session::framework::ContractDegradation,
+) -> FfiContractDegradation {
+    FfiContractDegradation {
+        surface: contract_surface_to_ffi(degradation.surface),
+        reason: match degradation.reason {
+            verter_session::framework::ContractDegradationReason::Absent => {
+                FfiContractDegradationReason::Absent
+            }
+            verter_session::framework::ContractDegradationReason::Incomplete => {
+                FfiContractDegradationReason::Incomplete
+            }
+        },
+        diagnostics: degradation
+            .diagnostics
+            .iter()
+            .cloned()
+            .map(resolution_diagnostic_to_ffi)
+            .collect(),
+    }
+}
+
+fn contract_surface_to_ffi(
+    surface: verter_session::framework::ContractSurface,
+) -> FfiContractSurface {
+    match surface {
+        verter_session::framework::ContractSurface::Prop { name } => FfiContractSurface::Prop {
+            name: name.to_string(),
+        },
+        verter_session::framework::ContractSurface::Event {
+            name,
+            overload_index,
+        } => FfiContractSurface::Event {
+            name: name.to_string(),
+            overload_index: overload_index as u32,
+        },
+        verter_session::framework::ContractSurface::SlotBinding { slot, binding } => {
+            FfiContractSurface::SlotBinding {
+                slot: slot.to_string(),
+                binding: binding.to_string(),
+            }
+        }
+        verter_session::framework::ContractSurface::SlotReturn { slot } => {
+            FfiContractSurface::SlotReturn {
+                slot: slot.to_string(),
+            }
+        }
+    }
+}
+
+fn unsupported_reason_to_ffi(
+    reason: verter_session::framework::ComponentContractUnsupportedReason,
+) -> FfiComponentContractUnsupportedReason {
+    use verter_session::framework::ComponentContractUnsupportedReason;
+    match reason {
+        ComponentContractUnsupportedReason::AdapterUnavailable => {
+            FfiComponentContractUnsupportedReason::AdapterUnavailable
+        }
+        ComponentContractUnsupportedReason::ComponentMetaUnavailable => {
+            FfiComponentContractUnsupportedReason::ComponentMetaUnavailable
+        }
+        ComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane,
+            index,
+            inner_index,
+            failure,
+        } => FfiComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane: output_lane_to_ffi(lane),
+            index: index as u32,
+            inner_index: inner_index.map(|value| value as u32),
+            failure: output_failure_to_ffi(failure),
+        },
+        ComponentContractUnsupportedReason::PublicationFailed {
+            surface,
+            failure,
+            provenance,
+        } => FfiComponentContractUnsupportedReason::PublicationFailed {
+            surface: contract_surface_to_ffi(surface),
+            failure: typed_resolution_failure_to_ffi(failure),
+            provenance: resolution_provenance_to_ffi(provenance),
+        },
+    }
+}
+
+fn output_lane_to_ffi(
+    lane: verter_session::meta_resolve::ComponentMetaOutputLane,
+) -> FfiComponentMetaOutputLane {
+    use verter_session::meta_resolve::ComponentMetaOutputLane;
+    match lane {
+        ComponentMetaOutputLane::Prop => FfiComponentMetaOutputLane::Prop,
+        ComponentMetaOutputLane::EventPayload => FfiComponentMetaOutputLane::EventPayload,
+        ComponentMetaOutputLane::EventReturn => FfiComponentMetaOutputLane::EventReturn,
+        ComponentMetaOutputLane::SlotBinding => FfiComponentMetaOutputLane::SlotBinding,
+        ComponentMetaOutputLane::SlotReturn => FfiComponentMetaOutputLane::SlotReturn,
+        ComponentMetaOutputLane::Model => FfiComponentMetaOutputLane::Model,
+        ComponentMetaOutputLane::Exposed => FfiComponentMetaOutputLane::Exposed,
+        ComponentMetaOutputLane::PublicInstanceMember => {
+            FfiComponentMetaOutputLane::PublicInstanceMember
+        }
+        ComponentMetaOutputLane::TypeRegistryEntry => FfiComponentMetaOutputLane::TypeRegistryEntry,
+        ComponentMetaOutputLane::AcceptedProp => FfiComponentMetaOutputLane::AcceptedProp,
+        ComponentMetaOutputLane::AcceptedEventPayload => {
+            FfiComponentMetaOutputLane::AcceptedEventPayload
+        }
+        ComponentMetaOutputLane::FallthroughProp => FfiComponentMetaOutputLane::FallthroughProp,
+        ComponentMetaOutputLane::FallthroughEventPayload => {
+            FfiComponentMetaOutputLane::FallthroughEventPayload
+        }
+    }
+}
+
+fn output_failure_to_ffi(
+    failure: verter_session::meta_resolve::ComponentMetaOutputFailure,
+) -> FfiComponentMetaOutputFailure {
+    use verter_session::meta_resolve::ComponentMetaOutputFailure;
+    match failure {
+        ComponentMetaOutputFailure::UnraisableSource => {
+            FfiComponentMetaOutputFailure::UnraisableSource
+        }
+        ComponentMetaOutputFailure::RequiredSourceUnavailable { failure } => {
+            FfiComponentMetaOutputFailure::RequiredSourceUnavailable {
+                failure: semantic_source_failure_to_ffi(failure),
+            }
+        }
+        ComponentMetaOutputFailure::InteriorSourceMiss { .. } => {
+            FfiComponentMetaOutputFailure::InteriorSourceMiss
+        }
+        ComponentMetaOutputFailure::ShellMaterializationMiss => {
+            FfiComponentMetaOutputFailure::ShellMaterializationMiss
+        }
+        ComponentMetaOutputFailure::UnknownMaterializingSourceInterior { .. } => {
+            FfiComponentMetaOutputFailure::UnknownMaterializingSourceInterior
+        }
+    }
+}
+
+fn semantic_source_failure_to_ffi(
+    failure: verter_type_expr::facts::SemanticSourceFailure,
+) -> FfiTypePublicationFailure {
+    match failure {
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue => {
+            FfiTypePublicationFailure::UnrepresentableRequiredMemberValue
+        }
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload => {
+            FfiTypePublicationFailure::UnrepresentableRequiredPayload
+        }
+    }
+}
+
+fn typed_resolution_failure_to_ffi(
+    failure: verter_type_expr::TypedResolutionFailure,
+) -> FfiTypePublicationFailure {
+    match failure {
+        verter_type_expr::TypedResolutionFailure::SourceConstruction(failure) => {
+            semantic_source_failure_to_ffi(failure)
+        }
+    }
+}
+
+fn resolution_provenance_to_ffi(
+    provenance: verter_type_expr::ResolutionProvenance,
+) -> FfiResolutionProvenance {
+    match provenance {
+        verter_type_expr::ResolutionProvenance::SemanticEvaluator => {
+            FfiResolutionProvenance::SemanticEvaluator
+        }
+        verter_type_expr::ResolutionProvenance::SessionProjector => {
+            FfiResolutionProvenance::SessionProjector
+        }
+        verter_type_expr::ResolutionProvenance::FrameworkSurface => {
+            FfiResolutionProvenance::FrameworkSurface
+        }
+        verter_type_expr::ResolutionProvenance::FallthroughInheritance => {
+            FfiResolutionProvenance::FallthroughInheritance
+        }
+        verter_type_expr::ResolutionProvenance::Schema => FfiResolutionProvenance::Schema,
+    }
+}
+
+fn resolution_diagnostic_to_ffi(
+    diagnostic: verter_type_expr::ResolutionDiagnostic,
+) -> FfiResolutionDiagnostic {
+    use verter_type_expr::ResolutionDiagnosticKind;
+    let kind = match diagnostic.kind {
+        ResolutionDiagnosticKind::BudgetExceeded => FfiResolutionDiagnosticKind::BudgetExceeded,
+        ResolutionDiagnosticKind::ProjectionWorkLimit => {
+            FfiResolutionDiagnosticKind::ProjectionWorkLimit
+        }
+        ResolutionDiagnosticKind::ConnectedQueryDepthLimit => {
+            FfiResolutionDiagnosticKind::ConnectedQueryDepthLimit
+        }
+        ResolutionDiagnosticKind::MappedDepthExceeded => {
+            FfiResolutionDiagnosticKind::MappedDepthExceeded
+        }
+        ResolutionDiagnosticKind::UnresolvedReference => {
+            FfiResolutionDiagnosticKind::UnresolvedReference
+        }
+        ResolutionDiagnosticKind::IndeterminateConditional => {
+            FfiResolutionDiagnosticKind::IndeterminateConditional
+        }
+        ResolutionDiagnosticKind::InfiniteKeySpace => FfiResolutionDiagnosticKind::InfiniteKeySpace,
+        ResolutionDiagnosticKind::UnsupportedOperator => {
+            FfiResolutionDiagnosticKind::UnsupportedOperator
+        }
+        ResolutionDiagnosticKind::ConditionalContextTruncated => {
+            FfiResolutionDiagnosticKind::ConditionalContextTruncated
+        }
+        ResolutionDiagnosticKind::IdempotentArm => FfiResolutionDiagnosticKind::IdempotentArm,
+        ResolutionDiagnosticKind::CyclicReference => FfiResolutionDiagnosticKind::CyclicReference,
+        ResolutionDiagnosticKind::CyclicInstantiation => {
+            FfiResolutionDiagnosticKind::CyclicInstantiation
+        }
+        ResolutionDiagnosticKind::InstantiationError => {
+            FfiResolutionDiagnosticKind::InstantiationError
+        }
+        ResolutionDiagnosticKind::EmptyUnionArm => FfiResolutionDiagnosticKind::EmptyUnionArm,
+    };
+    FfiResolutionDiagnostic {
+        kind,
+        context: diagnostic.context.to_string(),
+        property_name: diagnostic.property_name.map(|name| name.to_string()),
     }
 }
 

@@ -508,26 +508,30 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     // the slice path must observe no fact naming `Mytype` (no
     // class-surface, `TypeOf`, constructor, import, or route fact for
     // the sibling's type).
-    let (ir, finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        let outcome = lookup(stores.hash_node(), key.clone(), ctx).expect("hash lookup");
-        let slice_hash = planned(outcome);
-        lookup(
-            stores.lowered_node(),
-            FlowSliceLoweredKey {
-                hash_key: key.clone(),
-                slice_hash,
-            },
-            ctx,
-        )
-        .expect("lowered lookup")
-    });
+    let (ir, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || {
+            let outcome = lookup(stores.hash_node(), key.clone(), ctx).expect("hash lookup");
+            let slice_hash = planned(outcome);
+            lookup(
+                stores.lowered_node(),
+                FlowSliceLoweredKey {
+                    hash_key: key.clone(),
+                    slice_hash,
+                },
+                ctx,
+            )
+            .expect("lowered lookup")
+        },
+    );
     let observed: Vec<String> = match &finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(facts)
         | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
             facts.iter().map(|fact| format!("{fact:?}")).collect()
         }
-        crate::resolver_core::FactReadSetFinalise::Overflow => {
-            panic!("the slice chain must not overflow the fact tracer")
+        crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            panic!("the slice chain must not overflow or destabilize the fact tracer")
         }
     };
     assert!(
@@ -768,12 +772,15 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
         const e = { a, b, d };
         return { big: e, tiny: 1 };
     }"#;
-    let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        let skeleton = skeleton_of(source);
-        let graph =
-            verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
-        assert!(graph.node_count() > 0, "the build produced a real graph");
-    });
+    let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || {
+            let skeleton = skeleton_of(source);
+            let graph =
+                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph(&skeleton);
+            assert!(graph.node_count() > 0, "the build produced a real graph");
+        },
+    );
     match finalise {
         crate::resolver_core::FactReadSetFinalise::Ok(facts)
         | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
@@ -784,8 +791,9 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
                  production), got {facts:?}"
             );
         }
-        crate::resolver_core::FactReadSetFinalise::Overflow => {
-            panic!("the build path must not overflow the fact tracer")
+        crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            panic!("the build path must not overflow or destabilize the fact tracer")
         }
     }
 }

@@ -215,7 +215,7 @@ fn lower_macro_arg_carrier_head(
     mode: ProjectionMode,
 ) -> Option<crate::semantic_query::SemanticNodeId> {
     crate::structural_carrier_producer::macro_type_arg_hot_ref(ctx, owner_canonical, macro_index)
-        .map(|handle| dispatch.resolve_hot_handle_at_mode(handle, mode))
+        .map(|product| dispatch.resolve_hot_handle_at_mode(product.hot, mode))
 }
 
 /// Sink-owned demand: expand the `defineModel<T>()` prop/model output.

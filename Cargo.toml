@@ -40,6 +40,7 @@ syn = { version = "2.0", features = ["full", "visit"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
+verter_css_syntax = { path = "crates/verter_css_syntax" }
 verter_macro_dto = { path = "crates/verter_macro_dto" }
 verter_ecma = { path = "crates/verter_ecma" }
 verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }

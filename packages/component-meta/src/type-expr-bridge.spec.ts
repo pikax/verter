@@ -102,6 +102,24 @@ describe("typeExprToDescriptor", () => {
     expect(result.kind).toBe("intersection");
   });
 
+  it("preserves empty-object arms in mixed intersections for string brands", () => {
+    expect(
+      typeExprToDescriptor({
+        kind: "intersection",
+        types: [
+          { kind: "primitive", name: "string" },
+          { kind: "object", properties: [] },
+        ],
+      }),
+    ).toEqual({
+      kind: "intersection",
+      types: [
+        { kind: "primitive", name: "string" },
+        { kind: "object", properties: [] },
+      ],
+    });
+  });
+
   // =============================================================================
   // Array and tuple
   // =============================================================================

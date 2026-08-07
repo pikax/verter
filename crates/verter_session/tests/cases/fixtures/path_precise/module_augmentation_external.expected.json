@@ -8,8 +8,7 @@
   "fact_dep_signature_observed_by_consumer": [
     "Export(\"ComponentOptions\", Type)",
     "MemberShape(ComponentOptions, Type)",
-    "ModuleAugmentationIndexShape(target=ExternalSpecifier(\"vue\"))",
-    "EffectiveExportSet(specifier=\"vue\")"
+    "ModuleAugmentationIndexShape(target=ExternalSpecifier(\"vue\"))"
   ],
   "invalidation_matrix": [
     {

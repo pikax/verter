@@ -20,9 +20,11 @@ payload ONLY inside `verter_session`, immediately before the protocol/FFI
 boundary, through the existing sealed `OutputProjector` capability driven by one
 live `ProjectSemanticDispatch` under the request-bound validated `StoreView`.
 Hand `verter_ffi` a session-owned, fully-materialized, context-free output
-envelope. The wire contract is UNCHANGED: `Ffi*Meta.type` / `payload` stay
-`verter_type_expr::TypeExpr`; no `component_meta.proto` change, no generated
-TS/prost regen, no `schema_version` bump, no reserved tags.
+envelope. The materialized type wire contract is unchanged:
+`Ffi*Meta.type` / `payload` stay `verter_type_expr::TypeExpr`. Response v6
+appends diagnostic enum value `ComponentMetaOutputLane::EventReturn = 13`;
+generated TypeScript is regenerated, with no `schema_version` bump or reserved
+tag change.
 
 `verter_ffi` stays a context-free mechanical mapper: no dispatch, no lowering, no
 source lookup, no reparse, no second resolver. It moves already-materialized
@@ -46,7 +48,7 @@ New `crates/verter_session/src/meta_resolve/output.rs`:
   — PRIVATE fields, constructible ONLY by the session terminal output sink
   (unrepresentable until materialization succeeds).
 - `MaterializedComponentMetaTypes` is a NESTED POSITIONAL topology order-aligned
-  with the analysis across all 11 wire lanes — positional vectors, never
+  with the analysis across all 12 wire lanes — positional vectors, never
   name-keyed maps (names repeat across slots/fallthrough branches / registry
   rows). Positional alignment covers repeated names, nested slot bindings,
   registry rows, and every fallthrough branch.
@@ -64,13 +66,13 @@ The envelope is NEVER stored on `ResolvedComponentMetaState`, never on
 cache. It is request-local. Putting wire `TypeExpr` into cached semantic state
 would relaunder output IR into semantic authority.
 
-## The 11 wire type lanes
+## The 12 wire type lanes
 
-All 11 must materialize (all read a `SemanticTypeSource` / `Option<..>` /
+All 12 must materialize (all read a `SemanticTypeSource` / `Option<..>` /
 `payload` source; none has a working `.type_expr` read after the B3 narrowing):
-props, event payloads, slot bindings, models, exposed members, public-instance
-members, merged type-registry entries, accepted props, accepted event payloads,
-fallthrough props, fallthrough event payloads.
+props, event payloads, event returns, slot bindings, models, exposed members,
+public-instance members, merged type-registry entries, accepted props, accepted
+event payloads, fallthrough props, fallthrough event payloads.
 
 ## Materialization algorithm
 
@@ -221,13 +223,12 @@ carrier + shared nested union arm.
 
 CLOSED (amendment): steps 1–6 landed (the leaf-union closure), and the two
 residual REQUIRED-payload classes the leaf-union cut could not express landed
-after it — the projected CALLABLE-PARAMS replay route
-(`ProjectedTypeFact::CallableParams { base, signature_ordinal, first_param }`,
-raised by `raise_projected_callable_params` through the one shared dispatch)
-covers call-signature payload params richer than the closed element vocabulary
+after it — the exact callable-occurrence replay route
+(`ProjectedTypeFact::CallableOccurrence`, raised through the one shared
+dispatch) covers call-signature payload params richer than the closed element vocabulary
 (cross-file references, composites, nested objects, arrays/callbacks,
 instantiated generics), and `define_emits_shape` publishes the normalized
-`ResolvedEmitField.payload_source` as the SOLE emit payload authority (the
+`ResolvedEmitOccurrence.payload_source` as the SOLE emit payload authority (the
 flat evaluated field contributes exactness/status/diagnostics metadata only;
 the flat-lane REQUIRED-payload residue arm is deleted). Closure evidence and
 the executable rails live on `docs/arch/stage10-b6-p4b-debt-rows.md` (not carried on this branch) DEBT ROW
@@ -267,7 +268,7 @@ the executable rails live on `docs/arch/stage10-b6-p4b-debt-rows.md` (not carrie
 
 Discriminating tests (RED pre-change, GREEN post-change; read every body):
 
-1. One fixture populating all 11 lanes with distinct sentinel types, duplicate
+1. One fixture populating all 12 lanes with distinct sentinel types, duplicate
    names, nested slot bindings, multiple fallthrough branches.
 2. Closed `Ref` alias and `LeafUnion` shallow-output tests proving the published
    alias survives (not expanded to the internal decl name).
@@ -291,7 +292,7 @@ Discriminating tests (RED pre-change, GREEN post-change; read every body):
     exhaustive-raiser tests.
 17. Existing NAPI/WASM/LSP byte-equivalence and schema-freshness tests.
 18. Structural guards: sole envelope construction, sole terminal extraction, no
-    semantic-cache embedding, all 11 lanes present, no `Published(Expanded)`
+    semantic-cache embedding, all 12 lanes present, no `Published(Expanded)`
     output demand.
 
 Gate commands: `cargo build -p verter_ffi`; `verter_napi`/`verter_wasm`/
@@ -303,8 +304,9 @@ build:wasm`; `pnpm test`.
 
 ## Scope freeze
 
-No wire/proto/TypeScript/schema-version change; no `SemanticTypeSource` /
-`HotTypeRef` / `TypeHandle` wire redesign; no JS resolver; no broad
+No materialized-type payload or schema-version change beyond the appended
+diagnostic-lane enum value; no `SemanticTypeSource` / `HotTypeRef` /
+`TypeHandle` wire redesign; no JS resolver; no broad
 `HotComponentMetaAnalysis` or `MaterializedExpanded*` family; no output envelope
 in semantic caches; no arbitrary recursive composite-fact vocabulary beyond the
 finite nested leaf union F5 needs; no productionization/repair of the selective
@@ -316,7 +318,7 @@ consolidation, cache redesign, or other debt rows.
 One Lane-3 review; two independently coherent cuts:
 
 - Cut 1 — output-boundary cutover: characterization tests first; add the session
-  output envelope + materializer; neutralize member visibility; convert all 11
+  output envelope + materializer; neutralize member visibility; convert all 12
   lanes and all 6 callers ATOMICALLY; delete the raw-analysis converters; restore
   the FFI/NAPI/WASM/LSP compile surface. Do NOT land a temporary compile fix that
   maps missing fields to `Unknown`.
@@ -327,6 +329,6 @@ materialization through one FFI caller) using a simple authored/closed-leaf
 payload — exercising `None` vs `Some`, typed materialization failure, output
 ownership, positional transport, shallow-shell behavior. Keep the composite-union
 F5 fixture OUT of the A/B (schema feasibility must not confound the boundary
-decision). Once the winning boundary is chosen, implement all 11 lanes together.
+decision). Once the winning boundary is chosen, implement all 12 lanes together.
 
 Review tier: S, full 3/3.

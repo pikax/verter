@@ -43,6 +43,14 @@ use crate::semantic_query::DepSignature;
 /// `seen` dedup collapses them. The dispatch-fence pass covers
 /// synthetic / test publishes whose carrier was seeded without the
 /// fence merge.
+///
+/// A carrier whose signature COMPACTED registers under fewer canonicals:
+/// its terminal aggregate names none of the files it stands in for. That
+/// under-approximation is sound here — this index drives eager eviction,
+/// not validity; [`drain_candidate_reverse_index_registrations`] walks the
+/// identical projection so the two stay symmetric; and the aggregate
+/// rejects at read time on any movement in its domain. The consequence is
+/// a later eviction, never a stale serve.
 pub(super) fn register_reverse_index(
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,

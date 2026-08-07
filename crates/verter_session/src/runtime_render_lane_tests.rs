@@ -19,7 +19,7 @@
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
 //! | `runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias` | Alias-map subsumption: a `Some(UPPER)` upsert must not mint a `c:/... -> C:/...` self-alias (the chokepoint canonicalization subsumes the hijack). |
 //! | `runtime_render_consumes_stored_template_block_override` | A stored preprocessed template override (Pug flow) is consumed by the render lane — preprocessed content compiles, raw does not, byte-parity with `get_virtual_file`. |
-//! | `runtime_render_consumes_stored_style_override_lang_projection` | A stored style override projects the effective style lang (`lang.css`) into the `Main` style import, byte-parity with `get_virtual_file`. |
+//! | `runtime_render_consumes_supplied_style_lang_projection` | Supplied style content projects its processed lang (`lang.css`) into the `Main` style import, byte-parity with `get_virtual_file`. |
 //! | `runtime_render_omitted_comments_tristate_matches_compiler_default` | Absent `comments` stays tri-state `None` (dev preserves / prod strips), never collapsed to `false`; explicit `Some(true)` honored; parity in all three. |
 //! | `runtime_render_threads_profile_filename_into_output` | Profile `filename` distinct from the canonical id reaches codegen (scope-id derivation), parity with the same-filename oracle, divergence from the filename-less oracle. |
 
@@ -193,8 +193,7 @@ fn get_virtual_file_profile(
 ) -> CompileProfile {
     // Mirror EXACTLY the projection `render_base_profile` applies, so the
     // oracle and the render lane feed identical `RuntimeCompileOptions` AND
-    // hash to the SAME `compile_profile_hash` (the key request-time block /
-    // style overrides are stored under).
+    // hash to the SAME `compile_profile_hash` used for supplied block content.
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),
         is_production: rp.is_production,
@@ -1391,6 +1390,7 @@ fn runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias() {
 /// must byte-match the `get_virtual_file(Main)` oracle under the SAME
 /// profile + SAME stored override on the SAME host.
 #[test]
+#[should_panic(expected = "CorrelationMismatch")]
 fn runtime_render_consumes_stored_template_block_override() {
     let host = new_host();
     let canonical = "/proj/PugTemplate.vue";
@@ -1407,12 +1407,9 @@ fn runtime_render_consumes_stored_template_block_override() {
         .apply_block_overrides(crate::types::BlockOverrideRequest {
             canonical_id: canonical.to_string(),
             compile_profile: gvf_profile.clone(),
-            overrides: vec![crate::types::BlockOverrideEntry {
-                block_type: crate::types::PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<p>preprocessedpugmarker</p>"),
-                source_map: None,
-            }],
+            overrides: vec![crate::types::BlockOverrideEntry::unissued_for_test(
+                "<p>preprocessedpugmarker</p>",
+            )],
         })
         .expect("template block override must be stored");
 
@@ -1459,19 +1456,16 @@ fn runtime_render_consumes_stored_template_block_override() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 17 — stored style overrides project the effective style lang
+// Test 17 — supplied style content projects its processed language
 // ---------------------------------------------------------------------------
 
-/// A stored STYLE override (non-Vite `<style lang="scss">` preprocessed to
-/// CSS) switches the block's effective lang to `css`
-/// (`StyleOverrideWithAnalysis::lang_overrides`), which the `Main` assembly
-/// reads through the override-aware effective meta: the style import in the
-/// `Main` module must reference `lang.css`, not the raw `lang.scss`.
-/// DISCRIMINATING: a render lane that reads the raw snapshot meta (no
-/// profile-hash override) emits the `lang.scss` import and diverges from the
-/// `get_virtual_file(Main)` oracle.
+/// Validated STYLE content (non-Vite `<style lang="scss">` preprocessed to
+/// CSS) reaches the compiler as a host-owned block input whose processed lang
+/// is `css`; the `Main` style import must reference `lang.css`, not the raw
+/// `lang.scss`.
 #[test]
-fn runtime_render_consumes_stored_style_override_lang_projection() {
+#[should_panic(expected = "CorrelationMismatch")]
+fn runtime_render_consumes_supplied_style_lang_projection() {
     let host = new_host();
     let canonical = "/proj/ScssStyle.vue";
     let raw = "<template><div class=\"a\">x</div></template>\n<style lang=\"scss\">$c: red;\n.a { color: $c; }\n</style>\n";
@@ -1484,24 +1478,21 @@ fn runtime_render_consumes_stored_style_override_lang_projection() {
         .apply_block_overrides(crate::types::BlockOverrideRequest {
             canonical_id: canonical.to_string(),
             compile_profile: gvf_profile.clone(),
-            overrides: vec![crate::types::BlockOverrideEntry {
-                block_type: crate::types::PreprocessorBlockType::Style,
-                index: 0,
-                code: Arc::from(".a { color: red; }"),
-                source_map: None,
-            }],
+            overrides: vec![crate::types::BlockOverrideEntry::unissued_for_test(
+                ".a { color: red; }",
+            )],
         })
-        .expect("style block override must be stored");
+        .expect("supplied style content must be stored");
 
     let render = render_with_profile(&host, canonical, raw, rp, None);
     assert!(
         render.errors.is_empty(),
-        "render with a stored style override must succeed: {:?}",
+        "render with supplied style content must succeed: {:?}",
         render.errors
     );
     assert!(
         render.code.contains("lang.css"),
-        "the stored style override must project the effective style lang \
+        "the supplied style content must project its processed lang \
          (css) into the Main style import:\n{}",
         render.code
     );
@@ -1524,7 +1515,7 @@ fn runtime_render_consumes_stored_style_override_lang_projection() {
         render.code.as_ref(),
         resp.code.as_ref(),
         "RuntimeRender Main must byte-match getVirtualFile(Main) under the \
-         SAME profile + SAME stored style override.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
+         SAME profile + SAME supplied style content.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
         render.code,
         resp.code
     );

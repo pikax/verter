@@ -8,8 +8,8 @@
 //!
 //! Priority order:
 //!   HasModuleAugmentation > HasMacroTypeDeps > HasWorkspaceAlias >
-//!   HasExternalSrc > HasBlockOverride > HasStyleOverride >
-//!   HasIdeOnlyAnalysis > HasDevLastGood
+//!   HasExternalSrc > HasBlockOverride > HasIdeOnlyAnalysis >
+//!   HasDevLastGood
 //!
 //! Discrimination: before the public `downgrade_reason` field and the
 //! `requested_mode` profile field existed, this test would not compile.
@@ -17,8 +17,8 @@
 //! implementation whose priority ordering differs.
 
 use verter_session::{
-    CompileCacheMode, CompileProfile, DowngradeReason, FileLanguage, HostConfig, UpsertRequest,
-    VerterHost, VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, DowngradeReason, FileLanguage, HostConfig, HostError,
+    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 fn host() -> VerterHost {
@@ -80,14 +80,17 @@ fn macro_type_dep_outranks_external_src_on_public_result() {
         requested_mode: CompileCacheMode::Content,
         ..CompileProfile::default()
     };
-    let response = host
+    let error = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Script),
             compile_profile: profile,
         })
-        .expect("compile");
+        .expect_err("projected script must fail closed until multi-unit lowering exists");
+    let HostError::CompileError(response) = error else {
+        panic!("expected typed compile refusal, got {error:?}");
+    };
 
     // The Content request downgraded (a reason fired).
     assert_eq!(response.requested_mode, CompileCacheMode::Content);

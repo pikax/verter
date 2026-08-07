@@ -292,14 +292,17 @@ impl MetaSession {
         // raise that replays a producing route (`ensure_indexed_ready_serve`
         // on the owning SFC — the macro hot mirror, member-path, or callable-
         // params replay) therefore observes the same view as extraction.
-        let (output_result, output_read_set) = host.with_fact_tracer(|| {
-            crate::meta_resolve::projectors::build_component_meta_output(
-                ctx,
-                canonical.as_str(),
-                analysis,
-                Some(seed),
-            )
-        });
+        let (output_result, output_read_set) =
+            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx).with_fact_tracer(
+                || {
+                    crate::meta_resolve::projectors::build_component_meta_output(
+                        ctx,
+                        canonical.as_str(),
+                        analysis,
+                        Some(seed),
+                    )
+                },
+            );
         let output = output_result?;
         // Snapshot the output-materialization tracer's non-cacheability bit
         // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,
@@ -339,6 +342,10 @@ impl MetaSession {
             }
             crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => false,
             crate::resolver_core::FactReadSetFinalise::Overflow => false,
+            // A compaction domain moved mid-scope: the observation set
+            // cannot be merged into the output signature, so the output
+            // facts are inadmissible exactly as an overflow's are.
+            crate::resolver_core::FactReadSetFinalise::MutationUnstable => false,
         };
         // Conjunctive rails: the token fence (external supersession /
         // currentness) AND the output-materialization non-cacheability rail

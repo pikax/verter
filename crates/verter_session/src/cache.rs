@@ -270,7 +270,6 @@ mod tests {
             1u64,
             CompileSlot {
                 semantic_hash: [0; 16],
-                style_override_hash: 0,
                 content_override_hash: 0,
                 css_hash_override: None,
                 outputs,

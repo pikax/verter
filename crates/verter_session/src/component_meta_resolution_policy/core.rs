@@ -112,7 +112,7 @@ pub(super) struct PolicyCtx<'a, 'h> {
     /// `defineModel`, `defineSlots`, `withDefaults`) on the owner SFC.
     ///
     /// A type reference is classified "role-bearing" — and thus kept
-    /// symbolic per Rules 2 / 4 + the raw-restoration helpers — IFF its
+    /// symbolic per Rules 2 / 4 + the authored-publication selectors — IFF its
     /// resolved root identity appears in this set. This is the §3.4
     /// (Typed-IR-Only Resolver Rule) structural macro-participation
     /// classifier: type-role is conferred by macro consumption, not by
@@ -159,6 +159,11 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
     /// [`Self::raise_source`] under an explicit name-resolution scope — the
     /// declaring file for a located declaration body.
+    ///
+    /// EXPLICITLY OPTIONAL BOUNDARY: the policy walk answers a non-raise by
+    /// keeping the published source shallow verbatim, identically for a
+    /// genuine absence and for a typed failure, so it collapses the typed
+    /// outcome here rather than propagating it.
     pub(super) fn raise_source_in_scope(
         &self,
         source: &SemanticTypeSource,
@@ -166,17 +171,19 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
         scope_owner: TopLevelOwnerId,
     ) -> Option<HotTypeRef> {
         let dispatch = ProjectSemanticDispatch::new(self.resolver_ctx());
-        dispatch.raise_semantic_type_source_to_hot(
-            source,
-            SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
-                ),
-                interior_failures: None,
-            },
-        )
+        dispatch
+            .raise_semantic_type_source_to_hot(
+                source,
+                SourceRaiseContext {
+                    scope_canonical_id,
+                    scope_owner,
+                    context: ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                    interior_failures: None,
+                },
+            )
+            .at_optional_boundary()
     }
 
     /// Node data reader (the shared dispatch-owned arena read).
@@ -332,25 +339,19 @@ pub(super) struct DeclLookup {
     pub(super) body: SemanticTypeSource,
 }
 
-/// Returns true if the published source position was replaced. Only a
-/// PRESENT source is rule-walked: a proven absence and a typed failure pass
-/// through the policy untouched (the policy refines present sources; it
-/// never fabricates one and never launders a failure).
-pub(super) fn rewrite_source_in_place(
-    slot: &mut verter_type_expr::facts::SourcePosition,
+/// Return the rule-selected source position without mutating the input.
+/// Absent and Failed are absorbing.
+pub(super) fn rewrite_source_position(
+    slot: &verter_type_expr::facts::SourcePosition,
     ctx: &mut PolicyCtx<'_, '_>,
-) -> bool {
+) -> verter_type_expr::facts::SourcePosition {
     let Some(current) = slot.present() else {
-        return false;
+        return slot.clone();
     };
     let Some(next) = rewrite_source(current, ctx) else {
-        return false;
+        return slot.clone();
     };
-    if slot.present() == Some(&next) {
-        return false;
-    }
-    *slot = verter_type_expr::facts::SourcePosition::Present(next);
-    true
+    verter_type_expr::facts::SourcePosition::Present(next)
 }
 
 /// Decide a published source's replacement, node-domain: raise the source

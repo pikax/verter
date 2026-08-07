@@ -41,7 +41,7 @@ pub(crate) fn project_emits(
     let ctx: &dyn ResolverContext = query_engine.ctx;
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
-    let admitted: Vec<(AdmittedPublishedMember<'_>, _, _)> = {
+    let admitted: Vec<AdmittedPublishedMember<'_>> = {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let payload = match resolve_macro_payload(
             &dispatch,
@@ -80,35 +80,22 @@ pub(crate) fn project_emits(
 
         read_surface_member_candidates(ctx, &surface)
             .into_iter()
-            .filter_map(|candidate| {
-                let analyzed = mac.emit_fields.iter().find(|e| {
-                    candidate
-                        .member()
-                        .string_name()
-                        .is_some_and(|name| e.name == name)
-                });
-                let raw_type = analyzed.and_then(|e| e.payload_type.clone());
-                let shallow_payload = analyzed.and_then(|e| e.payload.clone());
-                let admitted = admit_published_member(candidate, &cursor, &dispatch)?;
-                Some((admitted, raw_type, shallow_payload))
-            })
+            .filter_map(|candidate| admit_published_member(candidate, &cursor, &dispatch))
             .collect()
     };
     admitted
         .into_iter()
-        .map(|(admitted, raw_type, shallow_payload)| {
+        .map(|admitted| {
             surface_member_to_expanded_field(
                 query_engine,
                 file,
                 &admitted,
-                raw_type,
-                shallow_payload,
+                None,
+                None,
                 mac.parsed_type_argument.as_ref(),
-                // The flat emit row is a shallow published member value —
-                // METADATA for `define_emits_shape` (exactness / status /
-                // diagnostics), never the payload authority: the published
-                // emit payload source is the normalized
-                // `ResolvedEmitField.payload_source` row.
+                // This flat expansion row is independent projector metadata,
+                // never CREO membership or payload authority. The complete
+                // `ResolvedEmitOccurrence` owns public emit association.
                 MemberValuePosition::ShallowMember,
             )
         })

@@ -12,8 +12,8 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
 use crate::documents::uri_to_canonical_id;
 use crate::features::definition::definition_at_position;
 use crate::features::references::references_at_position;
@@ -157,7 +157,7 @@ pub(super) async fn handle_goto_definition(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
         let canonical_id = uri_to_canonical_id(uri);
         let resolve_path = {
             let canonical_id = canonical_id.clone();
@@ -217,6 +217,10 @@ pub(super) async fn handle_goto_definition(
             return Some(barrel_def);
         }
 
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone());
         let mut def = definition_at_position(
             position,
             &doc.source,
@@ -225,6 +229,7 @@ pub(super) async fn handle_goto_definition(
             &doc.line_index,
             resolve_fn,
             resolve_export_fn,
+            structure.as_ref(),
         )?;
 
         // Fix up sentinel URIs: if the definition is in the same file, use the document URI
@@ -795,7 +800,11 @@ pub(super) async fn handle_references(
     let verter_result = (|| {
         let doc = server.documents.get(uri)?;
         let analysis = server.documents.get_analysis(uri);
-        let blocks = scan_sfc_blocks_for_document(&doc);
+        let blocks = project_carrier_blocks_for_document(&doc);
+        let structure = doc
+            .feature_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.structure().clone());
         let mut locations = references_at_position(
             position,
             &doc.source,
@@ -803,6 +812,7 @@ pub(super) async fn handle_references(
             analysis.as_ref(),
             &doc.line_index,
             include_declaration,
+            structure.as_ref(),
         )?;
 
         // Fix up sentinel URIs

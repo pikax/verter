@@ -474,10 +474,7 @@ impl VerterHost {
         // here so we can re-apply to workspace below without holding the
         // entry lock.
         let preserved_routes = {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical_id.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             let preserved_routes = derived.import_routes.clone();
             derived.evicted = false;
@@ -575,6 +572,7 @@ impl VerterHost {
     /// hosts don't keep the Node.js process alive waiting for GC
     /// finalisation.
     pub fn close(&self) {
+        let _block_content_fence = self.block_content_admission_fence.lock();
         // Notify the workspace for each tracked file so overlays AND
         // edge store are cleared before scheduler nodes are removed.
         // Use notify_delete (not notify_close) to clear the VFS edge
@@ -593,6 +591,7 @@ impl VerterHost {
 
         write_lock(&self.alias_to_canonical).clear();
         write_lock(&self.last_const_prop_overrides).clear();
+        write_lock(&self.block_content_state).close_all();
 
         // AUTHORITY-RESET cascade: close() is a full teardown, one of
         // the two reserved `bump_project_generation_and_evict` callers
@@ -875,7 +874,6 @@ impl VerterHost {
             },
             virtual_loads: self.metrics.virtual_loads.load(Relaxed),
             resolves: self.metrics.resolves.load(Relaxed),
-            style_override_calls: self.metrics.style_override_calls.load(Relaxed),
             slice_hash_time_us_total,
             avg_slice_hash_time_us: if upserts == 0 {
                 0.0
@@ -914,8 +912,6 @@ impl VerterHost {
         // outputs. ProfileState has no `evicted` flag; the eviction
         // marker lives on DerivedRawState.
         if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
-            profile.content_overrides.clear();
-            profile.style_overrides.clear();
             let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();
@@ -932,10 +928,7 @@ impl VerterHost {
         // and capture pre-evict whole_hash; clear all source-derived
         // caches.
         {
-            let mut derived_ref = self
-                .derived_raw_cache()
-                .entry(canonical_id.to_string())
-                .or_default();
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
             derived.evicted = true;
             derived.evicted_whole_hash = pre_evict_hash;
@@ -1034,16 +1027,11 @@ impl VerterHost {
         self.provenance
             .ensure_loaded_work_ns
             .fetch_add(work_start.elapsed().as_nanos() as u64, Relaxed);
-        // Every successful load — first-time additive OR reload — adds or
-        // changes host state that `HostStoreView::build` snapshots BY
-        // VALUE: a scheduler node + `whole_hashes` entry, the
-        // `derived_raw_cache` known-miss tag the build folds into
-        // `resolved_import_facts_known_miss_tags`, and the dependency/alias
-        // maps. A `StoreViewManager`-cached base snapshot built BEFORE this
-        // load does not track the newly-loaded canonical, so the token MUST
-        // advance or the manager would hand a stale pre-load snapshot back
-        // to the next caller (and the untracked-file `None => true`
-        // optimistic-accept would fossilize against it).
+        // Every successful load — first-time additive OR reload — publishes
+        // source state visible through a store view's captured scheduler root.
+        // A manager-cached base view captured BEFORE this load does not track
+        // the newly-loaded canonical, so the token MUST advance or the manager
+        // could hand the stale pre-load root back to the next caller.
         // `integrate_scheduler_snapshot` does NOT publish into
         // `FileArtifactStore`, so `artifact_generation` does not cover it.
         //

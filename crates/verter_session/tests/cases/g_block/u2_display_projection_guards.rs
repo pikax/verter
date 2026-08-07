@@ -314,11 +314,21 @@ fn object(
     call_signatures: Vec<SemanticNodeId>,
     construct_signatures: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    store.intern_node(SemanticNodeData::Object(SurfaceView::new(
-        Arc::from(members.into_boxed_slice()),
-        Arc::from(call_signatures.into_boxed_slice()),
-        Arc::from(construct_signatures.into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+    store.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+        members
+            .into_iter()
+            .map(verter_session::semantic_query::SurfaceEntry::Member)
+            .chain(
+                call_signatures
+                    .into_iter()
+                    .map(verter_session::semantic_query::SurfaceEntry::CallSignature),
+            )
+            .chain(
+                construct_signatures
+                    .into_iter()
+                    .map(verter_session::semantic_query::SurfaceEntry::ConstructSignature),
+            )
+            .collect(),
         None,
         false,
     )))

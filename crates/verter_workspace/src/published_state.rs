@@ -37,6 +37,7 @@ use rustc_hash::FxHashMap;
 
 use verter_scheduler::invalidation::Hash16;
 
+use crate::resolution_currency::PublishedContextSelection;
 use crate::workspace_snapshot::{ProjectId, WorkspaceSnapshot};
 
 /// Per-project four-array env-hash layout `[parse, resolve, type_, lib]`.
@@ -87,6 +88,13 @@ pub struct PublishedRoot {
     /// Per-project identity hashes. Empty on bootstrap snapshots; populated
     /// alongside [`env_hashes_by_project`].
     pub project_identity_hashes: FxHashMap<ProjectId, Hash16>,
+    /// This index's context-selection service.
+    ///
+    /// Private, and deliberately not part of any constructor's signature:
+    /// project selection is a pure function of the fields above, so a
+    /// caller must never be able to hand one index the records of
+    /// another. Every construction starts empty.
+    context_selection: PublishedContextSelection,
 }
 
 impl PublishedRoot {
@@ -102,6 +110,7 @@ impl PublishedRoot {
             ownership_ready: false,
             env_hashes_by_project: FxHashMap::default(),
             project_identity_hashes: FxHashMap::default(),
+            context_selection: PublishedContextSelection::default(),
         }
     }
 
@@ -118,6 +127,7 @@ impl PublishedRoot {
             ownership_ready: true,
             env_hashes_by_project: FxHashMap::default(),
             project_identity_hashes: FxHashMap::default(),
+            context_selection: PublishedContextSelection::default(),
         }
     }
 
@@ -138,6 +148,7 @@ impl PublishedRoot {
             ownership_ready: false,
             env_hashes_by_project,
             project_identity_hashes,
+            context_selection: PublishedContextSelection::default(),
         }
     }
 
@@ -146,6 +157,28 @@ impl PublishedRoot {
         self.consumer_ext
             .as_ref()
             .and_then(|ext| ext.downcast_ref::<T>())
+    }
+
+    /// This index's context-selection service.
+    pub(crate) fn context_selection(&self) -> &PublishedContextSelection {
+        &self.context_selection
+    }
+
+    /// Project-membership walks THIS index performed for `canonical_id`.
+    ///
+    /// Selecting a canonical's resolve context is a pure function of this
+    /// index, so a well-behaved index answers each path with one walk
+    /// however many resolutions ask. Read this together with
+    /// [`Self::context_membership_table_clears`]: a non-zero clear count
+    /// means the number below counts only since the last clear.
+    pub fn context_membership_evaluations(&self, canonical_id: &str) -> u64 {
+        self.context_selection.evaluations(canonical_id)
+    }
+
+    /// How often this index's per-path membership table was cleared for
+    /// capacity.
+    pub fn context_membership_table_clears(&self) -> u64 {
+        self.context_selection.table_clears()
     }
 }
 
@@ -163,6 +196,7 @@ impl std::fmt::Debug for PublishedRoot {
                 "project_identity_hashes_count",
                 &self.project_identity_hashes.len(),
             )
+            .field("context_selection", &self.context_selection)
             .finish()
     }
 }

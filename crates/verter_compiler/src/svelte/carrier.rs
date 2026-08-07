@@ -2,11 +2,8 @@
 //!
 //! Owns [`SvelteParseCarrier`] — the concrete [`CarrierParse`] payload wrapping
 //! a [`ParsedSvelte`] — and [`build_svelte_parse_artifact`], the producer that
-//! lifts a parse into the framework-neutral [`FrameworkParseArtifact`] (typed
-//! script regions for BOTH the instance and module `<script>` blocks, plus the
-//! `<style>` regions). The instance script is the runes-or-legacy component
-//! body; the module script is `<script module>` (5.5) / legacy
-//! `<script context="module">`.
+//! wraps a parse for the registered projector. The projector is the sole owner
+//! of the framework-neutral inventory geometry.
 //!
 //! [`SvelteCarrierCompiler`] is the second [`CarrierCompiler`] (Vue is the
 //! reference). `parse` produces the neutral artifact, `eval_source` blanks
@@ -25,16 +22,15 @@ use std::time::Instant;
 use web_time::Instant;
 
 use verter_language::{
-    CarrierParse, ExternalLink, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
-    FrameworkParseCommon, JsModuleKind, LanguageId, ScriptRegion, ScriptRegionKind,
-    ScriptSourceType, StyleRegion,
+    CarrierParse, FrameworkAdapterId, FrameworkParseArtifact, FrameworkParseCommon, JsModuleKind,
+    LanguageId, ScriptSourceType,
 };
 use verter_span::Span;
 
 use crate::framework_common::carrier_compiler::{
     CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    TemplateFacts,
+    RuntimeOutputDescriptor, SourceMapFidelity, TemplateFacts,
 };
 use crate::framework_common::ctx::{receive_svelte_carrier_token, CarrierCompilerCtx};
 
@@ -81,7 +77,7 @@ impl CarrierParse for SvelteParseCarrier {
 /// TypeScript. No-lang and other script languages use JavaScript grammar. A
 /// `.svelte` script is module-grammar (top-level `import`/`export` allowed), so
 /// JS dialects resolve the module module-kind.
-fn svelte_script_source_type(script: Option<&SvelteScript>) -> ScriptSourceType {
+pub(crate) fn svelte_script_source_type(script: Option<&SvelteScript>) -> ScriptSourceType {
     match script.and_then(|s| s.lang.as_deref()) {
         Some("ts") => ScriptSourceType::Ts,
         Some("jsx") => ScriptSourceType::Jsx(JsModuleKind::Module),
@@ -90,96 +86,32 @@ fn svelte_script_source_type(script: Option<&SvelteScript>) -> ScriptSourceType 
 }
 
 /// The Svelte carrier parser version stamped on produced artifacts.
-pub const SVELTE_CARRIER_PARSER_VERSION: u32 = 1;
+pub const SVELTE_CARRIER_PARSER_VERSION: u32 = 2;
+pub const SVELTE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::CarrierParserVersion =
+    match verter_language::carrier_versions::CarrierParserVersion::new(
+        SVELTE_CARRIER_PARSER_VERSION,
+    ) {
+        Some(version) => version,
+        None => panic!("Svelte carrier parser version must be nonzero"),
+    };
 
-/// Lift a parsed Svelte component into the framework-neutral parse artifact.
-///
-/// The neutral common surface carries:
-/// * one [`ScriptRegion`] per `<script>` block — `<script module>` →
-///   [`ScriptRegionKind::Module`], the instance `<script>` →
-///   [`ScriptRegionKind::Instance`] — each stamped with the block's resolved
-///   [`ScriptSourceType`]; regions are SOURCE-ordered;
-/// * one [`StyleRegion`] per component `<style>` block;
-/// * external `src` links for script/style blocks (Svelte rarely uses `src`,
-///   but the producer records them uniformly).
+/// Wrap a parsed Svelte component for the registered projector.
 #[must_use]
 pub fn build_svelte_parse_artifact(
-    source: &str,
+    _source: &str,
     parsed: Arc<ParsedSvelte>,
     parser_version: u32,
 ) -> Arc<FrameworkParseArtifact> {
-    let mut script_regions = Vec::new();
-    let mut external_links = Vec::new();
-
-    for script in [
-        parsed.instance_script.as_ref(),
-        parsed.module_script.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let source_type = svelte_script_source_type(Some(script));
-        let span = script
-            .content
-            .unwrap_or_else(|| Span::new(script.tag_open.end, script.tag_open.end));
-        script_regions.push(ScriptRegion {
-            span,
-            source_type,
-            kind: if script.is_module {
-                ScriptRegionKind::Module
-            } else {
-                ScriptRegionKind::Instance
-            },
-        });
-        if let Some((specifier, link_span)) = script_src(script, source) {
-            external_links.push(ExternalLink {
-                kind: ExternalLinkKind::Script,
-                specifier,
-                span: Some(link_span),
-            });
-        }
-    }
-    // Source-ordered (the parser already discovers them in source order, but a
-    // module script may precede the instance one).
-    script_regions.sort_by_key(|region| region.span.start);
-
-    let mut style_regions = Vec::new();
-    for style in &parsed.styles {
-        let span = style
-            .content
-            .unwrap_or_else(|| Span::new(style.tag_open.end, style.tag_open.end));
-        style_regions.push(StyleRegion { span });
-    }
-
     Arc::new(FrameworkParseArtifact::new(
         FrameworkAdapterId::svelte(),
         LanguageId::new("svelte"),
         parser_version,
         FrameworkParseCommon {
-            script_regions,
-            template_regions: Vec::new(),
-            style_regions,
-            external_links,
+            inventory: Arc::default(),
             diagnostics: Vec::new(),
         },
         Arc::new(SvelteParseCarrier::new(parsed)),
     ))
-}
-
-/// Read a `src="..."` specifier off a script block's attributes.
-fn script_src(script: &SvelteScript, source: &str) -> Option<(String, Span)> {
-    use super::parser::{SvelteAttributeKind, SvelteAttributeValue};
-    script.attributes.iter().find_map(|attr| match &attr.kind {
-        SvelteAttributeKind::Plain {
-            name,
-            value: Some(SvelteAttributeValue::Text(span)),
-            ..
-        } if name.eq_ignore_ascii_case("src") => Some((
-            source[span.start as usize..span.end as usize].to_string(),
-            *span,
-        )),
-        _ => None,
-    })
 }
 
 /// The Svelte carrier compiler — the second [`CarrierCompiler`].
@@ -203,10 +135,20 @@ impl Default for SvelteCarrierCompiler {
 }
 
 impl SvelteCarrierCompiler {
+    pub(crate) fn carrier_arc(
+        &self,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<Arc<SvelteParseCarrier>> {
+        self.ctx.carrier_for_arc::<SvelteParseCarrier>(artifact)
+    }
+
     /// Reach the parsed component back out of a Svelte artifact, or `None` when
     /// the artifact is not a Svelte carrier.
     #[must_use]
-    fn parsed_svelte<'a>(&self, artifact: &'a FrameworkParseArtifact) -> Option<&'a ParsedSvelte> {
+    pub(crate) fn parsed_svelte<'a>(
+        &self,
+        artifact: &'a FrameworkParseArtifact,
+    ) -> Option<&'a ParsedSvelte> {
         self.ctx
             .carrier_for::<SvelteParseCarrier>(artifact)
             .map(|carrier| carrier.parsed())
@@ -259,18 +201,32 @@ impl SvelteCarrierCompiler {
             })
             .collect();
 
+        let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+        let output_descriptor = RuntimeOutputDescriptor::generated(
+            &projection.code,
+            (!projection.source_map.is_empty()).then_some(projection.source_map.as_str()),
+            &[(space.as_str(), artifact.as_str())],
+            SourceMapFidelity::Approximate,
+        );
         let ide = IdeOutput {
             code: projection.code,
             source_map: projection.source_map,
             is_jsx: projection.is_jsx,
             duration_ms,
             destructured_block: None,
+            output_descriptor,
+            generated_template_hole: None,
+            generated_template_chunk: None,
         };
         (ide, diagnostics)
     }
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {
+    fn __verter_as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn adapter_id(&self) -> FrameworkAdapterId {
         FrameworkAdapterId::svelte()
     }
@@ -296,7 +252,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             .iter()
             .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
             .collect();
-        for region in &artifact.common.script_regions {
+        for region in artifact.script_regions() {
             let start = region.span.start as usize;
             let end = region.span.end as usize;
             if start <= end && end <= src.len() {
@@ -434,6 +390,13 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 // styles population). Injected-mode css is inlined in the
                 // module (no artifact), and a style-less component has none.
                 if let Some(css) = module.css {
+                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+                    let output_descriptor = RuntimeOutputDescriptor::generated(
+                        &css.code,
+                        css.source_map.as_deref(),
+                        &[(space.as_str(), artifact.as_str())],
+                        SourceMapFidelity::Approximate,
+                    );
                     bundle.styles.push(
                         crate::framework_common::carrier_compiler::RuntimeStyleBlock {
                             code: css.code,
@@ -441,6 +404,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                             lang: None,
                             scope_hash: Some(css.hash),
                             has_global: css.has_global,
+                            output_descriptor,
                         },
                     );
                 }
@@ -528,6 +492,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 filename: opts.filename.clone(),
                 skip_source_map: !opts.source_map,
                 embed_ambient_types: opts.embed_ambient_types,
+                block_content: opts.block_content.clone(),
             };
             let (ide, mut diagnostics) = Self::project_ide(parsed, source, &ide_opts);
             bundle.tsx = Some(ide);
@@ -553,10 +518,46 @@ mod tests {
         assert_token_maps_to_source, assert_token_maps_to_source_line, build_lookup_table,
         parse_ide_output,
     };
+    use verter_language::ScriptRegionKind;
 
     fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
-        let parsed = Arc::new(parse_svelte(source));
-        build_svelte_parse_artifact(source, parsed, SVELTE_CARRIER_PARSER_VERSION)
+        use verter_language::carrier_grammar::{
+            CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
+            FrameworkAdapterSemanticVersion,
+        };
+        use verter_language::registered_source_authority::{
+            CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
+        };
+        let source_authority = RegisteredSourceAuthority::new().unwrap();
+        let grammar_authority = CarrierGrammarAuthority::new().unwrap();
+        let config = CarrierGrammarConfig::Svelte;
+        grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::svelte(),
+                FrameworkAdapterSemanticVersion::new(1).unwrap(),
+                CarrierParserGrammarVersion::new(1).unwrap(),
+                config.clone(),
+            )
+            .unwrap();
+        let snapshot = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///fixture.svelte"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                verter_language::FileLanguage::svelte(),
+                Arc::from(source),
+            )
+            .unwrap();
+        let accepted = grammar_authority
+            .accept_registered_source(&source_authority, &snapshot, &config)
+            .unwrap();
+        Arc::new(
+            crate::framework_common::registered_carrier_projection::__project_registered_carrier_for_store_leader(
+                &SvelteCarrierCompiler::default(),
+                &accepted,
+            )
+            .into_framework_parse_artifact(),
+        )
     }
 
     #[test]
@@ -566,7 +567,7 @@ mod tests {
         // client module, not empty.
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let bundle = compiler
             .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
@@ -602,7 +603,7 @@ mod tests {
         // export refusal is gone.
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script>export let label;</script>\n<p>{label}</p>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let bundle = compiler
             .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
@@ -643,7 +644,7 @@ mod tests {
         // discriminating test of the carrier's source-map transport.
         let source = "<script>let count = $state(0);</script>\n\
 <button onclick={() => count += 1}>{count}</button>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let mapped = compiler
             .compile_bundle(
@@ -705,7 +706,7 @@ mod tests {
         // map + the `:global` fact ride the neutral style block.
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let opts = RuntimeCompileOptions {
             filename: Some("App.svelte".to_string()),
@@ -749,7 +750,7 @@ mod tests {
 
         // A non-global component reports `has_global == false`.
         let non_global = "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
-        let artifact2 = compiler.parse(non_global, &ParseOptions::default());
+        let artifact2 = artifact_for(non_global);
         let bundle2 = compiler
             .compile_bundle(non_global, &artifact2, &opts, &alloc)
             .expect("svelte runtime bundle");
@@ -768,7 +769,7 @@ mod tests {
         // of a style block publishes none (`compiled.css === null`).
         let compiler = SvelteCarrierCompiler::default();
         let source = "<style></style><p>hi</p>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let opts = RuntimeCompileOptions {
             filename: Some("X.svelte".to_string()),
@@ -800,7 +801,7 @@ mod tests {
 
         // NEGATIVE: NO `<style>` block ⇒ NO artifact (official css === null).
         let source_none = "<p>hi</p>\n";
-        let artifact_none = compiler.parse(source_none, &ParseOptions::default());
+        let artifact_none = artifact_for(source_none);
         let bundle_none = compiler
             .compile_bundle(source_none, &artifact_none, &opts, &alloc)
             .expect("svelte runtime bundle");
@@ -822,7 +823,7 @@ mod tests {
         // construct that genuinely still fails closed.
         let source =
             "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let opts = RuntimeCompileOptions {
             want_ide: true,
@@ -866,7 +867,7 @@ mod tests {
         let compiler = SvelteCarrierCompiler::default();
         let source =
             "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let alloc = oxc_allocator::Allocator::default();
         let bundle = compiler
             .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
@@ -889,7 +890,7 @@ mod tests {
         let compiler = SvelteCarrierCompiler::default();
         let source =
             "<script lang=\"ts\">let myUniqueBinding = 0;</script>\n<div>{myUniqueBinding}</div>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let ide = compiler
             .compile_ide(
                 source,
@@ -924,7 +925,7 @@ mod tests {
         let source = "<script lang=\"ts\">import { fly } from \"svelte/transition\";\n\
              const flyParam = { delay: 0 };</script>\n\
              <div transition:fly={flyParam}>x</div>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let ide = compiler
             .compile_ide(
                 source,
@@ -960,7 +961,7 @@ mod tests {
         let source =
             "<script module>export const x = 1;</script>\n<script lang=\"ts\">let a = 1;</script>";
         let artifact = artifact_for(source);
-        let regions = &artifact.common.script_regions;
+        let regions = artifact.script_regions();
         assert_eq!(regions.len(), 2);
         // Source-ordered: module script first.
         assert_eq!(regions[0].kind, ScriptRegionKind::Module);
@@ -969,8 +970,8 @@ mod tests {
         assert_eq!(regions[1].span.slice(source).trim(), "let a = 1;");
         assert_eq!(
             regions[0].source_type,
-            ScriptSourceType::Js(JsModuleKind::Module),
-            "a no-lang Svelte script is JavaScript"
+            ScriptSourceType::Js(JsModuleKind::Unambiguous),
+            "inventory compatibility projects generic carrier JavaScript"
         );
         assert_eq!(regions[1].source_type, ScriptSourceType::Ts);
     }
@@ -979,21 +980,18 @@ mod tests {
     fn legacy_context_module_classifies_as_module() {
         let source = "<script context=\"module\">export const x = 1;</script>";
         let artifact = artifact_for(source);
-        assert_eq!(artifact.common.script_regions.len(), 1);
-        assert_eq!(
-            artifact.common.script_regions[0].kind,
-            ScriptRegionKind::Module
-        );
+        assert_eq!(artifact.script_regions().len(), 1);
+        assert_eq!(artifact.script_regions()[0].kind, ScriptRegionKind::Module);
     }
 
     #[test]
     fn eval_source_is_position_preserving_with_both_scripts_at_raw_offsets() {
         let source = "<script module>export const x = 1;</script>\n<div>{count}</div>\n<script lang=\"ts\">let count = 0;</script>";
         let compiler = SvelteCarrierCompiler::default();
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let eval = compiler.eval_source(source, &artifact);
         assert_eq!(eval.len(), source.len(), "eval source must be same length");
-        for region in &artifact.common.script_regions {
+        for region in artifact.script_regions() {
             let (s, e) = (region.span.start as usize, region.span.end as usize);
             assert_eq!(
                 &eval[s..e],
@@ -1010,7 +1008,7 @@ mod tests {
     fn compile_ide_projects_a_tsx_artifact_with_the_pragma_prelude() {
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script lang=\"ts\">let a = 1;</script>\n<div>{a}</div>";
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(source, &artifact, &IdeCompileOptions::default())
             .expect("the Svelte IDE projection produces a TSX artifact");
@@ -1037,7 +1035,7 @@ let { label } = $props();
 let count = $state(0);
 </script>
 <button onclick={() => count += 1}>{label}: {count}</button>"#;
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         let out = compiler
             .compile_ide(source, &artifact, &IdeCompileOptions::default())
             .expect("the Svelte IDE projection produces a JavaScript carrier");
@@ -1067,7 +1065,7 @@ let count = $state(0);
     fn compile_ide_declines_a_foreign_artifact() {
         let compiler = SvelteCarrierCompiler::default();
         // A Vue-shaped artifact is not a Svelte carrier — the typed answer.
-        let svelte = compiler.parse("<div />", &ParseOptions::default());
+        let svelte = artifact_for("<div />");
         // Re-wrap is unnecessary; a real foreign carrier is exercised by the
         // shared contract tests. Here we assert the Svelte path succeeds.
         let out = compiler.compile_ide("<div />", &svelte, &IdeCompileOptions::default());
@@ -1076,7 +1074,7 @@ let count = $state(0);
 
     fn facts_for(source: &str) -> crate::compile::RawTemplateData {
         let compiler = SvelteCarrierCompiler::default();
-        let artifact = compiler.parse(source, &ParseOptions::default());
+        let artifact = artifact_for(source);
         compiler.template_data(source, &artifact).data
     }
 

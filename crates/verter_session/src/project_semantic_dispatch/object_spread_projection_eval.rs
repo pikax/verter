@@ -740,7 +740,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
                     let transit =
                         crate::semantic_query::ProjectionReductionContext::structural_transit();
-                    let (resolved, _) =
+                    let (resolved, _, _) =
                         self.resolve_carrier_subject_node_capturing_suppress(current, transit);
                     if resolved == current {
                         return current;

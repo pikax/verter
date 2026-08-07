@@ -1,0 +1,9 @@
+error[E0451]: fields `insert_offset` and `is_empty` of struct `MemberListAnchor` are private
+ --> tests/cases/compile-fail/member_list_anchor_struct_literal.rs:8:9
+  |
+7 |     let _literal = verter_semantic::analysis::types::MemberListAnchor {
+  |                    -------------------------------------------------- in this type
+8 |         insert_offset: 4,
+  |         ^^^^^^^^^^^^^ private field
+9 |         is_empty: false,
+  |         ^^^^^^^^ private field

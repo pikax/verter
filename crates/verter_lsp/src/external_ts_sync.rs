@@ -457,6 +457,7 @@ impl PlannedFile {
             // records the `map_hash` identity) — the fail-closed two-phase rule for
             // maps (never advertise a map blob that does not exist).
             map_json: None,
+            structure: None,
             version: self.version,
             open_state,
         }

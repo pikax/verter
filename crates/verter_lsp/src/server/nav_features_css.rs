@@ -3,7 +3,7 @@
 
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 
 use super::handler_guard::block_in_place_if_available;
 use super::VerterLanguageServer;
@@ -18,10 +18,9 @@ pub(super) fn global_class_target(
     let doc = server.documents.get(uri)?;
     let analysis = server.documents.get_analysis(uri)?;
     let offset = doc.line_index.position_to_offset(position)? as usize;
-    let blocks = scan_sfc_blocks_for_document(&doc);
+    let blocks = project_carrier_blocks_for_document(&doc);
     crate::css::global_classes::global_class_target_at(offset, &doc.source, &blocks, &analysis)
 }
-
 /// Extend `base` definition locations with every OTHER file's global
 /// declarations of `class_name`, deduplicated.
 pub(super) fn merge_global_class_definitions(

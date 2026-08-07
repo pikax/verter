@@ -7,8 +7,8 @@
 
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Format an SFC document.
 ///
@@ -22,14 +22,14 @@ use crate::documents::sfc_scanner::SfcBlock;
 /// (Prettier, dprint, etc.) via the client's formatting pipeline.
 pub fn format_document(
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     line_index: &LineIndex,
     _options: &FormattingOptions,
 ) -> Vec<TextEdit> {
     let mut edits = Vec::new();
 
     // 1. Ensure single blank line between consecutive blocks
-    let mut sorted_blocks: Vec<&SfcBlock> = blocks.iter().collect();
+    let mut sorted_blocks: Vec<&CarrierBlockView> = blocks.iter().collect();
     sorted_blocks.sort_by_key(|b| b.open_tag_start);
 
     for window in sorted_blocks.windows(2) {
@@ -113,7 +113,7 @@ pub fn format_document(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
 
     fn default_options() -> FormattingOptions {
         FormattingOptions {
@@ -127,7 +127,7 @@ mod tests {
     fn test_no_edits_for_well_formatted() {
         let source =
             "<template>\n  <div />\n</template>\n\n<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let edits = format_document(source, &blocks, &line_index, &default_options());
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn test_missing_trailing_newline() {
         let source = "<template>\n  <div />\n</template>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let edits = format_document(source, &blocks, &line_index, &default_options());
@@ -148,7 +148,7 @@ mod tests {
     fn test_excessive_blank_lines() {
         let source =
             "<template>\n  <div />\n</template>\n\n\n\n<script setup>\nconst x = 1\n</script>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let edits = format_document(source, &blocks, &line_index, &default_options());
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_trailing_whitespace_removed() {
         let source = "<template>  \n  <div />\n</template>\n";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
 
         let edits = format_document(source, &blocks, &line_index, &default_options());

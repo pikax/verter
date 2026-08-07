@@ -1493,24 +1493,25 @@ fn return_only_reason_propagates_only_transitive_hazards() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let map: DashMap<u32, Arc<String>> = DashMap::new();
         let inflight: InflightTable<(u32, u8)> = InflightTable::default();
-        let (value, finalise) = host.with_fact_tracer(|| {
-            cooperative_admit_with_post_publish_by_flight_key(
-                &map,
-                &inflight,
-                9u32,
-                (9u32, 0u8),
-                |entry: &String| Some(entry.clone()),
-                || ComputeAdmission::<String, String>::ReturnOnly {
-                    value: "winner-only".to_string(),
-                    reason,
-                },
-                |entry: &String| entry.clone(),
-                |_entry: &String| true,
-                |_k: &u32, _e: &Arc<String>| {},
-                |_e: &Arc<String>, _k: &u32| {},
-                None,
-            )
-        });
+        let (value, finalise) =
+            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                cooperative_admit_with_post_publish_by_flight_key(
+                    &map,
+                    &inflight,
+                    9u32,
+                    (9u32, 0u8),
+                    |entry: &String| Some(entry.clone()),
+                    || ComputeAdmission::<String, String>::ReturnOnly {
+                        value: "winner-only".to_string(),
+                        reason,
+                    },
+                    |entry: &String| entry.clone(),
+                    |_entry: &String| true,
+                    |_k: &u32, _e: &Arc<String>| {},
+                    |_e: &Arc<String>, _k: &u32| {},
+                    None,
+                )
+            });
         assert_eq!(value.as_deref(), Some("winner-only"));
         finalise.finalise()
     }

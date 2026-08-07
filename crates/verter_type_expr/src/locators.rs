@@ -581,6 +581,16 @@ impl TypeBodySlot {
     }
 }
 
+impl TypeArgLocator {
+    pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
+        self.anchor.absolutize(canonical_id).map(|anchor| Self {
+            anchor,
+            path: Arc::clone(&self.path),
+            arg_index: self.arg_index,
+        })
+    }
+}
+
 impl SymbolBodyLocator {
     pub(crate) fn absolutize(&self, canonical_id: &str) -> Option<Self> {
         self.anchor

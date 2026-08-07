@@ -5,6 +5,7 @@ import {
   activeCarrierSources,
   CARRIER_STORE_REFRESH_TOKEN_CONFIG_KEY,
   cleanupCarrierVirtualImportPath,
+  carrierSourceStructure,
   containingFileAwareExists,
   editorOwnsCarrierMembership,
   editorOwnsCarrierSourceFeatures,
@@ -47,6 +48,12 @@ import {
 import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
 import { writeEditorTsserverAttestation } from "./helpers/editorAttestation";
 import { prepareVueJsxCarrier } from "./helpers/vueJsxAuthority";
+import {
+  isFrameworkAttributeNamePosition as boundedFrameworkAttributeNamePosition,
+  utf8RangesToUtf16,
+} from "./cursorGeometry";
+
+const isFrameworkAttributeNamePosition = boundedFrameworkAttributeNamePosition;
 
 // tsserver may invoke the plugin module factory separately for different projects.
 // Attestation is process-scoped, so every factory must publish the same union rather
@@ -288,6 +295,36 @@ function sameStorePath(reader: DiskCarrierStoreReader, left: string, right: stri
   return reader.canonicalPath(left) === reader.canonicalPath(right);
 }
 
+/** Resolve a relative module path in the path dialect of its containing file. */
+function resolveModulePath(containingFile: string, moduleName: string): string {
+  const containing = normalizePath(containingFile);
+  const specifier = normalizePath(moduleName);
+  if (/^[A-Za-z]:\//.test(containing) || containing.startsWith("//")) {
+    const windowsContaining = containing.replace(/\//g, "\\");
+    const windowsSpecifier = specifier.replace(/\//g, "\\");
+    return normalizePath(
+      path.win32.resolve(path.win32.dirname(windowsContaining), windowsSpecifier),
+    );
+  }
+  if (containing.startsWith("/")) {
+    return path.posix.resolve(path.posix.dirname(containing), specifier);
+  }
+  return normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+}
+
+/** Preserve already-absolute manifest/TypeScript identities across host OSes. */
+function absoluteStorePath(fileName: string): string {
+  const normalized = normalizePath(fileName);
+  if (
+    normalized.startsWith("/") ||
+    normalized.startsWith("//") ||
+    /^[A-Za-z]:\//.test(normalized)
+  ) {
+    return normalized;
+  }
+  return normalizePath(path.resolve(fileName));
+}
+
 /**
  * The `@verter/typescript-plugin` is a THIN SYNCHRONOUS READER over the Rust
  * `verter_lsp`-published on-disk carrier-snapshot store. The Rust LSP is the
@@ -320,104 +357,6 @@ function manifestScriptKind(ts: typeof tsModule, kind: ManifestScriptKind): tsMo
   }
 }
 
-function asciiEqualsAt(source: string, offset: number, expectedLowercase: string): boolean {
-  if (offset < 0 || offset + expectedLowercase.length > source.length) return false;
-  for (let index = 0; index < expectedLowercase.length; index += 1) {
-    let code = source.charCodeAt(offset + index);
-    if (code >= 65 && code <= 90) code += 32;
-    if (code !== expectedLowercase.charCodeAt(index)) return false;
-  }
-  return true;
-}
-
-function isHtmlTagBoundary(source: string, offset: number): boolean {
-  if (offset >= source.length) return true;
-  const code = source.charCodeAt(offset);
-  return (
-    code === 47 ||
-    code === 62 ||
-    code === 9 ||
-    code === 10 ||
-    code === 12 ||
-    code === 13 ||
-    code === 32
-  );
-}
-
-function findHtmlTagEnd(source: string, start: number): number {
-  let quote = 0;
-  for (let offset = start; offset < source.length; offset += 1) {
-    const code = source.charCodeAt(offset);
-    if (quote !== 0) {
-      if (code === quote) quote = 0;
-      continue;
-    }
-    if (code === 34 || code === 39) {
-      quote = code;
-    } else if (code === 62) {
-      return offset;
-    }
-  }
-  return -1;
-}
-
-/**
- * Classify a raw SFC offset without interpreting the generated companion.
- *
- * HTML raw-text rules make the first matching `</script>` terminate a script
- * block even when those bytes appear in JavaScript text. The scan therefore
- * needs only quote-aware opening-tag handling plus comment skipping; it does
- * not guess from generated TSX or project configuration. This serves Vue and
- * Svelte carriers alike and does no source allocation on the completion path.
- */
-function sfcScriptImportAnchor(source: string | undefined, position: number): number | null {
-  if (source === undefined || position < 0 || position > source.length) return null;
-  let offset = 0;
-  while (offset < source.length) {
-    const tagStart = source.indexOf("<", offset);
-    if (tagStart < 0 || tagStart > position) return null;
-    if (source.startsWith("<!--", tagStart)) {
-      const commentEnd = source.indexOf("-->", tagStart + 4);
-      if (commentEnd < 0) return null;
-      offset = commentEnd + 3;
-      continue;
-    }
-    if (
-      !asciiEqualsAt(source, tagStart + 1, "script") ||
-      !isHtmlTagBoundary(source, tagStart + 7)
-    ) {
-      offset = tagStart + 1;
-      continue;
-    }
-    const openEnd = findHtmlTagEnd(source, tagStart + 7);
-    if (openEnd < 0) return null;
-    let closeStart = source.indexOf("<", openEnd + 1);
-    while (
-      closeStart >= 0 &&
-      (!asciiEqualsAt(source, closeStart + 1, "/script") ||
-        !isHtmlTagBoundary(source, closeStart + 8))
-    ) {
-      closeStart = source.indexOf("<", closeStart + 1);
-    }
-    let contentStart = openEnd + 1;
-    if (source.charCodeAt(contentStart) === 13 && source.charCodeAt(contentStart + 1) === 10) {
-      contentStart += 2;
-    } else if (source.charCodeAt(contentStart) === 10 || source.charCodeAt(contentStart) === 13) {
-      contentStart += 1;
-    }
-    if (closeStart < 0) return position > openEnd ? contentStart : null;
-    if (position > openEnd && position <= closeStart) return contentStart;
-    const closeEnd = findHtmlTagEnd(source, closeStart + 8);
-    if (closeEnd < 0) return null;
-    offset = closeEnd + 1;
-  }
-  return null;
-}
-
-function isInsideSfcScript(source: string | undefined, position: number): boolean {
-  return sfcScriptImportAnchor(source, position) !== null;
-}
-
 function identifierPrefixAt(source: string | undefined, position: number): string | null {
   if (source === undefined || position <= 0 || position > source.length) return null;
   const lineStart = source.lastIndexOf("\n", position - 1) + 1;
@@ -436,29 +375,6 @@ function identifierSpanAt(source: string | undefined, position: number): tsModul
   const identifier = left + right;
   if (identifier.length === 0 || !/^[$_\p{ID_Start}]/u.test(identifier)) return null;
   return { start: position - left.length, length: identifier.length };
-}
-
-function isFrameworkAttributeNamePosition(source: string | undefined, position: number): boolean {
-  if (source === undefined || position <= 0 || position > source.length) return false;
-  const tagStart = source.lastIndexOf("<", position - 1);
-  if (tagStart < 0 || source.lastIndexOf(">", position - 1) > tagStart) return false;
-  const first = source.charCodeAt(tagStart + 1);
-  if (first === 47 || first === 33 || first === 63) return false;
-
-  let quote = 0;
-  let braceDepth = 0;
-  for (let offset = tagStart + 1; offset < position; offset++) {
-    const code = source.charCodeAt(offset);
-    if (quote !== 0) {
-      if (code === 92) offset += 1;
-      else if (code === quote) quote = 0;
-      continue;
-    }
-    if (code === 34 || code === 39) quote = code;
-    else if (code === 123) braceDepth += 1;
-    else if (code === 125 && braceDepth > 0) braceDepth -= 1;
-  }
-  return quote === 0 && braceDepth === 0;
 }
 
 function camelToKebab(value: string): string {
@@ -1284,7 +1200,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (!/^\.\.?[\\/]/.test(moduleName) || !moduleName.endsWith(".verter.js")) {
         return undefined;
       }
-      const jsAlias = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+      const jsAlias = resolveModulePath(containingFile, moduleName);
       const provider = `${jsAlias.slice(0, -".js".length)}.ts`;
       const owned = store.ownedSourceFor(provider);
       return owned?.role === "CarrierApi" && sameStorePath(store, owned.provider_uri, provider)
@@ -1380,7 +1296,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
         // An already-IDE-carrier-shaped relative specifier resolves to itself.
         if (isRelativeVueTs(moduleName)) {
-          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          const resolved = resolveModulePath(containingFile, moduleName);
           return {
             extension: providerExtension(resolved),
             isExternalLibraryImport: false,
@@ -1394,7 +1310,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // redirect target here; when the API carrier is not servable the plugin
         // abstains (see `importedCarrierForSource`).
         if (isRelativeVue(moduleName)) {
-          const resolved = path.resolve(path.dirname(containingFile), moduleName);
+          const resolved = resolveModulePath(containingFile, moduleName);
           observedCarrierImportKeys.add(activeKey(resolved));
           const importedCarrier = importedCarrierForSource(resolved);
           if (importedCarrier) {
@@ -1429,10 +1345,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         if (!carrierSource) {
           return;
         }
-        observedCarrierImportKeys.add(activeKey(normalizePath(path.resolve(carrierSource))));
-        const importedCarrier = importedCarrierForSource(
-          normalizePath(path.resolve(carrierSource)),
-        );
+        const absoluteCarrierSource = absoluteStorePath(carrierSource);
+        observedCarrierImportKeys.add(activeKey(absoluteCarrierSource));
+        const importedCarrier = importedCarrierForSource(absoluteCarrierSource);
         if (!importedCarrier) {
           return;
         }
@@ -1919,8 +1834,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         readSource: runtime.readSource,
         fileExists: _fileExists,
       };
-      const sourceText = runtime.readSource(sourceFileName);
-      const importAnchor = sfcScriptImportAnchor(sourceText, sourcePosition);
       const out: tsModule.FileTextChanges[] = [];
       for (const change of changes) {
         const mapped = remapAllFileTextChanges(runtimeContext, [change]);
@@ -1935,6 +1848,20 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // and only into the exact source script block that requested the
         // completion. Every other unmappable edit remains dropped atomically.
         const owned = runtime.getStore().ownedSourceFor(change.fileName);
+        const sourceStructure =
+          owned === undefined
+            ? null
+            : carrierSourceStructure(runtime.getStore(), owned.provider_uri);
+        // The stamped script spans are UTF-8 BYTE offsets; `sourcePosition`
+        // and the recovered anchor are UTF-16 code units — convert before
+        // comparing or anchoring (no source text ⇒ fail closed, no recovery).
+        const sourceTextForAnchor = runtime.readSource(sourceFileName);
+        const importAnchor =
+          sourceStructure === null || sourceTextForAnchor === undefined
+            ? null
+            : (utf8RangesToUtf16(sourceTextForAnchor, sourceStructure.scriptContentRanges).find(
+                ([start, end]) => sourcePosition >= start && sourcePosition <= end,
+              )?.[0] ?? null);
         if (
           importAnchor === null ||
           owned === undefined ||
@@ -2409,7 +2336,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return verterTypesVirtualPath;
       }
       if (isRelativeVueTs(moduleName)) {
-        return path.resolve(path.dirname(containingFile), moduleName);
+        return resolveModulePath(containingFile, moduleName);
       }
       if (isRelativeVue(moduleName)) {
         // NAVIGATION, not module resolution: "go to `./Comp.vue`" targets the
@@ -2417,7 +2344,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // through a generated companion (and mapping back) would make
         // ctrl-click on an import specifier depend on publication state — the
         // source file is navigable the moment it exists on disk.
-        const resolved = normalizePath(path.resolve(path.dirname(containingFile), moduleName));
+        const resolved = resolveModulePath(containingFile, moduleName);
         return _fileExists(resolved) || store.ownedSourceFor(resolved) !== undefined
           ? resolved
           : undefined;
@@ -2875,7 +2802,17 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       if (usesEditorCarrierRouting(fileName)) {
         const routed = editorCarrierPosition(fileName, position);
         if (routed === null) return undefined;
-        const scriptOwned = isInsideSfcScript(routed.runtime.readSource(fileName), position);
+        const sourceStructure = carrierSourceStructure(routed.runtime.getStore(), routed.companion);
+        // The stamped script spans are UTF-8 BYTE offsets; `position` is a
+        // UTF-16 code-unit offset — convert before the ownership compare
+        // (no source text ⇒ fail closed: not script-owned).
+        const editorSourceText = routed.runtime.readSource(fileName);
+        const scriptOwned =
+          sourceStructure !== null &&
+          editorSourceText !== undefined &&
+          utf8RangesToUtf16(editorSourceText, sourceStructure.scriptContentRanges).some(
+            ([start, end]) => position >= start && position <= end,
+          );
         let companionResult = routed.runtime.languageService.getCompletionsAtPosition(
           routed.companion,
           routed.position,
@@ -2910,7 +2847,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         }
         if (
           !scriptOwned &&
-          isFrameworkAttributeNamePosition(routed.runtime.readSource(fileName), position)
+          isFrameworkAttributeNamePosition(
+            routed.runtime.readSource(fileName),
+            position,
+            sourceStructure?.markupOpeningRanges,
+          )
         ) {
           companionResult = {
             ...companionResult,

@@ -1,10 +1,8 @@
 //! CSS/style analysis for Vue SFC style blocks.
 //!
-//! Uses a lightweight byte-level CSS scanner to extract selectors, specificity,
-//! classes, IDs, custom properties, and at-rules from CSS blocks. Vue-specific
+//! Projects the shared lossless style syntax authority into selectors, specificity,
+//! classes, IDs, custom properties, and at-rules. Vue-specific
 //! features (v-bind, :deep, :global, :slotted) are passed through from verter_compiler.
-//!
-//! For non-CSS preprocessors (SCSS, Less, etc.), only Vue features are stored.
 
 use verter_span::Span;
 
@@ -59,6 +57,36 @@ pub enum SpecialPseudoKind {
 // Analysis Output Types (owned, serializable)
 // =============================================================================
 
+/// Where a style block's content lives, and therefore whether this analysis
+/// carries content facts at all.
+///
+/// The raw carrier parse never slices an external block's ignored inline span.
+/// The host may later hydrate a native external CSS/SCSS/Sass/Less/Stylus file
+/// from its registered VFS artifact, or hydrate a sealed supplied result for a
+/// processed language. Until that selection is available, consumers fail open
+/// for binding liveness (see
+/// [`super::types::ScriptAnalysisSnapshot::mark_bindings_used_in_style`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockContentAvailability {
+    /// Inline `<style>` content — analyzed in place.
+    #[default]
+    NativeAvailable,
+    /// The selected bytes require an external processor and no sealed result
+    /// has been admitted; content facts remain unavailable.
+    ProcessedContentRequired,
+    SuppliedAvailable,
+    Missing,
+    Conflict,
+    Stale,
+}
+
+impl BlockContentAvailability {
+    fn is_native_available(&self) -> bool {
+        matches!(self, Self::NativeAvailable)
+    }
+}
+
 /// Complete analysis of a single `<style>` block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,8 +96,25 @@ pub struct StyleBlockAnalysis {
     pub is_module: bool,
     pub module_name: Option<String>,
 
+    /// Sealed artifact-bound block identity, minted ONLY by the owning
+    /// `CarrierBlockInventory`. The SOLE Rust association key between this
+    /// analysis and a structure block: consumers full-identity-join
+    /// (artifact identity + block id) and fail closed on missing/mismatch.
+    #[serde(skip)]
+    pub block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
+
+    /// Opaque public block token for wire consumers (playground/FFI),
+    /// attached at the host serve boundary only after the sealed ref
+    /// revalidates against the live registered structure. Absent means
+    /// "identity unavailable" — wire consumers fail closed, never ordinal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_token: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_space_token: Option<String>,
+
     /// Byte offset of the style block content start within the SFC source.
-    /// Stored as block metadata for remapping and block identity.
+    /// Stored only for span remapping; it is not block identity.
     #[serde(default)]
     pub content_offset: u32,
 
@@ -77,8 +122,17 @@ pub struct StyleBlockAnalysis {
     pub v_binds: Vec<AnalyzedVBind>,
     pub special_pseudos: Vec<AnalyzedSpecialPseudo>,
 
-    // Full CSS analysis (scanner-based, CSS-only)
+    // Trusted structural analysis projected from the shared style syntax authority.
     pub css: Option<CssAnalysis>,
+
+    /// Content availability: inline (analyzed) or external-`src` (deferred).
+    /// Serialization is byte-identical for inline blocks (the default), so
+    /// existing persisted payloads round-trip unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "BlockContentAvailability::is_native_available"
+    )]
+    pub content_availability: BlockContentAvailability,
 
     pub flags: u16,
 }
@@ -87,6 +141,15 @@ impl StyleBlockAnalysis {
     /// Get flags as `StyleAnalysisFlags`.
     pub fn analysis_flags(&self) -> StyleAnalysisFlags {
         StyleAnalysisFlags::from_bits_truncate(self.flags)
+    }
+
+    /// Whether this block is an external `<style src="...">` whose content
+    /// analysis is deferred (unavailable) rather than an analyzed inline block.
+    pub fn content_is_available(&self) -> bool {
+        matches!(
+            self.content_availability,
+            BlockContentAvailability::NativeAvailable | BlockContentAvailability::SuppliedAvailable
+        )
     }
 }
 
@@ -121,7 +184,7 @@ pub struct AnalyzedSpecialPseudo {
     pub inner: Option<String>,
 }
 
-/// Full CSS analysis produced by the byte-level scanner.
+/// Trusted style analysis projected from the shared syntax authority.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CssAnalysis {
@@ -553,7 +616,7 @@ pub enum StyleAnalysisLang {
 
 /// Build style analysis for a CSS style block.
 ///
-/// Scans `css_content` with a byte-level scanner to extract selectors, specificity,
+/// Parses `css_content` with the shared syntax authority to extract selectors, specificity,
 /// classes, IDs, custom properties, and at-rules.
 /// `vue_input` contains pre-extracted Vue features from verter_compiler.
 /// All stored spans are SFC-absolute byte offsets.
@@ -576,17 +639,10 @@ pub fn build_css_style_analysis(
     )
 }
 
-/// Build style analysis for a brace-based style block, scanning with the
-/// dialect matching `lang`.
-///
-/// `Css`, `Scss`, and `Less` blocks run the byte-level scanner (SCSS/Less get
-/// `//` line-comment awareness and SCSS `#{...}` interpolation fail-closed
-/// handling); indentation-based languages (`Sass`, `Stylus`) and `Unknown`
-/// store only Vue features (`css: None`), same as
-/// [`build_preprocessor_style_analysis`].
+/// Build style analysis with the shared five-dialect syntax authority.
 ///
 /// Vue special pseudos (`:deep`, `:global`, `:slotted`) discovered by the
-/// scanner are merged with any pseudos supplied on `vue_input`.
+/// parser are merged with any pseudos supplied on `vue_input`.
 pub fn build_scanned_style_analysis(
     lang: StyleAnalysisLang,
     css_content: &str,
@@ -597,10 +653,12 @@ pub fn build_scanned_style_analysis(
     content_offset: u32,
 ) -> StyleBlockAnalysis {
     let dialect = match lang {
-        StyleAnalysisLang::Css => CssScanDialect::Css,
-        StyleAnalysisLang::Scss => CssScanDialect::Scss,
-        StyleAnalysisLang::Less => CssScanDialect::Less,
-        StyleAnalysisLang::Sass | StyleAnalysisLang::Stylus | StyleAnalysisLang::Unknown => {
+        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
+        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
+        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
+        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
+        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
+        StyleAnalysisLang::Unknown => {
             return build_preprocessor_style_analysis(
                 lang,
                 vue_input,
@@ -612,14 +670,15 @@ pub fn build_scanned_style_analysis(
         }
     };
 
-    let (css, scanned_pseudos) = match scan_css_dialect(css_content, content_offset, dialect) {
-        Some((css, pseudos)) => (Some(css), pseudos),
-        None => (None, Vec::new()),
-    };
+    let (css, scanned_pseudos) =
+        match super::style_syntax::project_style(css_content, content_offset, dialect) {
+            Some((css, pseudos)) => (Some(css), pseudos),
+            None => (None, Vec::new()),
+        };
 
     let v_binds = convert_v_binds(&vue_input);
     let mut special_pseudos = convert_special_pseudos(&vue_input);
-    // Merge scanner-discovered pseudos, skipping duplicates of caller-supplied
+    // Merge syntax-discovered pseudos, skipping duplicates of caller-supplied
     // entries (same kind + span).
     for scanned in scanned_pseudos {
         let duplicate = special_pseudos
@@ -636,10 +695,44 @@ pub fn build_scanned_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
+        block_ref: None,
+        block_token: None,
+        source_space_token: None,
         content_offset,
         v_binds,
         special_pseudos,
         css,
+        content_availability: BlockContentAvailability::NativeAvailable,
+        flags: flags.bits(),
+    }
+}
+
+/// Build the TYPED deferred analysis for an external `<style src="...">`
+/// block: declaration facts only (lang/scoped/module), NO content facts —
+/// `css: None`, no v-binds, and a typed unavailable content state. The
+/// external file's content stays deferred (B-23); this never fabricates an
+/// empty-but-positive analysis for content the producer has not seen.
+pub fn build_external_src_style_analysis(
+    lang: StyleAnalysisLang,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    let flags = derive_flags(scoped, is_module, &[], &[], None);
+    StyleBlockAnalysis {
+        lang,
+        scoped,
+        is_module,
+        module_name: module_name.map(|s| s.to_string()),
+        block_ref: None,
+        block_token: None,
+        source_space_token: None,
+        content_offset,
+        v_binds: Vec::new(),
+        special_pseudos: Vec::new(),
+        css: None,
+        content_availability: BlockContentAvailability::Missing,
         flags: flags.bits(),
     }
 }
@@ -664,10 +757,14 @@ pub fn build_preprocessor_style_analysis(
         scoped,
         is_module,
         module_name: module_name.map(|s| s.to_string()),
+        block_ref: None,
+        block_token: None,
+        source_space_token: None,
         content_offset,
         v_binds,
         special_pseudos,
         css: None,
+        content_availability: BlockContentAvailability::ProcessedContentRequired,
         flags: flags.bits(),
     }
 }
@@ -754,9 +851,6 @@ fn derive_flags(
 // CSS Variable Reference Extraction
 // =============================================================================
 
-/// Maximum nesting depth for `var()` in fallbacks (prevents runaway recursion).
-const MAX_VAR_NESTING_DEPTH: u8 = 8;
-
 /// Extract all `var(--name)` and `var(--name, fallback)` references from a CSS value string.
 ///
 /// `offset_in_css` is the byte offset of `value_text` within the CSS content.
@@ -767,531 +861,18 @@ pub fn extract_var_references(
     offset_in_css: u32,
     content_offset: u32,
 ) -> Vec<CssVarReference> {
-    let mut refs = Vec::new();
-    extract_var_references_inner(value_text, offset_in_css, content_offset, 0, &mut refs);
-    refs
-}
-
-fn extract_var_references_inner(
-    text: &str,
-    base_offset: u32,
-    content_offset: u32,
-    depth: u8,
-    out: &mut Vec<CssVarReference>,
-) {
-    if depth >= MAX_VAR_NESTING_DEPTH {
-        return;
-    }
-
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i + 4 <= len {
-        // Look for "var("
-        if bytes[i] == b'v' && bytes[i + 1] == b'a' && bytes[i + 2] == b'r' && bytes[i + 3] == b'('
-        {
-            let var_start = i;
-            i += 4; // skip "var("
-
-            // Skip whitespace
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-
-            // Expect --
-            if i + 1 >= len || bytes[i] != b'-' || bytes[i + 1] != b'-' {
-                i += 1;
-                continue;
-            }
-
-            let name_start = i;
-            i += 2; // skip --
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            let name_end = i;
-            let var_name = &text[name_start..name_end];
-
-            // Skip whitespace after name
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-
-            // Check for fallback (comma) or close paren
-            let fallback = if i < len && bytes[i] == b',' {
-                i += 1; // skip comma
-                        // Skip whitespace after comma
-                while i < len && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                let fallback_start = i;
-
-                // Find matching close paren, tracking nesting
-                let mut paren_depth = 1u32;
-                while i < len && paren_depth > 0 {
-                    match bytes[i] {
-                        b'(' => paren_depth += 1,
-                        b')' => paren_depth -= 1,
-                        _ => {}
-                    }
-                    if paren_depth > 0 {
-                        i += 1;
-                    }
-                }
-                let fallback_end = i;
-                let fallback_text = text[fallback_start..fallback_end].trim();
-
-                // Extract nested var() from fallback
-                let mut nested = Vec::new();
-                if !fallback_text.is_empty() {
-                    let fb_offset_in_text =
-                        fallback_text.as_ptr() as usize - text.as_ptr() as usize;
-                    extract_var_references_inner(
-                        fallback_text,
-                        base_offset + fb_offset_in_text as u32,
-                        content_offset,
-                        depth + 1,
-                        &mut nested,
-                    );
-                }
-
-                let fb_abs_start = base_offset + fallback_start as u32 + content_offset;
-                let fb_abs_end = base_offset + fallback_end as u32 + content_offset;
-
-                Some(CssVarFallback {
-                    text: fallback_text.to_string(),
-                    span: Span::new(fb_abs_start, fb_abs_end),
-                    nested_var_references: nested,
-                })
-            } else {
-                // Find closing paren
-                while i < len && bytes[i] != b')' {
-                    i += 1;
-                }
-                None
-            };
-
-            // Skip closing paren
-            let var_end = if i < len && bytes[i] == b')' {
-                i += 1;
-                i
-            } else {
-                i
-            };
-
-            let abs = |local: usize| -> u32 { base_offset + local as u32 + content_offset };
-
-            out.push(CssVarReference {
-                name: var_name.to_string(),
-                span: Span::new(abs(var_start), abs(var_end)),
-                name_span: Span::new(abs(name_start), abs(name_end)),
-                fallback,
-            });
-            continue;
-        }
-
-        i += 1;
-    }
+    super::style_syntax::extract_var_references_authority(value_text, offset_in_css, content_offset)
 }
 
 // =============================================================================
 // Selector String Parser
 // =============================================================================
 
-/// Parse a CSS selector string into a structured representation.
-///
-/// Returns `None` for unparseable selectors (e.g., containing `:has()`).
-/// Handles: `.foo`, `.foo.bar`, `div.active`, `#app`, `.parent .child`,
-/// `.parent > .child`, `.a + .b`, `.a ~ .b`, `[type="text"]`,
-/// `:not(...)`, `:is(...)`, `:where(...)`, `:hover`, `::before`, `*`.
+/// Parse a complete static CSS selector into the legacy semantic matcher shape.
+/// Dynamic, recovered, and evaluation-dependent selectors fail closed.
 pub fn parse_selector(selector_text: &str) -> Option<StructuredSelector> {
-    let trimmed = selector_text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let bytes = trimmed.as_bytes();
-    let len = bytes.len();
-    let mut compounds = Vec::new();
-    let mut combinators = Vec::new();
-    let mut current = CompoundSelector::default();
-    let mut i = 0;
-    let mut has_simple_selector = false;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Skip whitespace — it could be a descendant combinator
-        if b.is_ascii_whitespace() {
-            i += 1;
-            // Skip all whitespace
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i >= len {
-                break;
-            }
-            // Check if next char is a combinator
-            let next = bytes[i];
-            if next == b'>' || next == b'+' || next == b'~' {
-                // Explicit combinator follows — whitespace was just padding
-                continue;
-            }
-            // Whitespace IS the descendant combinator
-            if has_simple_selector {
-                compounds.push(std::mem::take(&mut current));
-                combinators.push(SelectorCombinator::Descendant);
-                has_simple_selector = false;
-            }
-            continue;
-        }
-
-        // Explicit combinators
-        if b == b'>' || b == b'+' || b == b'~' {
-            if has_simple_selector {
-                compounds.push(std::mem::take(&mut current));
-                has_simple_selector = false;
-            }
-            let combinator = match b {
-                b'>' => SelectorCombinator::Child,
-                b'+' => SelectorCombinator::NextSibling,
-                b'~' => SelectorCombinator::LaterSibling,
-                _ => unreachable!(),
-            };
-            combinators.push(combinator);
-            i += 1;
-            // Skip trailing whitespace after combinator
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            continue;
-        }
-
-        // * — universal selector
-        if b == b'*' {
-            // Universal selector — don't set element, just mark we have something
-            has_simple_selector = true;
-            i += 1;
-            continue;
-        }
-
-        // # — ID selector
-        if b == b'#' && i + 1 < len && is_css_ident_start(bytes[i + 1]) {
-            let start = i + 1;
-            let mut end = start;
-            while end < len && is_css_ident_char(bytes[end]) {
-                end += 1;
-            }
-            let name = &trimmed[start..end];
-            if !is_hex_color(name) {
-                current.id = Some(name.to_string());
-                has_simple_selector = true;
-            }
-            i = end;
-            continue;
-        }
-
-        // . — class selector
-        if b == b'.' && i + 1 < len && is_css_ident_start(bytes[i + 1]) {
-            let start = i + 1;
-            let mut end = start;
-            while end < len && is_css_ident_char(bytes[end]) {
-                end += 1;
-            }
-            current.classes.push(trimmed[start..end].to_string());
-            has_simple_selector = true;
-            i = end;
-            continue;
-        }
-
-        // [ — attribute selector
-        if b == b'[' {
-            if let Some((attr, consumed)) = parse_attribute_selector(&trimmed[i..]) {
-                current.attributes.push(attr);
-                has_simple_selector = true;
-                i += consumed;
-            } else {
-                // Unparseable attribute selector
-                return None;
-            }
-            continue;
-        }
-
-        // : — pseudo-class or pseudo-element
-        if b == b':' {
-            if i + 1 < len && bytes[i + 1] == b':' {
-                // :: pseudo-element
-                i += 2;
-                while i < len && is_css_ident_char(bytes[i]) {
-                    i += 1;
-                }
-                // Skip functional pseudo-element arguments
-                if i < len && bytes[i] == b'(' {
-                    let close = find_matching_paren(&trimmed[i..]);
-                    i += close;
-                }
-                current.has_pseudo_element = true;
-                has_simple_selector = true;
-                continue;
-            }
-
-            // Single : pseudo-class
-            i += 1;
-            let pseudo_start = i;
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            let pseudo_name = &trimmed[pseudo_start..i];
-
-            match pseudo_name {
-                "not" | "is" | "where" => {
-                    if i < len && bytes[i] == b'(' {
-                        let inner_start = i + 1;
-                        let paren_consumed = find_matching_paren(&trimmed[i..]);
-                        let inner_end = i + paren_consumed - 1; // before closing )
-                        let inner = &trimmed[inner_start..inner_end];
-                        i += paren_consumed;
-
-                        // Parse inner selector list
-                        let inner_selectors = split_selector_list(inner);
-                        let mut parsed_inner = Vec::new();
-                        for inner_sel in inner_selectors {
-                            let inner_trimmed = inner_sel.trim();
-                            if !inner_trimmed.is_empty() {
-                                if let Some(parsed) = parse_selector(inner_trimmed) {
-                                    parsed_inner.push(parsed);
-                                }
-                            }
-                        }
-
-                        let pseudo = match pseudo_name {
-                            "not" => SelectorPseudoClass::Not(parsed_inner),
-                            "is" => SelectorPseudoClass::Is(parsed_inner),
-                            "where" => SelectorPseudoClass::Where(parsed_inner),
-                            _ => unreachable!(),
-                        };
-                        current.pseudo_classes.push(pseudo);
-                    } else {
-                        current
-                            .pseudo_classes
-                            .push(SelectorPseudoClass::Runtime(pseudo_name.to_string()));
-                    }
-                    has_simple_selector = true;
-                    continue;
-                }
-                "has" => {
-                    // :has() is too complex for our matcher — bail out
-                    return None;
-                }
-                _ => {
-                    // Skip functional pseudo-class arguments
-                    if i < len && bytes[i] == b'(' {
-                        let paren_consumed = find_matching_paren(&trimmed[i..]);
-                        i += paren_consumed;
-                    }
-                    current
-                        .pseudo_classes
-                        .push(SelectorPseudoClass::Runtime(pseudo_name.to_string()));
-                    has_simple_selector = true;
-                    continue;
-                }
-            }
-        }
-
-        // Type selector (element name)
-        if is_css_ident_start(b) {
-            let start = i;
-            i += 1;
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            current.element = Some(trimmed[start..i].to_string());
-            has_simple_selector = true;
-            continue;
-        }
-
-        // Skip unknown characters
-        i += 1;
-    }
-
-    if has_simple_selector {
-        compounds.push(current);
-    }
-
-    if compounds.is_empty() {
-        return None;
-    }
-
-    Some(StructuredSelector {
-        compounds,
-        combinators,
-    })
+    super::style_syntax::parse_selector_authority(selector_text)
 }
-
-/// Parse an attribute selector starting at `[`.
-/// Returns `(AttributeSelector, bytes_consumed)` or `None`.
-fn parse_attribute_selector(s: &str) -> Option<(AttributeSelector, usize)> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() || bytes[0] != b'[' {
-        return None;
-    }
-
-    let mut i = 1; // skip [
-    let len = bytes.len();
-
-    // Skip whitespace
-    while i < len && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-
-    // Attribute name
-    let name_start = i;
-    while i < len && is_css_ident_char(bytes[i]) {
-        i += 1;
-    }
-    let name = s[name_start..i].to_string();
-
-    // Skip whitespace
-    while i < len && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-
-    // Check for ] (presence-only selector)
-    if i < len && bytes[i] == b']' {
-        return Some((
-            AttributeSelector {
-                name,
-                operator: None,
-                value: None,
-            },
-            i + 1,
-        ));
-    }
-
-    // Operator
-    let operator = if i < len {
-        match bytes[i] {
-            b'=' => {
-                i += 1;
-                Some(AttributeOperator::Equal)
-            }
-            b'~' if i + 1 < len && bytes[i + 1] == b'=' => {
-                i += 2;
-                Some(AttributeOperator::Includes)
-            }
-            b'|' if i + 1 < len && bytes[i + 1] == b'=' => {
-                i += 2;
-                Some(AttributeOperator::DashMatch)
-            }
-            b'^' if i + 1 < len && bytes[i + 1] == b'=' => {
-                i += 2;
-                Some(AttributeOperator::Prefix)
-            }
-            b'$' if i + 1 < len && bytes[i + 1] == b'=' => {
-                i += 2;
-                Some(AttributeOperator::Suffix)
-            }
-            b'*' if i + 1 < len && bytes[i + 1] == b'=' => {
-                i += 2;
-                Some(AttributeOperator::Substring)
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // Skip whitespace
-    while i < len && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-
-    // Value
-    let value = if i < len && (bytes[i] == b'"' || bytes[i] == b'\'') {
-        let quote = bytes[i];
-        i += 1;
-        let val_start = i;
-        while i < len && bytes[i] != quote {
-            if bytes[i] == b'\\' && i + 1 < len {
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-        let val = s[val_start..i].to_string();
-        if i < len {
-            i += 1; // skip closing quote
-        }
-        Some(val)
-    } else if i < len && bytes[i] != b']' {
-        // Unquoted value
-        let val_start = i;
-        while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b']' {
-            i += 1;
-        }
-        Some(s[val_start..i].to_string())
-    } else {
-        None
-    };
-
-    // Skip to ]
-    while i < len && bytes[i] != b']' {
-        i += 1;
-    }
-    if i < len {
-        i += 1; // skip ]
-    }
-
-    Some((
-        AttributeSelector {
-            name,
-            operator,
-            value,
-        },
-        i,
-    ))
-}
-
-/// Find the matching closing parenthesis, returning bytes consumed including both parens.
-fn find_matching_paren(s: &str) -> usize {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() || bytes[0] != b'(' {
-        return 0;
-    }
-
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-
-    for (i, &b) in bytes.iter().enumerate() {
-        if in_string {
-            if b == b'\\' {
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            continue;
-        }
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            continue;
-        }
-        if b == b'(' {
-            depth += 1;
-        } else if b == b')' {
-            depth -= 1;
-            if depth == 0 {
-                return i + 1;
-            }
-        }
-    }
-
-    bytes.len()
-}
-
 /// Compute specificity from a `StructuredSelector`.
 pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u32, u32) {
     let mut a: u32 = 0; // IDs
@@ -1337,1324 +918,6 @@ pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u3
     }
 
     (a, b, c)
-}
-
-/// Scan CSS content with a byte-level scanner and extract analysis data.
-/// Returns `None` only for completely empty input.
-/// Scanner dialect — which brace-based CSS flavor the byte scanner is reading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CssScanDialect {
-    Css,
-    Scss,
-    Less,
-}
-
-impl CssScanDialect {
-    /// Whether `//` line comments are part of the dialect.
-    fn line_comments(self) -> bool {
-        matches!(self, Self::Scss | Self::Less)
-    }
-}
-
-fn scan_css_dialect(
-    css_content: &str,
-    content_offset: u32,
-    dialect: CssScanDialect,
-) -> Option<(CssAnalysis, Vec<AnalyzedSpecialPseudo>)> {
-    let bytes = css_content.as_bytes();
-    let len = bytes.len();
-
-    if len == 0 {
-        return Some((CssAnalysis::default(), Vec::new()));
-    }
-
-    let mut analysis = CssAnalysis::default();
-    let mut scanned_pseudos: Vec<AnalyzedSpecialPseudo> = Vec::new();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-    let mut in_comment = false;
-    let mut brace_depth: usize = 0;
-    // Track @keyframes depth to skip keyframe selectors (from, to, %)
-    let mut keyframes_depth: usize = 0;
-    let mut keyframes_entry_depths: Vec<usize> = Vec::new();
-    // Track selector start (text between } / start-of-file and {)
-    let mut selector_start: usize = 0;
-    // Track declaration block start for custom property scanning
-    let mut decl_block_start: usize = 0;
-    // Track end of last statement (`;`) inside rule blocks, so nested selectors
-    // start after the last property declaration, not from the opening `{`.
-    let mut last_statement_end: usize = 0;
-    // Track the selector index for the current rule block (for linking custom properties)
-    let mut current_selector_index: Option<u32> = None;
-    // One frame per open brace. `Some((first_selector, count, open_brace_pos))`
-    // for a regular rule; `None` for at-rules / keyframes / selector-less braces.
-    let mut rule_frames: Vec<Option<(u32, u32, usize)>> = Vec::new();
-    // SCSS `#{...}` interpolation spans (byte ranges in css_content).
-    let mut interpolation_spans: Vec<(usize, usize)> = Vec::new();
-    let mut pending_at_rule: Option<(AtRuleKind, String)> = None;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Handle comments
-        if in_comment {
-            if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
-                in_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Handle strings
-        if in_string {
-            if b == b'\\' && i + 1 < len {
-                i += 2; // skip escaped char
-            } else if b == string_char {
-                in_string = false;
-                i += 1;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Comment start
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-
-        // Line comment (SCSS/Less only)
-        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            let comment_start = i;
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            // When nothing but whitespace accumulated for the pending selector,
-            // advance the selector start past the comment so selector spans
-            // stay exact (a leading `// note` line never degrades spans).
-            let pending_from = selector_start.max(last_statement_end.min(comment_start));
-            if pending_from <= comment_start
-                && css_content[pending_from..comment_start].trim().is_empty()
-            {
-                selector_start = i;
-                if brace_depth > 0 {
-                    last_statement_end = i;
-                }
-            }
-            continue;
-        }
-
-        // SCSS `#{...}` interpolation: consume it whole so its braces never
-        // reach the depth tracker; the containing selector fails closed.
-        if dialect == CssScanDialect::Scss && b == b'#' && i + 1 < len && bytes[i + 1] == b'{' {
-            let interp_start = i;
-            i += 2;
-            let mut depth = 1usize;
-            while i < len && depth > 0 {
-                match bytes[i] {
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
-                    _ => {}
-                }
-                i += 1;
-            }
-            interpolation_spans.push((interp_start, i));
-            continue;
-        }
-
-        // String start
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            i += 1;
-            continue;
-        }
-
-        // Handle semicolons at top level for @import, @layer statement
-        if b == b';' && brace_depth == 0 {
-            if let Some((kind, name)) = pending_at_rule.take() {
-                // At-rule without block (e.g., @import "x"; or @layer foo;)
-                if kind == AtRuleKind::Import {
-                    // Extract the URL from the at-rule text
-                    let at_text = &css_content[selector_start..i];
-                    let import_name = extract_import_url(at_text);
-                    analysis.at_rules.push(AnalyzedAtRule {
-                        kind,
-                        name: import_name,
-                    });
-                } else {
-                    analysis.at_rules.push(AnalyzedAtRule { kind, name });
-                }
-            }
-            selector_start = i + 1;
-            i += 1;
-            continue;
-        }
-
-        // Track semicolons inside rule blocks for nested selector start position
-        if b == b';' && brace_depth > 0 {
-            last_statement_end = i + 1;
-            i += 1;
-            continue;
-        }
-
-        // Opening brace
-        if b == b'{' {
-            // For nested selectors (brace_depth > 0), use last_statement_end
-            // so we don't capture property declarations in the selector text.
-            let effective_start = if brace_depth > 0 && last_statement_end > selector_start {
-                last_statement_end
-            } else {
-                selector_start
-            };
-            let selector_text = &css_content[effective_start..i];
-            let trimmed = selector_text.trim();
-            // One frame per `{`; regular rules overwrite it below.
-            let mut frame: Option<(u32, u32, usize)> = None;
-
-            if !trimmed.is_empty() {
-                if let Some(at_rule) = try_parse_at_rule(trimmed) {
-                    // At-rule with block
-                    if at_rule.0 == AtRuleKind::Keyframes {
-                        keyframes_depth += 1;
-                        keyframes_entry_depths.push(brace_depth);
-                    }
-                    analysis.at_rules.push(AnalyzedAtRule {
-                        kind: at_rule.0,
-                        name: at_rule.1,
-                    });
-                    pending_at_rule = None;
-                } else if keyframes_depth == 0 {
-                    // Regular style rule — extract selectors
-                    analysis.rule_count += 1;
-
-                    // A selector containing SCSS interpolation has no static
-                    // name — fail closed (no classes/ids, no structure).
-                    let has_interpolation = dialect == CssScanDialect::Scss
-                        && interpolation_spans
-                            .iter()
-                            .any(|&(s, e)| s < i && e > effective_start);
-
-                    // Strip CSS comments from selector text before parsing.
-                    // This prevents comments like `.a /* comment */ > .b`
-                    // from corrupting selector structure.
-                    let clean_selector;
-                    let selector_for_parse =
-                        if let Some(cleaned) = strip_css_comments_dialect(trimmed, dialect) {
-                            clean_selector = cleaned;
-                            clean_selector.trim()
-                        } else {
-                            trimmed
-                        };
-                    let is_clean = std::ptr::eq(
-                        selector_for_parse.as_bytes().as_ptr(),
-                        trimmed.as_bytes().as_ptr(),
-                    );
-
-                    // Split comma-separated selectors
-                    let css_base = css_content.as_ptr() as usize;
-                    let first_new_selector = analysis.selectors.len();
-                    let individual_selectors = split_selector_list(selector_for_parse);
-                    for sel_text in &individual_selectors {
-                        let sel_trimmed = sel_text.trim();
-                        if sel_trimmed.is_empty() {
-                            continue;
-                        }
-                        // If we're using the original (no comments), pointer
-                        // arithmetic gives exact span. Otherwise, use the
-                        // whole selector range as a fallback.
-                        let sel_offset = if is_clean {
-                            (sel_trimmed.as_ptr() as usize - css_base) as u32
-                        } else {
-                            (trimmed.as_ptr() as usize - css_base) as u32
-                        };
-                        // `&` (SCSS parent / CSS nesting) and interpolated
-                        // selectors have no self-contained structure — matching
-                        // them against elements would be unsound. Fail closed.
-                        let structure = if has_interpolation || sel_trimmed.contains('&') {
-                            None
-                        } else {
-                            parse_selector(sel_trimmed)
-                        };
-                        let specificity = if let Some(ref s) = structure {
-                            compute_structured_specificity(s)
-                        } else {
-                            compute_specificity_from_text(sel_trimmed)
-                        };
-                        let sel_index = analysis.selectors.len() as u32;
-                        analysis.selectors.push(AnalyzedSelector {
-                            text: sel_trimmed.to_string(),
-                            specificity,
-                            span: Span::new(
-                                content_offset + sel_offset,
-                                content_offset + sel_offset + sel_trimmed.len() as u32,
-                            ),
-                            structure,
-                            rule_body_span: None,
-                        });
-                        // Per-comma-part class/ID extraction with an exact
-                        // class → selector join (clean text only).
-                        if is_clean && !has_interpolation {
-                            let part_offset = sel_trimmed.as_ptr() as usize - css_base;
-                            extract_classes_and_ids_from_selector(
-                                sel_trimmed,
-                                part_offset,
-                                content_offset,
-                                Some(sel_index),
-                                dialect,
-                                &mut analysis,
-                            );
-                        }
-                    }
-
-                    if !is_clean && !has_interpolation {
-                        // Comment-degraded selector text: extract over the raw
-                        // text (comment-skipping) without a selector join.
-                        let selector_offset =
-                            (selector_text.as_ptr() as usize) - (css_content.as_ptr() as usize);
-                        extract_classes_and_ids_from_selector(
-                            selector_text,
-                            selector_offset,
-                            content_offset,
-                            None,
-                            dialect,
-                            &mut analysis,
-                        );
-                    }
-
-                    // Vue special pseudos (`:deep` / `:global` / `:slotted`)
-                    // with exact spans, from the raw selector text.
-                    {
-                        let selector_offset =
-                            (selector_text.as_ptr() as usize) - (css_content.as_ptr() as usize);
-                        extract_special_pseudos(
-                            selector_text,
-                            selector_offset,
-                            content_offset,
-                            &mut scanned_pseudos,
-                        );
-                    }
-
-                    let count = (analysis.selectors.len() - first_new_selector) as u32;
-                    if count > 0 {
-                        frame = Some((first_new_selector as u32, count, i));
-                        current_selector_index = Some(first_new_selector as u32);
-                    }
-                }
-            }
-
-            rule_frames.push(frame);
-            brace_depth += 1;
-            decl_block_start = i + 1;
-            selector_start = i + 1;
-            i += 1;
-            continue;
-        }
-
-        // Closing brace
-        if b == b'}' {
-            // Scan for declarations in the block we're closing
-            if keyframes_depth == 0 && brace_depth > 0 {
-                let decl_content = &css_content[decl_block_start..i];
-                scan_declarations(
-                    decl_content,
-                    decl_block_start as u32,
-                    content_offset,
-                    current_selector_index,
-                    dialect,
-                    &mut analysis,
-                );
-            }
-
-            brace_depth = brace_depth.saturating_sub(1);
-            if keyframes_entry_depths.last() == Some(&brace_depth) {
-                keyframes_entry_depths.pop();
-                keyframes_depth = keyframes_depth.saturating_sub(1);
-            }
-            // Assign the closed rule's declaration-block span to its selectors.
-            if let Some(Some((first, count, open_pos))) = rule_frames.pop() {
-                let body_span = Span::new(
-                    content_offset + open_pos as u32,
-                    content_offset + i as u32 + 1,
-                );
-                for sel in analysis
-                    .selectors
-                    .iter_mut()
-                    .skip(first as usize)
-                    .take(count as usize)
-                {
-                    sel.rule_body_span = Some(body_span);
-                }
-            }
-            // Restore the enclosing rule's selector index (nested rules).
-            current_selector_index = rule_frames
-                .iter()
-                .rev()
-                .find_map(|f| f.map(|(first, _, _)| first));
-            selector_start = i + 1;
-            decl_block_start = i + 1;
-            i += 1;
-            continue;
-        }
-
-        // Detect at-rule starts at the current brace depth
-        if b == b'@' && (brace_depth == 0 || keyframes_depth == 0) {
-            // Look ahead to get the at-rule keyword
-            let at_start = i;
-            i += 1; // skip '@'
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            let keyword = &css_content[at_start + 1..i];
-
-            match keyword {
-                "import" => {
-                    pending_at_rule = Some((AtRuleKind::Import, String::new()));
-                }
-                "layer" => {
-                    // Could be @layer statement or @layer block — determined at ; or {
-                    // Extract the name part
-                    let name_start = i;
-                    // Scan ahead for ; or { to get the name
-                    let mut j = i;
-                    while j < len && bytes[j] != b';' && bytes[j] != b'{' {
-                        j += 1;
-                    }
-                    let name = css_content[name_start..j].trim().to_string();
-                    pending_at_rule = Some((AtRuleKind::Layer, name));
-                }
-                _ => {
-                    // Other at-rules parsed when we hit {
-                }
-            }
-            continue;
-        }
-
-        i += 1;
-    }
-
-    // Handle any trailing at-rule without ; (malformed but graceful)
-    if let Some((kind, name)) = pending_at_rule.take() {
-        analysis.at_rules.push(AnalyzedAtRule { kind, name });
-    }
-
-    Some((analysis, scanned_pseudos))
-}
-
-/// Extract Vue special pseudos (`:deep()` / `:global()` / `:slotted()`, plus
-/// the legacy `::v-deep()` / `::v-global()` / `::v-slotted()` forms) from raw
-/// selector text, recording SFC-absolute spans and the inner selector text.
-///
-/// Bare (paren-less) `:global` / `::v-deep` forms are recorded with a
-/// name-only span and no inner text.
-fn extract_special_pseudos(
-    selector_text: &str,
-    offset_in_css: usize,
-    content_offset: u32,
-    out: &mut Vec<AnalyzedSpecialPseudo>,
-) {
-    const FORMS: &[(&str, SpecialPseudoKind)] = &[
-        ("::v-deep", SpecialPseudoKind::Deep),
-        ("::v-global", SpecialPseudoKind::Global),
-        ("::v-slotted", SpecialPseudoKind::Slotted),
-        (":deep", SpecialPseudoKind::Deep),
-        (":global", SpecialPseudoKind::Global),
-        (":slotted", SpecialPseudoKind::Slotted),
-    ];
-
-    let bytes = selector_text.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-
-    'outer: while i < len {
-        let b = bytes[i];
-
-        if in_string {
-            if b == b'\\' && i + 1 < len {
-                i += 2;
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            i += 1;
-            continue;
-        }
-        // Skip block comments.
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(len);
-            continue;
-        }
-
-        if b == b':' {
-            for (form, kind) in FORMS {
-                let form_bytes = form.as_bytes();
-                if i + form_bytes.len() <= len && &bytes[i..i + form_bytes.len()] == form_bytes {
-                    let after = i + form_bytes.len();
-                    // Reject a longer ident continuing the token (e.g. `:globalx`).
-                    if after < len && is_css_ident_char(bytes[after]) {
-                        continue;
-                    }
-                    let abs = |local: usize| content_offset + (offset_in_css + local) as u32;
-                    if after < len && bytes[after] == b'(' {
-                        let consumed = find_matching_paren(&selector_text[after..]);
-                        if consumed >= 2 {
-                            let inner = selector_text[after + 1..after + consumed - 1].trim();
-                            out.push(AnalyzedSpecialPseudo {
-                                kind: *kind,
-                                start: abs(i),
-                                end: abs(after + consumed),
-                                inner: (!inner.is_empty()).then(|| inner.to_string()),
-                            });
-                            i = after + consumed;
-                            continue 'outer;
-                        }
-                    }
-                    // Bare form (`::v-deep .x` / Svelte-style bare `:global`).
-                    out.push(AnalyzedSpecialPseudo {
-                        kind: *kind,
-                        start: abs(i),
-                        end: abs(after),
-                        inner: None,
-                    });
-                    i = after;
-                    continue 'outer;
-                }
-            }
-        }
-
-        i += 1;
-    }
-}
-
-/// Try to parse an at-rule from trimmed text before `{`.
-/// Returns `(AtRuleKind, name)` if this is an at-rule, `None` if it's a regular selector.
-fn try_parse_at_rule(trimmed: &str) -> Option<(AtRuleKind, String)> {
-    if !trimmed.starts_with('@') {
-        return None;
-    }
-
-    let rest = &trimmed[1..];
-
-    if let Some(after) = rest.strip_prefix("media") {
-        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '(') {
-            let name = after.trim().to_string();
-            return Some((AtRuleKind::Media, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("keyframes") {
-        if after.is_empty() || after.starts_with(char::is_whitespace) {
-            let name = after.trim().to_string();
-            return Some((AtRuleKind::Keyframes, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("-webkit-keyframes") {
-        if after.is_empty() || after.starts_with(char::is_whitespace) {
-            let name = after.trim().to_string();
-            return Some((AtRuleKind::Keyframes, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("supports") {
-        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '(') {
-            return Some((AtRuleKind::Supports, String::new()));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("layer") {
-        if after.is_empty() || after.starts_with(char::is_whitespace) {
-            let name = after.trim().to_string();
-            return Some((AtRuleKind::Layer, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("container") {
-        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '(') {
-            let name = extract_container_name(after.trim());
-            return Some((AtRuleKind::Container, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("font-face") {
-        if after.is_empty() || after.starts_with(char::is_whitespace) {
-            return Some((AtRuleKind::FontFace, String::new()));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("property") {
-        if after.is_empty() || after.starts_with(char::is_whitespace) {
-            let name = after.trim().to_string();
-            return Some((AtRuleKind::Property, name));
-        }
-    }
-
-    if let Some(after) = rest.strip_prefix("scope") {
-        if after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '(') {
-            return Some((AtRuleKind::Scope, String::new()));
-        }
-    }
-
-    // Unknown at-rule
-    Some((AtRuleKind::Other, String::new()))
-}
-
-/// Extract the container name from a `@container` query.
-/// e.g., "sidebar (min-width: 300px)" → "sidebar"
-fn extract_container_name(query: &str) -> String {
-    // The name is the first ident before `(` or whitespace+`(`
-    let query = query.trim();
-    if query.is_empty() || query.starts_with('(') {
-        return String::new();
-    }
-    // Take everything before the first `(`
-    let before_paren = if let Some(idx) = query.find('(') {
-        query[..idx].trim()
-    } else {
-        query
-    };
-    before_paren.to_string()
-}
-
-/// Extract the URL from an @import at-rule text.
-/// e.g., `@import "base.css"` → `base.css`, `@import url("x.css")` → `x.css`
-fn extract_import_url(at_text: &str) -> String {
-    let text = at_text.trim();
-    let rest = text.strip_prefix("@import").unwrap_or(text).trim_start();
-
-    // url("...") or url('...')
-    if let Some(inner) = rest.strip_prefix("url(") {
-        let inner = inner.trim_start();
-        if let Some(s) = extract_quoted_string(inner) {
-            return s;
-        }
-        // url(foo.css) without quotes
-        if let Some(end) = inner.find(')') {
-            return inner[..end].trim().to_string();
-        }
-    }
-
-    // "..." or '...'
-    if let Some(s) = extract_quoted_string(rest) {
-        return s;
-    }
-
-    rest.to_string()
-}
-
-/// Extract a quoted string value, stripping the quotes.
-fn extract_quoted_string(s: &str) -> Option<String> {
-    let s = s.trim_start();
-    if (s.starts_with('"') || s.starts_with('\'')) && s.len() >= 2 {
-        let quote = s.as_bytes()[0];
-        if let Some(end) = s[1..].find(|c: char| c as u8 == quote) {
-            return Some(s[1..1 + end].to_string());
-        }
-    }
-    None
-}
-
-/// Strip CSS block comments (`/* ... */`) — and, for line-comment dialects,
-/// `// ...` line comments — from selector text.
-///
-/// Returns `None` if no comments were found (original string is clean),
-/// or `Some(cleaned)` with each comment replaced by a single space.
-fn strip_css_comments_dialect(text: &str, dialect: CssScanDialect) -> Option<String> {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let line_comments = dialect.line_comments();
-    let mut i = 0;
-    let mut has_comment = false;
-
-    // Quick scan — avoid allocation if no comments
-    while i + 1 < len {
-        if bytes[i] == b'/' && (bytes[i + 1] == b'*' || (line_comments && bytes[i + 1] == b'/')) {
-            has_comment = true;
-            break;
-        }
-        i += 1;
-    }
-    if !has_comment {
-        return None;
-    }
-
-    // Build cleaned string
-    let mut result = String::with_capacity(len);
-    i = 0;
-    while i < len {
-        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            // Skip comment contents
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            if i + 1 < len {
-                i += 2; // skip */
-            }
-            result.push(' '); // replace comment with single space
-        } else if line_comments && i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            // Skip to end of line (the newline itself is kept)
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            result.push(' ');
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    Some(result)
-}
-
-/// Split a selector list by commas, respecting parentheses nesting.
-/// e.g., ".a, .b, :not(.c, .d)" → [".a", ".b", ":not(.c, .d)"]
-fn split_selector_list(selector: &str) -> Vec<&str> {
-    let bytes = selector.as_bytes();
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut paren_depth: usize = 0;
-    let mut bracket_depth: usize = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-
-    for (i, &b) in bytes.iter().enumerate() {
-        if in_string {
-            if b == b'\\' {
-                // Skip next char (handled by not checking next iteration)
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            continue;
-        }
-
-        if b == b'(' {
-            paren_depth += 1;
-        } else if b == b')' {
-            paren_depth = paren_depth.saturating_sub(1);
-        } else if b == b'[' {
-            bracket_depth += 1;
-        } else if b == b']' {
-            bracket_depth = bracket_depth.saturating_sub(1);
-        } else if b == b',' && paren_depth == 0 && bracket_depth == 0 {
-            result.push(&selector[start..i]);
-            start = i + 1;
-        }
-    }
-
-    result.push(&selector[start..]);
-    result
-}
-
-/// Compute CSS specificity from selector text.
-/// Returns (id_count, class_count, type_count).
-fn compute_specificity_from_text(selector: &str) -> (u32, u32, u32) {
-    let bytes = selector.as_bytes();
-    let len = bytes.len();
-    let mut ids: u32 = 0;
-    let mut classes: u32 = 0;
-    let mut types: u32 = 0;
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-    let mut paren_depth: usize = 0;
-    // Track functional pseudo-classes that affect specificity
-    let mut where_depth: Vec<usize> = Vec::new(); // :where() contributes 0 specificity
-
-    while i < len {
-        let b = bytes[i];
-
-        if in_string {
-            if b == b'\\' && i + 1 < len {
-                i += 2;
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            i += 1;
-            continue;
-        }
-
-        if b == b'(' {
-            paren_depth += 1;
-            i += 1;
-            continue;
-        }
-
-        if b == b')' {
-            paren_depth = paren_depth.saturating_sub(1);
-            if where_depth.last() == Some(&paren_depth) {
-                where_depth.pop();
-            }
-            i += 1;
-            continue;
-        }
-
-        // Inside :where() — skip all specificity
-        if !where_depth.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        // # → ID selector
-        if b == b'#' && i + 1 < len && is_css_ident_start(bytes[i + 1]) {
-            let name_start = i + 1;
-            let mut end = name_start;
-            while end < len && is_css_ident_char(bytes[end]) {
-                end += 1;
-            }
-            let name = &selector[name_start..end];
-            if !is_hex_color(name) {
-                ids += 1;
-            }
-            i = end;
-            continue;
-        }
-
-        // . → class selector
-        if b == b'.' && i + 1 < len && is_css_ident_start(bytes[i + 1]) {
-            // Skip decimal numbers
-            if i > 0 && bytes[i - 1].is_ascii_digit() {
-                i += 1;
-                continue;
-            }
-            classes += 1;
-            i += 1;
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            continue;
-        }
-
-        // [ → attribute selector (contributes to class-level specificity)
-        if b == b'[' {
-            classes += 1;
-            // Skip to matching ]
-            i += 1;
-            let mut bracket_string = false;
-            let mut bracket_string_char = b'"';
-            while i < len {
-                if bracket_string {
-                    if bytes[i] == b'\\' && i + 1 < len {
-                        i += 2;
-                        continue;
-                    }
-                    if bytes[i] == bracket_string_char {
-                        bracket_string = false;
-                    }
-                } else if bytes[i] == b'"' || bytes[i] == b'\'' {
-                    bracket_string = true;
-                    bracket_string_char = bytes[i];
-                } else if bytes[i] == b']' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-
-        // : → pseudo-class or pseudo-element
-        if b == b':' {
-            if i + 1 < len && bytes[i + 1] == b':' {
-                // :: pseudo-element → type-level specificity
-                types += 1;
-                i += 2;
-                while i < len && is_css_ident_char(bytes[i]) {
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Single : → pseudo-class
-            i += 1;
-            let pseudo_start = i;
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            let pseudo_name = &selector[pseudo_start..i];
-
-            match pseudo_name {
-                "where" => {
-                    // :where() contributes 0 specificity
-                    if i < len && bytes[i] == b'(' {
-                        where_depth.push(paren_depth);
-                    }
-                }
-                "not" | "is" | "has" => {
-                    // :not(), :is(), :has() — specificity of most specific argument
-                    // For simplicity in this pass, we count inner selectors normally
-                    // (the max-of-args rule is handled by the fact that we're processing
-                    // the full text which includes the inner selectors)
-                    // Don't count the pseudo-class itself
-                }
-                _ => {
-                    // Regular pseudo-class → class-level specificity
-                    classes += 1;
-                }
-            }
-            continue;
-        }
-
-        // * → universal selector (0 specificity)
-        if b == b'*' {
-            i += 1;
-            continue;
-        }
-
-        // Whitespace / combinators
-        if b == b' ' || b == b'>' || b == b'+' || b == b'~' {
-            i += 1;
-            continue;
-        }
-
-        // Otherwise: could be a type selector
-        if is_css_ident_start(b) {
-            types += 1;
-            i += 1;
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            continue;
-        }
-
-        i += 1;
-    }
-
-    (ids, classes, types)
-}
-
-/// Extract `.class` and `#id` occurrences from selector text, recording
-/// SFC-absolute byte spans and the owning selector index (when derivable).
-fn extract_classes_and_ids_from_selector(
-    selector_text: &str,
-    offset_in_css: usize,
-    content_offset: u32,
-    selector_index: Option<u32>,
-    dialect: CssScanDialect,
-    analysis: &mut CssAnalysis,
-) {
-    let bytes = selector_text.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-
-    while i < len {
-        let b = bytes[i];
-
-        if in_string {
-            if b == b'\\' && i + 1 < len {
-                i += 2;
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            i += 1;
-            continue;
-        }
-
-        // Skip block comments — a `.ghost` inside `/* ... */` is not a class.
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = (i + 2).min(len);
-            continue;
-        }
-        // Skip line comments in line-comment dialects.
-        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if b == b'.' || b == b'#' {
-            let name_start = i + 1;
-            if name_start < len && is_css_ident_start(bytes[name_start]) {
-                // Skip decimal numbers
-                if b == b'.' && i > 0 && bytes[i - 1].is_ascii_digit() {
-                    i += 1;
-                    continue;
-                }
-
-                let mut end = name_start;
-                while end < len && is_css_ident_char(bytes[end]) {
-                    end += 1;
-                }
-
-                let name = &selector_text[name_start..end];
-
-                // Skip hex colors for #
-                if b == b'#' && is_hex_color(name) {
-                    i = end;
-                    continue;
-                }
-
-                let abs_start = content_offset + (offset_in_css + name_start) as u32;
-                let abs_end = content_offset + (offset_in_css + end) as u32;
-
-                if b == b'.' {
-                    analysis.classes.push(AnalyzedCssClass {
-                        name: name.to_string(),
-                        span: Span::new(abs_start, abs_end),
-                        selector_index,
-                    });
-                } else {
-                    analysis.ids.push(AnalyzedCssId {
-                        name: name.to_string(),
-                        span: Span::new(abs_start, abs_end),
-                    });
-                }
-
-                i = end;
-                continue;
-            }
-        }
-
-        i += 1;
-    }
-}
-
-/// Scan a declaration block for custom property declarations and var() usages.
-///
-/// - Custom property declarations (`--name: value`) are added to `analysis.custom_properties`
-///   with full details (value, spans, var_references, selector_index).
-/// - Non-custom-property declarations containing `var()` are added to `analysis.var_usages`.
-///
-/// `decl_block_offset` is the byte offset of `decl_content` within `css_content`.
-/// `content_offset` is the SFC-absolute offset of the style block content start.
-fn scan_declarations(
-    decl_content: &str,
-    decl_block_offset: u32,
-    content_offset: u32,
-    selector_index: Option<u32>,
-    dialect: CssScanDialect,
-    analysis: &mut CssAnalysis,
-) {
-    let bytes = decl_content.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_char = b'"';
-    let mut in_comment = false;
-    // Track whether we're at property-name position (after `;` or block start)
-    let mut at_prop_start = true;
-    let mut brace_depth: usize = 0;
-
-    while i < len {
-        let b = bytes[i];
-
-        if in_comment {
-            if b == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
-                in_comment = false;
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if in_string {
-            if b == b'\\' && i + 1 < len {
-                i += 2;
-                continue;
-            }
-            if b == string_char {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-
-        // Line comment (SCSS/Less): skip to end of line.
-        if dialect.line_comments() && b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if b == b'"' || b == b'\'' {
-            in_string = true;
-            string_char = b;
-            at_prop_start = false;
-            i += 1;
-            continue;
-        }
-
-        if b == b'{' {
-            brace_depth += 1;
-            at_prop_start = true;
-            i += 1;
-            continue;
-        }
-
-        if b == b'}' {
-            brace_depth = brace_depth.saturating_sub(1);
-            at_prop_start = true;
-            i += 1;
-            continue;
-        }
-
-        if b == b';' {
-            at_prop_start = true;
-            i += 1;
-            continue;
-        }
-
-        // At property-name position, check for `--` (custom property declaration)
-        if at_prop_start && b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
-            // Found custom property declaration
-            let name_start = i;
-            i += 2; // skip `--`
-            while i < len && is_css_ident_char(bytes[i]) {
-                i += 1;
-            }
-            let name_end = i;
-            let name = &decl_content[name_start..name_end];
-
-            // Skip whitespace and colon to get to value
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i < len && bytes[i] == b':' {
-                i += 1; // skip ':'
-                while i < len && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-            }
-
-            // Extract value until `;` or `}` or end, respecting strings/comments/nested parens
-            let value_start = i;
-            let mut val_in_string = false;
-            let mut val_string_char = b'"';
-            let mut val_paren_depth = 0u32;
-            while i < len {
-                let vb = bytes[i];
-                if val_in_string {
-                    if vb == b'\\' && i + 1 < len {
-                        i += 2;
-                        continue;
-                    }
-                    if vb == val_string_char {
-                        val_in_string = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if vb == b'"' || vb == b'\'' {
-                    val_in_string = true;
-                    val_string_char = vb;
-                    i += 1;
-                    continue;
-                }
-                if vb == b'(' {
-                    val_paren_depth += 1;
-                    i += 1;
-                    continue;
-                }
-                if vb == b')' {
-                    val_paren_depth = val_paren_depth.saturating_sub(1);
-                    i += 1;
-                    continue;
-                }
-                if val_paren_depth == 0 && (vb == b';' || vb == b'}') {
-                    break;
-                }
-                i += 1;
-            }
-            let value_end = i;
-            let value_raw = decl_content[value_start..value_end].trim();
-
-            let abs_name_start = decl_block_offset + name_start as u32 + content_offset;
-            let abs_name_end = decl_block_offset + name_end as u32 + content_offset;
-            let abs_value_start = decl_block_offset
-                + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32
-                + content_offset;
-            let abs_value_end = abs_value_start + value_raw.len() as u32;
-
-            // Extract var() references from the value
-            let value_offset_in_css = decl_block_offset
-                + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32;
-            let var_refs = extract_var_references(value_raw, value_offset_in_css, content_offset);
-
-            analysis.custom_properties.push(AnalyzedCustomProperty {
-                name: name.to_string(),
-                name_span: Span::new(abs_name_start, abs_name_end),
-                value: value_raw.to_string(),
-                value_span: Span::new(abs_value_start, abs_value_end),
-                var_references: var_refs,
-                selector_index,
-            });
-
-            at_prop_start = false;
-            continue;
-        }
-
-        // At property-name position, scan for a regular property that may contain var()
-        if at_prop_start && b.is_ascii_alphabetic() && brace_depth == 0 {
-            let prop_name_start = i;
-            // Scan property name (letters, hyphens, digits)
-            while i < len
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-' || bytes[i] == b'_')
-            {
-                i += 1;
-            }
-            let prop_name = decl_content[prop_name_start..i].trim();
-
-            // Skip whitespace and colon
-            while i < len && bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i < len && bytes[i] == b':' {
-                i += 1;
-                while i < len && bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-
-                // Scan value for var()
-                let value_start = i;
-                let mut val_in_string = false;
-                let mut val_string_char = b'"';
-                let mut val_paren_depth = 0u32;
-                while i < len {
-                    let vb = bytes[i];
-                    if val_in_string {
-                        if vb == b'\\' && i + 1 < len {
-                            i += 2;
-                            continue;
-                        }
-                        if vb == val_string_char {
-                            val_in_string = false;
-                        }
-                        i += 1;
-                        continue;
-                    }
-                    if vb == b'"' || vb == b'\'' {
-                        val_in_string = true;
-                        val_string_char = vb;
-                        i += 1;
-                        continue;
-                    }
-                    if vb == b'(' {
-                        val_paren_depth += 1;
-                        i += 1;
-                        continue;
-                    }
-                    if vb == b')' {
-                        val_paren_depth = val_paren_depth.saturating_sub(1);
-                        i += 1;
-                        continue;
-                    }
-                    if val_paren_depth == 0 && (vb == b';' || vb == b'}') {
-                        break;
-                    }
-                    i += 1;
-                }
-                let value_end = i;
-                let value_raw = decl_content[value_start..value_end].trim();
-
-                // Check if value contains var()
-                if value_raw.contains("var(") {
-                    let value_offset_in_css = decl_block_offset
-                        + (value_raw.as_ptr() as usize - decl_content.as_ptr() as usize) as u32;
-                    let var_refs =
-                        extract_var_references(value_raw, value_offset_in_css, content_offset);
-                    for var_ref in var_refs {
-                        analysis.var_usages.push(AnalyzedVarUsage {
-                            property_name: prop_name.to_string(),
-                            reference: var_ref,
-                            selector_index,
-                        });
-                    }
-                }
-            }
-
-            at_prop_start = false;
-            continue;
-        }
-
-        if b == b':' {
-            at_prop_start = false;
-            i += 1;
-            continue;
-        }
-
-        if b.is_ascii_whitespace() {
-            // Whitespace doesn't change prop_start state
-            i += 1;
-            continue;
-        }
-
-        at_prop_start = false;
-        i += 1;
-    }
-}
-
-/// Check if a string looks like a hex color (3, 4, 6, or 8 hex digits).
-fn is_hex_color(s: &str) -> bool {
-    let len = s.len();
-    (len == 3 || len == 4 || len == 6 || len == 8) && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Check if a byte is a valid CSS identifier start character.
-fn is_css_ident_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_' || b == b'-' || b > 0x7F
-}
-
-/// Check if a byte is a valid CSS identifier continuation character.
-fn is_css_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b > 0x7F
 }
 
 #[cfg(test)]

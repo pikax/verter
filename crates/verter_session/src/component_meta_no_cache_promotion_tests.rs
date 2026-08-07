@@ -90,16 +90,14 @@ fn intern_three_member_object(host: &VerterHost) -> SemanticNodeId {
 
 fn intern_single_member_object(host: &VerterHost, name: &'static str) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
-    let leaf = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ));
+    let leaf = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
     let member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
@@ -114,16 +112,14 @@ fn intern_single_member_object(host: &VerterHost, name: &'static str) -> Semanti
         spans: Default::default(),
         declaration_origin: None,
     };
-    graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(vec![member].into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ))
+    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(vec![member].into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }))
 }
 
 #[test]
@@ -1263,16 +1259,14 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         ..HostConfig::default()
     }));
     let graph = host.project_type_store().semantic_graph();
-    let value_node = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ));
+    let value_node = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
 
     let empty_sig: crate::semantic_query::DepSignature = Arc::from(Vec::new().into_boxed_slice());
 

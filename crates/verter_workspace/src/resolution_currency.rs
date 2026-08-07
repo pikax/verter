@@ -15,7 +15,8 @@ use crate::types::{
     ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
 };
 use crate::{
-    FactReadSet, FactVersionRef, FactVersionValidator, ResolveImportsFactRef, SignatureAdmission,
+    AggregateStamp, FactReadSet, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
+    SignatureAdmission,
 };
 
 /// Effective bytes revision for one canonical.
@@ -358,9 +359,114 @@ pub enum ResolutionFactKey {
         entry: ResolutionEntry,
         population: ResolutionPopulation,
     },
+    /// **Derived node.** The resolution decision for one complete query
+    /// identity.
+    ///
+    /// Its version is the single fact a consumer records instead of the
+    /// query's whole transitive leaf set. Its direct dependency edges —
+    /// the primitive facts the query itself observed plus the child
+    /// decisions it reused — live in [`ResolutionFactRoot`], and a
+    /// mutation reaching any of them advances this node through reverse
+    /// propagation.
+    Decision { query: Box<ResolutionQueryKey> },
+    /// **Derived node.** One owner's complete set of direct resolution
+    /// decisions.
+    ///
+    /// Records CHILD DECISIONS, never their leaves, so an owner witness
+    /// is bounded by the owner's authored specifier count rather than by
+    /// the transitive closure of everything those specifiers resolve
+    /// through.
+    OwnerResolutionSet {
+        owner: CanonicalResolutionId,
+        population: ResolutionPopulation,
+    },
+}
+
+/// How one observation participates in the resolution decision DAG.
+///
+/// The classification is total over [`FactVersionRef`] (see
+/// [`classify_resolution_observation`]), so a new fact variant cannot
+/// compile until it has been given one of these three dispositions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionEdgeClass {
+    /// A primitive resolution input: a direct dependency edge of the
+    /// enclosing decision.
+    DirectLeaf,
+    /// A derived DAG node reused by this query: a direct dependency edge,
+    /// and itself a node whose own edges stay its own business. This is
+    /// what replaces flattening a reused child's whole signature.
+    DerivedNode,
+    /// Not edge-bearing. The observation still roots the witness, but it
+    /// stands for a whole compaction domain or for a producer identity
+    /// space the resolution root does not own, so it never becomes a
+    /// graph edge.
+    Terminal,
+}
+
+/// **The one observation-to-edge classification.**
+///
+/// Exhaustive over [`FactVersionRef`] and, inside the resolution arm,
+/// over [`ResolutionFactKey`] — no wildcard on either. Adding a variant
+/// to either enum is a compile error until its direct-leaf / derived-node
+/// / terminal disposition is stated here, which is what makes witness
+/// creation and edge classification one operation rather than two that
+/// can drift.
+pub(crate) fn classify_resolution_observation(fact: &FactVersionRef) -> ResolutionEdgeClass {
+    match fact {
+        FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(fact)) => {
+            match &fact.key {
+                ResolutionFactKey::PathProbe { .. }
+                | ResolutionFactKey::Manifest { .. }
+                | ResolutionFactKey::Realpath { .. }
+                | ResolutionFactKey::ExactResolution { .. }
+                | ResolutionFactKey::DirectoryMembers { .. }
+                | ResolutionFactKey::RecoveryScope { .. }
+                | ResolutionFactKey::ContextSelection { .. } => ResolutionEdgeClass::DirectLeaf,
+                ResolutionFactKey::Decision { .. }
+                | ResolutionFactKey::OwnerResolutionSet { .. } => ResolutionEdgeClass::DerivedNode,
+            }
+        }
+        // Another producer's identity space, or an already-terminal
+        // whole-domain aggregate. Both root the witness; neither is a
+        // resolution-graph edge.
+        FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic { .. })
+        | FactVersionRef::FileWholeHash { .. }
+        | FactVersionRef::DerivedFactHash { .. }
+        | FactVersionRef::Parse(_)
+        | FactVersionRef::FileSourceEnv { .. }
+        | FactVersionRef::RouteSurface(_)
+        | FactVersionRef::ProjectGeneration { .. }
+        | FactVersionRef::DomainGeneration(_)
+        | FactVersionRef::ProgramAnalysis(_)
+        | FactVersionRef::StrictSelfRootWorld(_) => ResolutionEdgeClass::Terminal,
+    }
 }
 
 impl ResolutionFactKey {
+    /// Build the derived node key for one query identity.
+    pub(crate) fn decision(query: ResolutionQueryKey) -> Self {
+        Self::Decision {
+            query: Box::new(query),
+        }
+    }
+
+    /// Build the derived node key for one owner's decision set.
+    pub(crate) fn owner_resolution_set(owner: &str, population: ResolutionPopulation) -> Self {
+        Self::OwnerResolutionSet {
+            owner: CanonicalResolutionId::new(crate::resolver::normalize_canonical_id(owner)),
+            population,
+        }
+    }
+
+    /// Whether this key names a derived DAG node rather than a primitive
+    /// resolution input.
+    pub(crate) fn is_derived_node(&self) -> bool {
+        matches!(
+            self,
+            Self::Decision { .. } | Self::OwnerResolutionSet { .. }
+        )
+    }
+
     pub(crate) fn population(&self) -> ResolutionPopulation {
         match self {
             Self::PathProbe { population, .. }
@@ -369,7 +475,12 @@ impl ResolutionFactKey {
             | Self::ExactResolution { population, .. }
             | Self::DirectoryMembers { population, .. }
             | Self::RecoveryScope { population, .. }
-            | Self::ContextSelection { population, .. } => *population,
+            | Self::ContextSelection { population, .. }
+            | Self::OwnerResolutionSet { population, .. } => *population,
+            // A decision's population is its query's: the query identity
+            // already carries one, and two populations for one node
+            // would be two answers to the same question.
+            Self::Decision { query } => query.population,
         }
     }
 
@@ -403,7 +514,12 @@ impl ResolutionFactKey {
             | Self::ContextSelection {
                 population: current,
                 ..
+            }
+            | Self::OwnerResolutionSet {
+                population: current,
+                ..
             } => *current = population,
+            Self::Decision { query } => query.population = population,
         }
         key
     }
@@ -417,12 +533,28 @@ impl ResolutionFactKey {
             Self::RecoveryScope {
                 canonical_prefix, ..
             } => Some(&canonical_prefix.0),
+            Self::OwnerResolutionSet { owner, .. } => Some(&owner.0),
             Self::ExactResolution { entry, .. } | Self::ContextSelection { entry, .. } => {
                 match entry {
                     ResolutionEntry::Importer(canonical) => Some(&canonical.0),
                     ResolutionEntry::ExplicitProject(_) => None,
                 }
             }
+            Self::Decision { query } => match &query.entry {
+                ResolutionEntry::Importer(canonical) => Some(&canonical.0),
+                ResolutionEntry::ExplicitProject(_) => None,
+            },
+        }
+    }
+
+    /// The owner a `Decision` belongs to, for the owner-set index.
+    fn owner_canonical(&self) -> Option<&str> {
+        match self {
+            Self::Decision { query } => match &query.entry {
+                ResolutionEntry::Importer(canonical) => Some(&canonical.0),
+                ResolutionEntry::ExplicitProject(_) => None,
+            },
+            _ => None,
         }
     }
 
@@ -448,7 +580,12 @@ impl ResolutionFactKey {
             Self::ExactResolution { .. }
             | Self::DirectoryMembers { .. }
             | Self::RecoveryScope { .. }
-            | Self::ContextSelection { .. } => None,
+            | Self::ContextSelection { .. }
+            // A derived node is computed, never read off a path. Handing
+            // one to the re-observation walk would re-read a canonical
+            // the resolver never probed.
+            | Self::Decision { .. }
+            | Self::OwnerResolutionSet { .. } => None,
         }
     }
 
@@ -506,6 +643,32 @@ pub struct ResolutionFactRef {
     pub(crate) version: ResolutionFactVersion,
 }
 
+impl ResolutionFactRef {
+    pub(crate) fn new(key: ResolutionFactKey, version: ResolutionFactVersion) -> Self {
+        Self { key, version }
+    }
+
+    /// Whether this ref names the OWNER-SCOPED resolution set.
+    ///
+    /// The read-only oracle a consumer crate needs to assert what it
+    /// rooted on: the key's own shape stays crate-private, so this is the
+    /// only way to ask the question from outside without exposing the
+    /// taxonomy.
+    #[must_use]
+    pub fn is_owner_resolution_set(&self) -> bool {
+        matches!(self.key, ResolutionFactKey::OwnerResolutionSet { .. })
+    }
+
+    /// Whether this ref names one query's derived decision node.
+    ///
+    /// Consumer crates use this read-only oracle to verify that a witness
+    /// carries bounded DAG nodes without exposing the key's private fields.
+    #[must_use]
+    pub fn is_decision(&self) -> bool {
+        matches!(self.key, ResolutionFactKey::Decision { .. })
+    }
+}
+
 /// Version ledger for one immutable resolution root.
 ///
 /// The map is point-lookup only — `version` / `advance` / `remove`, never an
@@ -519,9 +682,35 @@ pub struct ResolutionFactRef {
 type FactVersionLedger =
     HashMap<ResolutionFactKey, ResolutionFactVersion, rustc_hash::FxBuildHasher>;
 
+/// One derived node's edge set, or one dependency's dependent set.
+type ResolutionEdgeSet = HashSet<ResolutionFactKey, rustc_hash::FxBuildHasher>;
+
+/// Persistent adjacency. `im` maps are HAMTs, so cloning a root shares
+/// their nodes structurally and a mutation costs
+/// `O(changed keys × log n)` — the bound the decision DAG is sized
+/// against.
+type ResolutionEdgeMap = HashMap<ResolutionFactKey, ResolutionEdgeSet, rustc_hash::FxBuildHasher>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolutionFactRoot {
     versions: FactVersionLedger,
+    /// derived node → its COMPLETE direct dependency set.
+    forward: ResolutionEdgeMap,
+    /// dependency → the derived nodes that directly depend on it.
+    reverse: ResolutionEdgeMap,
+    /// owner canonical + population -> that owner's published child
+    /// decisions. The index exists so an owner-set publication is
+    /// `O(owner's decisions)` rather than a scan of the whole ledger.
+    owner_decisions:
+        HashMap<(String, ResolutionPopulation), ResolutionEdgeSet, rustc_hash::FxBuildHasher>,
+    /// Direct fact keys advanced since the enclosing mutation batch
+    /// began, drained by [`Self::take_pending_seeds`] at the publication
+    /// protocol's propagation step.
+    ///
+    /// Always empty in a PUBLISHED root: the publication protocol drains
+    /// it before the root is stored, so a captured world never carries
+    /// mutation-batch scratch state.
+    pending_seeds: Vec<ResolutionFactKey>,
 }
 
 impl ResolutionFactRoot {
@@ -532,12 +721,241 @@ impl ResolutionFactRoot {
             .unwrap_or(ResolutionFactVersion::INITIAL)
     }
 
+    /// Semantic advance: the fact's observed meaning moved. Records the
+    /// key as a propagation seed for the enclosing mutation batch.
     pub(crate) fn advance(&mut self, key: ResolutionFactKey, version: ResolutionFactVersion) {
+        self.versions.insert(key.clone(), version);
+        self.pending_seeds.push(key);
+    }
+
+    /// Copy a base version DOWN into a session root without claiming a
+    /// semantic change.
+    ///
+    /// Deliberately NOT [`Self::advance`]. The composed session view
+    /// already answered this key from the base root, so mirroring the
+    /// value changes no witness's meaning — seeding propagation from it
+    /// would advance every session decision under an unchanged fact on
+    /// every overlay open.
+    pub(crate) fn mirror_base_version(
+        &mut self,
+        key: ResolutionFactKey,
+        version: ResolutionFactVersion,
+    ) {
         self.versions.insert(key, version);
     }
 
     pub(crate) fn remove(&mut self, key: &ResolutionFactKey) {
         self.versions.remove(key);
+        self.pending_seeds.push(key.clone());
+    }
+
+    /// **Atomic direct-edge replacement.**
+    ///
+    /// The node's COMPLETE prior edge set is detached from both maps and
+    /// the new one attached in the same mutation, so no reader can ever
+    /// observe a node holding a mixture of two computations' edges.
+    ///
+    /// Publication does NOT mint a version, and that is a correctness
+    /// choice. A resolution publishes its own decision, so a minted
+    /// version would be one no view captured before that resolution can
+    /// hold — every consumer rooting on it would miss against the very
+    /// request view it computed under, which is the reuse the DAG exists
+    /// to enable. A never-published node reads
+    /// [`ResolutionFactVersion::INITIAL`], exactly like every other fact
+    /// nothing has advanced, and its version moves only when something
+    /// genuinely invalidates it: reverse propagation from a mutated
+    /// dependency, or [`Self::remove_derived`].
+    ///
+    /// Returns whether an EXISTING node's edges were replaced.
+    pub(crate) fn publish_derived(
+        &mut self,
+        node: ResolutionFactKey,
+        dependencies: impl IntoIterator<Item = ResolutionFactKey>,
+    ) -> bool {
+        debug_assert!(
+            node.is_derived_node(),
+            "only a derived DAG node carries direct edges"
+        );
+        let replaced = self.forward.contains_key(&node);
+        self.detach_edges(&node);
+        let mut direct = ResolutionEdgeSet::default();
+        for dependency in dependencies {
+            // A node is never its own dependency: a recompute of Q that
+            // reuses Q's own prior answer is the SAME decision, not a
+            // child of itself, and a self-edge would make propagation
+            // advance the node that seeded it.
+            if dependency == node {
+                continue;
+            }
+            self.reverse
+                .entry(dependency.clone())
+                .or_default()
+                .insert(node.clone());
+            direct.insert(dependency);
+        }
+        if let Some(owner) = node.owner_canonical() {
+            self.owner_decisions
+                .entry((owner.to_owned(), node.population()))
+                .or_default()
+                .insert(node.clone());
+        }
+        self.forward.insert(node, direct);
+        replaced
+    }
+
+    /// Drop a derived node: ADVANCE its version, then drop its complete
+    /// edge set in both directions.
+    ///
+    /// The advance is what prevents ABA. A node that fell out of the
+    /// graph and was later republished must not return to a version a
+    /// witness already holds, and publication mints nothing — so the
+    /// removal itself is where the tombstone version is minted. Every
+    /// witness recorded against the node, at any prior version including
+    /// `INITIAL`, stops validating from here on; a reintroduction keeps
+    /// the tombstone rather than reverting.
+    ///
+    /// Nothing is evicted. A dependent cache entry stays exactly where it
+    /// is and goes cold only when its own recorded derived version fails
+    /// ordinary read-side validation.
+    pub(crate) fn remove_derived(
+        &mut self,
+        node: &ResolutionFactKey,
+        version: ResolutionFactVersion,
+    ) -> bool {
+        if !self.forward.contains_key(node) {
+            return false;
+        }
+        self.detach_edges(node);
+        self.forward.remove(node);
+        if let Some(owner) = node.owner_canonical() {
+            let index_key = (owner.to_owned(), node.population());
+            let empty = match self.owner_decisions.get_mut(&index_key) {
+                Some(decisions) => {
+                    decisions.remove(node);
+                    decisions.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                self.owner_decisions.remove(&index_key);
+            }
+        }
+        self.advance(node.clone(), version);
+        true
+    }
+
+    fn detach_edges(&mut self, node: &ResolutionFactKey) {
+        let Some(previous) = self.forward.get(node).cloned() else {
+            return;
+        };
+        for dependency in previous {
+            let empty = match self.reverse.get_mut(&dependency) {
+                Some(dependents) => {
+                    dependents.remove(node);
+                    dependents.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                self.reverse.remove(&dependency);
+            }
+        }
+    }
+
+    /// One owner's currently published child decisions.
+    pub(crate) fn owner_child_decisions(
+        &self,
+        owner: &str,
+        population: ResolutionPopulation,
+    ) -> Vec<ResolutionFactKey> {
+        self.owner_decisions
+            .get(&(crate::resolver::normalize_canonical_id(owner), population))
+            .map(|decisions| decisions.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// One derived node's complete direct dependency set.
+    pub(crate) fn direct_dependencies(
+        &self,
+        node: &ResolutionFactKey,
+    ) -> Option<Vec<ResolutionFactKey>> {
+        self.forward
+            .get(node)
+            .map(|deps| deps.iter().cloned().collect())
+    }
+
+    /// Every `ContextSelection` key some derived node depends on.
+    ///
+    /// The REGISTERED leaves the publication path enumerates for changed
+    /// selections. Bounded by the graph's own context edges — never by
+    /// the project set, and never by the whole fact ledger.
+    pub(crate) fn registered_context_selection_keys(&self) -> Vec<ResolutionFactKey> {
+        self.reverse
+            .keys()
+            .filter(|key| matches!(key, ResolutionFactKey::ContextSelection { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Seed this mutation batch's propagation from `key` without claiming
+    /// that `key`'s own version moved.
+    ///
+    /// `ContextSelection` is versioned in the separate `context_versions`
+    /// map rather than in the fact ledger, so a publication that changes
+    /// an entry's selected context advances no ledger entry to seed from.
+    pub(crate) fn seed_propagation(&mut self, key: ResolutionFactKey) {
+        self.pending_seeds.push(key);
+    }
+
+    /// The derived nodes directly depending on `key`.
+    #[cfg(test)]
+    pub(crate) fn direct_dependents(&self, key: &ResolutionFactKey) -> Vec<ResolutionFactKey> {
+        self.reverse
+            .get(key)
+            .map(|dependents| dependents.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drain the direct fact keys this mutation batch advanced.
+    pub(crate) fn take_pending_seeds(&mut self) -> Vec<ResolutionFactKey> {
+        std::mem::take(&mut self.pending_seeds)
+    }
+
+    /// **Reverse-reachable derived propagation, once per node per batch.**
+    ///
+    /// Advances every `Decision` / `OwnerResolutionSet` reachable from
+    /// `seeds` through reverse edges, exactly once, and returns them.
+    /// Termination follows from the batch-local visited set over a finite
+    /// node set, so a cycle among derived nodes terminates without any
+    /// depth bound; the event-minted fresh versions are what make
+    /// "advance once per batch" the CORRECT number, not the reason the
+    /// walk halts.
+    ///
+    /// Nothing is evicted. A dependent cache entry stays exactly where it
+    /// is and goes cold only when its own recorded derived version fails
+    /// ordinary read-side validation.
+    pub(crate) fn propagate(
+        &mut self,
+        seeds: impl IntoIterator<Item = ResolutionFactKey>,
+        mut fresh_version: impl FnMut() -> ResolutionFactVersion,
+    ) -> Vec<ResolutionFactKey> {
+        let mut queue: std::collections::VecDeque<ResolutionFactKey> = seeds.into_iter().collect();
+        let mut visited: rustc_hash::FxHashSet<ResolutionFactKey> = queue.iter().cloned().collect();
+        let mut advanced = Vec::new();
+        while let Some(key) = queue.pop_front() {
+            let Some(dependents) = self.reverse.get(&key).cloned() else {
+                continue;
+            };
+            for dependent in dependents {
+                if !visited.insert(dependent.clone()) {
+                    continue;
+                }
+                self.versions.insert(dependent.clone(), fresh_version());
+                advanced.push(dependent.clone());
+                queue.push_back(dependent);
+            }
+        }
+        advanced
     }
 }
 
@@ -620,11 +1038,47 @@ impl ResolutionWorldRoot {
     /// only for context nodes whose complete semantic value remains present.
     /// A context that disappears and is later reintroduced receives a fresh,
     /// globally unique typed version, so a publish cycle cannot create ABA.
+    /// A publication can change which context an entry SELECTS without
+    /// touching any project's own version, so the registered
+    /// `ContextSelection` leaves are enumerated across the swap and the
+    /// changed ones seed derived propagation.
+    ///
+    /// The enumeration costs
+    /// `O(registered ContextSelection leaves × one membership evaluation)`
+    /// and runs only at publish time. [`PublishedContextSelection`] cannot
+    /// reduce it, by construction and by design. By construction: `published`
+    /// is a brand-new index whose memo is empty, and every registered leaf
+    /// is a distinct path, so each post-swap comparison is a genuine first
+    /// walk. By design: a memo that DID answer here would answer with the
+    /// previous index's selection — exactly the stale answer that would
+    /// make a changed selection compare equal and seed nothing.
+    ///
+    /// The pre-swap half reads the OUTGOING index and may hit its memo.
+    /// That is correct: the old index's answers are still answers about
+    /// the old index.
+    ///
+    /// `also_registered` carries the context leaves registered in the
+    /// LIVE SESSION graphs, normalised to the base population. A session
+    /// decision's context edge lives in its own root, so a base-local
+    /// enumeration would see none of them and a context change would
+    /// silently miss every session decision; the seeds are recorded in
+    /// the base root and the publication protocol's session fan-out
+    /// translates them back.
     pub(crate) fn replace_published(
         &mut self,
         published: Arc<PublishedRoot>,
+        also_registered: &[ResolutionFactKey],
         mut fresh_version: impl FnMut() -> ResolutionFactVersion,
     ) {
+        let mut registered = self.facts.registered_context_selection_keys();
+        registered.extend(also_registered.iter().cloned());
+        registered.sort();
+        registered.dedup();
+        let before: Vec<ResolutionFactVersion> = registered
+            .iter()
+            .map(|key| self.fact_version(key))
+            .collect();
+
         let mut next_context_versions = HashMap::new();
         let contexts = std::iter::once(ResolveContextId::unowned()).chain(
             published
@@ -643,6 +1097,12 @@ impl ResolutionWorldRoot {
         }
         self.context_versions = next_context_versions;
         self.published = Some(published);
+
+        for (key, was) in registered.into_iter().zip(before) {
+            if self.fact_version(&key) != was {
+                self.facts.seed_propagation(key);
+            }
+        }
     }
 
     pub(crate) fn exact(
@@ -741,6 +1201,151 @@ pub(crate) enum ContextProvenanceError {
     ResolveEnvironmentMissing,
 }
 
+/// Maximum number of per-path context-membership rows one published index
+/// retains before an overflowing insert clears the table.
+///
+/// Same shape and rationale as [`crate::workspace_snapshot::OWNERS_MEMO_CAP`]:
+/// the rows are a cost mechanism, never an authority, so dropping them is
+/// always correct and costs only a recompute. A clear is COUNTED
+/// ([`PublishedContextSelection::table_clears`]) because it also restarts the
+/// per-path tally, and a tally that silently restarted would read
+/// "evaluated once" for a path this index evaluated many times.
+pub(crate) const CONTEXT_MEMBERSHIP_TABLE_CAP: usize = 16 * 1024;
+
+/// One published index's record for one canonical path.
+#[derive(Debug, Default)]
+struct ContextMembershipRow {
+    /// Membership walks this index performed for the row's path.
+    ///
+    /// A true tally, not a memo-presence flag: it counts walks, so a
+    /// memo that computed an answer and then failed to keep it makes this
+    /// climb instead of resting at one.
+    evaluations: u64,
+    /// The memoized answer, TYPED: a provenance error and an unowned
+    /// selection are recorded exactly as computed, never collapsed into
+    /// absence and never retried per demand.
+    selected: Option<Result<ResolveContextId, ContextProvenanceError>>,
+}
+
+/// One published index's context-selection memo.
+///
+/// [`selected_context_for_path`] is a pure function of the published index
+/// and the requested canonical id: it reads the index's resolver
+/// membership, its project list and its two per-project tables, and
+/// nothing else. Its answer is therefore valid for exactly one index's
+/// lifetime, which is why this memo lives ON [`PublishedRoot`] — an index
+/// that is replaced takes its answers with it, and there is no
+/// cross-generation invalidation to get wrong.
+///
+/// It is deliberately not owned by `ResolutionWorldRoot`, which is cloned
+/// on every mutation, and not by `WorkspaceSnapshot`, which an LSP
+/// view-only rebuild reuses across a [`PublishedRoot`] whose per-project
+/// identity and environment tables were recomposed — the selected context
+/// depends on those tables, so a snapshot-scoped answer could outlive its
+/// own inputs.
+///
+/// # What it cannot do
+///
+/// - **It cannot reduce the publish-time context enumeration.**
+///   `ResolutionWorldRoot::replace_published` compares every registered
+///   `ContextSelection` leaf across the swap, and the index it compares
+///   against is brand new, so its memo is empty by construction. Each
+///   registered leaf is a distinct path and therefore a genuine first
+///   walk. That enumeration stays `O(registered leaves × one walk)`, and
+///   a memo that DID answer there would answer with the previous index's
+///   selection — the exact stale answer that makes a changed selection
+///   invisible to propagation.
+/// - **It does not cover the direct membership callers.** The memo sits
+///   at `selected_context_for_path`. `ProjectResolver::nearest_config_for_path`
+///   and `effective_configs_for_path` are also called directly — seven
+///   times inside `resolver.rs` itself and five times from `verter_lsp`
+///   (`provider_sync.rs` ×2, `background_drain_decl_closure.rs`,
+///   `background_init.rs`, `server_utils.rs`). Those walk the resolver
+///   unmemoized. Extending the memo to them needs their own measurement:
+///   they take a different value out of the walk (`&IdeProjectConfig`, a
+///   candidate list), not a `ResolveContextId`.
+pub(crate) struct PublishedContextSelection {
+    rows: dashmap::DashMap<Box<str>, ContextMembershipRow>,
+    cap: usize,
+    table_clears: std::sync::atomic::AtomicU64,
+}
+
+impl PublishedContextSelection {
+    /// Service bounded at `cap` rows. Production uses
+    /// [`CONTEXT_MEMBERSHIP_TABLE_CAP`] via [`Default`]; the overflow test
+    /// uses a tiny cap.
+    pub(crate) fn with_cap(cap: usize) -> Self {
+        Self {
+            rows: dashmap::DashMap::new(),
+            cap,
+            table_clears: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Membership walks this index performed for `canonical_id`.
+    pub(crate) fn evaluations(&self, canonical_id: &str) -> u64 {
+        self.rows
+            .get(canonical_id)
+            .map(|row| row.evaluations)
+            .unwrap_or(0)
+    }
+
+    /// How often the row table was cleared for capacity. Non-zero means
+    /// [`Self::evaluations`] counts only since the last clear.
+    pub(crate) fn table_clears(&self) -> u64 {
+        self.table_clears.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// This index's selection for `canonical_id`, walking membership only
+    /// on the first demand.
+    ///
+    /// `evaluate` runs under the row's write guard, so concurrent demands
+    /// for one path collapse onto one walk. It must not re-enter this
+    /// memo — the membership walk reads published state only, and holds
+    /// no row guard of its own.
+    fn selected(
+        &self,
+        canonical_id: &str,
+        evaluate: impl FnOnce() -> Result<ResolveContextId, ContextProvenanceError>,
+    ) -> Result<ResolveContextId, ContextProvenanceError> {
+        if let Some(row) = self.rows.get(canonical_id) {
+            if let Some(selected) = row.selected.as_ref() {
+                return selected.clone();
+            }
+        }
+        // The capacity clear takes every shard: no row guard may be held.
+        if self.rows.len() >= self.cap {
+            self.rows.clear();
+            self.table_clears
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let mut row = self.rows.entry(Box::from(canonical_id)).or_default();
+        if let Some(selected) = row.selected.as_ref() {
+            return selected.clone();
+        }
+        let selected = evaluate();
+        row.evaluations += 1;
+        row.selected = Some(selected.clone());
+        selected
+    }
+}
+
+impl Default for PublishedContextSelection {
+    fn default() -> Self {
+        Self::with_cap(CONTEXT_MEMBERSHIP_TABLE_CAP)
+    }
+}
+
+impl std::fmt::Debug for PublishedContextSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishedContextSelection")
+            .field("rows", &self.rows.len())
+            .field("cap", &self.cap)
+            .field("table_clears", &self.table_clears())
+            .finish()
+    }
+}
+
 fn project_for_config<'a>(
     published: &'a PublishedRoot,
     config: &crate::resolver::IdeProjectConfig,
@@ -786,6 +1391,15 @@ fn context_for_project(
     ))
 }
 
+/// The context an entry selects in `world`'s published index.
+///
+/// The membership-evaluation boundary the `RESOLVE_CONTEXT_SELECT` probe
+/// names, memoized per path on the index it walked. Every walk is
+/// tallied, so repeated evaluation of one path against one index stays
+/// observable through [`PublishedRoot::context_membership_evaluations`].
+///
+/// A world with NO published index answers before the boundary: there is
+/// no index to walk, none to memoize against, and none to tally on.
 pub(crate) fn selected_context_for_path(
     world: &ResolutionWorldRoot,
     canonical_id: &str,
@@ -794,6 +1408,16 @@ pub(crate) fn selected_context_for_path(
         .published
         .as_ref()
         .ok_or(ContextProvenanceError::NoPublishedRoot)?;
+    published.context_selection().selected(canonical_id, || {
+        evaluate_selected_context(published, canonical_id)
+    })
+}
+
+/// One membership walk over `published`. Pure in `(published, canonical_id)`.
+fn evaluate_selected_context(
+    published: &PublishedRoot,
+    canonical_id: &str,
+) -> Result<ResolveContextId, ContextProvenanceError> {
     if let Some(config) = published
         .snapshot
         .resolver
@@ -938,9 +1562,86 @@ impl CapturedResolutionWorld {
     #[must_use]
     pub fn validates_resolve_imports_fact(&self, fact: &ResolveImportsFactRef) -> bool {
         match fact {
-            ResolveImportsFactRef::Resolution(fact) => self.fact_version(&fact.key) == fact.version,
+            ResolveImportsFactRef::Resolution(fact) => {
+                self.answers_for_population(fact.key.population())
+                    && self.fact_version(&fact.key) == fact.version
+            }
             ResolveImportsFactRef::Semantic { .. } => false,
         }
+    }
+
+    /// `RC-4`: whether this world has AUTHORITY over `population`.
+    ///
+    /// A base world composes no overlay, and one session's world knows
+    /// nothing of another's, so neither can answer for a session
+    /// population that is not its own. Answering anyway would settle the
+    /// question with [`ResolutionFactVersion::INITIAL`] — the value a
+    /// never-advanced fact carries — so every session witness that
+    /// happened to record an unadvanced fact would validate against a
+    /// base capture. Authority is checked BEFORE the version comparison
+    /// precisely so "this world cannot answer" never presents as "the
+    /// fact has not moved".
+    fn answers_for_population(&self, population: ResolutionPopulation) -> bool {
+        match population {
+            ResolutionPopulation::Base => true,
+            ResolutionPopulation::Session(fingerprint) => {
+                self.population == ResolutionPopulation::Session(fingerprint)
+                    && self.session.is_some()
+            }
+        }
+    }
+
+    /// The stamp a [`CompactionDomain::Resolution`] aggregate is minted
+    /// from and validated against: this captured world's ROOT IDENTITY.
+    ///
+    /// Root identity, not a ledger counter. `ContextSelection` is
+    /// versioned in a separate `context_versions` map that
+    /// [`Self::fact_version`] reads INSTEAD of the fact ledger, so a
+    /// counter advanced only by ledger mutation would be blind to a
+    /// published-context replacement and let a context change stale-serve.
+    /// Both root ids advance on publication, which is the boundary
+    /// `replace_published` crosses — so the stamp covers the whole domain,
+    /// `ContextSelection` included.
+    ///
+    /// `None` for a population this world cannot answer for, which is what
+    /// stops a session aggregate validating against a base world (or
+    /// against a DIFFERENT session's world). A session stamp pins BOTH
+    /// roots because a session-population fact composes both:
+    /// [`Self::fact_version`] falls back to the base root when the session
+    /// root holds no entry.
+    #[must_use]
+    pub fn resolution_stamp(&self, population: ResolutionPopulation) -> Option<AggregateStamp> {
+        match population {
+            ResolutionPopulation::Base => Some(AggregateStamp::ResolutionRoots {
+                base: self.base.id,
+                session: None,
+            }),
+            ResolutionPopulation::Session(fingerprint) => {
+                if self.population != ResolutionPopulation::Session(fingerprint) {
+                    return None;
+                }
+                let session = self.session.as_ref()?;
+                Some(AggregateStamp::ResolutionRoots {
+                    base: self.base.id,
+                    session: Some(session.id),
+                })
+            }
+        }
+    }
+
+    /// This world's OWN root-identity stamp — [`Self::resolution_stamp`]
+    /// for the population the world was captured under.
+    ///
+    /// The seam a COMPOSITE stamp in another domain uses to pin "the
+    /// resolved-import world has not been republished". A composite is
+    /// minted under a VIEW population, which is a different identity
+    /// space from [`ResolutionPopulation`] and cannot be translated into
+    /// one — so the component is the world's own stamp, read through the
+    /// same single derivation on both the producer and the validator
+    /// side.
+    #[must_use]
+    pub fn own_resolution_stamp(&self) -> Option<AggregateStamp> {
+        self.resolution_stamp(self.population)
     }
 
     pub(crate) fn fact_version(&self, key: &ResolutionFactKey) -> ResolutionFactVersion {
@@ -965,10 +1666,29 @@ impl CapturedResolutionWorld {
 
 impl FactVersionValidator for CapturedResolutionWorld {
     fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
-        let FactVersionRef::ResolveImports(fact) = fact else {
-            return false;
-        };
-        self.validates_resolve_imports_fact(fact)
+        match fact {
+            FactVersionRef::ResolveImports(fact) => self.validates_resolve_imports_fact(fact),
+            // The resolution domain's terminal aggregate: this world is
+            // its only authority, exactly as it is for the precise facts
+            // the aggregate replaced. Every other domain's aggregate
+            // belongs to a producer this world knows nothing about.
+            FactVersionRef::DomainGeneration(aggregate) => {
+                aggregate.domain == crate::fact_cache::CompactionDomain::Resolution
+                    && match aggregate.population {
+                        crate::fact_cache::AggregatePopulation::Resolution(population) => {
+                            self.resolution_stamp(population) == Some(aggregate.stamp)
+                        }
+                        // A VIEW population is another producer's identity
+                        // space entirely — overlay installation, which this
+                        // world knows nothing about. An aggregate claiming
+                        // the resolution domain under one is malformed, and
+                        // vouching for it would let a view-scoped claim be
+                        // settled by a resolution-world stamp.
+                        crate::fact_cache::AggregatePopulation::View(_) => false,
+                    }
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1533,14 +2253,22 @@ pub(crate) struct ResolutionTransaction {
     /// they created, while leaving the finalised set — and the merge with
     /// any absorbed canonical run — exactly as it was.
     observed_keys: rustc_hash::FxHashSet<ResolutionFactKey>,
-    /// Witnesses absorbed wholesale from reused warm candidates. Each is
-    /// an already-canonical signature minted by a previous [`Self::finish`],
-    /// so finalisation MERGES them rather than re-sorting them (see
-    /// [`FactReadSet::absorb_canonical_signature`]).
-    absorbed: Vec<Arc<[FactVersionRef]>>,
+    /// This attempt's COMPLETE direct dependency set, in first-observation
+    /// order: the primitive resolution facts it observed itself plus the
+    /// child decisions it reused. Nothing transitive — a child's own
+    /// edges are the child's business.
+    ///
+    /// Filled by the same operation that records the witness
+    /// ([`Self::observe_fact`]), from
+    /// [`classify_resolution_observation`], so a fact can never enter the
+    /// witness without its edge role having been decided.
+    direct_edges: Vec<ResolutionFactKey>,
     observed_values: ObservedResolutionValues,
     non_admission: Option<verter_audit::NonAdmissionReason>,
     query: Option<ResolutionQueryKey>,
+    /// Per-domain generations this transaction compacts against. Only the
+    /// resolution domain is populated — see [`Self::new`].
+    aggregate_basis: crate::fact_cache::AggregateGenerations,
 }
 
 /// Resolver-facing reader that makes every filesystem/config observation enter
@@ -1885,11 +2613,20 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
 impl ResolutionTransaction {
     pub(crate) fn new(root: Arc<CapturedResolutionWorld>) -> Self {
+        // A resolution transaction observes exactly one compaction domain,
+        // and its captured world is that domain's producer AND validator —
+        // so the basis is derivable here, with no plumbing from the
+        // caller. Every other domain is left absent and stays precise.
+        let resolution = root.resolution_stamp(root.population);
         Self {
+            aggregate_basis: crate::fact_cache::AggregateGenerations {
+                resolution,
+                ..Default::default()
+            },
             root,
             observations: Vec::new(),
             observed_keys: rustc_hash::FxHashSet::default(),
-            absorbed: Vec::new(),
+            direct_edges: Vec::new(),
             observed_values: ObservedResolutionValues::default(),
             non_admission: None,
             query: None,
@@ -1910,9 +2647,49 @@ impl ResolutionTransaction {
         }
         let version = self.root.fact_version(&key);
         self.observed_keys.insert(key.clone());
-        self.observations.push(FactVersionRef::ResolveImports(
+        self.observe_fact(FactVersionRef::ResolveImports(
             ResolveImportsFactRef::Resolution(ResolutionFactRef { key, version }),
         ));
+    }
+
+    /// **The one operation that records a witness entry and classifies its
+    /// edge role.** Every observation this transaction makes goes through
+    /// here, so there is no path on which a fact enters the witness
+    /// without a direct-leaf / derived-node / terminal disposition.
+    fn observe_fact(&mut self, fact: FactVersionRef) {
+        match (classify_resolution_observation(&fact), &fact) {
+            (
+                ResolutionEdgeClass::DirectLeaf | ResolutionEdgeClass::DerivedNode,
+                FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)),
+            ) => self.direct_edges.push(resolution.key.clone()),
+            (ResolutionEdgeClass::DirectLeaf | ResolutionEdgeClass::DerivedNode, other) => {
+                // Structurally unreachable: only the resolution arm of
+                // the classification yields an edge-bearing class, and
+                // only a resolution fact carries a graph key. Stated so a
+                // future classification change fails loudly here instead
+                // of silently minting an edge with no key.
+                unreachable!("edge-bearing class on a non-resolution fact: {other:?}")
+            }
+            (ResolutionEdgeClass::Terminal, _) => {}
+        }
+        self.observations.push(fact);
+    }
+
+    /// This attempt's complete direct dependency set, deduped, in
+    /// first-observation order.
+    pub(crate) fn direct_edges(&self) -> Vec<ResolutionFactKey> {
+        self.direct_edges.clone()
+    }
+
+    /// Stage a fact minted by ANOTHER domain's producer.
+    ///
+    /// Every production resolution observation is a resolution key, so
+    /// this is the fixture seam that exercises the TERMINAL
+    /// (non-edge-bearing) classification arm and the cross-domain
+    /// signature shapes `SIG-3` asserts.
+    #[cfg(test)]
+    pub(crate) fn observe_foreign_fact_for_test(&mut self, fact: FactVersionRef) {
+        self.observe_fact(fact);
     }
 
     pub(crate) fn population(&self) -> ResolutionPopulation {
@@ -2011,23 +2788,6 @@ impl ResolutionTransaction {
         self.query.as_ref()
     }
 
-    /// Inherit a reused warm candidate's whole witness.
-    ///
-    /// The candidate's signature is retained BY REFERENCE as a canonical
-    /// run instead of being cloned element-wise into `observations`: it was
-    /// already sorted and deduped when the candidate was minted, and
-    /// finalisation merges it with this attempt's own (small) observation
-    /// set in linear time. The finalised witness is exactly the union of
-    /// the two — every attempt-local observation this attempt made is still
-    /// in it, so the reused candidate's witness stays path-precise for THIS
-    /// demand.
-    pub(crate) fn absorb(&mut self, signature: &crate::ReadSetSignature) {
-        if signature.facts.is_empty() {
-            return;
-        }
-        self.absorbed.push(Arc::clone(&signature.facts));
-    }
-
     pub(crate) fn finish(self) -> SignatureAdmission {
         if self.query.is_none() {
             return SignatureAdmission::NonCacheable(
@@ -2037,17 +2797,12 @@ impl ResolutionTransaction {
         if let Some(reason) = self.non_admission {
             return SignatureAdmission::NonCacheable(reason);
         }
-        crate::probe_tally!(
-            OBS_PRE_DEDUP,
-            self.observations.len() + self.absorbed.iter().map(|run| run.len()).sum::<usize>()
-        );
+        crate::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
         let mut facts = FactReadSet::new();
+        facts.set_aggregate_basis(self.aggregate_basis);
         {
             crate::probe_scope!(FINISH_COLLECT);
             facts.observe_borrowed_signature(&self.observations);
-            for run in &self.absorbed {
-                facts.absorb_canonical_signature(run);
-            }
         }
         SignatureAdmission::from_finalise(facts.finalise())
     }
@@ -2117,8 +2872,15 @@ mod transaction_contract_tests {
         // empty signature and this typed refusal disappears.
     }
 
+    /// `SIG-1`: signature CARDINALITY alone must never refuse admission.
+    ///
+    /// An over-cap observation set confined to ONE compaction domain lifts
+    /// that domain's precise bucket to its terminal aggregate and admits.
+    /// Written against existing API only, so it is a runnable red: at the
+    /// pre-change tree it fails with
+    /// `NonCacheable(SignatureOverflow)`.
     #[test]
-    fn resolution_overflow_uses_the_shared_fact_signature_cap() {
+    fn resolution_over_cap_single_domain_admits_instead_of_refusing() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
         for index in 0..=crate::FACT_SIGNATURE_CAP {
@@ -2128,14 +2890,227 @@ mod transaction_contract_tests {
             });
         }
 
-        assert!(matches!(
-            transaction.finish(),
-            SignatureAdmission::NonCacheable(verter_audit::NonAdmissionReason::SignatureOverflow)
-        ));
+        assert!(
+            matches!(transaction.finish(), SignatureAdmission::Cacheable(_)),
+            "SIG-1: an over-cap observation set confined to one compaction domain must \
+             compact that domain and ADMIT — signature cardinality is never a refusal reason"
+        );
+    }
 
-        // Mutation recipe: add a resolution-specific cap/fallback or convert
-        // overflow into ReadSetSignature::empty(). This assertion then becomes
-        // cacheable instead of using the one shared overflow convention.
+    /// `SIG-3`: compaction is DOMAIN-WISE. The over-cap domain lifts to a
+    /// single terminal aggregate carrying its population; every other
+    /// domain in the same signature stays precise.
+    ///
+    /// Replaces the former `resolution_overflow_uses_the_shared_fact_signature_cap`,
+    /// which pinned the refusal this inverts.
+    ///
+    /// Mutation recipe: make `compact_domains` replace the WHOLE
+    /// observation set instead of only the over-threshold buckets — the
+    /// unrelated precise fact disappears and the last assertion fails.
+    #[test]
+    fn resolution_over_cap_lifts_only_its_own_domain() {
+        let mut transaction = ResolutionTransaction::new(captured_world());
+        transaction.set_query(query());
+        for index in 0..=crate::FACT_SIGNATURE_CAP {
+            transaction.observe(ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
+                population: ResolutionPopulation::Base,
+            });
+        }
+        // A second domain, well under its own threshold. It must survive
+        // the resolution domain's lifting untouched.
+        let unrelated = FactVersionRef::ProjectGeneration { generation: 42 };
+        transaction.observe_foreign_fact_for_test(unrelated.clone());
+
+        let SignatureAdmission::Cacheable(signature) = transaction.finish() else {
+            panic!("an over-cap single-domain observation set must compact, not refuse");
+        };
+
+        let aggregates: Vec<_> = signature
+            .facts
+            .iter()
+            .filter_map(|fact| match fact {
+                FactVersionRef::DomainGeneration(fact) => Some(*fact),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            aggregates.len(),
+            1,
+            "exactly one terminal aggregate must stand in for the lifted domain; got \
+             {aggregates:?}"
+        );
+        assert_eq!(
+            aggregates[0].domain,
+            crate::fact_cache::CompactionDomain::Resolution
+        );
+        assert_eq!(
+            aggregates[0].population,
+            crate::fact_cache::AggregatePopulation::Resolution(ResolutionPopulation::Base),
+            "the aggregate must carry the population of the bucket it replaced"
+        );
+        assert!(
+            signature.facts.contains(&unrelated),
+            "SIG-3: lifting one domain must leave every OTHER domain precise — a \
+             whole-signature collapse would coarsen this entry's workspace-shape \
+             dependency and destroy warm reuse across unrelated edits"
+        );
+        assert!(
+            !signature.facts.iter().any(|fact| matches!(
+                fact,
+                FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(_))
+            )),
+            "the lifted domain's precise facts must be GONE, not merely joined by an \
+             aggregate — otherwise nothing is bounded"
+        );
+    }
+
+    /// Further observations in an already-lifted domain do not regrow its
+    /// precise bucket: the aggregate absorbs them.
+    ///
+    /// Mutation recipe: run `compact_domains` BEFORE the dedup/merge in
+    /// `canonicalise` instead of after — the already-present aggregate
+    /// then sits beside reintroduced precise facts and this fails.
+    #[test]
+    fn a_lifted_resolution_domain_does_not_regrow() {
+        let mut first = ResolutionTransaction::new(captured_world());
+        first.set_query(query());
+        for index in 0..=crate::FACT_SIGNATURE_CAP {
+            first.observe(ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
+                population: ResolutionPopulation::Base,
+            });
+        }
+        let SignatureAdmission::Cacheable(lifted) = first.finish() else {
+            panic!("the first attempt must compact and admit");
+        };
+        assert_eq!(lifted.facts.len(), 1);
+
+        // A later attempt carries that already-lifted aggregate AND
+        // observes a handful of its own precise resolution facts.
+        let mut second = ResolutionTransaction::new(captured_world());
+        second.set_query(query());
+        for fact in lifted.facts.iter() {
+            second.observe_foreign_fact_for_test(fact.clone());
+        }
+        for index in 0..4 {
+            second.observe(ResolutionFactKey::PathProbe {
+                canonical: CanonicalResolutionId::new(format!("/p/late-{index}.ts")),
+                population: ResolutionPopulation::Base,
+            });
+        }
+        let SignatureAdmission::Cacheable(signature) = second.finish() else {
+            panic!("the reuse attempt must admit");
+        };
+        assert_eq!(
+            signature.facts.len(),
+            1,
+            "an already-lifted domain must not regrow a precise bucket beside its \
+             aggregate; got {:?}",
+            signature.facts
+        );
+        assert!(matches!(
+            &signature.facts[0],
+            FactVersionRef::DomainGeneration(fact)
+                if fact.domain == crate::fact_cache::CompactionDomain::Resolution
+        ));
+    }
+
+    /// `RC-4`: a session aggregate cannot validate against a base world,
+    /// and a base aggregate cannot validate against a foreign session.
+    ///
+    /// Mutation recipe: drop the population equality check in
+    /// `CapturedResolutionWorld::resolution_stamp` (return the base stamp
+    /// for any session) — the cross-population assertions fail.
+    #[test]
+    fn resolution_aggregate_never_validates_across_populations() {
+        use crate::fact_cache::{
+            AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
+        };
+
+        let base_world = captured_world();
+        let base_stamp = base_world
+            .resolution_stamp(ResolutionPopulation::Base)
+            .expect("a base world always answers for the base population");
+
+        let base_aggregate = FactVersionRef::DomainGeneration(DomainGenerationFact {
+            domain: CompactionDomain::Resolution,
+            population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+            stamp: base_stamp,
+        });
+        assert!(
+            base_world.validates_fact_version(&base_aggregate),
+            "a base aggregate must validate against the world that minted it"
+        );
+
+        let foreign_session = FactVersionRef::DomainGeneration(DomainGenerationFact {
+            domain: CompactionDomain::Resolution,
+            population: AggregatePopulation::Resolution(ResolutionPopulation::Session(
+                SessionFingerprint::fresh(7),
+            )),
+            // Deliberately the numerically-matching generation: population
+            // identity, not the number, is what must reject it.
+            stamp: base_stamp,
+        });
+        assert!(
+            !base_world.validates_fact_version(&foreign_session),
+            "RC-4: a SESSION aggregate must not validate against a base world merely \
+             because the generation number coincides"
+        );
+
+        let other_domain = FactVersionRef::DomainGeneration(DomainGenerationFact {
+            domain: CompactionDomain::Content,
+            population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
+            stamp: base_stamp,
+        });
+        assert!(
+            !base_world.validates_fact_version(&other_domain),
+            "the resolution world is authority for the RESOLUTION domain only — it must \
+             never vouch for another domain's aggregate"
+        );
+    }
+
+    /// The resolution world is authority over the RESOLUTION identity
+    /// space only. An aggregate claiming its domain under a VIEW
+    /// population — overlay installation, a space this world knows
+    /// nothing about — is malformed and must be refused outright, not
+    /// settled by a resolution-world stamp that happens to be current.
+    ///
+    /// Mutation recipe: in `CapturedResolutionWorld::validates_fact_version`,
+    /// replace the `AggregatePopulation::View(_) => false` arm with
+    /// `AggregatePopulation::View(_) => true`. Both assertions below fail;
+    /// nothing else in the workspace suite does.
+    #[test]
+    fn a_view_population_aggregate_is_refused_by_the_resolution_world() {
+        use crate::fact_cache::{
+            AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
+            SessionOverlayFingerprint, ViewPopulation,
+        };
+
+        let base_world = captured_world();
+        let base_stamp = base_world
+            .resolution_stamp(ResolutionPopulation::Base)
+            .expect("a base world always answers for the base population");
+
+        for view in [
+            ViewPopulation::Base,
+            ViewPopulation::SessionOverlay(
+                SessionOverlayFingerprint::new(0x0BAD_CAFE).expect("non-zero"),
+            ),
+        ] {
+            let malformed = FactVersionRef::DomainGeneration(DomainGenerationFact {
+                domain: CompactionDomain::Resolution,
+                population: AggregatePopulation::View(view),
+                // The CURRENT stamp: only the population may reject it.
+                stamp: base_stamp,
+            });
+            assert!(
+                !base_world.validates_fact_version(&malformed),
+                "a resolution-domain aggregate carrying a VIEW population is malformed — the \
+                 resolution world must refuse it rather than vouch for an identity space it \
+                 does not own; got acceptance for {view:?}"
+            );
+        }
     }
 
     fn path_probe(name: &str) -> ResolutionFactKey {
@@ -2152,82 +3127,130 @@ mod transaction_contract_tests {
         }
     }
 
-    /// The warm-reuse witness is the UNION of the reused candidate's
-    /// signature and this attempt's own observations — never one or the
-    /// other. Absorbing retains the candidate's signature as an
-    /// already-canonical run instead of re-sorting it; the attempt-local
-    /// observations that make the witness path-precise for THIS demand must
-    /// survive that merge intact.
+    /// `RC-2`: a reused warm candidate contributes exactly ONE typed
+    /// decision fact, and every attempt-local observation survives beside
+    /// it.
+    ///
+    /// Both halves matter. Without the first, the witness would restate
+    /// the child's whole transitive leaf set — the growth this DAG
+    /// exists to remove. Without the second, the witness would stop
+    /// being path-precise for THIS demand.
     #[test]
-    fn absorbing_a_reused_witness_keeps_every_attempt_local_observation() {
-        // The witness a previously admitted candidate retained.
-        let mut producer = ResolutionTransaction::new(captured_world());
-        producer.set_query(query());
-        for name in ["/p/b.ts", "/p/d.ts", "/p/f.ts"] {
-            producer.observe(path_probe(name));
-        }
-        let reused = finished_signature(producer);
-        assert_eq!(reused.facts.len(), 3);
+    fn a_reused_child_decision_contributes_one_fact_and_keeps_local_observations() {
+        // The child decision a previously admitted candidate published,
+        // and the leaves it was computed from.
+        let child_leaves = ["/p/b.ts", "/p/d.ts", "/p/f.ts"];
+        let child = query();
 
-        // A fresh attempt that reuses it: observations that sort BEFORE,
-        // BETWEEN and AFTER the absorbed run, plus one that duplicates it.
         let mut attempt = ResolutionTransaction::new(captured_world());
         attempt.set_query(query());
         attempt.observe(path_probe("/p/a.ts"));
         attempt.observe(path_probe("/p/e.ts"));
-        attempt.absorb(&reused);
-        attempt.observe(path_probe("/p/d.ts"));
+        attempt.observe(ResolutionFactKey::decision(child.clone()));
         attempt.observe(path_probe("/p/z.ts"));
-        let merged = finished_signature(attempt);
+        let witness = finished_signature(attempt);
 
-        let observed: Vec<String> = merged
+        let decisions: Vec<_> = witness
             .facts
             .iter()
-            .map(|fact| {
-                fact.canonical_id()
-                    .expect("every fact in this witness names a canonical")
-                    .to_string()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(fact))
+                        if matches!(fact.key, ResolutionFactKey::Decision { .. })
+                )
             })
             .collect();
         assert_eq!(
-            observed,
-            vec!["/p/a.ts", "/p/b.ts", "/p/d.ts", "/p/e.ts", "/p/f.ts", "/p/z.ts"],
-            "the merged witness must be the canonical union of the absorbed run and the \
-             attempt-local observations, with the cross-seam duplicate appearing once"
+            decisions.len(),
+            1,
+            "reusing a child decision must record exactly one derived fact; got {decisions:?}"
         );
+        for leaf in child_leaves {
+            assert!(
+                !witness
+                    .facts
+                    .iter()
+                    .any(|fact| fact.canonical_id() == Some(leaf)),
+                "RC-2: the reused child's leaf `{leaf}` must NOT appear in the parent's \
+                 witness — a decision records direct dependencies only, never a child's \
+                 flattened signature"
+            );
+        }
+        for local in ["/p/a.ts", "/p/e.ts", "/p/z.ts"] {
+            assert!(
+                witness
+                    .facts
+                    .iter()
+                    .any(|fact| fact.canonical_id() == Some(local)),
+                "the attempt's own observation of `{local}` must survive beside the child \
+                 decision"
+            );
+        }
 
-        // Mutation recipe: make `absorb` replace `observations` instead of
-        // recording a separate run, or make `finish` feed only the absorbed
-        // runs into the tracer. The attempt-local `/p/a.ts` / `/p/e.ts` /
-        // `/p/z.ts` observations then vanish and this assertion fails.
+        // Mutation recipe: make `observe` fan a `Decision` key out into
+        // the leaves the child recorded instead of recording the node.
+        // The leaf-absence assertions fail immediately.
     }
 
-    /// Absorption order must not change the witness: the merge is a set
-    /// union under one canonical order, not an append.
+    /// Observation order must not change the witness: finalisation is a
+    /// set union under one canonical order, not an append.
     #[test]
-    fn absorbed_witness_is_independent_of_absorption_order() {
-        let mut producer = ResolutionTransaction::new(captured_world());
-        producer.set_query(query());
-        for name in ["/p/b.ts", "/p/d.ts"] {
-            producer.observe(path_probe(name));
-        }
-        let reused = finished_signature(producer);
+    fn a_child_decision_witness_is_independent_of_observation_order() {
+        let child = query();
 
-        let mut absorb_first = ResolutionTransaction::new(captured_world());
-        absorb_first.set_query(query());
-        absorb_first.absorb(&reused);
-        absorb_first.observe(path_probe("/p/c.ts"));
-        absorb_first.observe(path_probe("/p/a.ts"));
+        let mut decision_first = ResolutionTransaction::new(captured_world());
+        decision_first.set_query(query());
+        decision_first.observe(ResolutionFactKey::decision(child.clone()));
+        decision_first.observe(path_probe("/p/c.ts"));
+        decision_first.observe(path_probe("/p/a.ts"));
 
-        let mut absorb_last = ResolutionTransaction::new(captured_world());
-        absorb_last.set_query(query());
-        absorb_last.observe(path_probe("/p/a.ts"));
-        absorb_last.observe(path_probe("/p/c.ts"));
-        absorb_last.absorb(&reused);
+        let mut decision_last = ResolutionTransaction::new(captured_world());
+        decision_last.set_query(query());
+        decision_last.observe(path_probe("/p/a.ts"));
+        decision_last.observe(path_probe("/p/c.ts"));
+        decision_last.observe(ResolutionFactKey::decision(child.clone()));
 
         assert_eq!(
-            finished_signature(absorb_first).facts.as_ref(),
-            finished_signature(absorb_last).facts.as_ref()
+            finished_signature(decision_first).facts.as_ref(),
+            finished_signature(decision_last).facts.as_ref()
+        );
+    }
+
+    /// `DAG-1`: the observation operation classifies every fact it
+    /// records. A direct leaf and a reused child decision both become
+    /// direct edges; a fact minted by another domain's producer roots the
+    /// witness and becomes no edge at all.
+    ///
+    /// Mutation recipe: give the `Terminal` arm of
+    /// `classify_resolution_observation` the `DirectLeaf` disposition.
+    /// The foreign observation then reaches the edge-bearing arm of
+    /// `observe_fact`, whose `unreachable!` states the invariant, and
+    /// this test panics.
+    #[test]
+    fn observation_classification_decides_every_recorded_fact_exactly_once() {
+        let mut attempt = ResolutionTransaction::new(captured_world());
+        attempt.set_query(query());
+        attempt.observe(path_probe("/p/a.ts"));
+        attempt.observe(ResolutionFactKey::decision(query()));
+        attempt.observe_foreign_fact_for_test(FactVersionRef::ProjectGeneration { generation: 42 });
+
+        let edges = attempt.direct_edges();
+        assert_eq!(
+            edges.len(),
+            2,
+            "exactly the direct leaf and the child decision are edges — a terminal \
+             observation roots the witness and enters no edge; got {edges:?}"
+        );
+        assert!(edges.contains(&path_probe("/p/a.ts")));
+        assert!(edges.iter().any(ResolutionFactKey::is_derived_node));
+
+        let witness = finished_signature(attempt);
+        assert!(
+            witness
+                .facts
+                .contains(&FactVersionRef::ProjectGeneration { generation: 42 }),
+            "a terminal observation must still root the witness"
         );
     }
 
@@ -2349,51 +3372,381 @@ mod transaction_contract_tests {
         // fixture size.
     }
 
-    /// Record-time suppression must not disturb the absorbed-run merge: the
-    /// witness stays the exact union of the absorbed run and the
-    /// attempt-local observations, however often either side is repeated.
+    /// Record-time suppression must not disturb the DIRECT EDGE set: a key
+    /// observed many times contributes exactly one edge, and a repeated
+    /// child-decision observation contributes exactly one derived edge.
+    ///
+    /// Mutation recipe: push into `direct_edges` before the
+    /// already-observed check in `observe` — the edge set then grows with
+    /// every repeat and both length assertions fail.
     #[test]
-    fn repeat_observations_do_not_disturb_the_absorbed_run_merge() {
+    fn repeat_observations_do_not_disturb_the_direct_edge_set() {
         let keys = distinguishing_keys();
-        let (absorbed_keys, local_keys) = keys.split_at(5);
 
-        let mut producer = ResolutionTransaction::new(captured_world());
-        producer.set_query(query());
-        for key in absorbed_keys {
-            producer.observe(key.clone());
-        }
-        let reused = finished_signature(producer);
-        assert_eq!(reused.facts.len(), absorbed_keys.len());
-
-        // The attempt repeats BOTH sides: keys the absorbed run already
-        // carries, and its own.
         let mut attempt = ResolutionTransaction::new(captured_world());
         attempt.set_query(query());
-        for key in keys.iter().chain(keys.iter()) {
-            attempt.observe(key.clone());
+        for round in 0..4 {
+            for key in keys.iter().rev().skip(round % 3).chain(keys.iter()) {
+                attempt.observe(key.clone());
+            }
+            attempt.observe(ResolutionFactKey::decision(query()));
         }
-        attempt.absorb(&reused);
-        for key in keys.iter().rev() {
-            attempt.observe(key.clone());
-        }
-        let merged = finished_signature(attempt);
+        let edges = attempt.direct_edges();
+        let witness = finished_signature(attempt);
 
-        // Reference: the same union built with no repetition at all.
-        let mut reference = ResolutionTransaction::new(captured_world());
-        reference.set_query(query());
-        for key in local_keys {
-            reference.observe(key.clone());
-        }
-        for key in absorbed_keys {
-            reference.observe(key.clone());
-        }
-        let reference = finished_signature(reference);
-
-        assert_eq!(merged.facts.len(), keys.len());
         assert_eq!(
-            merged.facts.as_ref(),
-            reference.facts.as_ref(),
-            "the absorbed-run merge must yield the exact union regardless of repetition"
+            edges.len(),
+            keys.len() + 1,
+            "every distinct key contributes exactly one direct edge, plus the one child \
+             decision; got {edges:?}"
         );
+        assert_eq!(
+            witness.facts.len(),
+            keys.len() + 1,
+            "the witness and the edge set agree on cardinality — they are produced by the \
+             same operation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod root_graph_tests {
+    use super::*;
+
+    fn leaf(name: &str) -> ResolutionFactKey {
+        ResolutionFactKey::PathProbe {
+            canonical: CanonicalResolutionId::new(name.to_string()),
+            population: ResolutionPopulation::Base,
+        }
+    }
+
+    fn node(specifier: &str) -> ResolutionFactKey {
+        ResolutionFactKey::decision(ResolutionQueryKey::importer(
+            "/p/main.ts",
+            specifier,
+            ResolutionContext {
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+            },
+            ResolveContextId::from_hashes([0xA1; 16], [0xA2; 16]),
+            ResolutionPopulation::Base,
+        ))
+    }
+
+    fn sorted(mut keys: Vec<ResolutionFactKey>) -> Vec<ResolutionFactKey> {
+        keys.sort();
+        keys
+    }
+
+    /// A minting counter that mirrors the Engine's: strictly increasing,
+    /// never `INITIAL`.
+    fn minter() -> impl FnMut() -> ResolutionFactVersion {
+        let mut next = 0_u64;
+        move || {
+            next += 1;
+            ResolutionFactVersion::fresh(next)
+        }
+    }
+
+    /// **Publication replaces the COMPLETE edge set atomically and mints
+    /// nothing**, so a node a request just published is rootable against
+    /// that request's own captured view.
+    ///
+    /// Mutation recipe: make `publish_derived` merge into the existing
+    /// edge set instead of replacing it (skip `detach_edges` and seed
+    /// `direct` from the current set). The dropped-dependency assertion
+    /// fails.
+    #[test]
+    fn republishing_a_decision_replaces_its_whole_edge_set_and_advances_nothing() {
+        let mut root = ResolutionFactRoot::default();
+        let decision = node("./dep");
+
+        assert!(!root.publish_derived(decision.clone(), [leaf("/p/a.ts"), leaf("/p/b.ts")]));
+        assert_eq!(
+            root.version(&decision),
+            ResolutionFactVersion::INITIAL,
+            "publication mints no version: a resolution publishes its OWN decision, so a \
+             minted version would be one no view captured before that resolution can hold, \
+             and every consumer rooting on it would miss against the very request view it \
+             computed under"
+        );
+        assert_eq!(
+            sorted(root.direct_dependencies(&decision).expect("edges")),
+            sorted(vec![leaf("/p/a.ts"), leaf("/p/b.ts")])
+        );
+
+        // A recomputation over a DIFFERENT edge set.
+        assert!(root.publish_derived(decision.clone(), [leaf("/p/b.ts"), leaf("/p/c.ts")]));
+
+        assert_eq!(
+            sorted(root.direct_dependencies(&decision).expect("edges")),
+            sorted(vec![leaf("/p/b.ts"), leaf("/p/c.ts")]),
+            "the replacement is of the COMPLETE edge set, not a union with the prior one"
+        );
+        assert!(
+            root.direct_dependents(&leaf("/p/a.ts")).is_empty(),
+            "the dropped dependency's reverse edge must be detached in the same operation \
+             — a stale reverse edge would keep propagating into a node that no longer \
+             depends on it"
+        );
+        assert_eq!(
+            root.direct_dependents(&leaf("/p/c.ts")),
+            vec![decision.clone()],
+            "the new dependency's reverse edge must be attached in the same operation"
+        );
+        assert_eq!(root.direct_dependents(&leaf("/p/b.ts")), vec![decision]);
+    }
+
+    /// A node is never recorded as its own dependency.
+    ///
+    /// The resolve path reaches this whenever an attempt that reused its
+    /// own prior answer goes on to republish: the reused answer is the
+    /// SAME decision, not a child of itself. A self-edge would make the
+    /// node a dependent of the very key that seeds its own propagation.
+    ///
+    /// Mutation recipe: replace the `if dependency == node { continue; }`
+    /// guard in `publish_derived` with `if false { continue; }`. Both
+    /// assertions fail.
+    #[test]
+    fn a_decision_is_never_recorded_as_its_own_dependency() {
+        let mut root = ResolutionFactRoot::default();
+        let decision = node("./dep");
+
+        root.publish_derived(decision.clone(), [leaf("/p/a.ts"), decision.clone()]);
+
+        assert_eq!(
+            root.direct_dependencies(&decision).expect("edges"),
+            vec![leaf("/p/a.ts")],
+            "a self-dependency must be dropped, not recorded"
+        );
+        assert!(
+            root.direct_dependents(&decision).is_empty(),
+            "and no reverse self-edge may be attached"
+        );
+    }
+
+    /// **Removal ADVANCES the version and drops both edge directions.**
+    ///
+    /// The advance is the ABA rail: publication mints nothing, so a node
+    /// that left the graph and was later republished would otherwise
+    /// return to a version a witness already holds. The tombstone means
+    /// every witness recorded at any prior version — `INITIAL`
+    /// included — stops validating, and a reintroduction keeps the
+    /// tombstone rather than reverting to it.
+    ///
+    /// Mutation recipe: make `remove_derived` skip
+    /// `self.advance(node.clone(), version)`. The tombstone assertions
+    /// fail.
+    #[test]
+    fn removing_a_decision_advances_its_version_and_drops_both_edge_directions() {
+        let mut mint = minter();
+        let mut root = ResolutionFactRoot::default();
+        let decision = node("./dep");
+        root.publish_derived(decision.clone(), [leaf("/p/a.ts")]);
+        assert_eq!(root.version(&decision), ResolutionFactVersion::INITIAL);
+
+        assert!(root.remove_derived(&decision, mint()));
+        let tombstone = root.version(&decision);
+        assert_ne!(
+            tombstone,
+            ResolutionFactVersion::INITIAL,
+            "a removed node must NOT fall back to INITIAL — that is the version a witness \
+             recorded before the node was ever published holds, so reverting to it would \
+             re-validate a witness the removal must invalidate"
+        );
+        assert!(root.direct_dependencies(&decision).is_none());
+        assert!(
+            root.direct_dependents(&leaf("/p/a.ts")).is_empty(),
+            "removal detaches the reverse edges too, so a later mutation of the leaf \
+             propagates into nothing"
+        );
+        assert!(
+            !root.remove_derived(&decision, mint()),
+            "removing an absent node reports no removal"
+        );
+
+        // Reintroduction keeps the tombstone: no ABA.
+        root.publish_derived(decision.clone(), [leaf("/p/a.ts")]);
+        assert_eq!(
+            root.version(&decision),
+            tombstone,
+            "a reintroduced node keeps its tombstone version — a witness recorded before \
+             the removal must never validate again"
+        );
+    }
+
+    /// **Propagation advances each reachable derived node exactly once
+    /// per batch, and terminates on a cycle.**
+    ///
+    /// Mutation recipe: drop the `visited.insert(..)` guard in
+    /// `propagate`. The cycle case then does not terminate.
+    #[test]
+    fn resolution_decision_cycle_advances_each_node_once() {
+        let mut mint = minter();
+        let mut root = ResolutionFactRoot::default();
+        let a = node("./a");
+        let b = node("./b");
+        let owner = node("./owner-set");
+
+        // a -> leaf, b -> a, owner -> {a, b}, and a -> owner closes a cycle.
+        root.publish_derived(a.clone(), [leaf("/p/dep.ts"), owner.clone()]);
+        root.publish_derived(b.clone(), [a.clone()]);
+        root.publish_derived(owner.clone(), [a.clone(), b.clone()]);
+
+        let before: Vec<_> = [&a, &b, &owner].map(|key| root.version(key)).into();
+        let advanced = root.propagate([leaf("/p/dep.ts")], &mut mint);
+
+        assert_eq!(
+            sorted(advanced.clone()),
+            sorted(vec![a.clone(), b.clone(), owner.clone()]),
+            "every reachable derived node advances"
+        );
+        assert_eq!(
+            advanced.len(),
+            3,
+            "and each advances exactly ONCE per batch, despite the cycle; got {advanced:?}"
+        );
+        for (key, was) in [&a, &b, &owner].into_iter().zip(before) {
+            assert_ne!(root.version(key), was, "{key:?} must advance");
+        }
+    }
+
+    /// A mutation of an unrelated leaf advances nothing.
+    ///
+    /// Mutation recipe: seed `propagate` with every key in the reverse
+    /// map instead of the batch's own seeds. This fails.
+    #[test]
+    fn resolution_decision_unrelated_leaf_advance_reaches_no_node() {
+        let mut mint = minter();
+        let mut root = ResolutionFactRoot::default();
+        let decision = node("./dep");
+        root.publish_derived(decision.clone(), [leaf("/p/a.ts")]);
+        let before = root.version(&decision);
+
+        let advanced = root.propagate([leaf("/p/unrelated.ts")], &mut mint);
+
+        assert!(advanced.is_empty(), "got {advanced:?}");
+        assert_eq!(root.version(&decision), before);
+    }
+
+    /// A `RecoveryScope` is a DIRECT LEAF, not a derived node: it is a
+    /// coarse ancestor input a decision depends on, and an imprecise
+    /// watcher mutation of it must reach every decision beneath it.
+    #[test]
+    fn only_the_two_derived_families_classify_as_derived_nodes() {
+        let derived = [
+            node("./dep"),
+            ResolutionFactKey::OwnerResolutionSet {
+                owner: CanonicalResolutionId::new("/p/main.ts"),
+                population: ResolutionPopulation::Base,
+            },
+        ];
+        let leaves = [
+            leaf("/p/a.ts"),
+            ResolutionFactKey::Manifest {
+                canonical: CanonicalResolutionId::new("/p/package.json"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::Realpath {
+                requested: CanonicalResolutionId::new("/p/a.ts"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::DirectoryMembers {
+                canonical: CanonicalResolutionId::new("/p"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::RecoveryScope {
+                canonical_prefix: CanonicalResolutionId::new("/p"),
+                population: ResolutionPopulation::Base,
+            },
+            ResolutionFactKey::context_importer("/p/main.ts", ResolutionPopulation::Base),
+            ResolutionFactKey::exact_importer(
+                "/p/main.ts",
+                "./dep",
+                ResolutionContext {
+                    phase: ResolvePhase::ProviderGraph,
+                    kind: ResolveRequestKind::EsmImport,
+                },
+                ResolutionPopulation::Base,
+            ),
+        ];
+        for key in derived {
+            assert!(key.is_derived_node(), "{key:?} must be a derived node");
+            assert_eq!(
+                classify_resolution_observation(&FactVersionRef::ResolveImports(
+                    ResolveImportsFactRef::Resolution(ResolutionFactRef {
+                        key: key.clone(),
+                        version: ResolutionFactVersion::INITIAL,
+                    })
+                )),
+                ResolutionEdgeClass::DerivedNode
+            );
+        }
+        for key in leaves {
+            assert!(!key.is_derived_node(), "{key:?} must be a direct leaf");
+            assert_eq!(
+                classify_resolution_observation(&FactVersionRef::ResolveImports(
+                    ResolveImportsFactRef::Resolution(ResolutionFactRef {
+                        key: key.clone(),
+                        version: ResolutionFactVersion::INITIAL,
+                    })
+                )),
+                ResolutionEdgeClass::DirectLeaf,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// The row table is BOUNDED, and it says so when it drops rows.
+    ///
+    /// The tally behind `CTX-1` lives in the same rows as the memoized
+    /// answers, so a silent clear would restart it and a path this index
+    /// walked many times would read "walked once". Every clear is
+    /// counted, and every `CTX-1` assertion reads that count first.
+    ///
+    /// Mutation recipe: drop the `table_clears` increment beside
+    /// `self.rows.clear()`. The clear then happens invisibly and this
+    /// fails.
+    #[test]
+    fn context_selection_memo_is_bounded_and_reports_its_clears() {
+        let memo = PublishedContextSelection::with_cap(2);
+        let unowned = || Ok(ResolveContextId::unowned());
+
+        assert_eq!(
+            memo.selected("/a.ts", unowned),
+            Ok(ResolveContextId::unowned())
+        );
+        assert_eq!(
+            memo.selected("/b.ts", unowned),
+            Ok(ResolveContextId::unowned())
+        );
+        assert_eq!(memo.table_clears(), 0, "two rows fit inside a cap of two");
+        assert_eq!(memo.evaluations("/a.ts"), 1);
+
+        // The third distinct path overflows: the table is dropped whole.
+        assert_eq!(
+            memo.selected("/c.ts", unowned),
+            Ok(ResolveContextId::unowned())
+        );
+        assert_eq!(
+            memo.table_clears(),
+            1,
+            "an overflowing insert must COUNT the clear — an uncounted one makes every \
+             per-path tally read as if the index had walked once"
+        );
+        assert_eq!(
+            memo.evaluations("/a.ts"),
+            0,
+            "and the dropped rows really are gone, so the count is honest about what it \
+             no longer knows"
+        );
+
+        // Dropping rows costs a recompute and nothing else: the answer is
+        // recomputed, identical, and memoized again.
+        assert_eq!(
+            memo.selected("/a.ts", unowned),
+            Ok(ResolveContextId::unowned())
+        );
+        assert_eq!(memo.evaluations("/a.ts"), 1);
     }
 }

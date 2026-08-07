@@ -98,6 +98,12 @@ sync_coordinator.rs  -> Debounced type provider sync during typing
 
 Both TSGO and tsserver implement `TypeProvider`. Methods: hover, completions, diagnostics, definition, references, rename, signature help, code actions, semantic tokens, highlights, inlay hints, open/update/close file, shutdown. Object-safe (`dyn TypeProvider`) so the server is backend-agnostic.
 
+**Provider quick-info is STRUCTURED display data.** `HoverInfo` (`verter_type_runtime/src/protocol.rs`) carries, besides the rendered `contents` blob: `display_signature: Option<DisplaySignature>` (the engine's quick-info display string VERBATIM, branded), `kind: Option<QuickInfoKind>` (closed tsserver `ScriptElementKind` mirror), `documentation: Option<String>`, and real `range_start`/`range_end` from the engine wire. Authority order: (1) per-engine normalization INTO the neutral protocol happens ONCE, at the producer's IPC boundary (tsserver reads `displayString`/`kind`/`documentation` off the `quickinfo` body; tsgo splits its PLAINTEXT hover at the first blank line — its capability handshake advertises no `textDocument.hover` member, hence no `contentFormat`, hence plaintext); (2) recovering structure OUT of the rendered `contents` string is forbidden — that consumer class is deleted (`extract_type_from_hover`, `wrap_type_block`, `replace_kind_prefix` are gone); (3) markdown renders FROM the structured fields only at the LSP hover boundary (`type_provider/merge/hover.rs`; `HoverInfo::kind_labeled_signature` is the shared `(kind) display` formatter, also the v-bind completion `detail` source); (4) an unsupplied field is `None`, never fabricated.
+
+Per-engine availability matrix: `display_signature` — both engines wherever they answer; `kind` — tsserver-family only (LSP hover has no kind field; tsgo stays `None`, an accepted, pinned asymmetry — never prefix-sniffed); `documentation` — both (tsserver wire field / tsgo paragraph split); `range_start`/`range_end` — both (tsserver `quickinfo` `start`/`end`, tsgo LSP `hover.range`), fail-closed on unmappable positions.
+
+**The `DisplaySignature` brand is sealed**: private inner `String`; construction only via `DisplaySignature::from_provider_wire` with a `DisplaySignatureWireWitness` (obtainable only through a `TypeProvider` impl — `provider_wire_witness()`); the sole reader is the labelled `as_display_str()`; display rewrites derive through `with_display_rewrite`; no `Deserialize`, no `Deref`/`AsRef<str>`/`Into<String>`/`Display`. Primary rail = the ordinary compile; trybuild witness = `verter_type_runtime/tests/cases/compile_fail.rs` (`--features compile-fail`, out of the default gate — recorded as GI-20 in `docs/arch/gate-integrity-ledger.md`). `$/verter/getBindingTypes` projects the signature onto the client wire as `Record<string, { displaySignature: string } | null>`; TS renders it verbatim (`packages/vue-vscode/src/bindingTypeDisplay.ts`) — any TS-side re-split of the display value is a Native-vs-Compat violation.
+
 **Semantic tokens cross the trait boundary in Verter's published legend space.** `verter_type_runtime::semantic_tokens` is the single mapping owner: `VERTER_TOKEN_TYPES`/`VERTER_TOKEN_MODIFIERS` (the arrays `verter_lsp::capabilities` builds the advertised `SemanticTokensLegend` from — pinned by `advertised_semantic_token_legend_is_the_shared_owners_published_vocabulary`), `decode_classification_2020` + `map_classified_spans_2020` (the ONE tsserver-family `"format": "2020"` decoder — `((typeIdx + 1) << 8) | modifierSet` — consumed by both the managed tsserver provider and the extension provider), and `SemanticTokenLegendMap` (name-built remap: types by index, modifiers per BIT). tsgo advertises the `textDocument.semanticTokens` client capability (the engine gates the whole feature on it), retains the server-advertised legend from the `initialize` result — for the shared attach, from the relay's in-band `InitializedWitness.semantic_tokens_legend` via `WaitInitializedResult` — and remaps per token. Fail closed everywhere: an unmappable token type or modifier bit drops the token; a session with no retained legend returns no tokens. tsgo inlay hints ride the `workspace.configuration` client capability + the read loop's `workspace/configuration` responder answering the `typescript`/`javascript` sections with nested `inlayHints` preferences (TS inlay hints are preference-gated, default off).
 
 ### TSGO Module (`tsgo/`)
@@ -181,6 +187,72 @@ One provider SHAPE runs at a time; on the tsserver tier that shape owns N engine
 Request (stdio) -> server/mod.rs -> Find document in host cache -> Feature handler -> Response (stdio)
 ```
 
+### Macro Code-Action Authority: Membership, Placement, Revision
+
+Vue macro code actions (`features/macro_actions.rs` B3/B4/B5, and the cross-file
+arm `features/cross_file.rs::make_insert_into_macro` reached from
+`features/component_actions.rs`) read **no macro source text**. Three separate
+authorities:
+
+| Question | Sole authority | Forbidden |
+| --- | --- | --- |
+| **Membership** — which slots / slot-props / emits exist | analysis rows: `AnalyzedMacro.{slot_fields,emit_fields,prop_fields}`, `AnalyzedSlotField.bindings` | any read of macro source text for a decision |
+| **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
+| **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
+
+**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
+`analysis::mod`):
+
+- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
+  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
+- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
+  — typed absence, never `Option<u32>`.
+- `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
+  IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
+  reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
+  was never published is indistinguishable from "nothing to anchor" and both
+  yield zero actions. A bounds / char-boundary failure is NOT a producer variant
+  — the producer cannot know the live buffer; it is a consumer-side typed miss.
+- `MacroEditAnchors { type_literal, runtime_array }` on `AnalyzedMacro`, plus the
+  per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
+  it anchors, so no parallel-array ordinal can drift.
+
+Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+from the OXC nodes already in scope (`type_argument_member_list_anchor`,
+`runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
+(`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
+locator deref, no resolution, and no final-index stamping pass.
+
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
+`Hash16`) is stamped at every producer from the source node's own
+`ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
+producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
+matches no live buffer and therefore fails closed.
+
+**Two structural rails** (no name-keyed scanner guard lands — `CLAUDE.md` →
+landed-scanner bar):
+
+1. The membership/placement decision functions take **no `&str`**. They receive
+   `action_utils::LiveEditTarget`, whose only capability is
+   `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
+   scope a brace scan is a compile error, not a convention.
+2. `MemberListAnchor`'s offset field is private and its constructor is
+   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
+   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
+   witnessed by the `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
+   path DOES exist by wire mandate: the type derives `Deserialize`, so
+   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
+   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
+   obtain anchors by running the real analyzer over fixture source
+   (`features/macro_fixture.rs`).
+
+`LiveEditTarget::anchor_position` is the single conversion point and fails closed
+on BOTH an offset past the live source's end and an offset off a UTF-8 character
+boundary. Absent anchor, unsupported anchor, or a failed conversion ⇒ **zero
+actions**, never a fallback offset.
+
 ## TypeProvider Architecture
 
 The LSP delegates TypeScript type checking to an external **TypeProvider** process. Two backends:
@@ -210,6 +282,31 @@ The LSP delegates TypeScript type checking to an external **TypeProvider** proce
 ### Background File Sync
 
 During `initialized()`, the LSP spawns a priority-aware `WorkspaceScanner`. Filesystem-backed tsserver continues to resolve real `.ts`/`.tsx`/`.js`/`.jsx` and `node_modules` from disk. Framework carriers are compiled on the background lane and published by authored source identity into the durable plugin store; after the carrier pass, one coalesced refresh advances metadata without making every workspace carrier a Program root. No generated file is opened over the tsserver protocol. Before every carrier unit the scanner yields to active LSP handlers, with a bounded background-deferral interval so continuous editor traffic cannot starve project-wide warmup. TSGO retains its explicit eager project-input path for carrier and plain-source materialization. Verter semantic/type-info caches remain a separate host concern; they are not serialized into either TypeScript engine or used as a substitute for its project graph.
+
+### Public-API Entries: Response-Only vs Projection
+
+The public-API surface has TWO consumer classes with distinct costs, split at the
+entry level (`host_resolve/virtual_file_pipeline.rs`):
+
+- **Response-only** — `get_public_api`, `get_public_api_with_mode`,
+  `get_public_api_batch`: adapter declaration render ONLY (the shared
+  `render_public_api_items` body). They never compose the structured component
+  contract and never run the component-meta walk, so a completion-time carrier
+  reconcile (`reconcile_carrier_source` → live `get_public_api`) cannot
+  `ensure_loaded` an evicted child or commit child analysis (pinned by
+  `completion_does_not_cold_load_children_for_native_enrichment`).
+- **Projection** — `get_public_api_projection`: the ONE entry returning
+  `ComponentApiProjection { response, contract }`. The mandatory contract
+  composes HERE, at the demand that consumes it, under the SAME `(fixed, view)`
+  capture as the render (`compose_component_contract`); composition never gates
+  the response (absent/failed component-meta output ⇒ typed `Unsupported`).
+  The contract stays NON-OPTIONAL on the projection type (compile-fail rail
+  `component_api_projection_contract_not_optional`).
+
+Single-knob proof that composition is projection-entry-scoped:
+`response_only_public_api_render_composes_no_contract`
+(`host_resolve_tests.rs`) — an armed `OUTPUT_MATERIALIZE_FORCE_FAIL_FOR`
+survives `get_public_api` and is consumed by `get_public_api_projection`.
 
 ### Ordinary Carrier Import → Public-API Surface
 
@@ -563,7 +660,7 @@ Native canonical loading goes through `ensure_loaded` — the scheduler is the s
 
 ### Store-View Token, Lane Identity, and Singleflight
 
-`HostStoreView` is Arc-backed by an immutable `StoreViewSnapshot`: `VerterHost::store_view_manager()` hands out ONE shared snapshot per `StoreViewValidationToken` generation by cheap `Arc` clone; `with_session_overlay` re-roots overlay/tombstone canonicals via copy-on-write so the shared base is never mutated in place. `RequestStoreView` (`resolver_core::request_store_view`) is the LIVE request-scoped read-through wrapper: it chains a `CanonicalCompletionOverlay` in front of the request-entry `HostStoreView` so mid-request additive loads (`ensure_loaded`/`ensure_indexed_ready_serve` successes the entry snapshot did not track) validate without a false miss. The `CanonicalCompletionOverlay` also carries the request-scoped SUCCESS-ONLY session-overlay prepared-decl bundle memo (`overlay_bundle_memo_get`/`_insert`, consulted by `prepared_decl_bundle_with_context` via `ResolverContext::request_completion_overlay`): R17 keeps overlay-bearing bundles OUT of the shared `prepared_decl_bundles` cache, so this per-request memo — keyed `(raw overlay owner, overlay content hash, StoreViewCompatToken)`, admitting only materialisations whose `with_cacheability_scope` verdict stayed clean — is their sole reuse tier; the compat-token key dimension makes a stability-retry attempt under an externally-moved view miss and re-materialise (provenance counter `overlay_bundle_memo_hits`; regressions in `crates/verter_session/src/overlay_bundle_memo_tests.rs`).
+`HostStoreView` is Arc-backed by an immutable `StoreViewSnapshot`: `VerterHost::store_view_manager()` hands out ONE shared snapshot per `StoreViewValidationToken` generation by cheap `Arc` clone; `with_session_overlay` re-roots overlay/tombstone canonicals via copy-on-write so the shared base is never mutated in place. `RequestStoreView` (`resolver_core::request_store_view`) is the LIVE request-scoped read-through wrapper: it chains a `CanonicalCompletionOverlay` in front of the request-entry `HostStoreView` so mid-request additive loads (`ensure_loaded`/`ensure_indexed_ready_serve` successes the entry snapshot did not track) validate without a false miss. The `CanonicalCompletionOverlay` also carries the request-world prepared-decl bundle memo (`RequestBundleMemo`, reached through `CanonicalCompletionOverlay::bundle_memo()` and threaded explicitly into `prepared_decl_bundle_with_store_view` / consulted by `prepared_decl_bundle_with_context` via `ResolverContext::request_completion_overlay`). It is ONE memo covering the base, session-overlay and `RequestOnly` worlds, keyed `(canonical, BundleMemoWorld)` with the `StoreViewCompatToken` on the entry: `BundleMemoWorld::{Base, Overlay(content hash)}` keeps the base and session namespaces distinct (R17 keeps overlay-bearing bundles OUT of the shared `prepared_decl_bundles` cache, and the shared slot is keyed by canonical alone), while the token pins entries to ONE externally-coherent world so a stability-retry attempt under an externally-moved view misses and re-materialises. Admission is STRUCTURAL: `RequestBundleMemo::insert` itself refuses anything that is not `ReuseClass::is_request_reusable`, so a cancelled, partial, lease-missed, mutation-unstable or overflow-refused materialisation never enters it, and a `RequestOnly` entry replays its stored refusal on EVERY hit so reuse cannot launder the taint (provenance counter `bundle_request_memo_hits`; regressions in `crates/verter_session/src/request_bundle_memo_tests.rs`).
 
 **Reuse/validity oracle = the complete `StoreViewValidationToken`:** `store_view_epoch` + `project_generation` + `FileArtifactStore.artifact_generation` + `load_generation` + the workspace `content_generation` + folded env hashes + project identity + frozen overlay identity. `store_view_epoch` is an INPUT to the token, not the oracle by itself. Token-advance rules — the token advances on EVERY state change a base view snapshots by value:
 
@@ -576,7 +673,7 @@ Native canonical loading goes through `ensure_loaded` — the scheduler is the s
 
 **Captured resolution root (C5a).** The snapshot also stamps the workspace's immutable published resolution world (`Option<Arc<verter_workspace::CapturedResolutionWorld>>`, captured O(1) in the same `PreBuildTokenInputs` read window via `WorkspaceRead::capture_resolution_world`: the current base root plus, for a session population, that session's overlay root). It is the SOLE authority for the `ResolveImportsFactRef::Resolution` arm — `HostStoreView::validates_resolution_fact` (shared by `validates_resolve_imports_domain` and its overlay-aware `_for_content_hash` sibling; `RequestStoreView` routes resolution facts straight to the base view because the completion overlay carries no resolver observations). A view with NO captured world validates no resolution fact. It stays OUT of the token because validity is fact-precise (world IDENTITY is barred from being a cross-root warm-validity oracle) and because a cold compute publishes replacement worlds through its OWN work (a first observation of any path records an evidence baseline), which would self-fence exactly like the additive generations. Residual, owned by C4/C5b: a view captured between a content mutation and the reader-driven evidence refresh holds a root that has not yet observed the change, so it keeps validating the pre-mutation witness until the refresh advances the fact.
 
-**Handle-backed dimensions stay out of the token for DIFFERENT reasons:** `ResolvedImportFactsDb` is content-addressed — its key carries `content_hash`, so a new version is a new key and a fixed handle reads correctly (immutable-by-key). `RouteDb` is NOT content-addressed (`EffectiveExportSetKey` has no content hash; evict/clear/replace reuse the same key) — it stays out because its route-surface validator compares the consumer's recorded `expected_hash` fingerprint against the live `RouteDb` slot, so an evict/replace yields a conservative fail-closed MISS, never a stale positive.
+**Handle-backed dimensions stay out of the token for DIFFERENT reasons:** `ResolvedImportFactsDb` is content-addressed — its key carries `content_hash`, so a new version is a new key and a fixed handle reads correctly (immutable-by-key). `RouteDb` is NOT content-addressed (its keys carry no content hash, and evict/clear/replace reuse the same key) — it stays out because every value it hands out is validated per candidate against the reading view through the candidate's own recorded `fact_dep_signature`, so an evict/replace yields a conservative fail-closed MISS, never a stale positive. The per-candidate signature comparison IS the validity rail, so the token needs no `RouteDb` generation. The route-surface FACT domain does not read `RouteDb` at all: its sole arm (`StoreView::validates_route_surface_domain`) compares the recorded `expected_hash` against the augmentation-index fingerprint snapshot captured on the view's artifact root.
 
 ### Non-Current Store-View Contract — Capability Split (CRITICAL)
 
@@ -589,6 +686,7 @@ Concrete contract:
 
 - **Warm validators require `&CurrentHostStoreView`.** The top-level warm-validation entry points with no outer publish fence (`try_get_cached_meta_payload`, `ComponentMetaResultDb::get_with_view`, the imported-root / owner-import-surface warm reads) accept ONLY a proven-current view. A `ReturnOnly` read is a cache MISS, not a validation — the caller falls to the cold path whose own `is_stable` / publish fence gates promotion.
 - **typeinfo query-returners do bounded-retry-then-supersede.** `resolve_named_symbol`, `evaluate_type_expression`, `project_node_to_type_expr_json_bytes` (the session-owned bytes FFI facade that mints the `OutputProjector` capability + materializes + serializes internally), `resolve_shallow_surface`, `resolve_vue_macro_surface`, `resolve_vue_public_type`, and `resolve_type_with_audit` build a request-bound dispatch context and RETURN the resolved node with NO outer fence. They acquire a `CurrentHostStoreView` via `typeinfo::current_store_view_for_query` (bounded retry, default 3); on sustained churn they surface a typed non-current MISS (`None`, or `QueryError::UnstableState`) rather than resolving against a superseded snapshot and returning a stale node. `None` is the established FFI miss signal (`typeExpr: null`). The retry is bounded — it terminates, never spins. A non-current evaluation must NOT warm the `scratch_cache`.
+- **Every branch of a cache-presence-selected lane binds a REQUEST-BOUND context.** `VerterHost::build_template_class_semantic_facts` (`host_manage/analysis_io.rs`) picks its resolver context from artifact presence: the base-publishable + `IndexedReady`-present branch builds a `HostResolverContext::from_cold_seed`, the other composes a `SessionResolverContext::from_cold_seed`. The resolver-tier builder takes `&dyn RequestBoundResolverContext` — the sealed marker implemented for those two contexts and NEVER for `VerterHost` — so a bare-host binding is a COMPILE error, not a cache-presence-dependent runtime abort. The rail matters because `classify_binding` demands `prepared_value_decl` for every template `:class` script binding, and only a request-bound context can serve a prepared declaration. Regression: `template_class_lane_context_tests.rs` (indexed-present assertion + cold-seed control).
 - **Cold contexts carry `Current` vs `ColdSeed`.** `HostResolverContext::from_current(&CurrentHostStoreView)` vs `HostResolverContext::from_cold_seed(&ColdSeedHostStoreView)` — and the session-bound counterpart `SessionResolverContext::from_cold_seed(&ColdSeedHostStoreView)`. The cold-seed constructor marks the request-bound `RequestStoreView` non-current iff the seed was `ReturnOnly`; its `validates*` family then fails CLOSED, so every nested warm-cache probe inside the dispatch MISSES rather than validating against the stale seed. This is the single-chokepoint enforcement — no individual nested validator knows about currentness.
 - **Cold-seed currentness is INTRINSIC to its read — never a separately-sourced flag.** A cold-seed view's `is_current` comes from the SAME read that produced its raw view: `StoreViewRead::into_cold_seed_view()` derives it from the read's arm (`Current` vs `ReturnOnly`). There is no constructor that pairs a raw view with a caller-supplied bool — the retired `ColdSeedHostStoreView::from_raw_for_compute(view, separate_flag)` was exactly such a footgun, letting a view from one read be re-bound with a currentness flag from ANOTHER read (a stale second read marked current). Two valid sources of a cold-seed in a validating cold compute:
   - **A helper that does its OWN fresh read** takes the cold-seed straight from that read: `self.resolver_store_view_read().into_cold_seed_view()` (then `.with_session_overlay(..)` for the session path). The view-bound component-meta cold compute (`VerterHost::view_bound_cold_seed` → `compute_component_meta_state_with_view` / `_from_captured_with_view`) and the bare-host overlay entries (`compute_component_meta_state_with_overlay` / `_from_captured_with_overlay`) use this — currentness and view come from one read, no flag to mismatch.
@@ -623,3 +721,18 @@ Pinned by the static guards in `crates/verter_session/tests/cases/architecture_g
 | `crates/verter_lsp/src/tsserver/ipc.rs` | `TsserverTypeProvider`, newline-delimited JSON transport |
 | `crates/verter_lsp/src/tsserver/resilient.rs` | `ResilientTsserverProvider` |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |
+
+### Template class fact lanes
+
+Normal compile, content override, and lazy raw-template conversion must all
+build `TemplateClassSemanticFacts` from the exact source `whole_hash` and the
+same script snapshot used by conversion. `CompileInput` and
+`VueTemplateInputs` carry that hash. Base-current computations may retain
+complete facts only with their validated dependency `ReadSetSignature`;
+overlay, missing/cyclic, or otherwise `ReturnOnly` computations never populate
+base-only caches. Content publication is owner-only, so dependency-derived
+class facts are served fresh without entering the pure-content store.
+
+`template_converter_inputs` is linkage-only. Semantic class domains flow
+through the opaque, revision-checked `TemplateClassDomainIndex`; callers must
+not manufacture raw class-domain tuples or recover domains from display text.

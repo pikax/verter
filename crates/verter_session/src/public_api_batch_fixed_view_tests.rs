@@ -13,8 +13,8 @@
 //!    read, and that read missed the warm cache because the call's first deep
 //!    semantic demand bumped `artifact_generation` → advanced the store-view
 //!    token → next call rebuilt. The batch collapses all of it onto one read.
-//! 2. **Full-workspace sweeps stay O(1).** A warm batch performs ~O(1) actual
-//!    `build_coherent` sweeps — one capture per batch.
+//! 2. **Root captures stay O(1).** A warm batch performs at most one
+//!    O(1)-in-host-size coherent capture.
 //! 3. **Batch == scalar.** Scalar (`get_public_api`) and batch
 //!    (`get_public_api_batch`) are the SAME shared `render_public_api_items`
 //!    body (scalar = N=1), so the rendered bytes (`code` + `source_map`) are
@@ -252,8 +252,8 @@ fn warm_public_api_batch_sweeps_stay_o1() {
 
     assert!(
         warm_sweeps <= 1,
-        "a warm public-API batch of N={N} must collapse onto ~O(1) full-\
-         workspace sweeps (the single per-batch capture); observed \
+        "a warm public-API batch of N={N} must collapse onto at most one \
+         O(1)-in-host-size root capture; observed \
          {warm_sweeps} on this thread. An O(N) value means the per-item path \
          rebuilt the base view per render.",
     );

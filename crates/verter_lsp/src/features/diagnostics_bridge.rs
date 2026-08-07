@@ -18,6 +18,7 @@ pub fn run_linter(
     analysis: &FileAnalysisSnapshot,
     source: &str,
     line_index: &LineIndex,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> Vec<Diagnostic> {
     let script = script_from_host(analysis);
     let set = linter.lint_with_source(
@@ -25,6 +26,7 @@ pub fn run_linter(
         analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
+        blocks,
     );
     map_diagnostic_set(&set, line_index)
 }
@@ -89,6 +91,7 @@ fn map_lint_diagnostic(diag: &LintDiagnostic, line_index: &LineIndex) -> Diagnos
 ///
 /// Re-runs the linter to reconstruct the `DiagnosticSet`, matches context
 /// diagnostics by rule name + range, and converts action results to LSP types.
+#[allow(clippy::too_many_arguments)]
 pub fn action_engine_fixes(
     engine: &verter_actions::ActionEngine,
     analysis: &FileAnalysisSnapshot,
@@ -97,6 +100,7 @@ pub fn action_engine_fixes(
     linter: &verter_diagnostics::Linter,
     context_diagnostics: &[Diagnostic],
     uri: &Uri,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> Vec<CodeActionOrCommand> {
     use verter_actions::ActionContext;
 
@@ -106,6 +110,7 @@ pub fn action_engine_fixes(
         analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
+        blocks,
     );
 
     let file_id = uri.as_str();
@@ -116,6 +121,7 @@ pub fn action_engine_fixes(
         template: analysis.template.as_deref(),
         script: Some(&script),
         styles: &analysis.styles,
+        blocks,
     };
 
     let mut result = Vec::new();
@@ -200,6 +206,7 @@ fn map_code_action_to_lsp(
 ///
 /// This calls `actions_at()` on all registered providers and converts results
 /// to LSP types.
+#[allow(clippy::too_many_arguments)]
 pub fn action_engine_refactorings(
     engine: &verter_actions::ActionEngine,
     analysis: &FileAnalysisSnapshot,
@@ -208,6 +215,7 @@ pub fn action_engine_refactorings(
     linter: &verter_diagnostics::Linter,
     offset: u32,
     uri: &Uri,
+    blocks: &[verter_diagnostics::SfcBlockFact],
 ) -> Vec<CodeActionOrCommand> {
     use verter_actions::ActionContext;
 
@@ -217,6 +225,7 @@ pub fn action_engine_refactorings(
         analysis.template.as_deref(),
         &analysis.styles,
         Some(source),
+        blocks,
     );
 
     let file_id = uri.as_str();
@@ -227,6 +236,7 @@ pub fn action_engine_refactorings(
         template: analysis.template.as_deref(),
         script: Some(&script),
         styles: &analysis.styles,
+        blocks,
     };
 
     let actions = engine.actions_at(offset, &ctx);
@@ -426,5 +436,48 @@ mod tests {
         assert_eq!(result[0].range.start.line, 1);
         assert!(result[0].range.start.character > 0);
         assert_eq!(result[0].range.end.line, 1);
+    }
+}
+
+#[cfg(test)]
+mod block_fact_rule_tests {
+    use crate::documents::carrier_structure::test_structure;
+
+    /// End-to-end discriminator over the REAL registered parse: decoy
+    /// `<script>`/`<style>` literals inside the script body must not fabricate
+    /// blocks (no false diagnostics), while genuine block facts still drive
+    /// the true positive. The retired raw-source scans reported the decoys.
+    #[test]
+    fn block_rules_read_registered_inventory_facts_not_raw_source() {
+        let source = "<script setup>\nconst s = '<script>'\nconst css = '<style>'\n</script>\n<template><div>{{ s }}</div></template>\n<style scoped>\n.a {}\n</style>";
+        let structure = test_structure(source, false);
+        let blocks = verter_diagnostics::project_block_facts(structure.inventory());
+        let linter = verter_diagnostics::Linter::default();
+        let set = linter.lint_with_source(None, None, &[], Some(source), &blocks);
+        let diags = set.into_diagnostics();
+
+        // TRUE positive: the real script block has no lang="ts" — block-lang
+        // fires exactly ONCE, anchored at the real opening tag.
+        let block_lang: Vec<_> = diags.iter().filter(|d| d.rule == "block-lang").collect();
+        assert_eq!(
+            block_lang.len(),
+            1,
+            "exactly the one real script block reports: {diags:?}"
+        );
+        assert_eq!(
+            block_lang[0].span.start, 0,
+            "anchored at the real opening tag"
+        );
+
+        // The '<style>' decoy literal must not fire the style rule (the real
+        // style block is scoped), and nothing may reorder blocks.
+        assert!(
+            !diags.iter().any(|d| d.rule == "enforce-style-attribute"),
+            "decoy style literal must not report: {diags:?}"
+        );
+        assert!(
+            !diags.iter().any(|d| d.rule == "block-order"),
+            "no false reorder: {diags:?}"
+        );
     }
 }

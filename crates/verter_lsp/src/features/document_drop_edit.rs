@@ -3,8 +3,8 @@
 
 use tower_lsp_server::ls_types::*;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Handle a file being dropped into a document.
 ///
@@ -18,7 +18,7 @@ pub fn document_drop_edit(
     dropped_uri: &str,
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     line_index: &LineIndex,
     target_uri: &Uri,
     preferred_import_path: Option<&str>,
@@ -166,7 +166,9 @@ mod tests {
                 character: 0,
             },
             "<template>\n  <div/>\n</template>\n",
-            &crate::documents::sfc_scanner::scan_sfc_blocks("<template>\n  <div/>\n</template>\n"),
+            &crate::documents::carrier_structure::test_carrier_blocks(
+                "<template>\n  <div/>\n</template>\n",
+            ),
             &LineIndex::new_utf16("<template>\n  <div/>\n</template>\n"),
             &"file:///project/App.vue".parse().unwrap(),
             None,

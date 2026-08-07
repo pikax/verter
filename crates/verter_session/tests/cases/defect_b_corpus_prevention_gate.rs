@@ -444,14 +444,10 @@ fn published_surface_is_degraded(
     let models = meta.models.iter().any(|m| degraded(&m.type_source));
     let events = meta.events.iter().any(|e| degraded(&e.payload));
     let slots = meta.slots.iter().any(|s| {
-        s.return_source.as_ref().is_some_and(|source| {
-            verter_session::test_only::semantic_source_probe::shallow_is_degraded(
-                host,
-                owner_canonical,
-                source,
-            )
-            .unwrap_or(true)
-        }) || s.bindings.iter().any(|b| degraded(&b.type_source))
+        s.return_publication
+            .as_ref()
+            .is_some_and(|publication| degraded(&publication.source_position()))
+            || s.bindings.iter().any(|b| degraded(&b.type_source))
     });
     props || models || events || slots
 }

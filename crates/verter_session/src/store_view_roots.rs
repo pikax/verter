@@ -333,6 +333,32 @@ impl ProjectEnvRoot {
         }
     }
 
+    /// The `resolve_env_hash` dimension for `canonical` AS OF this root.
+    ///
+    /// The per-canonical sibling of [`Self::parse_env_hash_for`], and the
+    /// one that actually matters: unlike `parse_env_hash` — which
+    /// `IdeProjectConfig` composes without ever reading `&self`, so every
+    /// project's value is identical — `resolve_env_hash` folds
+    /// `workspace_aliases`, `compiler_options` and `references`, all
+    /// per-project, while the workspace default comes from a synthetic
+    /// config carrying none of them. Keying a per-canonical fact on the
+    /// workspace-level value therefore addresses a slot the producer
+    /// (which keys per-canonical via
+    /// `VerterHost::host_view_env_hashes_for`) never wrote.
+    ///
+    /// Reads the CAPTURED published root, so the answer cannot drift under
+    /// a live re-publication mid-validation.
+    pub(crate) fn resolve_env_hash_for(&self, canonical: &str) -> Hash16 {
+        self.published
+            .as_ref()
+            .and_then(|root| {
+                let project = root.snapshot.owners_for_file(canonical).first().copied()?;
+                let array = root.env_hashes_by_project.get(&project).copied()?;
+                Some(array[1])
+            })
+            .unwrap_or(self.env_hashes.resolve_env_hash)
+    }
+
     #[cfg(test)]
     fn apply_override(&self, parse_env_hash: Hash16) -> Hash16 {
         self.parse_env_override.unwrap_or(parse_env_hash)
@@ -378,8 +404,6 @@ pub(crate) struct StoreViewRoots {
     /// live handle is sound here in a way it is not for a per-owner answer.
     pub(crate) resolved_import_facts:
         Option<Arc<crate::resolved_import_facts::ResolvedImportFactsDb>>,
-    /// Live candidate store, same contract as `resolved_import_facts`.
-    pub(crate) route_db: Option<Arc<crate::resolver_core::route_db::RouteDb>>,
     /// The store the artifact root ADDRESSES. Reads through it are
     /// root-relative (`artifacts_at_root` / `artifact_keys_at_root` /
     /// `augmenter_set_at_root`), so they answer for the captured epoch.
@@ -388,6 +412,10 @@ pub(crate) struct StoreViewRoots {
     /// artifact-only authority gate (see
     /// [`StoreViewRoots::artifact_only_whole_hash_at`]).
     pub(crate) workspace: Option<Arc<dyn verter_workspace::WorkspaceAccess>>,
+    /// Dedicated strict-self-root authority captured with the immutable
+    /// roots. The live value is re-read only when minting or validating the
+    /// O(1) terminal witness.
+    strict_self_root_generation: Option<u64>,
 }
 
 impl std::fmt::Debug for StoreViewRoots {
@@ -491,8 +519,8 @@ pub(crate) struct RootCapture {
     published: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
     artifact_reader: Arc<crate::project_type_store::ProjectTypeStore>,
     workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+    strict_self_root_generation: Option<u64>,
     resolved_import_facts: Arc<crate::resolved_import_facts::ResolvedImportFactsDb>,
-    route_db: Arc<crate::resolver_core::route_db::RouteDb>,
     #[cfg(test)]
     parse_env_override: Option<Hash16>,
 }
@@ -514,17 +542,18 @@ impl RootCapture {
     /// `Arc` clones. Nothing here enumerates owners, artifacts,
     /// augmentation targets or scheduler nodes.
     pub(crate) fn capture(host: &crate::VerterHost) -> Self {
+        let workspace = host.workspace();
         Self {
             source_root: host.scheduler().capture_source_root(),
             artifact_root: host.project_type_store().indexed().capture_root(),
             resolution_world: host.ws().capture_resolution_world(),
-            published: host.workspace().published_root(),
+            published: workspace.published_root(),
             artifact_reader: Arc::clone(host.project_type_store()),
-            workspace: host.workspace(),
+            strict_self_root_generation: workspace.strict_self_root_generation(),
+            workspace,
             resolved_import_facts: Arc::clone(
                 host.project_type_store().resolved_import_facts_handle(),
             ),
-            route_db: host.project_type_store().routes_handle(),
             #[cfg(test)]
             parse_env_override: *host.parse_env_override.lock(),
         }
@@ -571,10 +600,64 @@ impl StoreViewRoots {
             resolution_root: capture.resolution_world.clone(),
             session_root: None,
             resolved_import_facts: Some(Arc::clone(&capture.resolved_import_facts)),
-            route_db: Some(Arc::clone(&capture.route_db)),
             artifact_reader: Some(Arc::clone(&capture.artifact_reader)),
             workspace: Some(Arc::clone(&capture.workspace)),
+            strict_self_root_generation: capture.strict_self_root_generation,
         }
+    }
+
+    /// Exact O(1) identity of this sealed view's strict self-root world.
+    /// Returns `None` when the live authority moved, the source epoch is
+    /// exhausted, or the workspace exposes no authority producer.
+    pub(crate) fn strict_self_root_world(
+        &self,
+        population: verter_workspace::ViewPopulation,
+    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        let source_root = self.source_root()?;
+        let artifact_root = self.artifact_root()?;
+        let workspace = self.workspace.as_ref()?;
+        let captured = self.strict_self_root_generation?;
+        if source_root.is_exhausted()
+            || workspace.strict_self_root_transition_active()
+            || workspace.strict_self_root_generation() != Some(captured)
+        {
+            return None;
+        }
+        Some(verter_workspace::StrictSelfRootWorld {
+            authority_id: workspace.strict_self_root_authority_id()?,
+            authority_generation: captured,
+            source_epoch: source_root.epoch(),
+            artifact_epoch: artifact_root.epoch(),
+            population,
+        })
+    }
+
+    /// Whether `canonical` has a versioned authority suitable for collapsing
+    /// its precise strict self-root fact into a world witness.
+    ///
+    /// Scheduler and session-root answers are captured by immutable roots. An
+    /// artifact-only answer is eligible only when the workspace declares its
+    /// backend event bridge complete; native filesystem fallbacks can change
+    /// through an unobserved external syscall result and therefore fail closed.
+    pub(crate) fn strict_self_root_is_witnessable(&self, canonical: &str) -> bool {
+        if self
+            .session_root
+            .as_ref()
+            .is_some_and(|session| session.canonicals.contains_key(canonical))
+        {
+            return true;
+        }
+        if self.source_root().is_some_and(|root| {
+            matches!(
+                root.lookup(canonical),
+                verter_scheduler::source_root::SourceStateAt::Present { .. }
+            )
+        }) {
+            return true;
+        }
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.resolution_event_bridge_complete())
     }
 
     /// The leased artifact-membership root. Every artifact, canonical→keys

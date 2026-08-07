@@ -1,0 +1,10 @@
+error[E0624]: associated function `from_authored_body` is private
+  --> tests/cases/compile-fail/authored_source_from_public_locator.rs:19:39
+   |
+19 |     let _forged = AuthoredTypeSource::from_authored_body(&locator);
+   |                                       ^^^^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_expr/src/publication.rs
+   |
+   |     fn from_authored_body(locator: &AuthoredBodyLocator) -> Self {
+   |     ------------------------------------------------------------ private associated function defined here

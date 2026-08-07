@@ -8,9 +8,9 @@
 //! raw lowerer `lower_type_expr_structural`, the `<script setup generic="…">` binder-seed builder
 //! `build_script_setup_seed_frames`, and the macro hot-mirror builder
 //! `build_macro_hot_ref` — ALL of which are PRIVATE to the module (no
-//! visibility modifier). The ONLY crate-visible items it exposes are
-//! [`macro_type_arg_hot_ref`] (the sole production entry that lowers a macro
-//! type-argument) and the [`MacroHotMirror`] artifact child it populates.
+//! visibility modifier). Its ONLY crate-visible producer entry is
+//! [`macro_type_arg_hot_ref`], which returns the `MacroHotProduct` read from
+//! the [`MacroHotMirror`] artifact child it populates.
 //!
 //! The single-producer guarantee has TWO regimes. The FOREIGN case is
 //! COMPILER-CONFINED: no foreign module can NAME the private lowerer, the

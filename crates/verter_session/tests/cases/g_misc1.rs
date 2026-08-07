@@ -12,8 +12,6 @@ mod derived_raw_state_cached_fallthrough_matrix_module_aug_index_shape;
 mod derived_raw_state_cached_meta_payload_matrix_member_presence;
 #[path = "g_misc1/derived_raw_state_cached_resolved_meta_matrix_import_ref.rs"]
 mod derived_raw_state_cached_resolved_meta_matrix_import_ref;
-#[path = "g_misc1/derived_raw_state_cached_resolved_meta_matrix_route_surface.rs"]
-mod derived_raw_state_cached_resolved_meta_matrix_route_surface;
 #[path = "g_misc1/hermetic_checkout.rs"]
 mod hermetic_checkout;
 #[path = "g_misc1/host_view_env_hashes_real.rs"]
@@ -66,8 +64,6 @@ mod pe4_evaluate_deferred_memo;
 mod semantic_graph_signature_builder_provenance;
 #[path = "g_misc1/slot_binding_graph_matrix_import_ref.rs"]
 mod slot_binding_graph_matrix_import_ref;
-#[path = "g_misc1/slot_binding_graph_matrix_route_surface.rs"]
-mod slot_binding_graph_matrix_route_surface;
 #[path = "g_misc1/test_support_feature_off_in_default_build.rs"]
 mod test_support_feature_off_in_default_build;
 #[path = "g_misc1/ts_bindings.rs"]

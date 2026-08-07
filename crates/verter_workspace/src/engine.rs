@@ -38,6 +38,16 @@ use crate::workspace_snapshot::{
 };
 use crate::{SignatureAdmission, CANDIDATE_CAP};
 
+static NEXT_STRICT_SELF_ROOT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_strict_self_root_authority_id() -> u64 {
+    NEXT_STRICT_SELF_ROOT_AUTHORITY_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            next.checked_add(1)
+        })
+        .expect("strict self-root authority id space exhausted")
+}
+
 /// Path-segment marker used by the package classification helpers to
 /// detect node_modules-rooted paths.
 const NODE_MODULES_SEGMENT: &str = "/node_modules/";
@@ -91,15 +101,27 @@ type LazyResolutionCandidates = SmallVec<[LazyResolutionCacheEntry; CANDIDATE_CA
 /// [`crate::CANDIDATE_CAP`]. Mirrors the session `ValidatedFactCache`
 /// admission policy exactly: append, then drain the front until the
 /// slot is at the cap.
+///
+/// Returns the queries whose candidates aged out, so the caller can
+/// remove their decision nodes in the same fence. An aged-out candidate
+/// no longer has an answer behind it, so leaving its decision published
+/// would let a consumer keep validating against a decision nothing can
+/// serve — and would grow the graph without bound.
 fn admit_resolution_candidate(
     slot: &mut LazyResolutionCandidates,
     candidate: LazyResolutionCacheEntry,
-) {
+) -> Vec<ResolutionQueryKey> {
+    let mut evicted = Vec::new();
     if slot.len() >= CANDIDATE_CAP {
         let drop_count = slot.len() - CANDIDATE_CAP + 1;
-        slot.drain(..drop_count);
+        evicted.extend(slot.drain(..drop_count).map(|entry| entry.query));
     }
+    // The incoming candidate republishes this query's decision, so an
+    // aged-out entry for the SAME query is a replacement rather than a
+    // removal.
+    evicted.retain(|query| *query != candidate.query);
     slot.push(candidate);
+    evicted
 }
 
 /// Post-mutation realpath knowledge a content mutator can assert.
@@ -331,6 +353,20 @@ pub(crate) struct Engine {
     /// witnesses name — the same set the world's own probe baseline holds.
     evidence_verified_generation: RwLock<FxHashMap<String, u64>>,
     pub(crate) content_generation: AtomicU64,
+    /// Process-unique identity of this strict-self-root authority. Unlike the
+    /// per-workspace generation, it cannot alias after a workspace swap.
+    strict_self_root_authority_id: u64,
+    /// Dedicated authority for strict structural self-root validation.
+    /// Advances on every workspace transition that may change a strict
+    /// whole-hash or trackedness answer, including publication-only changes.
+    strict_self_root_generation: AtomicU64,
+    /// Number of overlapping strict-self-root authority writers. A witness
+    /// cannot be minted while this is non-zero; unlike an odd/even bit this
+    /// remains sound when independent host-side membership writers overlap.
+    strict_self_root_writers: AtomicU64,
+    /// Counter behind the SOURCE-ENV compaction domain. See
+    /// [`Engine::current_source_env_generation`].
+    source_env_generation: AtomicU64,
     /// Immutable resolution-visible composition and its four-step publisher.
     resolution_world: ArcSwap<ResolutionWorldRoot>,
     resolution_epoch: AtomicU64,
@@ -339,6 +375,18 @@ pub(crate) struct Engine {
     default_resolution_session: SessionFingerprint,
     next_resolution_world_id: AtomicU64,
     next_resolution_fact_version: AtomicU64,
+    /// Count of resolution fact advances a WITNESS COULD OBSERVE.
+    ///
+    /// Deliberately not the mint counter. Publishing a brand-new derived
+    /// node mints a version — freshness comes from one global source, so
+    /// a removal/reintroduction can never reproduce an old version — but
+    /// no witness could have recorded that node, so nothing a witness
+    /// observes moved. The session folds this counter into
+    /// `StoreViewValidationToken`'s EXTERNAL-supersession set, where a
+    /// cold compute's own work must never appear: a resolve that
+    /// published its own decision node would otherwise fence its own
+    /// promotion.
+    resolution_fact_generation: AtomicU64,
     /// Project graph — the write-side store. Callers update this via
     /// `set_project_graph()` / `configure_resolver()`, then
     /// `rebuild_and_publish()` atomically derives and publishes a
@@ -418,6 +466,14 @@ pub(crate) struct Engine {
     subtree_transitions: RwLock<FxHashMap<String, u64>>,
 }
 
+struct StrictSelfRootTransition<'a>(&'a Engine);
+
+impl Drop for StrictSelfRootTransition<'_> {
+    fn drop(&mut self) {
+        self.0.end_strict_self_root_transition();
+    }
+}
+
 impl Engine {
     pub(crate) fn new() -> Self {
         static NEXT_SESSION_FINGERPRINT: AtomicU64 = AtomicU64::new(1);
@@ -439,6 +495,10 @@ impl Engine {
             pending_resolution_refresh: RwLock::new(rustc_hash::FxHashSet::default()),
             evidence_verified_generation: RwLock::new(FxHashMap::default()),
             content_generation: AtomicU64::new(1),
+            strict_self_root_authority_id: next_strict_self_root_authority_id(),
+            strict_self_root_generation: AtomicU64::new(1),
+            strict_self_root_writers: AtomicU64::new(0),
+            source_env_generation: AtomicU64::new(1),
             resolution_world: ArcSwap::from(initial_resolution_world),
             resolution_epoch: AtomicU64::new(0),
             resolution_world_write: Mutex::new(()),
@@ -446,6 +506,7 @@ impl Engine {
             default_resolution_session,
             next_resolution_world_id: AtomicU64::new(3),
             next_resolution_fact_version: AtomicU64::new(1),
+            resolution_fact_generation: AtomicU64::new(1),
             project_graph: RwLock::new(ProjectGraph::new()),
             configured_resolver_projects: RwLock::new(None),
             package_index: RwLock::new(PackageIndex::new()),
@@ -514,6 +575,10 @@ impl Engine {
         if changed {
             self.rebuild_and_publish();
             self.bump_content_generation();
+            // NO separate source-env bump here: `rebuild_and_publish`
+            // above already advanced it, and a second bump would be an
+            // unfalsifiable producer claim — removing it changes no
+            // observable.
         }
     }
 
@@ -526,6 +591,7 @@ impl Engine {
     /// After this call, all readers loading from `published_state` see the
     /// new snapshot. One store, one generation.
     pub(crate) fn publish_snapshot(&self, mut root: PublishedRoot) {
+        let _strict_transition = self.strict_self_root_transition();
         let tables_complete = root.snapshot.projects.iter().all(|project| {
             root.env_hashes_by_project.contains_key(&project.id)
                 && root.project_identity_hashes.contains_key(&project.id)
@@ -537,16 +603,82 @@ impl Engine {
             root.env_hashes_by_project = env_hashes;
             root.project_identity_hashes = identities;
         }
+        // Publishing a snapshot republishes the per-project env-hash
+        // tables (`parse_env_hash`, project identity) with no content
+        // bump, so the source-env domain advances here.
+        self.bump_source_env_generation();
         self.mutate_resolution_world(|world| {
             let root = Arc::new(root);
             self.published_state.store(Some(Arc::clone(&root)));
-            world.replace_published(root, || self.next_resolution_fact_version());
+            world.replace_published(root, &self.registered_session_context_keys(), || {
+                self.next_resolution_fact_version()
+            });
             ((), true)
         });
     }
 
     pub(crate) fn current_content_generation(&self) -> u64 {
         self.content_generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn current_strict_self_root_generation(&self) -> u64 {
+        self.strict_self_root_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn strict_self_root_authority_id(&self) -> u64 {
+        self.strict_self_root_authority_id
+    }
+
+    pub(crate) fn bump_strict_self_root_generation(&self) -> u64 {
+        self.strict_self_root_generation
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+
+    pub(crate) fn strict_self_root_transition_active(&self) -> bool {
+        self.strict_self_root_writers.load(Ordering::Acquire) != 0
+    }
+
+    pub(crate) fn begin_strict_self_root_transition(&self) {
+        self.strict_self_root_writers.fetch_add(1, Ordering::AcqRel);
+        self.bump_strict_self_root_generation();
+    }
+
+    pub(crate) fn end_strict_self_root_transition(&self) {
+        self.bump_strict_self_root_generation();
+        let previous = self.strict_self_root_writers.fetch_sub(1, Ordering::AcqRel);
+        assert!(
+            previous > 0,
+            "strict self-root transition ended without a writer"
+        );
+    }
+
+    fn strict_self_root_transition(&self) -> StrictSelfRootTransition<'_> {
+        self.begin_strict_self_root_transition();
+        StrictSelfRootTransition(self)
+    }
+
+    /// Live generation of the SOURCE-ENV compaction domain: the counter
+    /// behind every `FileSourceEnv` observation.
+    ///
+    /// Its own domain, deliberately NOT folded into the content counter.
+    /// `FileSourceEnv` carries `parse_env_hash` / `parser_version` /
+    /// `file_language_id`, and the production paths that move them —
+    /// `publish_snapshot`, `rebuild_and_publish` (both reached through
+    /// `configure_projects` / `configure_resolver`) and
+    /// `WorkspaceChange::ConfigChanged` — do NOT bump
+    /// `content_generation`. A source-env fact folded into the content
+    /// domain would therefore survive a parse-env or file-language
+    /// change, which is a new poisoning class rather than a bounded
+    /// coarsening.
+    /// Read in production through [`crate::WorkspaceAccess::source_env_generation`],
+    /// which is the seam the session's store view captures it from.
+    pub(crate) fn current_source_env_generation(&self) -> u64 {
+        self.source_env_generation.load(Ordering::Relaxed)
+    }
+
+    fn bump_source_env_generation(&self) -> u64 {
+        self.source_env_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     fn bump_content_generation_in_world(&self) -> u64 {
@@ -670,6 +802,16 @@ impl Engine {
         self.mutate_resolution_world_locked(mutation)
     }
 
+    /// The session fingerprint whose write gate a caller already holds,
+    /// so the base publication protocol's session fan-out reuses it
+    /// instead of re-locking a non-reentrant mutex against itself.
+    fn held_session_of(captured: &CapturedResolutionFence) -> Option<SessionFingerprint> {
+        match (captured.session_domain.as_ref(), captured.world.population) {
+            (Some(_), ResolutionPopulation::Session(fingerprint)) => Some(fingerprint),
+            _ => None,
+        }
+    }
+
     /// Apply a mutation only when the caller's captured world is still the
     /// current stable world. Validation and the odd/even publication protocol
     /// share the same write-gate critical section, so no writer can land
@@ -687,13 +829,28 @@ impl Engine {
         if !self.resolution_world_still_current(captured) {
             return Err(());
         }
-        Ok(self.mutate_resolution_world_locked(mutation))
+        Ok(self.mutate_resolution_world_locked_with_held_session(
+            Self::held_session_of(captured),
+            mutation,
+        ))
     }
 
     /// Publication implementation for callers already holding
     /// `resolution_world_write`.
     fn mutate_resolution_world_locked<R, W: Into<WorldWrite>>(
         &self,
+        mutation: impl FnOnce(&mut ResolutionWorldRoot) -> (R, W),
+    ) -> R {
+        self.mutate_resolution_world_locked_with_held_session(None, mutation)
+    }
+
+    /// [`Self::mutate_resolution_world_locked`] for a caller that already
+    /// holds one session's write gate — the parsed-edge recorder and the
+    /// resolve fence both do, and `parking_lot::Mutex` is not reentrant,
+    /// so the session fan-out must be told which domain not to re-lock.
+    fn mutate_resolution_world_locked_with_held_session<R, W: Into<WorldWrite>>(
+        &self,
+        held_session: Option<SessionFingerprint>,
         mutation: impl FnOnce(&mut ResolutionWorldRoot) -> (R, W),
     ) -> R {
         let stable = self.resolution_epoch.load(Ordering::Acquire);
@@ -726,7 +883,25 @@ impl Engine {
         let current = self.resolution_world.load_full();
         let mut replacement = (*current).clone();
         let (result, write) = mutation(&mut replacement);
-        match write.into() {
+        let write = write.into();
+        // Step 3: every direct base fact this batch advanced propagates
+        // ONCE over the base graph's reverse edges, before anything is
+        // published. Nothing is evicted — a dependent cache entry becomes
+        // cold only when its own recorded derived version fails ordinary
+        // read-side validation.
+        let base_seeds = replacement.facts.take_pending_seeds();
+        if !base_seeds.is_empty() && !matches!(write, WorldWrite::Discard) {
+            replacement.facts.propagate(base_seeds.iter().cloned(), || {
+                self.next_resolution_fact_version()
+            });
+            // Step 4/5: the same changed BASE keys propagate through every
+            // live session graph, and each changed session root is
+            // published — all of it while the base epoch is still ODD, so
+            // no capture can pair a new base root with an unpropagated
+            // session decision root.
+            self.propagate_base_changes_into_sessions(&replacement, &base_seeds, held_session);
+        }
+        match write {
             WorldWrite::Discard => {}
             WorldWrite::Retain => {
                 // Same identity, same epoch: a capture taken before this
@@ -749,17 +924,124 @@ impl Engine {
         result
     }
 
-    /// The number of resolution fact versions this Engine has minted.
+    /// The `ContextSelection` leaves registered in every LIVE session
+    /// graph, normalised to the base population.
     ///
-    /// One mint per fact whose observed value actually moved (a
-    /// first-observation baseline fill mints nothing), so a consumer
-    /// retaining a captured world can tell whether ANY fact has advanced
-    /// since its capture without enumerating facts.
-    pub(crate) fn current_resolution_fact_generation(&self) -> u64 {
-        self.next_resolution_fact_version.load(Ordering::Relaxed)
+    /// A session decision records its context edge in its own root, so
+    /// the base world's own reverse map names none of them. The caller
+    /// holds the base publication gate, and this only reads published
+    /// session roots through their `ArcSwap`.
+    fn registered_session_context_keys(&self) -> Vec<ResolutionFactKey> {
+        self.resolution_sessions
+            .read()
+            .values()
+            .flat_map(|domain| {
+                domain
+                    .root
+                    .load()
+                    .facts
+                    .registered_context_selection_keys()
+                    .into_iter()
+                    .map(|key| key.in_population(ResolutionPopulation::Base))
+            })
+            .collect()
     }
 
+    /// **Step 4 and 5 of the base publication protocol.** Propagate the
+    /// base keys this batch advanced through every live session graph and
+    /// publish each session root that changed.
+    ///
+    /// A session decision records SESSION-population edges whose versions
+    /// fall back to the base root, so a base advance is invisible to the
+    /// session graph until its keys are translated into that population.
+    /// Skipping this step is a stale serve, not an optimisation: the
+    /// session decision keeps validating across a base mutation it
+    /// genuinely depends on.
+    ///
+    /// The caller holds the base publication gate and the base epoch is
+    /// ODD for the whole traversal — `capture_resolution_world` cannot
+    /// complete at all while it is, so the intermediate state where a new
+    /// base root is paired with an unpropagated session root is
+    /// unreachable rather than merely unpaired. Lock order is
+    /// base gate → `resolution_sessions` → session write, exactly the
+    /// documented order.
+    ///
+    /// Cost: `O(changed base keys × live sessions)` seeds plus the
+    /// reachable-subgraph propagation in each. `resolution_sessions` is
+    /// never pruned — production interns exactly one session domain per
+    /// engine, but if multi-session ever lands this traversal grows with
+    /// the accumulated, never-reaped domain count while the global base
+    /// gate is held.
+    fn propagate_base_changes_into_sessions(
+        &self,
+        base: &ResolutionWorldRoot,
+        base_seeds: &[ResolutionFactKey],
+        held_session: Option<SessionFingerprint>,
+    ) {
+        debug_assert!(
+            !crate::resolution_currency::ResolutionEpoch::from_raw(
+                self.resolution_epoch.load(Ordering::Acquire)
+            )
+            .is_stable(),
+            "session propagation must run inside the base publication window: a session \
+             root published under a STABLE base epoch can be captured paired with the \
+             pre-mutation base root"
+        );
+        let domains: Vec<(SessionFingerprint, Arc<SessionResolutionDomain>)> = self
+            .resolution_sessions
+            .read()
+            .iter()
+            .map(|(fingerprint, domain)| (*fingerprint, Arc::clone(domain)))
+            .collect();
+        for (fingerprint, domain) in domains {
+            let population = ResolutionPopulation::Session(fingerprint);
+            let seeds: Vec<ResolutionFactKey> = base_seeds
+                .iter()
+                .map(|key| key.in_population(population))
+                .collect();
+            let _session_write = (held_session != Some(fingerprint)).then(|| domain.write.lock());
+            self.mutate_resolution_session_write_held(&domain, base, |_base, session| {
+                let advanced = session
+                    .facts
+                    .propagate(seeds, || self.next_resolution_fact_version());
+                (
+                    (),
+                    if advanced.is_empty() {
+                        WorldWrite::Discard
+                    } else {
+                        WorldWrite::Publish
+                    },
+                )
+            });
+        }
+    }
+
+    /// The number of resolution fact advances a witness could observe.
+    ///
+    /// One count per fact whose observed value actually moved (a
+    /// first-observation baseline fill counts nothing, and neither does
+    /// publishing a derived node no witness can have recorded), so a
+    /// consumer retaining a captured world can tell whether ANY fact it
+    /// could have observed has advanced since its capture without
+    /// enumerating facts.
+    pub(crate) fn current_resolution_fact_generation(&self) -> u64 {
+        self.resolution_fact_generation.load(Ordering::Relaxed)
+    }
+
+    /// Mint a fresh version for a fact whose observed value MOVED.
     fn next_resolution_fact_version(&self) -> ResolutionFactVersion {
+        self.resolution_fact_generation
+            .fetch_add(1, Ordering::Relaxed);
+        self.mint_fact_version()
+    }
+
+    /// Mint a fresh version WITHOUT claiming an observable advance.
+    ///
+    /// The single global mint source, so a version is unique across
+    /// every family and a removed-and-reintroduced node can never
+    /// reproduce one a witness holds. Only the observable-advance count
+    /// is withheld.
+    fn mint_fact_version(&self) -> ResolutionFactVersion {
         ResolutionFactVersion::fresh(
             self.next_resolution_fact_version
                 .fetch_add(1, Ordering::Relaxed),
@@ -804,13 +1086,31 @@ impl Engine {
         self.mutate_resolution_session_locked(&domain, base.as_ref(), mutation)
     }
 
-    fn mutate_resolution_session_locked<R>(
+    fn mutate_resolution_session_locked<R, W: Into<WorldWrite>>(
         &self,
         domain: &Arc<SessionResolutionDomain>,
         base: &ResolutionWorldRoot,
-        mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, bool),
+        mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, W),
     ) -> R {
         let _session_write = domain.write.lock();
+        self.mutate_resolution_session_write_held(domain, base, mutation)
+    }
+
+    /// Session publication for a caller ALREADY holding
+    /// `domain.write` — the resolve fence, which takes that gate before
+    /// its final currency check so no writer can land between the check
+    /// and the publication.
+    ///
+    /// `parking_lot::Mutex` is not reentrant, so this split is load
+    /// bearing: routing the fence through
+    /// [`Self::mutate_resolution_session_locked`] would wedge with no CPU
+    /// burn, no timeout and no panic.
+    fn mutate_resolution_session_write_held<R, W: Into<WorldWrite>>(
+        &self,
+        domain: &Arc<SessionResolutionDomain>,
+        base: &ResolutionWorldRoot,
+        mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, W),
+    ) -> R {
         let stable = domain.epoch.load(Ordering::Acquire);
         assert_eq!(
             stable % 2,
@@ -841,18 +1141,215 @@ impl Engine {
         };
         let current = domain.root.load_full();
         let mut replacement = (*current).clone();
-        let (result, changed) = mutation(base, &mut replacement);
-        if changed {
-            replacement.id = ResolutionWorldId::fresh(
-                self.next_resolution_world_id
-                    .fetch_add(1, Ordering::Relaxed),
-            );
-            domain.root.store(Arc::new(replacement));
-            restore.value = stable.wrapping_add(2);
+        let (result, write) = mutation(base, &mut replacement);
+        let write = write.into();
+        // Step 3 of the publication protocol, session side: every direct
+        // fact this batch advanced propagates ONCE over the session
+        // graph's reverse edges before the root is published.
+        let seeds = replacement.facts.take_pending_seeds();
+        if !seeds.is_empty() && !matches!(write, WorldWrite::Discard) {
+            replacement
+                .facts
+                .propagate(seeds, || self.next_resolution_fact_version());
+        }
+        match write {
+            WorldWrite::Discard => {}
+            WorldWrite::Retain => {
+                domain.root.store(Arc::new(replacement));
+            }
+            WorldWrite::Publish => {
+                replacement.id = ResolutionWorldId::fresh(
+                    self.next_resolution_world_id
+                        .fetch_add(1, Ordering::Relaxed),
+                );
+                domain.root.store(Arc::new(replacement));
+                restore.value = stable.wrapping_add(2);
+            }
         }
         restore.armed = false;
         domain.epoch.store(restore.value, Ordering::Release);
         result
+    }
+
+    /// Publish one query's DECISION node: a fresh, non-initial version
+    /// plus the atomic replacement of its COMPLETE direct edge set.
+    ///
+    /// Runs inside the resolve fence, so the caller already holds the
+    /// base publication gate and — for a session population — that
+    /// session's write gate.
+    ///
+    /// The write is a RETAIN, not a Publish, and that is a correctness
+    /// choice rather than an optimisation. A decision node's edges are
+    /// bookkeeping no captured witness can observe, and its fresh version
+    /// is a value only a LATER capture can read: the attempt that mints
+    /// it never records it (a cold attempt's witness is its own direct
+    /// observations), so nothing in flight is superseded. Minting a new
+    /// world identity per admitted resolution would instead invalidate
+    /// every concurrent capture and turn a cold sweep into a retry storm.
+    fn publish_resolution_decision(
+        &self,
+        captured: &CapturedResolutionFence,
+        query: ResolutionQueryKey,
+        direct_edges: Vec<ResolutionFactKey>,
+    ) {
+        let node = ResolutionFactKey::decision(query);
+        match (node.population(), captured.session_domain.as_ref()) {
+            (ResolutionPopulation::Base, _) => {
+                self.mutate_resolution_world_locked_with_held_session(
+                    Self::held_session_of(captured),
+                    |world| {
+                        world.facts.publish_derived(node, direct_edges);
+                        ((), WorldWrite::Retain)
+                    },
+                );
+            }
+            (ResolutionPopulation::Session(_), Some(domain)) => {
+                self.mutate_resolution_session_write_held(
+                    domain,
+                    captured.world.base.as_ref(),
+                    |_base, session| {
+                        session.facts.publish_derived(node, direct_edges);
+                        ((), WorldWrite::Retain)
+                    },
+                );
+            }
+            // A session-population query with no captured session domain
+            // has no root to publish into. Fail closed: no node, so no
+            // consumer can ever record one.
+            (ResolutionPopulation::Session(_), None) => {}
+        }
+    }
+
+    /// Drop the decision node of a query whose candidate aged out of its
+    /// slot, under the same fence that admitted the replacement.
+    ///
+    /// Publishes a new world identity: the removal ADVANCES the node's
+    /// version, which every parent that recorded it must observe.
+    fn remove_resolution_decision(
+        &self,
+        captured: &CapturedResolutionFence,
+        query: ResolutionQueryKey,
+    ) {
+        let node = ResolutionFactKey::decision(query);
+        let remove = |facts: &mut crate::resolution_currency::ResolutionFactRoot| {
+            if facts.remove_derived(&node, self.next_resolution_fact_version()) {
+                WorldWrite::Publish
+            } else {
+                WorldWrite::Discard
+            }
+        };
+        match (node.population(), captured.session_domain.as_ref()) {
+            (ResolutionPopulation::Base, _) => {
+                self.mutate_resolution_world_locked_with_held_session(
+                    Self::held_session_of(captured),
+                    |world| ((), remove(&mut world.facts)),
+                );
+            }
+            (ResolutionPopulation::Session(_), Some(domain)) => {
+                self.mutate_resolution_session_write_held(
+                    domain,
+                    captured.world.base.as_ref(),
+                    |_base, session| ((), remove(&mut session.facts)),
+                );
+            }
+            (ResolutionPopulation::Session(_), None) => {}
+        }
+    }
+
+    /// Publish one owner's `OwnerResolutionSet` node over that owner's
+    /// currently published child decisions.
+    ///
+    /// The node records CHILD DECISIONS, never their leaves, so an owner
+    /// witness is bounded by the owner's own decision count instead of by
+    /// the transitive closure everything it imports reaches through.
+    ///
+    /// IDEMPOTENT on an unchanged child set: the edges are replaced only
+    /// when the set actually differs, so re-asking for a warm owner
+    /// surface neither churns the graph nor supersedes the very view that
+    /// asked. Like a decision publication it mints no version — the node
+    /// reads what the caller's own captured world says, and advances only
+    /// through propagation from a child decision or through removal.
+    ///
+    /// Returns the node's fact ref so the caller can observe it as its
+    /// single owner-scoped root, or `None` when the owner has no
+    /// published decision to stand for.
+    pub(crate) fn publish_owner_resolution_set(
+        &self,
+        owner_canonical: &str,
+        population: ResolutionPopulation,
+    ) -> Option<crate::FactVersionRef> {
+        let node = ResolutionFactKey::owner_resolution_set(owner_canonical, population);
+        let publish = |facts: &mut crate::resolution_currency::ResolutionFactRoot| -> bool {
+            let mut children = facts.owner_child_decisions(owner_canonical, population);
+            if children.is_empty() {
+                return false;
+            }
+            children.sort();
+            let unchanged = facts
+                .direct_dependencies(&node)
+                .map(|mut existing| {
+                    existing.sort();
+                    existing == children
+                })
+                .unwrap_or(false);
+            if unchanged {
+                return false;
+            }
+            facts.publish_derived(node.clone(), children);
+            true
+        };
+        match population {
+            ResolutionPopulation::Base => {
+                self.mutate_resolution_world(|world| {
+                    let changed = publish(&mut world.facts);
+                    (
+                        (),
+                        if changed {
+                            WorldWrite::Retain
+                        } else {
+                            WorldWrite::Discard
+                        },
+                    )
+                });
+            }
+            ResolutionPopulation::Session(fingerprint) => {
+                let domain = self.session_resolution_domain(fingerprint);
+                let _base_read_fence = self.resolution_world_write.lock();
+                let base = self.resolution_world.load_full();
+                self.mutate_resolution_session_locked(&domain, base.as_ref(), |_base, session| {
+                    let changed = publish(&mut session.facts);
+                    (
+                        (),
+                        if changed {
+                            WorldWrite::Retain
+                        } else {
+                            WorldWrite::Discard
+                        },
+                    )
+                });
+            }
+        }
+        let world = self.capture_published_resolution_world(population)?;
+        let owns_children = match population {
+            ResolutionPopulation::Base => world.base.facts.direct_dependencies(&node).is_some(),
+            ResolutionPopulation::Session(_) => world
+                .session
+                .as_ref()
+                .is_some_and(|session| session.facts.direct_dependencies(&node).is_some()),
+        };
+        if !owns_children {
+            // No child decision has ever been published for this owner,
+            // so there is no owner-scoped node to root on. Fail closed
+            // rather than hand back a node with no edges — nothing could
+            // ever propagate into it.
+            return None;
+        }
+        let version = world.fact_version(&node);
+        Some(crate::FactVersionRef::ResolveImports(
+            crate::ResolveImportsFactRef::Resolution(
+                crate::resolution_currency::ResolutionFactRef::new(node, version),
+            ),
+        ))
     }
 
     fn replace_world_exact_resolutions(
@@ -941,7 +1438,43 @@ impl Engine {
         for key in Self::path_fact_keys(&canonical, ResolutionPopulation::Base) {
             self.advance_resolution_fact(&mut world.facts, key);
         }
+        if matches!(
+            outcome,
+            crate::resolution_currency::PathProbe::File
+                | crate::resolution_currency::PathProbe::Directory
+        ) {
+            self.advance_absent_realpath_ancestors(world, &canonical);
+        }
         true
+    }
+
+    /// A path APPEARING beneath an ancestor the world recorded as having
+    /// no realpath changes that ancestor's value too: the directory it
+    /// names now exists.
+    ///
+    /// Only ancestors recorded as KNOWN-ABSENT (`Some(None)`) are
+    /// touched. An unrecorded ancestor contradicts nothing, and one
+    /// recorded with a realpath already existed. The recorded value is
+    /// dropped alongside the advance so the next live observation refills
+    /// it as a first observation rather than as a conflict.
+    ///
+    /// `O(path depth × point lookup)` in the persistent maps already
+    /// present — no ancestor index is added.
+    fn advance_absent_realpath_ancestors(&self, world: &mut ResolutionWorldRoot, canonical: &str) {
+        let absent: Vec<String> = crate::resolution_currency::ancestor_scopes(canonical)
+            .into_iter()
+            .filter(|prefix| matches!(world.realpaths.get(prefix), Some(None)))
+            .collect();
+        for prefix in absent {
+            world.realpaths.remove(&prefix);
+            self.advance_resolution_fact(
+                &mut world.facts,
+                ResolutionFactKey::Realpath {
+                    requested: CanonicalResolutionId::new(prefix),
+                    population: ResolutionPopulation::Base,
+                },
+            );
+        }
     }
 
     /// Precise per-path transition whose post-mutation observed values are
@@ -1157,7 +1690,7 @@ impl Engine {
                 let base_version =
                     base.fact_version(&key.in_population(ResolutionPopulation::Base));
                 if base_version != ResolutionFactVersion::INITIAL {
-                    session.facts.advance(key, base_version);
+                    session.facts.mirror_base_version(key, base_version);
                 }
             }
         }
@@ -1192,7 +1725,7 @@ impl Engine {
                     let base_version =
                         base.fact_version(&key.in_population(ResolutionPopulation::Base));
                     if base_version != ResolutionFactVersion::INITIAL {
-                        session.facts.advance(key, base_version);
+                        session.facts.mirror_base_version(key, base_version);
                     }
                 }
             }
@@ -1258,6 +1791,7 @@ impl Engine {
         realpath_after: BaseRealpathTransition,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
+        let _strict_transition = self.strict_self_root_transition();
         self.mutate_resolution_world(|world| {
             let (result, changed) = mutation();
             if !changed {
@@ -1293,6 +1827,7 @@ impl Engine {
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
         crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
             let (result, changed) = mutation();
@@ -1318,6 +1853,7 @@ impl Engine {
         canonical_id: &str,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
+        let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |_base, session| {
             let (result, changed) = mutation();
@@ -1339,6 +1875,7 @@ impl Engine {
         prefix: &str,
         mutation: impl FnOnce() -> (R, Vec<String>, bool),
     ) -> R {
+        let _strict_transition = self.strict_self_root_transition();
         self.mutate_resolution_world(|world| {
             let (result, transitioned, changed) = mutation();
             if !changed {
@@ -1373,6 +1910,7 @@ impl Engine {
         remove_edges: bool,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
+        let _strict_transition = self.strict_self_root_transition();
         self.mutate_resolution_world(|world| {
             let (result, changed) = mutation();
             if !changed {
@@ -1563,6 +2101,80 @@ impl Engine {
             .unwrap_or(ResolutionFactVersion::INITIAL)
     }
 
+    /// One derived node's COMPLETE direct dependency set, read through a
+    /// freshly captured world.
+    #[cfg(test)]
+    pub(crate) fn decision_direct_dependencies_for_test(
+        &self,
+        population: ResolutionPopulation,
+        node: &ResolutionFactKey,
+    ) -> Option<Vec<ResolutionFactKey>> {
+        let captured = self.capture_resolution_world(population)?;
+        match population {
+            ResolutionPopulation::Base => captured.world.base.facts.direct_dependencies(node),
+            ResolutionPopulation::Session(_) => captured
+                .world
+                .session
+                .as_ref()
+                .and_then(|session| session.facts.direct_dependencies(node)),
+        }
+    }
+
+    /// Drop a derived node from the owning root — the removal half of the
+    /// removal/reintroduction contract.
+    #[cfg(test)]
+    pub(crate) fn remove_derived_node_for_test(
+        &self,
+        population: ResolutionPopulation,
+        node: &ResolutionFactKey,
+    ) -> bool {
+        match population {
+            ResolutionPopulation::Base => self.mutate_resolution_world(|world| {
+                let removed = world
+                    .facts
+                    .remove_derived(node, self.next_resolution_fact_version());
+                (
+                    removed,
+                    if removed {
+                        WorldWrite::Publish
+                    } else {
+                        WorldWrite::Discard
+                    },
+                )
+            }),
+            ResolutionPopulation::Session(fingerprint) => {
+                let domain = self.session_resolution_domain(fingerprint);
+                let _base_read_fence = self.resolution_world_write.lock();
+                let base = self.resolution_world.load_full();
+                self.mutate_resolution_session_locked(&domain, base.as_ref(), |_base, session| {
+                    let removed = session
+                        .facts
+                        .remove_derived(node, self.next_resolution_fact_version());
+                    (
+                        removed,
+                        if removed {
+                            WorldWrite::Publish
+                        } else {
+                            WorldWrite::Discard
+                        },
+                    )
+                })
+            }
+        }
+    }
+
+    /// The resolution domain's aggregate stamp, read through a freshly
+    /// captured world — the same value a compacted signature is minted
+    /// from and validated against.
+    #[cfg(test)]
+    pub(crate) fn captured_resolution_stamp_for_test(
+        &self,
+        population: ResolutionPopulation,
+    ) -> Option<crate::AggregateStamp> {
+        self.capture_resolution_world(population)
+            .and_then(|captured| captured.world.resolution_stamp(population))
+    }
+
     #[cfg(test)]
     pub(crate) fn cached_resolution_query_for_test(
         &self,
@@ -1649,6 +2261,14 @@ impl Engine {
     /// project graph's `compiler_options` and the engine-level resolve
     /// extensions; consumers look up tables on the published snapshot.
     pub(crate) fn rebuild_and_publish(&self) {
+        let _strict_transition = self.strict_self_root_transition();
+        // The second env-table republication path (the first is
+        // `publish_snapshot`): this recomposes `env_hashes_by_project` /
+        // `project_identity_hashes` from the rebuilt project set, with no
+        // content bump. Over-bumping a monotonic counter is conservative;
+        // MISSING a bump here would leave a source-env-compacted signature
+        // valid across a project reconfiguration.
+        self.bump_source_env_generation();
         self.mutate_resolution_world(|world| {
             let configured_projects = self.configured_resolver_projects.read().clone();
             let graph = self.project_graph.read();
@@ -1699,7 +2319,9 @@ impl Engine {
                 project_identity_hashes,
             ));
             self.published_state.store(Some(Arc::clone(&published)));
-            world.replace_published(published, || self.next_resolution_fact_version());
+            world.replace_published(published, &self.registered_session_context_keys(), || {
+                self.next_resolution_fact_version()
+            });
             ((), true)
         });
     }
@@ -1761,6 +2383,7 @@ impl Engine {
         changes: Vec<WorkspaceChange>,
         preflight: impl FnOnce(&[WorkspaceChange]),
     ) -> ChangeResult {
+        let _strict_transition = self.strict_self_root_transition();
         self.mutate_resolution_world(|world| {
             preflight(&changes);
             let mut result = ChangeResult::default();
@@ -1912,6 +2535,10 @@ impl Engine {
                         result.graph_rebuilt = true;
                         result.generation = Some(self.project_graph.read().generation() + 1);
                         base_changed = true;
+                        // A config change republishes the env-hash tables
+                        // WITHOUT touching content, so the source-env
+                        // domain must advance on its own counter here.
+                        self.bump_source_env_generation();
                     }
                 }
             }
@@ -2109,6 +2736,31 @@ impl Engine {
     /// is precisely where clearing the whole resolution memo per content
     /// generation used to heal — reached here by re-reading one candidate's
     /// own witness instead of discarding every candidate in the workspace.
+    /// Whether `signature` is unusable as the re-observation plan the
+    /// declared evidence source requires — in which case the candidate it
+    /// belongs to must NOT be reused.
+    ///
+    /// Only [`crate::resolution_currency::ResolutionEvidenceSource::Uncovered`]
+    /// is affected. That backend receives resolver-visible changes with no
+    /// event at all, so its healing rule is "re-read every witness canonical
+    /// whose evidence has not been read live at the current content
+    /// generation" — a rule stated over the witness's OWN path
+    /// observations, which an un-enumerable resolution witness does not
+    /// expose. Unlike the pending ledger there is no sound superset to
+    /// fall back to (no ledger records "every path canonical ever
+    /// observed"), so the honest answer is that this witness cannot be
+    /// certified under this backend. Declining costs a cold recompute;
+    /// reusing it would serve a candidate whose uncovered evidence was
+    /// never re-read.
+    fn witness_evidence_is_unenumerable(
+        evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+        signature: &crate::ReadSetSignature,
+    ) -> bool {
+        use crate::resolution_currency::ResolutionEvidenceSource;
+        matches!(evidence, ResolutionEvidenceSource::Uncovered(_))
+            && signature.resolution_evidence_is_unenumerable()
+    }
+
     fn refresh_resolution_evidence(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -2132,16 +2784,32 @@ impl Engine {
         // an ABBA deadlock between two concurrent resolutions, and it
         // presents as the worst possible failure: the request wedges with no
         // CPU burn, no timeout and no panic.
+        // A resolution witness can name none of the path canonicals it
+        // depends on either because its bucket compacted or because its
+        // derived fact is not itself a path observation.
+        // Projecting canonicals from either shape yields an
+        // UNDER-APPROXIMATION: the pass silently heals nothing and a recorded
+        // `Absent` can keep validating for the life of the process. The
+        // pending ledger is the sound bounded superset and drains as it is
+        // read.
+        let unenumerable_resolution = signature.resolution_evidence_is_unenumerable();
         let mut targets: Vec<Arc<str>> = {
             let pending = self.pending_resolution_refresh.read();
             if pending.is_empty() && !reobserve_reused {
                 return false;
             }
-            signature
-                .canonical_ids()
-                .into_iter()
-                .filter(|canonical| pending.contains(canonical.as_ref()))
-                .collect()
+            if unenumerable_resolution {
+                pending
+                    .iter()
+                    .map(|canonical| Arc::from(canonical.as_str()))
+                    .collect()
+            } else {
+                signature
+                    .canonical_ids()
+                    .into_iter()
+                    .filter(|canonical| pending.contains(canonical.as_ref()))
+                    .collect()
+            }
         };
         if reobserve_reused {
             let verified = self.evidence_verified_generation.read();
@@ -2356,7 +3024,11 @@ impl Engine {
     /// policy. While manifests were missing, no manifest baseline was ever
     /// recorded on the resolve path, so an `exports`/`types` rewrite could
     /// never be detected as a change by anything downstream.
-    fn fold_observed_base_evidence(&self, observed: ObservedResolutionValues) -> bool {
+    fn fold_observed_base_evidence(
+        &self,
+        held_session: Option<SessionFingerprint>,
+        observed: ObservedResolutionValues,
+    ) -> bool {
         if observed.is_empty() {
             return false;
         }
@@ -2378,7 +3050,7 @@ impl Engine {
             }
         }
         let mut conflict = false;
-        self.mutate_resolution_world_locked(|world| {
+        self.mutate_resolution_world_locked_with_held_session(held_session, |world| {
             let mut fold = BaselineFold::Unchanged;
             let overlay = self.overlay.read();
             let families = observed
@@ -2598,8 +3270,18 @@ impl Engine {
                     entry.signature.validates(captured.world.as_ref())
                 })
             };
+            // A witness the declared evidence source cannot re-observe is
+            // not a witness this attempt may stand on. See
+            // `witness_evidence_is_unenumerable`.
+            let reusable = reusable.filter(|entry| {
+                !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
+            });
             let result = if let Some(entry) = reusable {
-                transaction.lock().absorb(&entry.signature);
+                // The DAG's reuse seam. The reused candidate's signature
+                // is NOT folded in: the outcome roots on this query's own
+                // decision node, whose version reverse propagation keeps
+                // honest, so a warm answer no longer restates every leaf
+                // the candidate transitively touched.
                 transaction.lock().set_query(entry.query.clone());
                 reused = true;
                 entry.result.clone()
@@ -2701,6 +3383,11 @@ impl Engine {
             }
             let query = transaction.lock().query().cloned();
             let mut transaction = transaction.into_inner();
+            // The decision's COMPLETE direct edge set, taken before
+            // finalisation consumes the transaction. Direct only: the
+            // primitive facts this attempt observed plus the child
+            // decisions it reused, never a child's own edges.
+            let direct_edges = transaction.direct_edges();
             let observed_values = transaction.take_observed_values();
             let mut admission = {
                 crate::probe_scope!(RESOLVE_TXN_FINISH);
@@ -2720,7 +3407,10 @@ impl Engine {
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
                 && {
                     crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
-                    self.fold_observed_base_evidence(observed_values)
+                    self.fold_observed_base_evidence(
+                        Self::held_session_of(&captured),
+                        observed_values,
+                    )
                 }
             {
                 // An observed value conflicted with the recorded baseline:
@@ -2746,18 +3436,68 @@ impl Engine {
             if publish_candidate && !request_local_snapshot {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
                     crate::probe_scope!(RESOLVE_ADMIT);
-                    admit_resolution_candidate(
+                    let evicted = admit_resolution_candidate(
                         self.lazy_resolution_cache
                             .write()
                             .entry(cache_key.clone())
                             .or_default(),
                         LazyResolutionCacheEntry {
                             result: result.clone(),
-                            query,
+                            query: query.clone(),
                             signature,
                         },
                     );
+                    // The candidate, its decision node and the removal of
+                    // every aged-out sibling's decision all land under the
+                    // same fence, so a slot can never hold an answer whose
+                    // decision has no edges recorded, and no decision can
+                    // outlive the candidate that serves it.
+                    for query in evicted {
+                        self.remove_resolution_decision(&captured, query);
+                    }
+                    self.publish_resolution_decision(&captured, query, direct_edges);
                     published = true;
+                }
+            }
+            // **The DAG's consumer-facing product.** A cacheable outcome
+            // whose decision node is in the graph roots on THAT node —
+            // one typed derived fact — instead of on the attempt's own
+            // leaf set. Three properties follow, and all three are
+            // load bearing:
+            //
+            // * BOUNDED. An owner witness is one fact per specifier
+            //   rather than the union of every specifier's transitive
+            //   closure, which is the growth the decision DAG removes.
+            // * WARMTH-INDEPENDENT. Cold and warm answers to the same
+            //   demand produce the identical witness, so a producer's
+            //   identical-recomputation dedupe still recognises itself.
+            // * VALID AGAINST THE CAPTURED VIEW. Publication mints no
+            //   version, so the node reads exactly what this attempt's
+            //   own captured world says — a consumer holding a pinned
+            //   request view can root on it and warm-hit through that
+            //   same view.
+            //
+            // A request-local snapshot publishes no node, so it keeps its
+            // precise observation set: rooting on a node that does not
+            // exist would be a witness nothing can ever invalidate.
+            if !request_local_snapshot
+                && matches!(&admission, SignatureAdmission::Cacheable(_))
+                && (published || reused)
+            {
+                if let Some(query) = query.clone() {
+                    let node = ResolutionFactKey::decision(query);
+                    let version = captured.world.fact_version(&node);
+                    admission =
+                        SignatureAdmission::Cacheable(crate::ReadSetSignature::new(Arc::from([
+                            crate::FactVersionRef::ResolveImports(
+                                crate::ResolveImportsFactRef::Resolution(
+                                    crate::resolution_currency::ResolutionFactRef {
+                                        key: node,
+                                        version,
+                                    },
+                                ),
+                            ),
+                        ])));
                 }
             }
             if !request_local_snapshot && matches!(&admission, SignatureAdmission::Cacheable(_)) {

@@ -42,8 +42,9 @@ fn resolver_coverage_mapped_types_exclude_distributes() {
         .find(|p| p.name == "kind")
         .expect("Source.kind must surface as a prop");
     let kind_source = kind
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("Source.kind must publish a typed source");
     let kind_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,

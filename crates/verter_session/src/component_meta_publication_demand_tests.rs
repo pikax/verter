@@ -427,7 +427,8 @@ fn decl_body_lowering_keeps_member_value_refs_as_carriers() {
         &host,
         "/workspace/src/Comp.vue",
         features
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("features prop must publish a typed source"),
     )
@@ -583,7 +584,8 @@ fn tan_stack_selected_member_still_materialises_when_projected() {
         &host,
         "/workspace/src/Picked.vue",
         picked
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("picked prop must publish a typed source"),
     )
@@ -678,7 +680,8 @@ fn mapped_closed_keys_open_conditional_value_publishes_deferred_carrier() {
         &host,
         "/workspace/src/Chat.vue",
         message
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("message binding must publish a typed source"),
     )
@@ -754,7 +757,8 @@ fn indexed_access_terminal_publishes_shallow() {
     let cfg_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/workspace/src/Themed.vue",
-        cfg.type_source
+        cfg.publication
+            .source_position()
             .present()
             .expect("cfg prop must publish a typed source"),
     )
@@ -781,6 +785,78 @@ const m = defineModel<Theme['header']>();
 <template><div /></template>
 "#;
 
+const SELECTOR_BUTTON_TS: &str = r#"export interface ButtonProps {
+  label: string
+}
+"#;
+
+const SELECTOR_AVATAR_TS: &str = r#"export interface ImportedProps {
+  src: string
+}
+"#;
+
+const SELECTOR_APP_TS: &str = r#"import type { ImportedProps } from './avatar'
+
+export interface AppProps {
+  avatar: ImportedProps & { [k: string]: any }
+}
+"#;
+
+const SELECTOR_GUARD_SFC_VUE: &str = r#"<script setup lang="ts">
+import type { ButtonProps } from './button'
+import type { AppProps } from './app'
+
+interface SelectorProps {
+  actions?: ButtonProps[]
+  app?: AppProps
+  avatar?: AppProps['avatar']
+}
+
+defineProps<SelectorProps>()
+</script>
+<template><div /></template>
+"#;
+
+fn assert_authored_selector_fixture_exercised(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) {
+    let actions = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "actions")
+        .expect("A1-03 macro-compound selector prop must publish");
+    assert!(
+        matches!(
+            actions.publication.result(),
+            verter_type_expr::PublicationResult::Published { reason, .. }
+                if matches!(
+                    reason.as_ref(),
+                    verter_type_expr::PublicationReason::AuthoredSymbolicRepresentation { .. }
+                )
+        ),
+        "A1-03 fixture must select its authored symbolic representation; got {:?}",
+        actions.publication.result()
+    );
+
+    let avatar = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "avatar")
+        .expect("A1-07 imported-indexed selector prop must publish");
+    assert!(
+        matches!(
+            avatar.publication.result(),
+            verter_type_expr::PublicationResult::Published { reason, .. }
+                if matches!(
+                    reason.as_ref(),
+                    verter_type_expr::PublicationReason::AuthoredSymbolicRepresentation { .. }
+                )
+        ),
+        "A1-07 fixture must select its authored indexed-access representation; got {:?}",
+        avatar.publication.result()
+    );
+}
+
 /// A full `get_component_meta` over a fixture exercising the
 /// per-prop projector, the IndexedAccess terminal re-resolve, and
 /// the model-payload projector records ZERO `Published(Expanded)`
@@ -792,13 +868,23 @@ fn publication_routes_never_demand_expanded() {
     let host = build_host(&[
         ("/workspace/src/theme.ts", THEME_TYPES_TS),
         ("/workspace/src/Guarded.vue", GUARD_SFC_VUE),
+        ("/workspace/src/button.ts", SELECTOR_BUTTON_TS),
+        ("/workspace/src/avatar.ts", SELECTOR_AVATAR_TS),
+        ("/workspace/src/app.ts", SELECTOR_APP_TS),
+        ("/workspace/src/SelectorGuard.vue", SELECTOR_GUARD_SFC_VUE),
     ]);
 
     let guard = CaptureToken::start_for_query("publication_demand_guard");
     let resolved = host.get_component_meta_with_resolution("/workspace/src/Guarded.vue");
+    let selector_resolved =
+        host.get_component_meta_with_resolution("/workspace/src/SelectorGuard.vue");
     let snapshot = guard.end();
     let (_, resolution) = resolved.expect("guard SFC must resolve");
     assert!(!resolution.synthesis_should_suppress);
+    let (selector_meta, selector_resolution) =
+        selector_resolved.expect("selector guard SFC must resolve");
+    assert!(!selector_resolution.synthesis_should_suppress);
+    assert_authored_selector_fixture_exercised(&selector_meta);
 
     let expanded = published_expanded_dispatches(&snapshot.dispatch_log);
     assert!(
@@ -822,11 +908,18 @@ fn output_entry_routes_never_demand_expanded() {
     let host = build_host(&[
         ("/workspace/src/theme.ts", THEME_TYPES_TS),
         ("/workspace/src/Guarded.vue", GUARD_SFC_VUE),
+        ("/workspace/src/button.ts", SELECTOR_BUTTON_TS),
+        ("/workspace/src/avatar.ts", SELECTOR_AVATAR_TS),
+        ("/workspace/src/app.ts", SELECTOR_APP_TS),
+        ("/workspace/src/SelectorGuard.vue", SELECTOR_GUARD_SFC_VUE),
     ]);
 
     let guard = CaptureToken::start_for_query("output_publication_demand_guard");
     let plain = host.get_component_meta_output("/workspace/src/Guarded.vue");
     let audited = host.get_component_meta_output_with_resolution("/workspace/src/Guarded.vue");
+    let selector_plain = host.get_component_meta_output("/workspace/src/SelectorGuard.vue");
+    let selector_audited =
+        host.get_component_meta_output_with_resolution("/workspace/src/SelectorGuard.vue");
     let snapshot = guard.end();
     assert!(
         plain.expect("plain output entry ok").is_some(),
@@ -835,6 +928,19 @@ fn output_entry_routes_never_demand_expanded() {
     assert!(
         audited.expect("audited output entry ok").0.is_some(),
         "guard SFC must resolve through the audited output entry"
+    );
+    assert!(
+        selector_plain
+            .expect("plain selector output entry ok")
+            .is_some(),
+        "selector guard SFC must resolve through the plain output entry"
+    );
+    assert!(
+        selector_audited
+            .expect("audited selector output entry ok")
+            .0
+            .is_some(),
+        "selector guard SFC must resolve through the audited output entry"
     );
 
     let expanded = published_expanded_dispatches(&snapshot.dispatch_log);
@@ -1325,7 +1431,8 @@ defineProps<{ user: Extended }>();
     let user_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/workspace/src/IE.vue",
-        user.type_source
+        user.publication
+            .source_position()
             .present()
             .expect("`user` prop must publish a typed source"),
     )

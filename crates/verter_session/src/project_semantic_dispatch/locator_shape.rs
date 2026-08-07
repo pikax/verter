@@ -76,7 +76,8 @@ use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
     MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
     QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SurfaceMember, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    SurfaceEntry, SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl,
+    ValueRootKey,
 };
 
 /// The anchor declaration's prepared source, held so its
@@ -934,14 +935,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     );
                 }
                 let declaration_origin = scope.canonical_file();
-                let mut members: Vec<SurfaceMember> = Vec::new();
-                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
-                let mut index_signatures: Vec<IndexSignature> = Vec::new();
+                let mut entries = Vec::with_capacity(obj.properties.len());
                 for member in &obj.properties {
                     match member {
                         ObjectMember::Property(prop) => {
-                            members.push(SurfaceMember {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
                                 key: prop.key.clone().map(
                                     |computed| self.lower_locator_shape_node(&computed, ctx),
                                     |identity| identity,
@@ -972,7 +970,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // neither contains nor converts to one.
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
                                 merge_role: MergeRoleStamp::NEUTRAL,
-                            });
+                            }));
                         }
                         ObjectMember::Method(method) => {
                             let function_expr =
@@ -982,7 +980,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 &method.function,
                             );
-                            members.push(SurfaceMember {
+                            entries.push(SurfaceEntry::Member(SurfaceMember {
                                 key: method.key.clone().map(
                                     |computed| self.lower_locator_shape_node(&computed, ctx),
                                     |identity| identity,
@@ -1000,7 +998,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 declaration_origin: declaration_origin.clone(),
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
                                 merge_role: MergeRoleStamp::NEUTRAL,
-                            });
+                            }));
                         }
                         ObjectMember::CallSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
@@ -1009,8 +1007,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 func,
                             );
-                            call_signatures
-                                .push(self.lower_locator_shape_node(&function_expr, ctx));
+                            entries.push(SurfaceEntry::CallSignature(
+                                self.lower_locator_shape_node(&function_expr, ctx),
+                            ));
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
@@ -1019,17 +1018,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 func,
                             );
-                            construct_signatures
-                                .push(self.lower_locator_shape_node(&function_expr, ctx));
+                            entries.push(SurfaceEntry::ConstructSignature(
+                                self.lower_locator_shape_node(&function_expr, ctx),
+                            ));
                         }
                         ObjectMember::IndexSignature(sig) => {
-                            index_signatures.push(IndexSignature {
+                            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                                 key_type: self.lower_locator_shape_node(&sig.key_type, ctx),
                                 value_type: self.lower_locator_shape_node(&sig.value_type, ctx),
                                 readonly: sig.readonly,
                                 spans: sig.spans,
                                 declaration_origin: declaration_origin.clone(),
-                            })
+                            }))
                         }
                         // Unreachable by construction: the spread-bearing
                         // check above fails the whole object closed before
@@ -1037,15 +1037,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ObjectMember::Spread(_) => {}
                     }
                 }
-                let has_index_signature = !index_signatures.is_empty();
-                let view = crate::semantic_query::surface_view! {
-                    members: Arc::from(members.into_boxed_slice()),
-                    call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                    construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                    index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature,
-                };
+                let has_index_signature = entries
+                    .iter()
+                    .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
+                let view = SurfaceView::from_entries(entries, None, has_index_signature);
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
         }

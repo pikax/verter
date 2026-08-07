@@ -51,8 +51,9 @@ fn prop_type(
         .iter()
         .find(|p| p.name == name)
         .unwrap_or_else(|| panic!("missing prop `{name}`"))
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .unwrap_or_else(|| panic!("prop `{name}` must publish a typed source"));
     verter_session::test_only::semantic_source_probe::demand_type_expr(host, owner, source)
         .unwrap_or_else(|| panic!("prop `{name}`'s published source must demand-materialize"))
@@ -377,8 +378,8 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
         .iter()
         .find(|f| f.name == "flag")
         .expect("cold evaluated props must include `flag`")
-        .r#type
-        .present()
+        .authority
+        .source()
         .expect("present source");
     let pre_flag = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,
@@ -411,8 +412,8 @@ fn owner_self_edit_to_local_prop_type_recomputes_evaluate_types() {
         .iter()
         .find(|f| f.name == "flag")
         .expect("post-edit evaluated props must include `flag`")
-        .r#type
-        .present()
+        .authority
+        .source()
         .expect("present source");
     let post_flag = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,

@@ -357,6 +357,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -461,6 +462,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
@@ -591,6 +593,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
@@ -681,6 +684,7 @@ defineEmits<Emits>()
             resolved_canonical_id: Some("/dep.ts".to_string()),
         }],
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
@@ -754,7 +758,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
     };
     let snapshot = TestSnapshot {
         imports: Vec::new(),
-        macros: vec![AnalyzedMacro {
+        macros: vec![AnalyzedMacro { edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
@@ -821,6 +825,7 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineEmits,
             is_type_based: true,
@@ -889,6 +894,7 @@ defineSlots<CalendarSlots>()
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineSlots,
             is_type_based: true,
@@ -957,6 +963,7 @@ type LocalItem = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1080,6 +1087,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1160,6 +1168,7 @@ type Props = Pick<ImportedBase, 'href'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1263,6 +1272,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1347,6 +1357,7 @@ type Props = {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1426,6 +1437,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1506,6 +1518,7 @@ type Props = Omit<ImportedBase, 'hidden'>
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1574,6 +1587,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1658,6 +1672,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,
@@ -1730,6 +1745,7 @@ interface Helper {
     let snapshot = TestSnapshot {
         imports: Vec::new(),
         macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
             owner: TopLevelOwnerId::instance(0),
             kind: AnalyzedMacroKind::DefineProps,
             is_type_based: true,

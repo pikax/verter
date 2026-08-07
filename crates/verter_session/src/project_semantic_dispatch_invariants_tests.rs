@@ -952,7 +952,7 @@ fn host_for_relation_tests() -> VerterHost {
 }
 
 fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
-    crate::semantic_query::surface_view! {
+    crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),

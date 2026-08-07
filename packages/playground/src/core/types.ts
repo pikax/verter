@@ -195,6 +195,8 @@ export interface CompiledFile {
 export class File {
   filename: string;
   code: string;
+  /** Registered, revision-current carrier geometry supplied by the WASM host. */
+  structure: OrderedSfcStructure | null = null;
   compiled: CompiledFile = {
     js: "",
     css: "",
@@ -238,12 +240,70 @@ export class File {
   /** Whether this file contains TypeScript */
   get isTS(): boolean {
     if (this.filename.endsWith(".ts") || this.filename.endsWith(".tsx")) return true;
-    // A framework carrier (e.g. .vue / .svelte) is TS when its <script> opts in.
+    // A framework carrier (e.g. .vue / .svelte) is TS when its STAMPED
+    // structure projection records a TypeScript script dialect. The dialect is
+    // never re-derived from raw source, so a decoy `<script lang="ts">`
+    // literal inside the code cannot flip the classification; without a
+    // stamped structure the carrier is not (yet) TypeScript — fail closed.
     if (isCarrierFilename(this.filename)) {
-      return /<script[^>]*\blang\s*=\s*["'](ts|tsx)["']/.test(this.code);
+      return (
+        this.structure?.blocks.some(
+          (block) =>
+            block.kind === "section" &&
+            block.section.role.kind === "script" &&
+            (block.section.role.dialect === "TypeScript" || block.section.role.dialect === "Tsx"),
+        ) ?? false
+      );
     }
     return false;
   }
+}
+
+export interface StructureRange {
+  sourceSpaceToken: string;
+  start: number;
+  end: number;
+}
+
+export type StructureBlock =
+  | {
+      kind: "section";
+      section: {
+        blockToken: string;
+        role:
+          | { kind: "templateHost" }
+          | { kind: "script"; role: string; dialect: string }
+          | { kind: "style"; dialect: string; scoped: boolean; module: string }
+          | { kind: "custom"; normalizedName: string };
+        openingRange: StructureRange;
+        contentRange: StructureRange;
+        closingRange?: StructureRange;
+        fullRange: StructureRange;
+        attributeInsertionAnchor: StructureRange;
+      };
+      markupRootTokens: string[];
+    }
+  | { kind: "markupRoot"; blockToken: string; markupRootToken: string };
+
+export interface OrderedSfcStructure {
+  schemaVersion: 1;
+  artifactToken: string;
+  blocks: StructureBlock[];
+  markupNodes: Array<{
+    nodeToken: string;
+    parentNodeToken?: string;
+    childNodeTokens: string[];
+    syntax:
+      | {
+          kind: "element";
+          authoredName: { spelling: string; normalized: string; range: StructureRange };
+          openingRange: StructureRange;
+          contentRange: StructureRange;
+          closingRange?: StructureRange;
+          fullRange: StructureRange;
+        }
+      | { kind: string; [key: string]: unknown };
+  }>;
 }
 
 export type OutputMode =
@@ -387,6 +447,13 @@ export interface AnalysisStyleBlock {
   scoped: boolean;
   isModule: boolean;
   moduleName: string | null;
+  /**
+   * Opaque sealed block token binding this analysis to its structure block
+   * (same vocabulary as `StructureSection.blockToken`). Absent when the
+   * sealed identity could not be revalidated — consumers treat absence as
+   * typed unavailable, never an ordinal fallback.
+   */
+  blockToken?: string;
   vBinds: AnalysisVBind[];
   specialPseudos: AnalysisSpecialPseudo[];
   css: AnalysisCss | null;
@@ -675,8 +742,41 @@ export interface AnalysisIfChain {
   conditions: [string, number, number][];
 }
 
+export type AnalysisPropCallableRole =
+  | {
+      kind: "svelteSnippet";
+      symbol: {
+        canonicalId: string;
+        owner: {
+          kind: "Module" | "Instance" | "Frontmatter";
+          ordinal: number;
+        };
+        symbol: string;
+      };
+      exactness: "exactConcrete" | "exactSymbolic" | "incomplete";
+      provenance:
+        | "semanticEvaluator"
+        | "sessionProjector"
+        | "frameworkSurface"
+        | "fallthroughInheritance"
+        | "schema";
+    }
+  | { kind: "other" }
+  | {
+      kind: "unresolved";
+      reason:
+        | "analysisUnavailable"
+        | "missingDependency"
+        | "cycle"
+        | "budgetExceeded"
+        | "workLimitExceeded"
+        | "unsupported"
+        | "fault";
+    };
+
 export interface AnalysisPropDefinition {
   name: string;
+  callableRole: AnalysisPropCallableRole;
   typeAnnotation?: string | null;
   hasDefault: boolean;
   isRequired: boolean;

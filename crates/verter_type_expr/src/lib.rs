@@ -75,8 +75,28 @@ pub type TypePropertyKey = PropertyKey<ValueDeclIdentityPart>;
 /// Authored type-IR key. Computed syntax owns its typed expression child.
 pub type TypeAuthoredPropertyKey = AuthoredPropertyKey<TypeExpr, ValueDeclIdentityPart>;
 
+/// Closed feature-role facts derived from resolved symbol identity.
+pub mod feature_roles;
+pub use feature_roles::{
+    ClosedLiteralDomain, ClosedLiteralDomainUnresolvedReason, PropCallableRole,
+    PropCallableRoleUnresolvedReason, ReactiveWrapperImportProvenance, ReactiveWrapperRole,
+    ReactiveWrapperUnresolvedReason, ResolvedSymbolIdentity,
+};
+
 /// Generated static-intrinsic catalog substrate — the interned-id + member-fact
 /// replacement for raw-`TypeExpr` HTML intrinsic member shapes.
+/// Resolved authority, locator-backed authored evidence, and pure publication
+/// selection for component-meta type lanes.
+pub mod publication;
+pub use publication::{
+    select_type_publication, AuthoredProvenance, AuthoredSourceMint, AuthoredTypeEvidence,
+    AuthoredTypeSource, PublicationPolicy, PublicationPolicyReason, PublicationProvenance,
+    PublicationReason, PublicationResult, ResolutionDiagnostic, ResolutionDiagnosticKind,
+    ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority, ResolvedTypeOutcome,
+    SemanticAuthority, SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof,
+    TypePublication, TypedResolutionFailure,
+};
+
 pub mod intrinsics;
 
 /// Compile-time marker witnesses + [P2] discrimination fixtures for the closed

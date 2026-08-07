@@ -682,7 +682,7 @@ impl ImportedRegistryDb {
         >,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_admit_in_scope(key, ctx, probe, || compute(prepared))
@@ -979,7 +979,7 @@ impl DeclarationLookupDb {
         F: FnOnce(P) -> ComputedEntry<ResolvedTypeDeclaration>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1136,7 +1136,7 @@ impl ResolvabilityDb {
         F: FnOnce(P) -> ComputedEntry<bool>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1306,7 +1306,7 @@ impl OwnerCollectionDb {
         F: FnOnce(P) -> ComputedEntry<Option<verter_type_expr::locators::AuthoredBodyLocator>>,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 let prepared = prepare();
                 self.get_or_compute_in_scope(key, ctx, probe, || compute(prepared))
@@ -1877,7 +1877,7 @@ impl ShapeCacheDb {
         F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't>) -> R,
     {
         crate::fact_signature_helpers::with_cacheability_scope(
-            ctx.host_for_fact_tracer_install(),
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 f(ShapeCacheOwnerScope {
                     db: self,
@@ -2810,7 +2810,7 @@ impl crate::invalidation_domain::InvalidationByCanonical for MaterializeStructur
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════════════
 // AppConfigNoOverrideProofDb production producer
 // ═══════════════════════════════════════════════════════════════════════════
 /// Production producer for [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
@@ -2910,8 +2910,10 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise) =
-        crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
+    let (no_override, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        cold_body,
+    );
     host.provenance
         .app_config_proof_fact_tracer_installs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2945,5 +2947,9 @@ pub(crate) fn app_config_no_override_proof_get_or_compute(
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         }
+        // Refuses like an overflow and is counted as neither: the
+        // overflow counter is a SIZE observable and a stability refusal
+        // must not inflate it.
+        crate::resolver_core::FactReadSetFinalise::MutationUnstable => None,
     }
 }

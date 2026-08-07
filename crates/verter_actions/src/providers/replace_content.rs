@@ -131,6 +131,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = ReplaceContent.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -169,6 +170,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = ReplaceContent.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -201,6 +203,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = ReplaceContent.fixes_for_diagnostic(&diag, &ctx);
         assert!(
@@ -232,6 +235,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         assert!(ReplaceContent.fixes_for_diagnostic(&diag, &ctx).is_empty());
     }

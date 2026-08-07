@@ -1,56 +1,10 @@
-//! External source merging and main module assembly.
-
-use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
+//! Main module assembly.
 
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::RuntimeCompileOutput;
 
 use crate::id::render_ids;
-use crate::types::{CompileProfile, FileMeta, HmrStrategy, SrcBlockInfo, VirtualNodeKind};
-
-pub(crate) fn merge_external_sources(
-    source: &str,
-    src_blocks: &[SrcBlockInfo],
-    external_sources: &FxHashMap<String, Arc<str>>,
-) -> String {
-    let mut merged = source.to_string();
-    // Sort by descending tag_open_start so splicing from the end doesn't
-    // shift earlier offsets. Use sorted indices to avoid cloning blocks.
-    let mut indices: Vec<usize> = (0..src_blocks.len()).collect();
-    indices.sort_by(|&a, &b| {
-        src_blocks[b]
-            .tag_open_start
-            .cmp(&src_blocks[a].tag_open_start)
-    });
-
-    for idx in indices {
-        let block = &src_blocks[idx];
-        let ext = external_sources
-            .get(&block.resolved_canonical_id)
-            .map(|s| s.as_ref())
-            .unwrap_or("");
-
-        if let Some(close_start) = block.tag_close_start {
-            merged.replace_range(block.tag_open_end as usize..close_start as usize, ext);
-        } else {
-            let open_raw = &merged[block.tag_open_start as usize..block.tag_open_end as usize];
-            let open_fixed = if let Some(stripped) = open_raw.strip_suffix("/>") {
-                format!("{}>", stripped)
-            } else {
-                open_raw.to_string()
-            };
-            let replacement = format!("{}{} </{}>", open_fixed, ext, block.tag_name);
-            merged.replace_range(
-                block.tag_open_start as usize..block.tag_open_end as usize,
-                &replacement,
-            );
-        }
-    }
-
-    merged
-}
+use crate::types::{CompileProfile, FileMeta, HmrStrategy, VirtualNodeKind};
 
 /// Assemble the Vue `_sfc_main` runtime module from the framework-neutral
 /// [`RuntimeCompileOutput`] the Vue carrier produced.
@@ -215,104 +169,42 @@ pub fn assemble_vue_main_module(
 mod tests {
     use super::*;
 
-    #[test]
-    fn merge_replaces_content_between_open_close() {
-        let source = "<template>old content</template>";
-        let blocks = vec![SrcBlockInfo {
-            tag_name: "template".to_string(),
-            resolved_canonical_id: "tpl.html".to_string(),
-            tag_open_start: 0,
-            tag_open_end: 10,
-            tag_close_start: Some(21),
-        }];
-        let mut ext = FxHashMap::default();
-        ext.insert("tpl.html".to_string(), Arc::<str>::from("<div>new</div>"));
-        let result = merge_external_sources(source, &blocks, &ext);
-        assert_eq!(result, "<template><div>new</div></template>");
-    }
-
-    #[test]
-    fn merge_self_closing_tag_rewrite() {
-        let source = "<template src=\"./t.html\"/>";
-        let blocks = vec![SrcBlockInfo {
-            tag_name: "template".to_string(),
-            resolved_canonical_id: "t.html".to_string(),
-            tag_open_start: 0,
-            tag_open_end: 26,
-            tag_close_start: None,
-        }];
-        let mut ext = FxHashMap::default();
-        ext.insert("t.html".to_string(), Arc::<str>::from("<p>hi</p>"));
-        let result = merge_external_sources(source, &blocks, &ext);
-        assert!(result.contains("<p>hi</p>"));
-        assert!(result.contains("</template>"));
-    }
-
-    #[test]
-    fn merge_multiple_blocks_correct_splice_order() {
-        // Two blocks: a style at offset 50 and a template at offset 0
-        // After reverse-sort, style is spliced first (higher offset), then template
-        let source = "<template>tmpl</template><style>css</style>";
-        let blocks = vec![
-            SrcBlockInfo {
-                tag_name: "template".to_string(),
-                resolved_canonical_id: "t.html".to_string(),
-                tag_open_start: 0,
-                tag_open_end: 10,
-                tag_close_start: Some(14),
-            },
-            SrcBlockInfo {
-                tag_name: "style".to_string(),
-                resolved_canonical_id: "s.css".to_string(),
-                tag_open_start: 25,
-                tag_open_end: 32,
-                tag_close_start: Some(35),
-            },
-        ];
-        let mut ext = FxHashMap::default();
-        ext.insert("t.html".to_string(), Arc::<str>::from("<div>A</div>"));
-        ext.insert("s.css".to_string(), Arc::<str>::from(".a{color:red}"));
-        let result = merge_external_sources(source, &blocks, &ext);
-        assert!(result.contains("<div>A</div>"));
-        assert!(result.contains(".a{color:red}"));
-    }
-
-    #[test]
-    fn merge_missing_source_defaults_empty() {
-        let source = "<template>old</template>";
-        let blocks = vec![SrcBlockInfo {
-            tag_name: "template".to_string(),
-            resolved_canonical_id: "missing.html".to_string(),
-            tag_open_start: 0,
-            tag_open_end: 10,
-            tag_close_start: Some(13),
-        }];
-        let ext = FxHashMap::default();
-        let result = merge_external_sources(source, &blocks, &ext);
-        assert_eq!(result, "<template></template>");
-    }
-
     // ═══════════════════════════════════════════════════════════
     // assemble_main_module tests
     // ═══════════════════════════════════════════════════════════
 
     use verter_compiler::framework_common::{
-        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeScriptBlock, RuntimeStyleBlock,
-        RuntimeTemplateBlock,
+        RuntimeCompileOutput, RuntimeCustomBlock, RuntimeOutputDescriptor, RuntimeScriptBlock,
+        RuntimeStyleBlock, RuntimeTemplateBlock, SourceMapFidelity,
     };
 
+    fn test_output_descriptor(code: &str) -> RuntimeOutputDescriptor {
+        RuntimeOutputDescriptor::generated(
+            code,
+            None,
+            &[("test:space", "test:artifact")],
+            SourceMapFidelity::Approximate,
+        )
+    }
+
     fn basic_compiled_result() -> RuntimeCompileOutput {
+        let script_code = "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n";
+        let template_code = "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}";
         RuntimeCompileOutput {
             script: Some(RuntimeScriptBlock {
-                code: "const __sfc__ = _defineComponent({\n  setup(__props) {\n    const n = 1;\n\nreturn { n };\n\n}});\nexport default __sfc__;\n".to_string(),
+                code: script_code.to_string(),
                 source_map: String::new(),
                 setup: true,
+                output_descriptor: test_output_descriptor(script_code),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
             }),
             template: Some(RuntimeTemplateBlock {
-                code: "function render(_ctx, _cache, $props, $setup) {\n  return $setup.n\n}".to_string(),
+                code: template_code.to_string(),
                 source_map: String::new(),
                 imports: vec!["_openBlock".to_string(), "_createElementBlock".to_string()],
                 ssr_imports: vec![],
+                output_descriptor: test_output_descriptor(template_code),
             }),
             ..RuntimeCompileOutput::default()
         }
@@ -533,6 +425,7 @@ mod tests {
                     lang: None,
                     scope_hash: None,
                     has_global: false,
+                    output_descriptor: test_output_descriptor(".a{}"),
                 },
                 RuntimeStyleBlock {
                     code: ".b{}".to_string(),
@@ -540,6 +433,7 @@ mod tests {
                     lang: Some("scss".to_string()),
                     scope_hash: None,
                     has_global: false,
+                    output_descriptor: test_output_descriptor(".b{}"),
                 },
             ],
             ..RuntimeCompileOutput::default()
@@ -611,9 +505,7 @@ mod tests {
     fn assemble_main_module_template_only_sfc() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         // Drive the Vue CARRIER `compile_bundle` (the registry-routed producer)
         // so this end-to-end assembly test exercises the neutral bundle path.
@@ -623,12 +515,7 @@ mod tests {
         // Route the carrier parse through the counted chokepoint (the dedup
         // rail authority), not a raw `compiler.parse`.
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -684,20 +571,13 @@ mod tests {
     fn assemble_main_module_inline_topology() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
         let alloc = Allocator::new();
         let compiler = VueCarrierCompiler::default();
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -773,9 +653,7 @@ mod tests {
     fn assemble_passes_compiler_returned_bindings_verbatim() {
         use oxc_allocator::Allocator;
         use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-        use verter_compiler::framework_common::{
-            CarrierCompiler, ParseOptions, RuntimeCompileOptions,
-        };
+        use verter_compiler::framework_common::{CarrierCompiler, RuntimeCompileOptions};
 
         // UnusedSetupImport must be elided by the COMPILER (not by any
         // assembly-level text filtering); `msg` is template-used and stays.
@@ -783,12 +661,7 @@ mod tests {
         let alloc = Allocator::new();
         let compiler = VueCarrierCompiler::default();
         let provenance = crate::types::MetaProvenance::default();
-        let artifact = crate::parse::parse_carrier_counted(
-            &provenance,
-            &compiler,
-            source,
-            &ParseOptions::default(),
-        );
+        let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
         let result = compiler
             .compile_bundle(
                 source,
@@ -825,12 +698,11 @@ mod tests {
     /// @ai-generated - Multi-root template must use Fragment wrapping
     #[test]
     fn compile_multi_root_template_uses_fragment() {
-        use oxc_allocator::Allocator;
         use verter_compiler::compile::CodegenOptions;
-        use verter_compiler::compile::{compile as compile_sfc, VerterCompileOptions};
+        use verter_compiler::compile::VerterCompileOptions;
+        use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 
         let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
-        let alloc = Allocator::new();
         let opts = CodegenOptions {
             inline: Some(false),
             ..CodegenOptions::default()
@@ -839,12 +711,11 @@ mod tests {
             force_js: true,
             ..Default::default()
         };
-        let result = compile_sfc(
-            source,
+        let result = StandaloneCompiler.compile_source(
+            &StandaloneSourceBytes::copied_from(source),
             &opts,
             &vopts,
             &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
-            &alloc,
         );
 
         let tpl = result.template.expect("should have template block");

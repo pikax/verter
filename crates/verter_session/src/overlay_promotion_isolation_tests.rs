@@ -1,6 +1,6 @@
 //! Discriminator: the routed-shallow prepared-decl-bundle
 //! materialiser MUST promote
-//! `(whole_hash, route_hash, import_route_hash)` triples into
+//! the content hash and `Route` derived fact into
 //! the per-request [`CanonicalCompletionOverlay`] before publishing
 //! the bundle.
 //!
@@ -12,7 +12,7 @@
 //! ONCE at request entry; shallow surfaces published after that
 //! lookup are invisible to it). Every subsequent warm-read validation
 //! of the bundle's stored
-//! `(FileWholeHash, ImportRoute)` facts then routes through the base
+//! `(FileWholeHash, Route)` facts then routes through the base
 //! view's untracked-canonical reject and triggers a cold rebuild
 //! every probe — the leak overlay promotion closes.
 //!
@@ -23,7 +23,7 @@
 //! `prepared_decl_bundle_with_store_view` call against a hermetic
 //! host with a `.d.ts` declaration-file dependency, then assert the
 //! request-scoped overlay carries the canonical's
-//! `(whole_hash, route_hash, import_route_hash)` triple via the
+//! content hash plus `Route` fact via the
 //! direct `lookup_*` test accessors.
 //!
 //! Pre-fix the
@@ -85,9 +85,9 @@ fn routed_shallow_bundle_materialisation_populates_overlay_whole_hash() {
     // Drive the prepared-decl-bundle path on the `.d.ts` declaration
     // canonical. The first call cold-materialises via the routed-
     // shallow producer; the producer promotes the canonical's
-    // `(whole_hash, route_hash, import_route_hash)` triple into the
+    // content hash plus `Route` fact into the
     // overlay before publishing the bundle.
-    let bundle = host.prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts");
+    let bundle = host.prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts");
     assert!(
         bundle.is_some(),
         "the materialiser must produce a bundle for an existing `.d.ts` file"
@@ -107,7 +107,7 @@ fn routed_shallow_bundle_materialisation_populates_overlay_whole_hash() {
          what closes the perpetual cold-rebuild loop: without it, the \
          base view's snapshot misses the just-published canonical and \
          every warm validation rejects the bundle's stored `(FileWholeHash, \
-         ImportRoute)` facts."
+         Route)` facts."
     );
 
     // The overlay's `whole_hash` for the canonical MUST match the
@@ -143,7 +143,7 @@ fn routed_shallow_bundle_materialisation_view_lookup_observes_overlay_whole_hash
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts")
+        .prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts")
         .expect("materialiser must produce a bundle");
 
     let host_whole_hash = host
@@ -164,21 +164,16 @@ fn routed_shallow_bundle_materialisation_view_lookup_observes_overlay_whole_hash
 
 #[test]
 fn routed_shallow_bundle_materialisation_optional_import_route_promotion() {
-    // The routed-shallow producer pushes an `ImportRoute`
-    // derived-fact entry into the bundle's `fact_dep_signature`
-    // only when `host.owner_import_route_witness` returns
-    // `Some`. For a leaf `.d.ts` with no imports this is `None`, in
-    // which case the promotion correctly skips the `ImportRoute`
-    // arm. The discriminating contract is therefore conditional:
-    // *when* the host carries an import-route hash for the
-    // canonical, the overlay MUST carry the same hash.
+    // The legacy test name is retained for inventory stability. The live
+    // contract promotes the `Route` fact; path-precise import validity is
+    // carried separately by the request's resolution witness.
     let host = build_host_with_dts();
     let base = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let view = RequestStoreView::new(&base, Arc::clone(&overlay));
 
     let _bundle = host
-        .prepared_decl_bundle_with_store_view(&view, "/typedefs.d.ts")
+        .prepared_decl_bundle_with_store_view(&view, None, "/typedefs.d.ts")
         .expect("materialiser must produce a bundle");
 
     let host_route_hash = host.current_derived_fact_hash("/typedefs.d.ts", DerivedFactKind::Route);

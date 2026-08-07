@@ -32,7 +32,7 @@ use super::ProjectSemanticDispatch;
 use crate::request_context::RecursiveSubstituteIdentity;
 use crate::semantic_query::{
     FunctionParam, IndexKey, IndexSignature, MapperKey, QueryError, SemanticNodeData,
-    SemanticNodeId, SurfaceMember, TypeParamDecl,
+    SemanticNodeId, SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -422,19 +422,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
+                let mut members = new_members.into_iter();
+                let mut calls = new_call_signatures.into_iter();
+                let mut constructs = new_construct_signatures.into_iter();
+                let mut indexes = new_index_signatures.into_iter();
+                let entries = surface
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(_) => {
+                            crate::semantic_query::SurfaceEntry::Member(
+                                members.next().expect("derived member index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::CallSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::CallSignature(
+                                calls.next().expect("derived call index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::ConstructSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::ConstructSignature(
+                                constructs
+                                    .next()
+                                    .expect("derived construct index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::IndexSignature(
+                                indexes.next().expect("derived index matches stream"),
+                            )
+                        }
+                    })
+                    .collect();
                 (
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::Object(crate::semantic_query::surface_view! {
-                            members: Arc::from(new_members.into_boxed_slice()),
-                            call_signatures: Arc::from(new_call_signatures.into_boxed_slice()),
-                            construct_signatures: Arc::from(
-                                new_construct_signatures.into_boxed_slice(),
-                            ),
-                            index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
-                            keyspace: new_keyspace,
-                            has_index_signature: surface.has_known_index_signature(),
-                        }),
+                        SemanticNodeData::Object(SurfaceView::from_entries(
+                            entries,
+                            new_keyspace,
+                            surface.has_known_index_signature(),
+                        )),
                     ),
                     true,
                 )

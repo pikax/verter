@@ -2,7 +2,7 @@ import * as monaco from "monaco-editor-core";
 
 /**
  * Vue SFC Monarch language definition
- * Auto-generated from extensions/vscode/syntaxes/vue.tmLanguage.json
+ * Auto-generated from packages/vue-vscode/syntaxes/vue.tmLanguage.json
  * Run: pnpm run generate:vue-language
  */
 const vueLanguage: monaco.languages.IMonarchLanguage = {

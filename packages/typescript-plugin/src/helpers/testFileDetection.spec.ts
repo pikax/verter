@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearTestFileDetectionCache, isTestFileWithContext } from "./testFileDetection";
 
 interface TestFileSystem {
@@ -26,6 +26,17 @@ function createHost(files: TestFileSystem) {
 
 beforeEach(() => {
   clearTestFileDetectionCache();
+  // Freeze the clock: config discovery carries a small wall-clock budget (a
+  // production resilience fuse for slow disk walks). These tests pin the
+  // GLOB-MATCHING semantics over an in-memory host, so a loaded parallel
+  // test run must not be able to expire the budget mid-discovery and turn a
+  // semantic assertion into a scheduler lottery.
+  const frozenNow = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(frozenNow);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("isTestFileWithContext", () => {

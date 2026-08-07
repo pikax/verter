@@ -43,7 +43,7 @@ fn overflow_at_install_refuses_admission_and_advances_telemetry() {
     let overflow_after = read_signature_overflow_at_install(&host);
 
     match finalise {
-        FactReadSetFinalise::Overflow => {
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
             // expected
         }
         FactReadSetFinalise::Ok(sig) => {

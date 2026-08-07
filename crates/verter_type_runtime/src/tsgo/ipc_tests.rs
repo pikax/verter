@@ -1,5 +1,69 @@
 use super::*;
 
+// ---------------------------------------------------------------------------
+// Plaintext display/documentation split — the tsgo producer-side one-shot
+// normalization into the neutral protocol (shape pinned against
+// `build_client_capabilities()` advertising no hover member ⇒ plaintext).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plaintext_hover_splits_display_from_documentation_at_first_blank_line() {
+    let (display, docs) =
+        split_plaintext_hover_display("const count: Ref<number>\n\nA counter.\n\nMore docs.");
+    assert_eq!(display, Some("const count: Ref<number>"));
+    assert_eq!(docs.as_deref(), Some("A counter.\n\nMore docs."));
+}
+
+#[test]
+fn plaintext_hover_without_blank_line_is_all_display() {
+    let (display, docs) = split_plaintext_hover_display("const count: Ref<number>");
+    assert_eq!(display, Some("const count: Ref<number>"));
+    assert_eq!(docs, None, "no fabricated documentation");
+}
+
+#[test]
+fn fenced_hover_yields_no_display_signature() {
+    // The live driver is plaintext-only (no hover member advertised ⇒ no
+    // contentFormat ⇒ plaintext). A FENCED blob — the dormant markdown-driver
+    // shape — must fail closed rather than mint a fence-contaminated
+    // signature.
+    let (display, docs) =
+        split_plaintext_hover_display("```typescript\nconst x: string\n```\n\ndocs");
+    assert_eq!(display, None, "a fenced blob mints no display signature");
+    assert_eq!(docs, None);
+}
+
+#[test]
+fn empty_plaintext_hover_yields_no_display_signature() {
+    let (display, docs) = split_plaintext_hover_display("   \n\n   ");
+    assert_eq!(display, None);
+    assert_eq!(docs, None);
+}
+
+// ---------------------------------------------------------------------------
+// LSP wire position → byte offset (hover range population, fail-closed)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lsp_wire_pos_maps_to_byte_offset() {
+    let content = "const x = 1;\nconst y = 2;\n";
+    let pos = serde_json::json!({ "line": 1, "character": 6 });
+    assert_eq!(
+        lsp_wire_pos_to_byte_offset(content, Some(&pos)),
+        Some(13 + 6)
+    );
+}
+
+#[test]
+fn lsp_wire_pos_fails_closed_on_out_of_range_or_malformed() {
+    let content = "const x = 1;\n";
+    let past_eof = serde_json::json!({ "line": 9, "character": 0 });
+    assert_eq!(lsp_wire_pos_to_byte_offset(content, Some(&past_eof)), None);
+    let malformed = serde_json::json!({ "line": "zero" });
+    assert_eq!(lsp_wire_pos_to_byte_offset(content, Some(&malformed)), None);
+    assert_eq!(lsp_wire_pos_to_byte_offset(content, None), None);
+}
+
 #[test]
 fn process_death_closes_pending_registration_atomically() {
     let pending = PendingRequests::default();

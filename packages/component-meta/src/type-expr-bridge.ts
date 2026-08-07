@@ -2070,14 +2070,12 @@ function mappedIndexMatchesParameter(expr: NativeTypeExprLike, parameterName: st
 
 function simplifyIntersectionDescriptor(types: TypeDescriptor[]): TypeDescriptor {
   const flattened = types.flatMap((type) => (type.kind === "intersection" ? type.types : [type]));
-  const filtered = flattened.filter((type) => !isEmptyObjectDescriptor(type));
-  if (filtered.length === 0) {
-    return object([]);
+  if (flattened.every((type) => type.kind === "object")) {
+    const objects = flattened as Array<Extract<TypeDescriptor, { kind: "object" }>>;
+    const nonEmpty = objects.filter((type) => !isEmptyObjectDescriptor(type));
+    return nonEmpty.length === 0 ? object([]) : mergeObjectDescriptors(nonEmpty);
   }
-  if (filtered.every((type) => type.kind === "object")) {
-    return mergeObjectDescriptors(filtered as Array<Extract<TypeDescriptor, { kind: "object" }>>);
-  }
-  return intersection(filtered);
+  return intersection(flattened);
 }
 
 function isEmptyObjectDescriptor(type: TypeDescriptor): boolean {

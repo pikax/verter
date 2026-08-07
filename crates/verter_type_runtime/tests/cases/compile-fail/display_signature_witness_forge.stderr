@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `DisplaySignatureWireWitness` is private
+ --> tests/cases/compile-fail/display_signature_witness_forge.rs:9:81
+  |
+9 |     let _witness = verter_type_runtime::protocol::DisplaySignatureWireWitness { _private: () };
+  |                                                                                 ^^^^^^^^ private field

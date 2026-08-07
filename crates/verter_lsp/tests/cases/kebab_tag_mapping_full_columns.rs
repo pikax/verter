@@ -13,17 +13,16 @@
 //! Discriminating: against the whole-name-overwrite emission, the last-column
 //! probes below return `None` and this test FAILS.
 
-use oxc_allocator::Allocator;
 use verter_compiler::compile::{
-    compile, CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, CompileTarget, VerterCompileOptions, VueMacroSemanticInput,
 };
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_span::LspPosition;
 
 /// Compile one SFC through the production IDE/TSX lane and return
 /// `(tsx_code, PositionMapper)`.
 fn compile_to_mapper(source: &str) -> (String, PositionMapper) {
-    let alloc = Allocator::default();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
         target: CompileTarget::BUNDLER | CompileTarget::TSX,
@@ -33,12 +32,11 @@ fn compile_to_mapper(source: &str) -> (String, PositionMapper) {
         source_map: true,
         ..Default::default()
     };
-    let result = compile(
-        source,
+    let result = StandaloneCompiler.compile_source(
+        &StandaloneSourceBytes::copied_from(source),
         &options,
         &verter_opts,
         &VueMacroSemanticInput::Unavailable,
-        &alloc,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");

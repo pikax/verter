@@ -24,6 +24,7 @@ currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_pr
 
 [dependencies]
 verter_compiler = { path = "../verter_compiler", features = ["bench"] }
+verter_css_syntax = { path = "../verter_css_syntax" }
 verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }

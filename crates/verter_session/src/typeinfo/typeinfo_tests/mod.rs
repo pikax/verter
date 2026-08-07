@@ -35,6 +35,7 @@ mod index_signatures;
 mod indexed_utilities;
 mod jsdoc_types;
 mod jsx;
+mod macro_producer_fact_replay;
 pub(crate) mod mapped_modifiers;
 pub(crate) mod mapped_template;
 mod menu_like;

@@ -116,12 +116,12 @@ fn first_macro_utility_route_for(
     let _ = host
         .get_raw_analysis_snapshot(canonical)
         .expect("component analysis snapshot");
-    let hot =
+    let product =
         crate::structural_carrier_producer::macro_type_arg_hot_ref(host.as_ref(), canonical, 0)
             .expect("first macro structural type argument");
     crate::resolver_core::component_meta_registry::component_meta_registry_node_utility_route(
         host.as_ref(),
-        hot.node(),
+        product.hot.node(),
     )
     .expect("first macro must retain its authored Pick route")
 }

@@ -32,6 +32,28 @@ use verter_semantic::analysis::Hash16;
 
 use crate::semantic_query::{DepSignature, DepVersion};
 
+/// **The single publisher of `OwnerResolutionSet`.**
+///
+/// Private to this module by design, and that is the whole enforcement:
+/// nothing outside the owner import surface can name this function, so
+/// the owner-scoped resolution node has exactly one authority. Rust
+/// privacy (`E0603`) is the rail — there is no name-keyed scanner.
+///
+/// The node records the owner's CHILD DECISIONS, so observing it roots
+/// the surface on one fact per resolved specifier instead of on the union
+/// of everything those specifiers transitively reach. It is published and
+/// observed inside the surface's own cold fact tracer, so the admitted
+/// signature carries it and every warm read revalidates it.
+///
+/// A `None` publication (the owner has no published decision to stand
+/// for) observes nothing: the surface keeps whatever precise facts it
+/// already recorded, which is the fail-closed direction.
+fn observe_owner_resolution_set(host: &crate::VerterHost, owner_canonical: &str) {
+    if let Some(fact) = host.ws().publish_owner_resolution_set(owner_canonical) {
+        crate::resolver_core::resolver_context::observe_fan_out(fact);
+    }
+}
+
 /// A single resolved direct import from the owner file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedOwnerImport {
@@ -211,12 +233,7 @@ impl OwnerImportSurfaceDb {
         {
             return None;
         }
-        if candidate
-            .read_set_signature
-            .facts
-            .iter()
-            .all(|fact| view.validates(fact))
-        {
+        if view.validates_fact_signature(&candidate.read_set_signature.facts) {
             return Some(candidate);
         }
         None
@@ -259,28 +276,33 @@ impl OwnerImportSurfaceDb {
         }
         self.remove_if_owner_hash_matches(owner_canonical, owner_whole_hash);
 
-        let (decision, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            let decision = compute();
-            let surface = match &decision {
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(surface) => {
-                    Some(surface)
+        let (decision, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+            || {
+                let decision = compute();
+                let surface = match &decision {
+                    crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(surface) => {
+                        Some(surface)
+                    }
+                    crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                        value,
+                        ..
+                    } => Some(value),
+                    crate::cache_runtime::singleflight::ComputeAdmission::Failed => None,
+                };
+                // The owner re-observes every producer-supplied direct-chain fact
+                // before finalisation. The admitted signature is rebuilt solely from
+                // this owner-owned tracer; a caller cannot hand a raw signature to
+                // the write.
+                if let Some(surface) = surface {
+                    for fact in surface.read_set_signature.facts.iter() {
+                        crate::resolver_core::resolver_context::observe_fan_out(fact.clone());
+                    }
+                    observe_owner_resolution_set(host, &surface.owner_canonical);
                 }
-                crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
-                    value, ..
-                } => Some(value),
-                crate::cache_runtime::singleflight::ComputeAdmission::Failed => None,
-            };
-            // The owner re-observes every producer-supplied direct-chain fact
-            // before finalisation. The admitted signature is rebuilt solely from
-            // this owner-owned tracer; a caller cannot hand a raw signature to
-            // the write.
-            if let Some(surface) = surface {
-                for fact in surface.read_set_signature.facts.iter() {
-                    crate::resolver_core::resolver_context::observe_fan_out(fact.clone());
-                }
-            }
-            decision
-        });
+                decision
+            },
+        );
         host.provenance
             .owner_import_surface_fact_tracer_installs
             .fetch_add(1, Ordering::Relaxed);
@@ -357,6 +379,24 @@ impl OwnerImportSurfaceDb {
                     .fetch_add(1, Ordering::Relaxed);
                 crate::cache_runtime::admission::propagate_non_admission(
                     crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                );
+                Some(surface)
+            }
+            (
+                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(surface)
+                | crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value: surface,
+                    ..
+                },
+                crate::resolver_core::FactReadSetFinalise::MutationUnstable,
+            ) => {
+                // Same refusal as the overflow arm above, attributed
+                // truthfully: a compaction domain moved mid-scope, which
+                // is a STABILITY failure and not a size one, so it
+                // neither propagates `SignatureOverflow` nor inflates the
+                // overflow-refusal counter.
+                crate::cache_runtime::admission::propagate_non_admission(
+                    crate::cache_runtime::NonAdmissionReason::MutationUnstable,
                 );
                 Some(surface)
             }
@@ -695,8 +735,10 @@ mod tests {
 
         // Warm hit under an OUTER tracer: the surface's chain facts must
         // fan into it. The compute closure must NOT run (warm hit).
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            let warm = db.get_or_compute(
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                let warm = db.get_or_compute(
                 &host,
                 "/w/owner.ts",
                 owner_hash,
@@ -706,8 +748,9 @@ mod tests {
                     Arc<OwnerImportSurface>,
                 > { panic!("second call must warm-hit, not recompute") },
             );
-            assert!(warm.is_some(), "second call must serve the warm surface");
-        });
+                assert!(warm.is_some(), "second call must serve the warm surface");
+            },
+        );
         let crate::resolver_core::FactReadSetFinalise::Ok(outer_facts) = finalise else {
             panic!("outer tracer must finalise Ok, got a non-cacheable/overflow finalise");
         };

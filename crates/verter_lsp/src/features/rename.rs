@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use crate::features::references::{
     collect_css_ref_spans, find_css_target_in_style_refs, find_css_target_in_template_refs,
     CssRefTarget,
@@ -295,7 +295,7 @@ impl RenameTarget {
 pub fn classify_rename_target(
     position: &Position,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
 ) -> RenameTarget {
@@ -486,7 +486,7 @@ fn css_target(
 fn native_rename_spans(
     word: &str,
     source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
 ) -> Vec<(u32, u32)> {
     let mut spans: Vec<(u32, u32)> = Vec::new();

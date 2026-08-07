@@ -184,7 +184,8 @@ defineProps<Props>()
         project.host(),
         "/Generic.vue",
         items
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("prop `items` must publish a typed source"),
     )

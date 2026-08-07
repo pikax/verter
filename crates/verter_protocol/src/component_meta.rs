@@ -15,24 +15,23 @@ use crate::verter::v1::{
     self as proto, type_node, AcceptedEventMeta, AcceptedPropMeta, ArrayNode, BindingMeta,
     BranchStatus, ComponentBindingUsage, ComponentEventUsage, ComponentFlags, ComponentMetaBody,
     ComponentMetaPayload, ComponentMetaResolution, ComponentPropUsage, ComponentUsage,
-    ConditionalNode, ConsumedRootBindings, CustomBlockMeta as ProtoCustomBlockMeta, EventMeta,
-    ExpansionDiagnostic, ExpansionMetadata, ExposedMeta, FallthroughBranch, FallthroughEventEntry,
-    FallthroughPropEntry, FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta,
-    ImportMeta, IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
+    ConditionalNode, ConsumedRootBindings, EventMeta, ExpansionDiagnostic, ExpansionMetadata,
+    ExposedMeta, FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry,
+    FallthroughSurface, FunctionNode, FunctionParameter, ImportBindingMeta, ImportMeta,
+    IndexedAccessNode, InferNode, InheritedSource, JsdocTag, KeyOfNode, LiteralNode,
     MacroExpansionDiagnosticEntry, MappedNode, MemberAvailability, MemberProvenance, ModelMeta,
     ObjectMember as ProtoObjectMember, ObjectNode, OriginEdge as ProtoOriginEdge,
     OriginGraph as ProtoOriginGraph, OriginNode as ProtoOriginNode, ParenthesizedNode,
     PartialBranchReason, PropMeta, PublicInstanceMemberMeta, PublicInstanceMeta, RefNode,
     ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedRootStep,
     ResolvedTypeDeclaration, RestNode, RootBranch, RootInfo, RootReachability, RootTargetRef,
-    ScriptBlockMeta, SelectorMeta, SfcAttributeMeta, SfcBlocksMeta, SlotBindingMeta, SlotMeta,
-    StyleBlockMeta as ProtoStyleBlockMeta, StyleMeta, TemplateBlockMeta, TemplateLiteralNode,
-    TemplateRefMeta, TupleElement, TupleNode, TypeGraph, TypeNode, TypeOfNode, TypeParameterNode,
-    TypeRegistryEntry, UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason,
-    VueApiCallMeta,
+    SelectorMeta, SlotBindingMeta, SlotMeta, StyleMeta, TemplateLiteralNode, TemplateRefMeta,
+    TerminalTypeDisplay as ProtoTerminalTypeDisplay, TupleElement, TupleNode, TypeGraph, TypeNode,
+    TypeOfNode, TypeParameterNode, TypePublication as ProtoTypePublication, TypeRegistryEntry,
+    UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 5;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 9;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -144,6 +143,10 @@ fn component_meta_body_to_proto(
                 name_id: builder.string_id(&binding.name),
                 kind_id: builder.string_id(&binding.kind),
                 reactivity_kind_id: builder.string_id(&binding.reactivity_kind),
+                return_wrapper_role_id: builder
+                    .string_id_opt(binding.return_wrapper_role.as_deref()),
+                return_wrapper_unresolved_reason_id: builder
+                    .string_id_opt(binding.return_wrapper_unresolved_reason.as_deref()),
                 type_annotation_id: builder.string_id_opt(binding.type_annotation.as_deref()),
                 used_in_template: binding.used_in_template,
                 used_in_style: binding.used_in_style,
@@ -197,10 +200,7 @@ fn component_meta_body_to_proto(
             .public_instance
             .as_ref()
             .map(|public_instance| public_instance_to_proto(builder, public_instance)),
-        sfc_blocks: meta
-            .sfc_blocks
-            .as_ref()
-            .map(|blocks| sfc_blocks_to_proto(builder, blocks)),
+        ordered_sfc_structure: Some(ordered_structure_to_proto(&meta.ordered_sfc_structure)),
         resolution: meta
             .resolution
             .as_ref()
@@ -226,18 +226,25 @@ fn component_meta_body_to_proto(
                     .collect(),
             })
             .collect(),
+        component_public_contract: Some(component_contract_to_proto(
+            builder,
+            &meta.component_public_contract,
+        )),
     }
 }
 
 fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMeta {
     PropMeta {
         name_id: builder.string_id(&prop.name),
-        type_node_id: builder.node_id(&prop.r#type),
+        type_node_id: prop
+            .r#type
+            .as_ref()
+            .map(|r#type| builder.node_id(r#type))
+            .unwrap_or(0),
         type_expansion: prop
             .type_expansion
             .as_ref()
             .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
-        raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
         required: prop.required,
         has_default: prop.has_default,
         default_value_id: builder.string_id_opt(prop.default_value.as_deref()),
@@ -248,6 +255,502 @@ fn prop_meta_to_proto(builder: &mut GraphBuilder, prop: &FfiPropMeta) -> PropMet
             .map(|tag| jsdoc_tag_to_proto(builder, tag))
             .collect(),
         declared_in_macro_type_arg: prop.declared_in_macro_type_arg,
+        publication: Some(type_publication_to_proto(&prop.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &prop.terminal_display,
+        )),
+    }
+}
+
+fn type_publication_to_proto(publication: &FfiTypePublication) -> ProtoTypePublication {
+    use proto::{
+        SymbolicEquivalenceKind, TypePublicationAbsence, TypePublicationExactness,
+        TypePublicationFailure, TypePublicationKind, TypePublicationPolicyReason,
+        TypePublicationReason, TypePublicationSemanticAuthority,
+    };
+
+    let mut output = ProtoTypePublication::default();
+    match publication {
+        FfiTypePublication::Failed {
+            failure,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Failed as i32;
+            output.failure = match failure {
+                FfiTypePublicationFailure::UnrepresentableRequiredMemberValue => {
+                    TypePublicationFailure::UnrepresentableRequiredMemberValue
+                }
+                FfiTypePublicationFailure::UnrepresentableRequiredPayload => {
+                    TypePublicationFailure::UnrepresentableRequiredPayload
+                }
+            } as i32;
+            output.provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+        FfiTypePublication::Absent {
+            absence,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Absent as i32;
+            output.absence = match absence {
+                FfiTypePublicationAbsence::Unannotated => TypePublicationAbsence::Unannotated,
+                FfiTypePublicationAbsence::BranchDivergent => {
+                    TypePublicationAbsence::BranchDivergent
+                }
+            } as i32;
+            output.provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+        FfiTypePublication::Published {
+            semantic_authority,
+            exactness,
+            reason,
+            provenance,
+        } => {
+            output.kind = TypePublicationKind::Published as i32;
+            output.semantic_authority = match semantic_authority {
+                FfiPublicationSemanticAuthority::Resolved => {
+                    TypePublicationSemanticAuthority::Resolved
+                }
+                FfiPublicationSemanticAuthority::AuthoredFallback => {
+                    TypePublicationSemanticAuthority::AuthoredFallback
+                }
+            } as i32;
+            output.exactness = match exactness {
+                FfiPublicationExactness::ExactConcrete => TypePublicationExactness::ExactConcrete,
+                FfiPublicationExactness::ExactSymbolic => TypePublicationExactness::ExactSymbolic,
+                FfiPublicationExactness::Incomplete => TypePublicationExactness::Incomplete,
+            } as i32;
+            output.provenance = publication_provenance_to_proto(*provenance) as i32;
+            match reason {
+                FfiPublicationReason::ResolvedExactConcrete => {
+                    output.reason = TypePublicationReason::ResolvedExactConcrete as i32;
+                }
+                FfiPublicationReason::ResolvedExactSymbolic => {
+                    output.reason = TypePublicationReason::ResolvedExactSymbolic as i32;
+                }
+                FfiPublicationReason::ResolvedIncomplete => {
+                    output.reason = TypePublicationReason::ResolvedIncomplete as i32;
+                }
+                FfiPublicationReason::AuthoredForIncomplete { policy } => {
+                    output.reason = TypePublicationReason::AuthoredForIncomplete as i32;
+                    output.policy_reason = match policy {
+                        FfiPublicationPolicyReason::ImportedMacroCompound => {
+                            TypePublicationPolicyReason::ImportedMacroCompound
+                        }
+                        FfiPublicationPolicyReason::ImportedIndexedAccess => {
+                            TypePublicationPolicyReason::ImportedIndexedAccess
+                        }
+                    } as i32;
+                }
+                FfiPublicationReason::AuthoredSymbolicRepresentation { proof } => {
+                    output.reason = TypePublicationReason::AuthoredSymbolicRepresentation as i32;
+                    output.symbolic_proof = match proof {
+                        FfiSymbolicEquivalenceKind::ImportedMacroCompound => {
+                            SymbolicEquivalenceKind::ImportedMacroCompound
+                        }
+                        FfiSymbolicEquivalenceKind::ImportedIndexedAccess => {
+                            SymbolicEquivalenceKind::ImportedIndexedAccess
+                        }
+                    } as i32;
+                }
+            }
+        }
+    }
+    output
+}
+
+fn resolution_provenance_to_proto(
+    value: FfiResolutionProvenance,
+) -> proto::TypePublicationProvenance {
+    use proto::TypePublicationProvenance as P;
+    match value {
+        FfiResolutionProvenance::SemanticEvaluator => P::SemanticEvaluator,
+        FfiResolutionProvenance::SessionProjector => P::SessionProjector,
+        FfiResolutionProvenance::FrameworkSurface => P::FrameworkSurface,
+        FfiResolutionProvenance::FallthroughInheritance => P::FallthroughInheritance,
+        FfiResolutionProvenance::Schema => P::Schema,
+    }
+}
+
+fn publication_provenance_to_proto(
+    value: FfiPublicationProvenance,
+) -> proto::TypePublicationProvenance {
+    use proto::TypePublicationProvenance as P;
+    match value {
+        FfiPublicationProvenance::Resolved(provenance) => {
+            resolution_provenance_to_proto(provenance)
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::MacroPayload) => {
+            P::AuthoredMacroPayload
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::DeclarationBody) => {
+            P::AuthoredDeclarationBody
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::AugmentationBody) => {
+            P::AuthoredAugmentationBody
+        }
+        FfiPublicationProvenance::Authored(FfiAuthoredProvenance::JsdocTypedefBody) => {
+            P::AuthoredJsdocTypedefBody
+        }
+    }
+}
+
+fn terminal_type_display_to_proto(
+    builder: &mut GraphBuilder,
+    display: &FfiTerminalTypeDisplay,
+) -> ProtoTerminalTypeDisplay {
+    ProtoTerminalTypeDisplay {
+        text_id: builder.string_id_opt(display.text.as_deref()),
+    }
+}
+
+fn component_contract_to_proto(
+    builder: &mut GraphBuilder,
+    availability: &FfiComponentContractAvailability,
+) -> proto::ComponentContractAvailability {
+    use proto::component_contract_availability::Availability;
+    let availability = match availability {
+        FfiComponentContractAvailability::Supported { contract } => {
+            Availability::Supported(component_public_contract_to_proto(builder, contract))
+        }
+        FfiComponentContractAvailability::Unsupported { unsupported } => Availability::Unsupported(
+            component_contract_unsupported_to_proto(builder, unsupported),
+        ),
+    };
+    proto::ComponentContractAvailability {
+        availability: Some(availability),
+    }
+}
+
+fn component_public_contract_to_proto(
+    builder: &mut GraphBuilder,
+    contract: &FfiComponentPublicContract,
+) -> proto::ComponentPublicContract {
+    proto::ComponentPublicContract {
+        adapter_id: builder.string_id(&contract.adapter_id),
+        exactness: contract_exactness_to_proto(contract.exactness) as i32,
+        degradation: contract
+            .degradation
+            .iter()
+            .map(|row| contract_degradation_to_proto(builder, row))
+            .collect(),
+        provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+        props: contract
+            .props
+            .iter()
+            .map(|prop| proto::PublicProp {
+                name_id: builder.string_id(&prop.name),
+                optional: prop.optional,
+                has_default: prop.has_default,
+                r#type: Some(public_type_reference_to_proto(builder, &prop.ty)),
+                exactness: contract_exactness_to_proto(prop.exactness) as i32,
+                degradation: prop
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+        events: contract
+            .events
+            .iter()
+            .map(|event| proto::PublicEvent {
+                name_id: builder.string_id(&event.name),
+                overloads: event
+                    .overloads
+                    .iter()
+                    .map(|signature| public_call_signature_to_proto(builder, signature))
+                    .collect(),
+                derived_handler: Some(proto::PublicDerivedHandlerShape {
+                    overloads: event
+                        .derived_handler
+                        .overloads
+                        .iter()
+                        .map(|signature| proto::PublicHandlerSignature {
+                            parameters: signature
+                                .parameters
+                                .iter()
+                                .map(|parameter| public_parameter_to_proto(builder, parameter))
+                                .collect(),
+                            return_type_node_id: builder.node_id(&signature.return_type),
+                        })
+                        .collect(),
+                }),
+                exactness: contract_exactness_to_proto(event.exactness) as i32,
+                degradation: event
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+        slots: contract
+            .slots
+            .iter()
+            .map(|slot| proto::PublicSlot {
+                name_id: builder.string_id(&slot.name),
+                optional: slot.optional,
+                input: Some(proto::PublicSlotInput {
+                    bindings: slot
+                        .input
+                        .bindings
+                        .iter()
+                        .map(|binding| proto::PublicSlotBinding {
+                            name_id: builder.string_id(&binding.name),
+                            r#type: Some(public_type_reference_to_proto(builder, &binding.ty)),
+                        })
+                        .collect(),
+                }),
+                return_type: slot
+                    .return_type
+                    .as_ref()
+                    .map(|reference| public_type_reference_to_proto(builder, reference)),
+                exactness: contract_exactness_to_proto(slot.exactness) as i32,
+                degradation: slot
+                    .degradation
+                    .iter()
+                    .map(|row| contract_degradation_to_proto(builder, row))
+                    .collect(),
+                provenance: proto::ContractProvenance::ComponentMetaOutput as i32,
+            })
+            .collect(),
+    }
+}
+
+fn public_call_signature_to_proto(
+    builder: &mut GraphBuilder,
+    signature: &FfiPublicCallSignature,
+) -> proto::PublicCallSignature {
+    proto::PublicCallSignature {
+        source: Some(public_type_reference_to_proto(builder, &signature.source)),
+        parameters: signature
+            .parameters
+            .iter()
+            .map(|parameter| public_parameter_to_proto(builder, parameter))
+            .collect(),
+        return_type_node_id: builder.node_id(&signature.return_type),
+    }
+}
+
+fn public_parameter_to_proto(
+    builder: &mut GraphBuilder,
+    parameter: &FfiPublicParameter,
+) -> proto::PublicParameter {
+    proto::PublicParameter {
+        name_id: builder.string_id_opt(parameter.name.as_deref()),
+        type_node_id: builder.node_id(&parameter.ty),
+        optional: parameter.optional,
+        rest: parameter.rest,
+    }
+}
+
+fn public_type_reference_to_proto(
+    builder: &mut GraphBuilder,
+    reference: &FfiPublicTypeReference,
+) -> proto::PublicTypeReference {
+    proto::PublicTypeReference {
+        type_node_id: reference
+            .r#type
+            .as_ref()
+            .map(|ty| builder.node_id(ty))
+            .unwrap_or(0),
+        publication: Some(type_publication_to_proto(&reference.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &reference.terminal_display,
+        )),
+    }
+}
+
+fn component_contract_unsupported_to_proto(
+    builder: &mut GraphBuilder,
+    unsupported: &FfiComponentContractUnsupported,
+) -> proto::ComponentContractUnsupported {
+    let mut output = proto::ComponentContractUnsupported {
+        adapter_id: builder.string_id(&unsupported.adapter_id),
+        diagnostics: unsupported
+            .diagnostics
+            .iter()
+            .map(|diagnostic| resolution_diagnostic_to_proto(builder, diagnostic))
+            .collect(),
+        ..Default::default()
+    };
+    match &unsupported.reason {
+        FfiComponentContractUnsupportedReason::AdapterUnavailable => {
+            output.reason = proto::ComponentContractUnsupportedReason::AdapterUnavailable as i32;
+        }
+        FfiComponentContractUnsupportedReason::ComponentMetaUnavailable => {
+            output.reason =
+                proto::ComponentContractUnsupportedReason::ComponentMetaUnavailable as i32;
+        }
+        FfiComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane,
+            index,
+            inner_index,
+            failure,
+        } => {
+            output.reason =
+                proto::ComponentContractUnsupportedReason::OutputMaterializationFailed as i32;
+            output.output_lane = component_meta_output_lane_to_proto(*lane) as i32;
+            output.index = *index;
+            output.inner_index = inner_index.unwrap_or(0);
+            output.has_inner_index = inner_index.is_some();
+            output.output_failure = component_meta_output_failure_to_proto(failure) as i32;
+            if let FfiComponentMetaOutputFailure::RequiredSourceUnavailable { failure } = failure {
+                output.publication_failure = publication_failure_to_proto(*failure) as i32;
+            }
+        }
+        FfiComponentContractUnsupportedReason::PublicationFailed {
+            surface,
+            failure,
+            provenance,
+        } => {
+            output.reason = proto::ComponentContractUnsupportedReason::PublicationFailed as i32;
+            output.publication_surface = Some(contract_surface_to_proto(builder, surface));
+            output.publication_failure = publication_failure_to_proto(*failure) as i32;
+            output.publication_provenance = resolution_provenance_to_proto(*provenance) as i32;
+        }
+    }
+    output
+}
+
+fn contract_degradation_to_proto(
+    builder: &mut GraphBuilder,
+    degradation: &FfiContractDegradation,
+) -> proto::ContractDegradation {
+    proto::ContractDegradation {
+        surface: Some(contract_surface_to_proto(builder, &degradation.surface)),
+        reason: match degradation.reason {
+            FfiContractDegradationReason::Absent => proto::ContractDegradationReason::Absent,
+            FfiContractDegradationReason::Incomplete => {
+                proto::ContractDegradationReason::Incomplete
+            }
+        } as i32,
+        diagnostics: degradation
+            .diagnostics
+            .iter()
+            .map(|diagnostic| resolution_diagnostic_to_proto(builder, diagnostic))
+            .collect(),
+    }
+}
+
+fn contract_surface_to_proto(
+    builder: &mut GraphBuilder,
+    surface: &FfiContractSurface,
+) -> proto::ContractSurface {
+    match surface {
+        FfiContractSurface::Prop { name } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::Prop as i32,
+            name_id: builder.string_id(name),
+            ..Default::default()
+        },
+        FfiContractSurface::Event {
+            name,
+            overload_index,
+        } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::Event as i32,
+            name_id: builder.string_id(name),
+            overload_index: *overload_index,
+            ..Default::default()
+        },
+        FfiContractSurface::SlotBinding { slot, binding } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::SlotBinding as i32,
+            name_id: builder.string_id(slot),
+            binding_id: builder.string_id(binding),
+            ..Default::default()
+        },
+        FfiContractSurface::SlotReturn { slot } => proto::ContractSurface {
+            kind: proto::ContractSurfaceKind::SlotReturn as i32,
+            name_id: builder.string_id(slot),
+            ..Default::default()
+        },
+    }
+}
+
+fn resolution_diagnostic_to_proto(
+    builder: &mut GraphBuilder,
+    diagnostic: &FfiResolutionDiagnostic,
+) -> proto::ResolutionDiagnostic {
+    use proto::ResolutionDiagnosticKind as P;
+    use FfiResolutionDiagnosticKind as F;
+    let kind = match diagnostic.kind {
+        F::BudgetExceeded => P::BudgetExceeded,
+        F::ProjectionWorkLimit => P::ProjectionWorkLimit,
+        F::ConnectedQueryDepthLimit => P::ConnectedQueryDepthLimit,
+        F::MappedDepthExceeded => P::MappedDepthExceeded,
+        F::UnresolvedReference => P::UnresolvedReference,
+        F::IndeterminateConditional => P::IndeterminateConditional,
+        F::InfiniteKeySpace => P::InfiniteKeySpace,
+        F::UnsupportedOperator => P::UnsupportedOperator,
+        F::ConditionalContextTruncated => P::ConditionalContextTruncated,
+        F::IdempotentArm => P::IdempotentArm,
+        F::CyclicReference => P::CyclicReference,
+        F::CyclicInstantiation => P::CyclicInstantiation,
+        F::InstantiationError => P::InstantiationError,
+        F::EmptyUnionArm => P::EmptyUnionArm,
+    };
+    proto::ResolutionDiagnostic {
+        kind: kind as i32,
+        context_id: builder.string_id(&diagnostic.context),
+        property_name_id: builder.string_id_opt(diagnostic.property_name.as_deref()),
+    }
+}
+
+fn contract_exactness_to_proto(value: FfiContractExactness) -> proto::ContractExactness {
+    match value {
+        FfiContractExactness::Exact => proto::ContractExactness::Exact,
+        FfiContractExactness::Degraded => proto::ContractExactness::Degraded,
+    }
+}
+
+fn publication_failure_to_proto(
+    failure: FfiTypePublicationFailure,
+) -> proto::TypePublicationFailure {
+    match failure {
+        FfiTypePublicationFailure::UnrepresentableRequiredMemberValue => {
+            proto::TypePublicationFailure::UnrepresentableRequiredMemberValue
+        }
+        FfiTypePublicationFailure::UnrepresentableRequiredPayload => {
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload
+        }
+    }
+}
+
+fn component_meta_output_lane_to_proto(
+    lane: FfiComponentMetaOutputLane,
+) -> proto::ComponentMetaOutputLane {
+    use proto::ComponentMetaOutputLane as P;
+    use FfiComponentMetaOutputLane as F;
+    match lane {
+        F::Prop => P::Prop,
+        F::EventPayload => P::EventPayload,
+        F::EventReturn => P::EventReturn,
+        F::SlotBinding => P::SlotBinding,
+        F::SlotReturn => P::SlotReturn,
+        F::Model => P::Model,
+        F::Exposed => P::Exposed,
+        F::PublicInstanceMember => P::PublicInstanceMember,
+        F::TypeRegistryEntry => P::TypeRegistryEntry,
+        F::AcceptedProp => P::AcceptedProp,
+        F::AcceptedEventPayload => P::AcceptedEventPayload,
+        F::FallthroughProp => P::FallthroughProp,
+        F::FallthroughEventPayload => P::FallthroughEventPayload,
+    }
+}
+
+fn component_meta_output_failure_to_proto(
+    failure: &FfiComponentMetaOutputFailure,
+) -> proto::ComponentMetaOutputFailure {
+    use proto::ComponentMetaOutputFailure as P;
+    use FfiComponentMetaOutputFailure as F;
+    match failure {
+        F::UnraisableSource => P::UnraisableSource,
+        F::RequiredSourceUnavailable { .. } => P::RequiredSourceUnavailable,
+        F::InteriorSourceMiss => P::InteriorSourceMiss,
+        F::ShellMaterializationMiss => P::ShellMaterializationMiss,
+        F::UnknownMaterializingSourceInterior => P::UnknownMaterializingSourceInterior,
     }
 }
 
@@ -266,6 +769,11 @@ fn event_meta_to_proto(builder: &mut GraphBuilder, event: &FfiEventMeta) -> Even
             .iter()
             .map(|tag| jsdoc_tag_to_proto(builder, tag))
             .collect(),
+        publication: Some(type_publication_to_proto(&event.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &event.terminal_display,
+        )),
     }
 }
 
@@ -278,18 +786,39 @@ fn slot_meta_to_proto(builder: &mut GraphBuilder, slot: &FfiSlotMeta) -> SlotMet
             .iter()
             .map(|binding| SlotBindingMeta {
                 name_id: builder.string_id(&binding.name),
-                type_node_id: builder.node_id(&binding.r#type),
+                type_node_id: binding
+                    .r#type
+                    .as_ref()
+                    .map(|r#type| builder.node_id(r#type))
+                    .unwrap_or(0),
                 type_expansion: binding
                     .type_expansion
                     .as_ref()
                     .map(|metadata| expansion_metadata_to_proto(builder, metadata)),
-                raw_type_id: builder.string_id_opt(binding.raw_type.as_deref()),
+                publication: Some(type_publication_to_proto(&binding.publication)),
+                terminal_display: Some(terminal_type_display_to_proto(
+                    builder,
+                    &binding.terminal_display,
+                )),
             })
             .collect(),
         is_required: slot.is_required,
         return_type_id: builder.string_id_opt(slot.return_type.as_deref()),
         description_id: builder.string_id_opt(slot.description.as_deref()),
         declared_in_macro_type_arg: slot.declared_in_macro_type_arg,
+        return_value_node_id: slot
+            .return_value
+            .as_ref()
+            .map(|ty| builder.node_id(ty))
+            .unwrap_or(0),
+        return_publication: slot
+            .return_publication
+            .as_ref()
+            .map(type_publication_to_proto),
+        return_terminal_display: slot
+            .return_terminal_display
+            .as_ref()
+            .map(|display| terminal_type_display_to_proto(builder, display)),
         tags: slot
             .tags
             .iter()
@@ -405,12 +934,20 @@ fn accepted_prop_meta_to_proto(
 ) -> AcceptedPropMeta {
     AcceptedPropMeta {
         name_id: builder.string_id(&prop.name),
-        type_node_id: builder.node_id(&prop.r#type),
-        raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
+        type_node_id: prop
+            .r#type
+            .as_ref()
+            .map(|r#type| builder.node_id(r#type))
+            .unwrap_or(0),
         required: prop.required,
         provenance: Some(member_provenance_to_proto(builder, &prop.provenance)),
         availability: Some(member_availability_to_proto(builder, &prop.availability)),
         kind: accepted_prop_kind_to_proto(&prop.kind) as i32,
+        publication: Some(type_publication_to_proto(&prop.publication)),
+        terminal_display: Some(terminal_type_display_to_proto(
+            builder,
+            &prop.terminal_display,
+        )),
     }
 }
 
@@ -560,108 +1097,669 @@ fn public_instance_to_proto(
     }
 }
 
-fn sfc_blocks_to_proto(builder: &mut GraphBuilder, blocks: &FfiSfcBlocksMeta) -> SfcBlocksMeta {
-    SfcBlocksMeta {
-        template: blocks
-            .template
+fn ordered_structure_to_proto(value: &FfiOrderedSfcStructure) -> proto::OrderedSfcStructure {
+    proto::OrderedSfcStructure {
+        schema_version: value.schema_version,
+        artifact_token: value.artifact_token.clone(),
+        blocks: value.blocks.iter().map(structure_block_to_proto).collect(),
+        markup_nodes: value
+            .markup_nodes
+            .iter()
+            .map(markup_node_to_proto)
+            .collect(),
+    }
+}
+
+/// Project the registered semantic arena directly to the content-free wire schema.
+pub fn semantic_ordered_structure_to_proto(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+) -> proto::OrderedSfcStructure {
+    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
+
+    let inventory = structure.inventory.as_ref();
+    let range = |span| semantic_structure_range(structure, span);
+    let blocks = inventory
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            CarrierBlock::Section { id, role, syntax } => {
+                let section = FfiStructureSection {
+                    block_token: structure.block_tokens[id.get() as usize].clone(),
+                    role: semantic_block_role(role),
+                    authored_name: semantic_authored_name(
+                        structure,
+                        syntax.authored_name,
+                        syntax.normalized_name,
+                    ),
+                    opening_range: range(syntax.opening_span),
+                    opening_name_range: range(syntax.opening_name_span),
+                    content_range: range(syntax.content_span),
+                    closing_range: syntax.closing_span.map(range),
+                    closing_name_range: syntax.closing_name_span.map(range),
+                    full_range: range(syntax.full_span),
+                    termination: semantic_termination(structure, &syntax.termination),
+                    attributes: syntax
+                        .attributes
+                        .iter()
+                        .map(|attribute| semantic_attribute(structure, attribute))
+                        .collect(),
+                    block_content_basis_token: None,
+                    attribute_insertion_anchor: range(syntax.attribute_insertion_anchor),
+                };
+                FfiStructureBlock::Section {
+                    section: Box::new(section),
+                    markup_root_tokens: inventory
+                        .markup()
+                        .roots()
+                        .iter()
+                        .filter(|root| {
+                            inventory.markup().nodes()[root.get() as usize].root_block == *id
+                        })
+                        .map(|root| structure.markup_node_tokens[root.get() as usize].clone())
+                        .collect(),
+                }
+            }
+            CarrierBlock::MarkupRoot { id, node } => FfiStructureBlock::MarkupRoot {
+                block_token: structure.block_tokens[id.get() as usize].clone(),
+                markup_root_token: structure.markup_node_tokens[node.get() as usize].clone(),
+            },
+        })
+        .collect();
+    let markup_nodes = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let syntax = match node.kind() {
+                MarkupNodeKind::Element(element) => FfiMarkupSyntax::Element {
+                    authored_name: semantic_authored_name(
+                        structure,
+                        element.authored_name,
+                        element.normalized_name,
+                    ),
+                    namespace: format!("{:?}", element.namespace),
+                    element_kind: format!("{:?}", element.kind),
+                    opening_range: range(element.opening_span),
+                    opening_name_range: range(element.opening_name_span),
+                    attribute_insertion_anchor: range(element.attribute_insertion_anchor),
+                    content_range: range(element.content_span),
+                    closing_range: element.closing_span.map(range),
+                    closing_name_range: element.closing_name_span.map(range),
+                    full_range: range(element.full_span),
+                    self_closing: element.self_closing,
+                    void_element: element.void_element,
+                    raw_text: element.raw_text,
+                    termination: semantic_termination(structure, &element.termination),
+                    attributes: element
+                        .attributes
+                        .iter()
+                        .map(|attribute| semantic_attribute(structure, attribute))
+                        .collect(),
+                },
+                MarkupNodeKind::Text { content_span } => FfiMarkupSyntax::Text {
+                    content_range: range(*content_span),
+                },
+                MarkupNodeKind::Comment {
+                    opening_span,
+                    content_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Comment {
+                    opening_range: range(*opening_span),
+                    content_range: range(*content_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: semantic_termination(structure, termination),
+                },
+                MarkupNodeKind::Interpolation {
+                    family,
+                    opening_span,
+                    expression_span,
+                    closing_span,
+                    full_span,
+                    termination,
+                } => FfiMarkupSyntax::Interpolation {
+                    family: format!("{family:?}"),
+                    opening_range: range(*opening_span),
+                    expression_range: range(*expression_span),
+                    closing_range: closing_span.map(range),
+                    full_range: range(*full_span),
+                    termination: semantic_termination(structure, termination),
+                },
+                MarkupNodeKind::SvelteControlBlock(value) => FfiMarkupSyntax::SvelteControlBlock {
+                    full_range: range(value.full_span),
+                    termination: semantic_termination(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteClause(value) => FfiMarkupSyntax::SvelteClause {
+                    full_range: range(value.full_span),
+                    termination: semantic_termination(structure, &value.termination),
+                },
+                MarkupNodeKind::SvelteStandaloneTag(value) => {
+                    FfiMarkupSyntax::SvelteStandaloneTag {
+                        full_range: range(value.full_span),
+                        termination: semantic_termination(structure, &value.termination),
+                    }
+                }
+                MarkupNodeKind::Recovered {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    expected,
+                    reason,
+                } => FfiMarkupSyntax::Recovered {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: semantic_termination(structure, termination),
+                    expected: format!("{expected:?}"),
+                    reason: format!("{reason:?}"),
+                },
+                MarkupNodeKind::Unknown {
+                    opening_span,
+                    opening_name_span,
+                    content_span,
+                    closing_span,
+                    closing_name_span,
+                    full_span,
+                    termination,
+                    authored_head,
+                    reason,
+                } => FfiMarkupSyntax::Unknown {
+                    opening_range: opening_span.map(range),
+                    opening_name_range: opening_name_span.map(range),
+                    content_range: content_span.map(range),
+                    closing_range: closing_span.map(range),
+                    closing_name_range: closing_name_span.map(range),
+                    full_range: range(*full_span),
+                    termination: semantic_termination(structure, termination),
+                    authored_head: authored_head
+                        .and_then(|slice| inventory.slice(slice).ok())
+                        .map(str::to_owned),
+                    reason: format!("{reason:?}"),
+                },
+            };
+            FfiMarkupNode {
+                node_token: structure.markup_node_tokens[node.id.get() as usize].clone(),
+                parent_node_token: node
+                    .parent
+                    .map(|parent| structure.markup_node_tokens[parent.get() as usize].clone()),
+                child_node_tokens: inventory.markup().child_ids()
+                    [node.children.start as usize..node.children.end as usize]
+                    .iter()
+                    .map(|child| structure.markup_node_tokens[child.get() as usize].clone())
+                    .collect(),
+                syntax,
+            }
+        })
+        .collect();
+
+    ordered_structure_to_proto(&FfiOrderedSfcStructure {
+        schema_version: structure.schema_version,
+        artifact_token: structure.artifact_token.clone(),
+        blocks,
+        markup_nodes,
+    })
+}
+
+fn semantic_structure_range(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+) -> FfiStructureRange {
+    FfiStructureRange {
+        source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
+        start: span.start,
+        end: span.end,
+    }
+}
+
+fn semantic_authored_name(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
+    normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
+) -> FfiAuthoredName {
+    FfiAuthoredName {
+        spelling: structure
+            .inventory
+            .slice(authored)
+            .expect("validated authored name")
+            .to_owned(),
+        normalized: structure
+            .inventory
+            .normalized_name(normalized)
+            .expect("validated normalized name")
+            .to_owned(),
+        range: semantic_structure_range(structure, authored.span),
+    }
+}
+
+fn semantic_block_role(
+    role: &verter_language::parse_artifact::carrier_inventory::SectionRole,
+) -> FfiCarrierBlockRole {
+    use verter_language::parse_artifact::carrier_inventory::SectionRole;
+    match role {
+        SectionRole::TemplateHost => FfiCarrierBlockRole::TemplateHost,
+        SectionRole::Script { role, dialect } => FfiCarrierBlockRole::Script {
+            role: format!("{role:?}"),
+            dialect: format!("{dialect:?}"),
+        },
+        SectionRole::Style {
+            dialect,
+            scoped,
+            module,
+        } => FfiCarrierBlockRole::Style {
+            dialect: format!("{dialect:?}"),
+            scoped: *scoped,
+            module: format!("{module:?}"),
+        },
+        SectionRole::Custom { normalized_name } => FfiCarrierBlockRole::Custom {
+            normalized_name: normalized_name.to_string(),
+        },
+    }
+}
+
+fn semantic_termination(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
+) -> FfiSyntaxTermination {
+    use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
+    match value {
+        SyntaxTermination::Closed => FfiSyntaxTermination::Closed,
+        SyntaxTermination::SelfClosing => FfiSyntaxTermination::SelfClosing,
+        SyntaxTermination::Void => FfiSyntaxTermination::Void,
+        SyntaxTermination::UnclosedEof => FfiSyntaxTermination::UnclosedEof,
+        SyntaxTermination::Recovered {
+            reason,
+            recovery_span,
+        } => FfiSyntaxTermination::Recovered {
+            reason: format!("{reason:?}"),
+            recovery_range: recovery_span.map(|span| semantic_structure_range(structure, span)),
+        },
+    }
+}
+
+fn semantic_attribute(
+    structure: &verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis,
+    attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
+) -> FfiCarrierAttribute {
+    use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};
+    let (kind, name, value) = match attribute {
+        CarrierAttribute::Named { name, value, .. } => (
+            "named",
+            Some(semantic_authored_name(
+                structure,
+                name.authored,
+                name.normalized,
+            )),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Spread { .. } => ("spread", None, None),
+        CarrierAttribute::Directive {
+            local_name, value, ..
+        } => (
+            "directive",
+            local_name
+                .as_ref()
+                .map(|name| semantic_authored_name(structure, name.authored, name.normalized)),
+            match value {
+                AttributeValue::Static { raw, .. } => {
+                    structure.inventory.slice(*raw).ok().map(str::to_owned)
+                }
+                _ => None,
+            },
+        ),
+        CarrierAttribute::Attach { .. } => ("attach", None, None),
+    };
+    FfiCarrierAttribute {
+        attribute_token: structure.attribute_tokens[attribute.id().get() as usize].clone(),
+        kind: kind.to_owned(),
+        name,
+        value,
+        full_range: semantic_structure_range(structure, attribute.full_span()),
+        duplicate_of: attribute
+            .duplicate_of()
+            .map(|id| structure.attribute_tokens[id.get() as usize].clone()),
+    }
+}
+
+fn structure_block_to_proto(value: &FfiStructureBlock) -> proto::StructureBlock {
+    let kind = match value {
+        FfiStructureBlock::Section {
+            section,
+            markup_root_tokens,
+        } => proto::structure_block::Kind::Section(proto::SectionBlock {
+            common: Some(structure_section_to_proto(section)),
+            markup_root_tokens: markup_root_tokens.clone(),
+        }),
+        FfiStructureBlock::MarkupRoot {
+            block_token,
+            markup_root_token,
+        } => proto::structure_block::Kind::MarkupRoot(proto::MarkupRootBlock {
+            block_token: block_token.clone(),
+            markup_root_token: markup_root_token.clone(),
+        }),
+    };
+    proto::StructureBlock { kind: Some(kind) }
+}
+
+fn structure_section_to_proto(value: &FfiStructureSection) -> proto::StructureSection {
+    proto::StructureSection {
+        block_token: value.block_token.clone(),
+        role: Some(block_role_to_proto(&value.role)),
+        authored_name: Some(authored_name_to_proto(&value.authored_name)),
+        opening_range: Some(structure_range_to_proto(&value.opening_range)),
+        opening_name_range: Some(structure_range_to_proto(&value.opening_name_range)),
+        content_range: Some(structure_range_to_proto(&value.content_range)),
+        closing_range: value.closing_range.as_ref().map(structure_range_to_proto),
+        closing_name_range: value
+            .closing_name_range
             .as_ref()
-            .map(|template| template_block_to_proto(builder, template)),
-        script: blocks
-            .script
-            .as_ref()
-            .map(|script| script_block_to_proto(builder, script)),
-        script_setup: blocks
-            .script_setup
-            .as_ref()
-            .map(|script| script_block_to_proto(builder, script)),
-        styles: blocks
-            .styles
-            .iter()
-            .map(|style| style_block_to_proto(builder, style))
-            .collect(),
-        custom: blocks
-            .custom
-            .iter()
-            .map(|custom| custom_block_to_proto(builder, custom))
-            .collect(),
+            .map(structure_range_to_proto),
+        full_range: Some(structure_range_to_proto(&value.full_range)),
+        termination: Some(termination_to_proto(&value.termination)),
+        attributes: value.attributes.iter().map(attribute_to_proto).collect(),
+        block_content_basis_token: value.block_content_basis_token.as_ref().map(|token| {
+            proto::BlockContentBasisTokenV1 {
+                value: token.clone(),
+            }
+        }),
+        attribute_insertion_anchor: Some(structure_range_to_proto(
+            &value.attribute_insertion_anchor,
+        )),
     }
 }
 
-fn sfc_attribute_to_proto(
-    builder: &mut GraphBuilder,
-    attribute: &FfiSfcAttributeMeta,
-) -> SfcAttributeMeta {
-    SfcAttributeMeta {
-        name_id: builder.string_id(&attribute.name),
-        value_id: builder.string_id_opt(attribute.value.as_deref()),
+fn block_role_to_proto(value: &FfiCarrierBlockRole) -> proto::CarrierBlockRole {
+    let kind = match value {
+        FfiCarrierBlockRole::TemplateHost => {
+            proto::carrier_block_role::Kind::TemplateHost(proto::Empty {})
+        }
+        FfiCarrierBlockRole::Script { role, dialect } => {
+            proto::carrier_block_role::Kind::Script(proto::ScriptBlockRole {
+                role: role.clone(),
+                dialect: dialect.clone(),
+            })
+        }
+        FfiCarrierBlockRole::Style {
+            dialect,
+            scoped,
+            module,
+        } => proto::carrier_block_role::Kind::Style(proto::StyleBlockRole {
+            dialect: dialect.clone(),
+            scoped: *scoped,
+            module: module.clone(),
+        }),
+        FfiCarrierBlockRole::Custom { normalized_name } => {
+            proto::carrier_block_role::Kind::Custom(proto::CustomBlockRole {
+                normalized_name: normalized_name.clone(),
+            })
+        }
+    };
+    proto::CarrierBlockRole { kind: Some(kind) }
+}
+
+fn authored_name_to_proto(value: &FfiAuthoredName) -> proto::AuthoredName {
+    proto::AuthoredName {
+        spelling: value.spelling.clone(),
+        normalized: value.normalized.clone(),
+        range: Some(structure_range_to_proto(&value.range)),
     }
 }
 
-fn template_block_to_proto(
-    builder: &mut GraphBuilder,
-    block: &FfiTemplateBlockMeta,
-) -> TemplateBlockMeta {
-    TemplateBlockMeta {
-        lang_id: builder.string_id_opt(block.lang.as_deref()),
-        src_id: builder.string_id_opt(block.src.as_deref()),
-        attributes: block
-            .attributes
-            .iter()
-            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
-            .collect(),
+fn structure_range_to_proto(value: &FfiStructureRange) -> proto::CanonicalRange {
+    proto::CanonicalRange {
+        source_space_token: value.source_space_token.clone(),
+        encoding: proto::PositionEncoding::Utf8Bytes as i32,
+        representation: Some(proto::canonical_range::Representation::OffsetRange(
+            proto::OffsetRange {
+                start: value.start,
+                end: value.end,
+            },
+        )),
+        encoding_session_token: String::new(),
     }
 }
 
-fn script_block_to_proto(
-    builder: &mut GraphBuilder,
-    block: &FfiScriptBlockMeta,
-) -> ScriptBlockMeta {
-    ScriptBlockMeta {
-        lang_id: builder.string_id_opt(block.lang.as_deref()),
-        src_id: builder.string_id_opt(block.src.as_deref()),
-        generic_id: builder.string_id_opt(block.generic.as_deref()),
-        attrs_type_id: builder.string_id_opt(block.attrs_type.as_deref()),
-        attributes: block
-            .attributes
-            .iter()
-            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
-            .collect(),
+fn termination_to_proto(value: &FfiSyntaxTermination) -> proto::SyntaxTermination {
+    let kind = match value {
+        FfiSyntaxTermination::Closed => proto::syntax_termination::Kind::Closed(proto::Empty {}),
+        FfiSyntaxTermination::SelfClosing => {
+            proto::syntax_termination::Kind::SelfClosing(proto::Empty {})
+        }
+        FfiSyntaxTermination::Void => proto::syntax_termination::Kind::Void(proto::Empty {}),
+        FfiSyntaxTermination::UnclosedEof => {
+            proto::syntax_termination::Kind::UnclosedEof(proto::Empty {})
+        }
+        FfiSyntaxTermination::Recovered {
+            reason,
+            recovery_range,
+        } => proto::syntax_termination::Kind::Recovered(proto::RecoveredTermination {
+            reason: reason.clone(),
+            recovery_range: recovery_range.as_ref().map(structure_range_to_proto),
+        }),
+    };
+    proto::SyntaxTermination { kind: Some(kind) }
+}
+
+fn attribute_to_proto(value: &FfiCarrierAttribute) -> proto::CarrierAttribute {
+    let token = value.attribute_token.clone();
+    let full_range = Some(structure_range_to_proto(&value.full_range));
+    let kind = match value.kind.as_str() {
+        "spread" => proto::carrier_attribute::Kind::Spread(proto::SpreadAttribute {
+            attribute_token: token,
+            full_range,
+            open_range: None,
+            expression_range: None,
+            close_range: None,
+            termination: None,
+        }),
+        "directive" => proto::carrier_attribute::Kind::Directive(proto::DirectiveAttribute {
+            attribute_token: token,
+            family: String::new(),
+            prefix_range: None,
+            local_name: value.name.as_ref().map(authored_name_to_proto),
+            argument: None,
+            modifiers: vec![],
+            value: Some(attribute_value_to_proto(value.value.as_deref())),
+            full_range,
+            duplicate_of: value.duplicate_of.clone().unwrap_or_default(),
+        }),
+        "attach" => proto::carrier_attribute::Kind::Attach(proto::AttachAttribute {
+            attribute_token: token,
+            full_range,
+            keyword_range: None,
+            expression_range: None,
+            close_range: None,
+            termination: None,
+        }),
+        _ => proto::carrier_attribute::Kind::Named(proto::NamedAttribute {
+            attribute_token: token,
+            name: value.name.as_ref().map(authored_name_to_proto),
+            syntax: String::new(),
+            value: Some(attribute_value_to_proto(value.value.as_deref())),
+            full_range,
+            duplicate_of: value.duplicate_of.clone().unwrap_or_default(),
+        }),
+    };
+    proto::CarrierAttribute { kind: Some(kind) }
+}
+
+fn attribute_value_to_proto(value: Option<&str>) -> proto::AttributeValue {
+    let kind = value.map_or_else(
+        || proto::attribute_value::Kind::Missing(proto::Empty {}),
+        |text| {
+            proto::attribute_value::Kind::StaticValue(proto::StaticAttributeValue {
+                raw: Some(proto::AuthoredSlice {
+                    text: text.to_owned(),
+                    range: None,
+                }),
+                decoded: text.to_owned(),
+                quote: String::new(),
+                value_range: None,
+                inner_range: None,
+            })
+        },
+    );
+    proto::AttributeValue { kind: Some(kind) }
+}
+
+fn markup_node_to_proto(value: &FfiMarkupNode) -> proto::MarkupNode {
+    let syntax = match &value.syntax {
+        FfiMarkupSyntax::Element {
+            authored_name,
+            namespace,
+            element_kind,
+            opening_range,
+            opening_name_range,
+            attribute_insertion_anchor,
+            content_range,
+            closing_range,
+            closing_name_range,
+            full_range,
+            self_closing,
+            void_element,
+            raw_text,
+            termination,
+            attributes,
+        } => proto::markup_node::Syntax::Element(proto::MarkupElementSyntax {
+            authored_name: Some(authored_name_to_proto(authored_name)),
+            namespace: namespace.clone(),
+            kind: element_kind.clone(),
+            opening_range: Some(structure_range_to_proto(opening_range)),
+            opening_name_range: Some(structure_range_to_proto(opening_name_range)),
+            attribute_insertion_anchor: Some(structure_range_to_proto(attribute_insertion_anchor)),
+            content_range: Some(structure_range_to_proto(content_range)),
+            closing_range: closing_range.as_ref().map(structure_range_to_proto),
+            closing_name_range: closing_name_range.as_ref().map(structure_range_to_proto),
+            full_range: Some(structure_range_to_proto(full_range)),
+            self_closing: *self_closing,
+            void_element: *void_element,
+            raw_text: *raw_text,
+            termination: Some(termination_to_proto(termination)),
+            attributes: attributes.iter().map(attribute_to_proto).collect(),
+        }),
+        FfiMarkupSyntax::Text { content_range } => {
+            proto::markup_node::Syntax::Text(proto::TextSyntax {
+                content_range: Some(structure_range_to_proto(content_range)),
+            })
+        }
+        FfiMarkupSyntax::Comment {
+            opening_range,
+            content_range,
+            closing_range,
+            full_range,
+            termination,
+        } => proto::markup_node::Syntax::Comment(proto::CommentSyntax {
+            opening_range: Some(structure_range_to_proto(opening_range)),
+            content_range: Some(structure_range_to_proto(content_range)),
+            closing_range: closing_range.as_ref().map(structure_range_to_proto),
+            full_range: Some(structure_range_to_proto(full_range)),
+            termination: Some(termination_to_proto(termination)),
+        }),
+        FfiMarkupSyntax::Interpolation {
+            family,
+            opening_range,
+            expression_range,
+            closing_range,
+            full_range,
+            termination,
+        } => proto::markup_node::Syntax::Interpolation(proto::InterpolationSyntax {
+            family: family.clone(),
+            opening_range: Some(structure_range_to_proto(opening_range)),
+            expression_range: Some(structure_range_to_proto(expression_range)),
+            closing_range: closing_range.as_ref().map(structure_range_to_proto),
+            full_range: Some(structure_range_to_proto(full_range)),
+            termination: Some(termination_to_proto(termination)),
+        }),
+        FfiMarkupSyntax::SvelteControlBlock {
+            full_range,
+            termination,
+        } => {
+            proto::markup_node::Syntax::SvelteControlBlock(generic_syntax(full_range, termination))
+        }
+        FfiMarkupSyntax::SvelteClause {
+            full_range,
+            termination,
+        } => proto::markup_node::Syntax::SvelteClause(generic_syntax(full_range, termination)),
+        FfiMarkupSyntax::SvelteStandaloneTag {
+            full_range,
+            termination,
+        } => {
+            proto::markup_node::Syntax::SvelteStandaloneTag(generic_syntax(full_range, termination))
+        }
+        FfiMarkupSyntax::Recovered {
+            opening_range,
+            opening_name_range,
+            content_range,
+            closing_range,
+            closing_name_range,
+            full_range,
+            termination,
+            expected,
+            reason,
+        } => proto::markup_node::Syntax::Recovered(proto::RecoveredSyntax {
+            opening_range: opening_range.as_ref().map(structure_range_to_proto),
+            opening_name_range: opening_name_range.as_ref().map(structure_range_to_proto),
+            content_range: content_range.as_ref().map(structure_range_to_proto),
+            closing_range: closing_range.as_ref().map(structure_range_to_proto),
+            closing_name_range: closing_name_range.as_ref().map(structure_range_to_proto),
+            full_range: Some(structure_range_to_proto(full_range)),
+            termination: Some(termination_to_proto(termination)),
+            expected: expected.clone(),
+            reason: reason.clone(),
+        }),
+        FfiMarkupSyntax::Unknown {
+            opening_range,
+            opening_name_range,
+            content_range,
+            closing_range,
+            closing_name_range,
+            full_range,
+            termination,
+            authored_head,
+            reason,
+        } => proto::markup_node::Syntax::Unknown(proto::UnknownSyntax {
+            opening_range: opening_range.as_ref().map(structure_range_to_proto),
+            opening_name_range: opening_name_range.as_ref().map(structure_range_to_proto),
+            content_range: content_range.as_ref().map(structure_range_to_proto),
+            closing_range: closing_range.as_ref().map(structure_range_to_proto),
+            closing_name_range: closing_name_range.as_ref().map(structure_range_to_proto),
+            full_range: Some(structure_range_to_proto(full_range)),
+            termination: Some(termination_to_proto(termination)),
+            authored_head: authored_head.as_ref().map(|text| proto::AuthoredSlice {
+                text: text.clone(),
+                range: None,
+            }),
+            reason: reason.clone(),
+        }),
+    };
+    proto::MarkupNode {
+        node_token: value.node_token.clone(),
+        parent_node_token: value.parent_node_token.clone().unwrap_or_default(),
+        child_node_tokens: value.child_node_tokens.clone(),
+        syntax: Some(syntax),
     }
 }
 
-fn style_block_to_proto(
-    builder: &mut GraphBuilder,
-    block: &FfiStyleBlockMeta,
-) -> ProtoStyleBlockMeta {
-    ProtoStyleBlockMeta {
-        index: block.index,
-        lang_id: builder.string_id_opt(block.lang.as_deref()),
-        src_id: builder.string_id_opt(block.src.as_deref()),
-        scoped: block.scoped,
-        is_module: block.is_module,
-        module_name_id: builder.string_id_opt(block.module_name.as_deref()),
-        attributes: block
-            .attributes
-            .iter()
-            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
-            .collect(),
-    }
-}
-
-fn custom_block_to_proto(
-    builder: &mut GraphBuilder,
-    block: &FfiCustomBlockMeta,
-) -> ProtoCustomBlockMeta {
-    ProtoCustomBlockMeta {
-        index: block.index,
-        block_type_id: builder.string_id(&block.block_type),
-        lang_id: builder.string_id_opt(block.lang.as_deref()),
-        src_id: builder.string_id_opt(block.src.as_deref()),
-        attributes: block
-            .attributes
-            .iter()
-            .map(|attribute| sfc_attribute_to_proto(builder, attribute))
-            .collect(),
+fn generic_syntax(
+    range: &FfiStructureRange,
+    termination: &FfiSyntaxTermination,
+) -> proto::GenericMarkupSyntax {
+    proto::GenericMarkupSyntax {
+        full_range: Some(structure_range_to_proto(range)),
+        termination: Some(termination_to_proto(termination)),
     }
 }
 
@@ -808,13 +1906,21 @@ fn fallthrough_branch_to_proto(
             .iter()
             .map(|prop| FallthroughPropEntry {
                 name_id: builder.string_id(&prop.name),
-                type_node_id: builder.node_id(&prop.r#type),
-                raw_type_id: builder.string_id_opt(prop.raw_type.as_deref()),
+                type_node_id: prop
+                    .r#type
+                    .as_ref()
+                    .map(|r#type| builder.node_id(r#type))
+                    .unwrap_or(0),
                 sources: prop
                     .sources
                     .iter()
                     .map(|source| inherited_source_to_proto(builder, source))
                     .collect(),
+                publication: Some(type_publication_to_proto(&prop.publication)),
+                terminal_display: Some(terminal_type_display_to_proto(
+                    builder,
+                    &prop.terminal_display,
+                )),
             })
             .collect(),
         events: branch
@@ -1486,15 +2592,116 @@ fn build_test_meta() -> FfiComponentMeta {
     }));
 
     FfiComponentMeta {
+        component_public_contract: FfiComponentContractAvailability::Supported {
+            contract: FfiComponentPublicContract {
+                adapter_id: "vue".to_string(),
+                exactness: FfiContractExactness::Exact,
+                degradation: Vec::new(),
+                provenance: FfiContractProvenance::ComponentMetaOutput,
+                props: vec![FfiPublicProp {
+                    name: "root".to_string(),
+                    optional: false,
+                    has_default: false,
+                    ty: FfiPublicTypeReference {
+                        r#type: Some(tree_ref.clone()),
+                        publication: FfiTypePublication::Published {
+                            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                            exactness: FfiPublicationExactness::ExactSymbolic,
+                            reason: FfiPublicationReason::ResolvedExactSymbolic,
+                            provenance: FfiPublicationProvenance::Resolved(
+                                FfiResolutionProvenance::SemanticEvaluator,
+                            ),
+                        },
+                        terminal_display: FfiTerminalTypeDisplay {
+                            text: Some("TreeNode".to_string()),
+                        },
+                    },
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
+                events: vec![FfiPublicEvent {
+                    name: "select".to_string(),
+                    overloads: vec![FfiPublicCallSignature {
+                        source: test_public_type_reference(
+                            TypeExpr::Function(Arc::new(
+                                verter_type_expr::FunctionExpr::synthetic(
+                                    Vec::new(),
+                                    Some(Arc::new(TypeExpr::Primitive(PrimitiveName::Void))),
+                                    Vec::new(),
+                                ),
+                            )),
+                            "() => void",
+                        ),
+                        parameters: vec![
+                            FfiPublicParameter {
+                                name: Some("root".to_string()),
+                                optional: false,
+                                rest: false,
+                                ty: tree_ref.clone(),
+                            },
+                            FfiPublicParameter {
+                                name: Some("rest".to_string()),
+                                optional: true,
+                                rest: true,
+                                ty: TypeExpr::Primitive(PrimitiveName::String),
+                            },
+                        ],
+                        return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                    }],
+                    derived_handler: FfiPublicDerivedHandlerShape {
+                        overloads: vec![FfiPublicHandlerSignature {
+                            parameters: vec![FfiPublicParameter {
+                                name: Some("root".to_string()),
+                                optional: false,
+                                rest: false,
+                                ty: tree_ref.clone(),
+                            }],
+                            return_type: TypeExpr::Primitive(PrimitiveName::Void),
+                        }],
+                    },
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
+                slots: vec![FfiPublicSlot {
+                    name: "default".to_string(),
+                    optional: true,
+                    input: FfiPublicSlotInput {
+                        bindings: vec![FfiPublicSlotBinding {
+                            name: "root".to_string(),
+                            ty: test_public_type_reference(tree_ref.clone(), "TreeNode"),
+                        }],
+                    },
+                    return_type: Some(test_public_type_reference(
+                        tree_node.clone(),
+                        "{ label: string; next?: TreeNode | undefined }",
+                    )),
+                    exactness: FfiContractExactness::Exact,
+                    degradation: Vec::new(),
+                    provenance: FfiContractProvenance::ComponentMetaOutput,
+                }],
+            },
+        },
         // The synthetic test payload carries no resolution seed.
         resolution_status: crate::types::FfiComponentMetaResolutionStatus::Unavailable(
             crate::types::FfiResolutionUnavailableReason::ResolutionProviderAbsent,
         ),
         props: vec![FfiPropMeta {
             name: "root".to_string(),
-            r#type: tree_ref.clone(),
+            r#type: Some(tree_ref.clone()),
+            publication: FfiTypePublication::Published {
+                semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                exactness: FfiPublicationExactness::ExactSymbolic,
+                reason: FfiPublicationReason::ResolvedExactSymbolic,
+                provenance: FfiPublicationProvenance::Resolved(
+                    FfiResolutionProvenance::SemanticEvaluator,
+                ),
+            },
+            terminal_display: FfiTerminalTypeDisplay {
+                text: Some("TreeNode".to_string()),
+            },
             type_expansion: None,
-            raw_type: Some("TreeNode".to_string()),
             required: true,
             has_default: false,
             default_value: None,
@@ -1508,12 +2715,25 @@ fn build_test_meta() -> FfiComponentMeta {
             is_scoped: true,
             bindings: vec![FfiSlotBindingMeta {
                 name: "root".to_string(),
-                r#type: tree_ref.clone(),
+                r#type: Some(tree_ref.clone()),
+                publication: FfiTypePublication::Published {
+                    semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                    exactness: FfiPublicationExactness::ExactSymbolic,
+                    reason: FfiPublicationReason::ResolvedExactSymbolic,
+                    provenance: FfiPublicationProvenance::Resolved(
+                        FfiResolutionProvenance::SemanticEvaluator,
+                    ),
+                },
+                terminal_display: FfiTerminalTypeDisplay {
+                    text: Some("TreeNode".to_string()),
+                },
                 type_expansion: None,
-                raw_type: Some("TreeNode".to_string()),
             }],
             is_required: false,
             return_type: Some("VNode[]".to_string()),
+            return_value: None,
+            return_publication: None,
+            return_terminal_display: None,
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: true,
@@ -1521,7 +2741,12 @@ fn build_test_meta() -> FfiComponentMeta {
         models: Vec::new(),
         exposed: Vec::new(),
         public_instance: None,
-        sfc_blocks: None,
+        ordered_sfc_structure: FfiOrderedSfcStructure {
+            schema_version: 1,
+            artifact_token: "fixture-artifact-token".to_string(),
+            blocks: Vec::new(),
+            markup_nodes: Vec::new(),
+        },
         type_registry: vec![FfiResolvedTypeMeta {
             name: "TreeNode".to_string(),
             r#type: tree_node,
@@ -1569,14 +2794,128 @@ fn build_test_meta() -> FfiComponentMeta {
     }
 }
 
+fn test_public_type_reference(ty: TypeExpr, display: &str) -> FfiPublicTypeReference {
+    FfiPublicTypeReference {
+        r#type: Some(ty),
+        publication: FfiTypePublication::Published {
+            semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+            exactness: FfiPublicationExactness::ExactSymbolic,
+            reason: FfiPublicationReason::ResolvedExactSymbolic,
+            provenance: FfiPublicationProvenance::Resolved(
+                FfiResolutionProvenance::SemanticEvaluator,
+            ),
+        },
+        terminal_display: FfiTerminalTypeDisplay {
+            text: Some(display.to_string()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
 
-    use super::{build_test_payload, ComponentMetaPayload};
+    use super::{build_test_payload, proto, ComponentMetaPayload, ProtoTypePublication};
     use crate::graph::GraphBuilder;
-    use crate::types::FfiComponentMetaFlags;
+    use crate::types::{
+        FfiAuthoredProvenance, FfiComponentMetaFlags, FfiPublicationExactness,
+        FfiPublicationProvenance, FfiPublicationReason, FfiPublicationSemanticAuthority,
+        FfiResolutionProvenance, FfiSymbolicEquivalenceKind, FfiTypePublication,
+        FfiTypePublicationAbsence, FfiTypePublicationFailure,
+    };
     use verter_type_expr::TypeExpr;
+
+    /// A6-06 wire half: an EXACT whole-return wrapper role and a TYPED
+    /// degradation both survive the real encoder plus a prost decode, and stay
+    /// DISTINGUISHABLE from each other and from an undemanded binding.
+    ///
+    /// Discriminating mutations: omit the reason field (field 8) and the
+    /// degradation collapses onto the bare `"unresolved"` discriminant; intern
+    /// the role for an undemanded binding and the absent case reads as a role.
+    #[test]
+    fn binding_return_wrapper_role_survives_the_component_meta_proto_boundary() {
+        let mut meta = super::build_test_meta();
+        let binding =
+            |name: &str, role: Option<&str>, reason: Option<&str>| crate::types::FfiBindingMeta {
+                name: name.to_string(),
+                kind: "const".to_string(),
+                reactivity_kind: "maybeRef".to_string(),
+                return_wrapper_role: role.map(str::to_string),
+                return_wrapper_unresolved_reason: reason.map(str::to_string),
+                type_annotation: None,
+                used_in_template: false,
+                used_in_style: false,
+            };
+        meta.bindings = vec![
+            binding("exact", Some("ref"), None),
+            binding("degraded", Some("unresolved"), Some("cycle")),
+            binding("other_degraded", Some("unresolved"), Some("unsupported")),
+            binding("undemanded", None, None),
+        ];
+
+        let payload = super::component_meta_payload(&meta);
+        let encoded = payload.encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("payload must round-trip");
+        let graph = decoded.type_graph.as_ref().expect("string table");
+        let s = |id: u32| -> Option<&str> {
+            if id == 0 {
+                None
+            } else {
+                Some(graph.strings[(id - 1) as usize].as_str())
+            }
+        };
+        let body = decoded.body.as_ref().expect("component-meta body");
+        assert_eq!(body.bindings.len(), 4, "every binding must encode");
+
+        let exact = &body.bindings[0];
+        assert_eq!(s(exact.return_wrapper_role_id), Some("ref"));
+        assert_eq!(
+            s(exact.return_wrapper_unresolved_reason_id),
+            None,
+            "an exact role carries no degradation reason"
+        );
+
+        let degraded = &body.bindings[1];
+        assert_eq!(s(degraded.return_wrapper_role_id), Some("unresolved"));
+        assert_eq!(
+            s(degraded.return_wrapper_unresolved_reason_id),
+            Some("cycle"),
+            "the exact typed reason must survive the wire, not collapse onto \
+             the bare `unresolved` discriminant"
+        );
+
+        let other = &body.bindings[2];
+        assert_eq!(s(other.return_wrapper_role_id), Some("unresolved"));
+        assert_ne!(
+            s(other.return_wrapper_unresolved_reason_id),
+            s(degraded.return_wrapper_unresolved_reason_id),
+            "two degradations with different reasons must stay distinguishable"
+        );
+
+        let undemanded = &body.bindings[3];
+        assert_eq!(
+            s(undemanded.return_wrapper_role_id),
+            None,
+            "an undemanded binding interns NO role — id 0 means absent, which is \
+             distinct from the `none` completed-non-wrapper proof"
+        );
+        assert_eq!(s(undemanded.return_wrapper_unresolved_reason_id), None);
+
+        // …and `none` (the completed non-wrapper proof) is distinct from absent.
+        meta.bindings = vec![binding("proven_non_wrapper", Some("none"), None)];
+        let decoded = ComponentMetaPayload::decode(
+            super::component_meta_payload(&meta)
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .expect("payload must round-trip");
+        let graph = decoded.type_graph.as_ref().expect("string table");
+        let body = decoded.body.as_ref().expect("component-meta body");
+        let id = body.bindings[0].return_wrapper_role_id;
+        assert_ne!(id, 0, "`none` is a PRESENT role, never wire-absence");
+        assert_eq!(graph.strings[(id - 1) as usize].as_str(), "none");
+    }
 
     #[test]
     fn projection_limit_reasons_keep_distinct_wire_values() {
@@ -1694,11 +3033,172 @@ mod tests {
         assert!(!proto.events[0].is_inline);
         assert!(proto.events[0].modifier_ids.is_empty());
 
-        // SCHEMA bump landed (4 → 5): typed property keys replaced the
+        // SCHEMA bump landed (typed property keys replaced the
         // string-only `ObjectMember.name_id` (field 2, now reserved) with the
         // `property_key` oneof (string / canonical number / unique symbol /
-        // computed node), plus authored method-kind and body facts.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 5);
+        // computed node), plus authored method-kind and body facts).
+        // The wire schema version the encoder stamps and the TS decoder gate
+        // (`GRAPH_FORMAT_VERSION`, exact equality) demand in lockstep.
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 9);
+    }
+
+    #[test]
+    fn schema8_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+        let payload = build_test_payload();
+        assert_eq!(payload.schema_version, 9);
+        let encoded = payload.encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
+        assert_eq!(decoded.schema_version, 9);
+        let body = decoded.body.expect("component-meta body");
+        let bytes = body.encode_to_vec();
+        assert!(
+            bytes.windows(2).any(|window| window == [0xd2, 0x01]),
+            "field 26 wire key must be present"
+        );
+        let availability = body
+            .component_public_contract
+            .expect("mandatory contract availability")
+            .availability
+            .expect("closed availability arm");
+        let proto::component_contract_availability::Availability::Supported(contract) =
+            availability
+        else {
+            panic!("test payload must carry Supported");
+        };
+        assert_eq!(contract.props.len(), 1);
+        assert_eq!(contract.events.len(), 1);
+        assert_eq!(contract.events[0].overloads.len(), 1);
+        assert_eq!(contract.events[0].overloads[0].parameters.len(), 2);
+        assert!(contract.events[0].overloads[0].parameters[1].optional);
+        assert!(contract.events[0].overloads[0].parameters[1].rest);
+        assert_eq!(contract.slots.len(), 1);
+        assert!(contract.slots[0].optional);
+        assert_eq!(
+            contract.slots[0]
+                .input
+                .as_ref()
+                .expect("slot input")
+                .bindings
+                .len(),
+            1
+        );
+        assert!(
+            contract.slots[0]
+                .return_type
+                .as_ref()
+                .expect("structured slot return")
+                .type_node_id
+                > 0
+        );
+        assert_ne!(
+            contract.props[0]
+                .r#type
+                .as_ref()
+                .expect("public prop type")
+                .type_node_id,
+            0
+        );
+    }
+
+    #[test]
+    fn schema8_full_body_roundtrips_typed_unsupported_contract() {
+        let mut meta = super::build_test_meta();
+        meta.component_public_contract = crate::types::FfiComponentContractAvailability::Unsupported {
+            unsupported: crate::types::FfiComponentContractUnsupported {
+                adapter_id: "vue".to_string(),
+                reason: crate::types::FfiComponentContractUnsupportedReason::OutputMaterializationFailed {
+                    lane: crate::types::FfiComponentMetaOutputLane::EventReturn,
+                    index: 3,
+                    inner_index: Some(1),
+                    failure: crate::types::FfiComponentMetaOutputFailure::RequiredSourceUnavailable {
+                        failure: crate::types::FfiTypePublicationFailure::UnrepresentableRequiredPayload,
+                    },
+                },
+                diagnostics: Vec::new(),
+            },
+        };
+        let encoded = super::component_meta_payload(&meta).encode_to_vec();
+        let decoded =
+            ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
+        let availability = decoded
+            .body
+            .and_then(|body| body.component_public_contract)
+            .and_then(|availability| availability.availability)
+            .expect("unsupported availability");
+        let proto::component_contract_availability::Availability::Unsupported(unsupported) =
+            availability
+        else {
+            panic!("Unsupported expected");
+        };
+        assert_eq!(
+            unsupported.reason,
+            proto::ComponentContractUnsupportedReason::OutputMaterializationFailed as i32
+        );
+        assert_eq!(
+            unsupported.output_lane,
+            proto::ComponentMetaOutputLane::EventReturn as i32
+        );
+        assert_eq!(unsupported.index, 3);
+        assert!(unsupported.has_inner_index);
+        assert_eq!(unsupported.inner_index, 1);
+        assert_eq!(
+            unsupported.output_failure,
+            proto::ComponentMetaOutputFailure::RequiredSourceUnavailable as i32
+        );
+        assert_eq!(
+            unsupported.publication_failure,
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload as i32
+        );
+    }
+
+    #[test]
+    fn type_publication_proto_roundtrips_all_outcomes_without_display() {
+        let cases = [
+            FfiTypePublication::Failed {
+                failure: FfiTypePublicationFailure::UnrepresentableRequiredPayload,
+                provenance: FfiResolutionProvenance::FrameworkSurface,
+            },
+            FfiTypePublication::Absent {
+                absence: FfiTypePublicationAbsence::BranchDivergent,
+                provenance: FfiResolutionProvenance::FallthroughInheritance,
+            },
+            FfiTypePublication::Published {
+                semantic_authority: FfiPublicationSemanticAuthority::Resolved,
+                exactness: FfiPublicationExactness::ExactSymbolic,
+                reason: FfiPublicationReason::AuthoredSymbolicRepresentation {
+                    proof: FfiSymbolicEquivalenceKind::ImportedIndexedAccess,
+                },
+                provenance: FfiPublicationProvenance::Authored(
+                    FfiAuthoredProvenance::DeclarationBody,
+                ),
+            },
+        ];
+
+        let decoded = cases.map(|case| {
+            let encoded = super::type_publication_to_proto(&case).encode_to_vec();
+            ProtoTypePublication::decode(encoded.as_slice()).expect("publication decodes")
+        });
+
+        assert_eq!(decoded[0].kind(), proto::TypePublicationKind::Failed);
+        assert_eq!(
+            decoded[0].failure(),
+            proto::TypePublicationFailure::UnrepresentableRequiredPayload
+        );
+        assert_eq!(decoded[1].kind(), proto::TypePublicationKind::Absent);
+        assert_eq!(
+            decoded[1].absence(),
+            proto::TypePublicationAbsence::BranchDivergent
+        );
+        assert_eq!(decoded[2].kind(), proto::TypePublicationKind::Published);
+        assert_eq!(
+            decoded[2].reason(),
+            proto::TypePublicationReason::AuthoredSymbolicRepresentation
+        );
+        assert_eq!(
+            decoded[2].symbolic_proof(),
+            proto::SymbolicEquivalenceKind::ImportedIndexedAccess
+        );
     }
 
     #[test]

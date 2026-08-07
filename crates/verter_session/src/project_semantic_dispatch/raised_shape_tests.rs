@@ -731,16 +731,14 @@ fn parity_object_edge_cases() {
     let graph = graph_of(&host);
 
     // Empty surface ⇒ representable empty `Object{}` ⇒ materialized + expanded.
-    let empty = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ));
+    let empty = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
     assert_classifier_parity(&host, empty, "object-empty");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, empty),
@@ -771,16 +769,14 @@ fn parity_object_edge_cases() {
 
     // Open synthetic index signature ⇒ the synthetic `projectedOpenSurface`
     // value is a sentinel ⇒ the object contains a semantic miss.
-    let open = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: true,
-        },
-    ));
+    let open = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: true,
+    }));
     assert_classifier_parity(&host, open, "object-open-index");
 }
 
@@ -800,16 +796,14 @@ fn parity_intersection_arm_drop_and_collapse() {
     let real_obj = graph.intern_node(SemanticNodeData::Object(object_surface(&[(
         "a", string_id,
     )])));
-    let empty_obj = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ));
+    let empty_obj = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
 
     // `{} & RealObject` ⇒ drops the empty arm, collapses to RealObject ⇒
     // MATERIALIZED (proves the collapse: the raw graph has 2 arms, the raised
@@ -855,16 +849,14 @@ fn parity_intersection_arm_drop_and_collapse() {
     let non_fn_ctor = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
         "not-a-fn",
     ))));
-    let surface_sentinel = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(vec![non_fn_ctor].into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        },
-    ));
+    let surface_sentinel = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(vec![non_fn_ctor].into_boxed_slice()),
+        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: false,
+    }));
     // Sanity: the surface-sentinel node alone raises to the SEMANTIC_OBJECT_SURFACE
     // sentinel ⇒ semantic miss (proves the arm we are about to drop is the real
     // sentinel, not an incidental materialized shape).
@@ -1570,28 +1562,26 @@ fn parity_real_index_signature_member() {
     // placeholder). The raiser re-emits its declared key/value shape; the miss
     // predicate recurses `key_type` + `value_type`. Both materialized ⇒ NOT a
     // miss, and an Object with a real index signature is an expanded surface.
-    let string_keyed = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(
-                vec![IndexSignature {
-                    key_type: string_id,
-                    value_type: number_id,
-                    readonly: false,
-                    spans: Default::default(),
-                    declaration_origin: Some(Arc::from("/w/idx.ts")),
-                }]
-                .into_boxed_slice(),
-            ),
-            keyspace: None,
-            // A REAL declared index signature is present, so `has_index_signature`
-            // is true but `index_signatures` is non-empty (NOT the synthetic open
-            // case that injects the `projectedOpenSurface` sentinel).
-            has_index_signature: true,
-        },
-    ));
+    let string_keyed = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(
+            vec![IndexSignature {
+                key_type: string_id,
+                value_type: number_id,
+                readonly: false,
+                spans: Default::default(),
+                declaration_origin: Some(Arc::from("/w/idx.ts")),
+            }]
+            .into_boxed_slice(),
+        ),
+        keyspace: None,
+        // A REAL declared index signature is present, so `has_index_signature`
+        // is true but `index_signatures` is non-empty (NOT the synthetic open
+        // case that injects the `projectedOpenSurface` sentinel).
+        has_index_signature: true,
+    }));
     assert_classifier_parity(
         &host,
         string_keyed,
@@ -1610,25 +1600,23 @@ fn parity_real_index_signature_member() {
     // recurses `value_type` ⇒ semantic miss (proves the recursion into the
     // declared index signature, not a leaf).
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let idx_value_miss = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(
-                vec![IndexSignature {
-                    key_type: string_id,
-                    value_type: miss,
-                    readonly: false,
-                    spans: Default::default(),
-                    declaration_origin: Some(Arc::from("/w/idx.ts")),
-                }]
-                .into_boxed_slice(),
-            ),
-            keyspace: None,
-            has_index_signature: true,
-        },
-    ));
+    let idx_value_miss = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        index_signatures: Arc::from(
+            vec![IndexSignature {
+                key_type: string_id,
+                value_type: miss,
+                readonly: false,
+                spans: Default::default(),
+                declaration_origin: Some(Arc::from("/w/idx.ts")),
+            }]
+            .into_boxed_slice(),
+        ),
+        keyspace: None,
+        has_index_signature: true,
+    }));
     assert_classifier_parity(&host, idx_value_miss, "object-index-signature-value-miss");
     assert!(
         node_contains_semantic_miss_or_unraisable(&host, idx_value_miss),
@@ -2140,7 +2128,7 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
             declaration_origin: None,
         })
         .collect::<Vec<_>>();
-    crate::semantic_query::surface_view! {
+    crate::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),

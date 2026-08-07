@@ -204,7 +204,7 @@ fn extract_resolved_value_type(resolution: &FixtureResolution) -> Option<TypeExp
             verter_session::test_only::semantic_source_probe::demand_type_expr(
                 &resolution.host,
                 &resolution.owner,
-                field.r#type.present().expect("present source"),
+                field.authority.source().expect("present source"),
             )
             .unwrap_or_else(|| panic!("`value`'s published source must demand-materialize"))
         })

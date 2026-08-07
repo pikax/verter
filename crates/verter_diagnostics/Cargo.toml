@@ -15,6 +15,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 verter_span = { path = "../verter_span" }
 hotpath = { version = "0.16", optional = true }
 verter_semantic = { path = "../verter_semantic" }
+verter_language = { path = "../verter_language" }
 verter_workspace = { path = "../verter_workspace" }
 rustc-hash.workspace = true
 serde.workspace = true

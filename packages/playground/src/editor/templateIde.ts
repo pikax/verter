@@ -1,5 +1,11 @@
-import type { FileAnalysis } from "../core/types";
+import type {
+  FileAnalysis,
+  OrderedSfcStructure,
+  StructureBlock,
+  StructureRange,
+} from "../core/types";
 import { collectCompletions } from "./analysisHelpers";
+import { utf16ToUtf8Offset, utf8ToUtf16Offset } from "./offsets";
 
 const HTML_TAGS = [
   "a",
@@ -129,6 +135,7 @@ export interface TemplateCompletion {
 
 export interface TemplateCompletionParams {
   source: string;
+  structure: OrderedSfcStructure | null;
   offset: number;
   activeFilename: string;
   openFilenames: string[];
@@ -139,74 +146,167 @@ function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function isOffsetInTemplateBlock(source: string, offset: number): boolean {
-  const templateOpen = source.lastIndexOf("<template", offset);
-  if (templateOpen === -1) return false;
-
-  const openEnd = source.indexOf(">", templateOpen);
-  if (openEnd === -1 || offset < openEnd + 1) return false;
-
-  const templateClose = source.indexOf("</template>", openEnd + 1);
-  if (templateClose === -1) return true;
-  return offset <= templateClose;
+function sections(
+  structure: OrderedSfcStructure | null,
+): Extract<StructureBlock, { kind: "section" }>[] {
+  return (
+    structure?.blocks.filter(
+      (block): block is Extract<StructureBlock, { kind: "section" }> => block.kind === "section",
+    ) ?? []
+  );
 }
 
-export function isInsideInterpolation(source: string, offset: number): boolean {
-  const open = source.lastIndexOf("{{", offset);
-  const close = source.lastIndexOf("}}", offset);
-  return open > close;
+export function isOffsetInTemplateBlock(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  // Structure ranges are UTF-8 BYTES; the editor offset is UTF-16. Convert
+  // once, compare in byte space.
+  const utf8Offset = utf8OffsetOf(source, offset);
+  return sections(structure).some(
+    (block) =>
+      block.section.role.kind === "templateHost" &&
+      utf8Offset >= block.section.contentRange.start &&
+      utf8Offset <= block.section.contentRange.end,
+  );
 }
 
-function getOpenTagStart(source: string, offset: number): number | null {
-  const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  const gt = source.lastIndexOf(">", searchOffset);
-  if (lt === -1 || lt < gt) return null;
+/** Bounded current-token lookback (mirrors the plugin's 256-byte contract). */
+const MAX_CURRENT_TOKEN_LOOKBACK = 256;
 
-  const marker = source[lt + 1];
-  if (marker === "/" || marker === "!" || marker === "?") return null;
-  return lt;
+const utf8OffsetOf = utf16ToUtf8Offset;
+
+function isTagNameChar(char: string): boolean {
+  return /[\w.-]/.test(char);
+}
+
+/**
+ * Innermost stamped markup node whose OPENING span contains the offset —
+ * element, recovered, or unknown nodes retaining an opening range. The
+ * structure projection is the sole tag-geometry authority; raw source is
+ * never scanned for `<`.
+ */
+function enclosingOpeningSyntax(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): { openingStart: number; nameEnd: number | null; name: string | null } | null {
+  if (structure === null) return null;
+  const utf8Offset = utf8OffsetOf(source, offset);
+  let best: { openingStart: number; nameEnd: number | null; name: string | null } | null = null;
+  for (const node of structure.markupNodes) {
+    const syntax = node.syntax as {
+      kind: string;
+      openingRange?: StructureRange;
+      authoredName?: { spelling: string; range: StructureRange };
+    };
+    if (!["element", "recovered", "unknown"].includes(syntax.kind)) continue;
+    const opening = syntax.openingRange;
+    if (!opening) continue;
+    if (!(utf8Offset > opening.start && utf8Offset < opening.end)) continue;
+    if (best === null || opening.start > best.openingStart) {
+      best = {
+        openingStart: opening.start,
+        nameEnd: syntax.authoredName?.range.end ?? null,
+        name: syntax.authoredName?.spelling ?? null,
+      };
+    }
+  }
+  return best;
+}
+
+/**
+ * Whether the offset sits inside an interpolation. Structure-first: a stamped
+ * interpolation node containing the offset. Edit-time recovery for a
+ * just-typed `{{` (not yet stamped): a bounded current-token lookback — the
+ * candidate opener must NOT sit inside a stamped element opening span (a `{{`
+ * inside an attribute value string is not an interpolation opener).
+ */
+export function isInsideInterpolation(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  if (structure !== null) {
+    const utf8Offset = utf8OffsetOf(source, offset);
+    for (const node of structure.markupNodes) {
+      const syntax = node.syntax as { kind: string; fullRange?: StructureRange };
+      if (syntax.kind !== "interpolation" || !syntax.fullRange) continue;
+      if (utf8Offset > syntax.fullRange.start && utf8Offset < syntax.fullRange.end) return true;
+    }
+  }
+  const floor = Math.max(0, offset - MAX_CURRENT_TOKEN_LOOKBACK);
+  const window = source.slice(floor, offset);
+  const open = window.lastIndexOf("{{");
+  const close = window.lastIndexOf("}}");
+  if (open < 0 || open < close) return false;
+  // The recovered opener is only an interpolation when it is markup content —
+  // never inside a stamped element opening tag (attribute value territory).
+  return enclosingOpeningSyntax(structure, source, floor + open) === null;
+}
+
+/**
+ * Start of the current open-tag NAME token: the cursor's token characters
+ * walked back (bounded), immediately preceded by `<`. A pure current-token
+ * lex — no window delimiter search.
+ */
+function openTagTokenStart(source: string, offset: number): number | null {
+  let start = offset;
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  while (start > 0 && budget > 0 && isTagNameChar(source[start - 1])) {
+    start -= 1;
+    budget -= 1;
+  }
+  if (budget === 0) return null;
+  if (start > 0 && source[start - 1] === "<") return start;
+  return null;
 }
 
 function isTagNameContext(source: string, offset: number): boolean {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return false;
-
-  const between = source.slice(openTagStart + 1, offset);
-  return !/\s/.test(between);
+  return openTagTokenStart(source, offset) !== null;
 }
 
-function isTagAttributeContext(source: string, offset: number): boolean {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return false;
-  const between = source.slice(openTagStart + 1, offset);
-  if (between.length === 0) return false;
-  return /\s/.test(between);
+/**
+ * Attribute-name position: strictly inside a STAMPED opening tag, past the
+ * tag-name token. The structure projection supplies the opening span; a `<`
+ * appearing in text or attribute strings can never fabricate one.
+ */
+function isTagAttributeContext(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): boolean {
+  const syntax = enclosingOpeningSyntax(structure, source, offset);
+  if (syntax === null || syntax.nameEnd === null) return false;
+  return utf8OffsetOf(source, offset) > syntax.nameEnd;
+}
+
+/** `</name|` current-token check: token chars back, immediately preceded by `</`. */
+function closingTagTokenStart(source: string, offset: number): number | null {
+  let start = offset;
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  while (start > 0 && budget > 0 && isTagNameChar(source[start - 1])) {
+    start -= 1;
+    budget -= 1;
+  }
+  if (budget === 0) return null;
+  if (start > 1 && source[start - 1] === "/" && source[start - 2] === "<") return start;
+  return null;
 }
 
 function isClosingTagNameContext(source: string, offset: number): boolean {
-  const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  const gt = source.lastIndexOf(">", searchOffset);
-  if (lt === -1 || lt < gt) return false;
-
-  if (source.slice(lt, lt + 2) !== "</") return false;
-  const between = source.slice(lt + 2, offset);
-  return !/\s/.test(between);
+  return closingTagTokenStart(source, offset) !== null;
 }
 
 function currentTagPrefix(source: string, offset: number): string {
-  const openTagStart = getOpenTagStart(source, offset);
-  if (openTagStart == null) return "";
-  const raw = source.slice(openTagStart + 1, offset);
-  return raw.trim();
+  const start = openTagTokenStart(source, offset);
+  return start === null ? "" : source.slice(start, offset);
 }
 
 function currentClosingTagPrefix(source: string, offset: number): string {
-  const searchOffset = Math.max(0, offset - 1);
-  const lt = source.lastIndexOf("<", searchOffset);
-  if (lt === -1) return "";
-  return source.slice(lt + 2, offset).trim();
+  const start = closingTagTokenStart(source, offset);
+  return start === null ? "" : source.slice(start, offset);
 }
 
 export function toPascalCase(input: string): string {
@@ -243,17 +343,16 @@ interface ScriptBlock {
   content: string;
 }
 
-function findScriptBlock(source: string): ScriptBlock | null {
-  const setupMatch = /<script\b[^>]*\bsetup\b[^>]*>/i.exec(source);
-  const anyMatch = /<script\b[^>]*>/i.exec(source);
-  const match = setupMatch ?? anyMatch;
-  if (!match || match.index == null) return null;
-
-  const openStart = match.index;
-  const openEnd = openStart + match[0].length;
-  const closeStart = source.indexOf("</script>", openEnd);
-  if (closeStart === -1) return null;
-
+function findScriptBlock(
+  source: string,
+  structure: OrderedSfcStructure | null,
+): ScriptBlock | null {
+  const block = sections(structure).find((candidate) => candidate.section.role.kind === "script");
+  if (!block) return null;
+  // Structure ranges are UTF-8 BYTES; slicing and edit offsets are UTF-16.
+  const openStart = utf8ToUtf16Offset(source, block.section.openingRange.start);
+  const openEnd = utf8ToUtf16Offset(source, block.section.contentRange.start);
+  const closeStart = utf8ToUtf16Offset(source, block.section.contentRange.end);
   return {
     openStart,
     openEnd,
@@ -262,8 +361,12 @@ function findScriptBlock(source: string): ScriptBlock | null {
   };
 }
 
-function hasComponentImport(source: string, componentName: string): boolean {
-  const block = findScriptBlock(source);
+function hasComponentImport(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  componentName: string,
+): boolean {
+  const block = findScriptBlock(source, structure);
   if (!block) return false;
 
   const importRe = /import[\s\S]*?from\s+['"][^'"]+['"]\s*;?/g;
@@ -278,13 +381,14 @@ function hasComponentImport(source: string, componentName: string): boolean {
 
 export function buildComponentImportEdit(
   source: string,
+  structure: OrderedSfcStructure | null,
   componentName: string,
   importPath: string,
 ): ImportEdit | null {
-  if (hasComponentImport(source, componentName)) return null;
+  if (hasComponentImport(source, structure, componentName)) return null;
 
   const importStmt = `import ${componentName} from '${importPath}'`;
-  const block = findScriptBlock(source);
+  const block = findScriptBlock(source, structure);
 
   if (!block) {
     return {
@@ -382,51 +486,73 @@ function buildTagInsertText(tag: string): string {
   return `<${tag}>$0</${tag}>`;
 }
 
-function findLastUnclosedTag(source: string, offset: number): string | null {
-  const before = source.slice(0, offset);
-  const tagRe = /<\/?([A-Za-z][\w.-]*)\b[^>]*>/g;
-  const stack: string[] = [];
-
-  let match: RegExpExecArray | null;
-  while ((match = tagRe.exec(before)) !== null) {
-    const full = match[0];
-    const name = match[1];
-    const lower = name.toLowerCase();
-
-    if (full.startsWith("</")) {
-      const last = stack[stack.length - 1];
-      if (last && last.toLowerCase() === lower) {
-        stack.pop();
-      }
-      continue;
+function currentMarkupElement(
+  structure: OrderedSfcStructure | null,
+  source: string,
+  offset: number,
+): string | null {
+  if (structure === null) return null;
+  const utf8Offset = utf8OffsetOf(source, offset);
+  let best: { start: number; name: string } | null = null;
+  for (const node of structure.markupNodes) {
+    const syntax = node.syntax;
+    if (syntax.kind !== "element" || !("authoredName" in syntax)) continue;
+    if (syntax.openingRange.end > utf8Offset || syntax.fullRange.end < utf8Offset) continue;
+    if (best === null || syntax.openingRange.start > best.start) {
+      best = { start: syntax.openingRange.start, name: syntax.authoredName.spelling };
     }
-
-    if (full.endsWith("/>") || VOID_HTML_TAGS.has(lower)) {
-      continue;
-    }
-
-    stack.push(name);
   }
-
-  return stack[stack.length - 1] ?? null;
+  return best?.name ?? null;
 }
 
-export function computeAutoCloseTagText(source: string, offset: number): string | null {
+/**
+ * The name of the opening tag whose `>` was JUST typed at `gtIndex` — the one
+ * genuine edit-time recovery in this module (the structure cannot have
+ * stamped a tag whose `>` landed this keystroke). A bounded, quote-aware
+ * backward lex over the current tag only: quoted attribute values are
+ * skipped as units, an unquoted `>` aborts, and the walk gives up past the
+ * 256-char budget. Nothing outside the just-typed tag is ever inspected.
+ */
+function justTypedOpenTagName(source: string, gtIndex: number): string | null {
+  if (gtIndex > 0 && source[gtIndex - 1] === "/") return null; // self-closing
+  let budget = MAX_CURRENT_TOKEN_LOOKBACK;
+  let index = gtIndex - 1;
+  while (index >= 0 && budget > 0) {
+    const char = source[index];
+    if (char === '"' || char === "'") {
+      const openQuote = source.lastIndexOf(char, index - 1);
+      if (openQuote < 0 || gtIndex - openQuote > MAX_CURRENT_TOKEN_LOOKBACK) return null;
+      budget -= index - openQuote;
+      index = openQuote - 1;
+      continue;
+    }
+    if (char === ">") return null;
+    if (char === "<") {
+      if (source[index + 1] === "/") return null; // closing tag
+      const match = /^<([A-Za-z][\w.-]*)\b/.exec(source.slice(index, gtIndex + 1));
+      return match ? match[1] : null;
+    }
+    index -= 1;
+    budget -= 1;
+  }
+  return null;
+}
+
+export function computeAutoCloseTagText(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): string | null {
   if (offset <= 0 || source[offset - 1] !== ">") return null;
-  if (!isOffsetInTemplateBlock(source, offset) || isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(structure, source, offset) ||
+    isInsideInterpolation(structure, source, offset)
+  ) {
     return null;
   }
 
-  const openTagStart = getOpenTagStart(source, offset - 1);
-  if (openTagStart == null) return null;
-
-  const openTagText = source.slice(openTagStart, offset);
-  if (openTagText.startsWith("</") || openTagText.endsWith("/>")) return null;
-
-  const match = /^<([A-Za-z][\w.-]*)\b/.exec(openTagText);
-  if (!match) return null;
-
-  const tagName = match[1];
+  const tagName = justTypedOpenTagName(source, offset - 1);
+  if (tagName === null) return null;
   if (VOID_HTML_TAGS.has(tagName.toLowerCase())) return null;
 
   const after = source.slice(offset).trimStart();
@@ -435,10 +561,17 @@ export function computeAutoCloseTagText(source: string, offset: number): string 
   return `</${tagName}>`;
 }
 
-function collectClosingTagCompletions(source: string, offset: number): TemplateCompletion[] {
+function collectClosingTagCompletions(
+  source: string,
+  structure: OrderedSfcStructure | null,
+  offset: number,
+): TemplateCompletion[] {
   if (!isClosingTagNameContext(source, offset)) return [];
+  // A `</` DECOY inside a stamped opening tag (an attribute value string) is
+  // not a closing tag — the structure knows the cursor is tag-internal.
+  if (enclosingOpeningSyntax(structure, source, offset) !== null) return [];
 
-  const expectedTag = findLastUnclosedTag(source, offset);
+  const expectedTag = currentMarkupElement(structure, source, offset);
   if (!expectedTag) return [];
 
   const prefix = currentClosingTagPrefix(source, offset).toLowerCase();
@@ -459,7 +592,10 @@ export function collectTemplateInterpolationCompletions(
   params: TemplateCompletionParams,
 ): TemplateCompletion[] {
   const { source, offset, analysis } = params;
-  if (!isOffsetInTemplateBlock(source, offset) || !isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(params.structure, source, offset) ||
+    !isInsideInterpolation(params.structure, source, offset)
+  ) {
     return [];
   }
 
@@ -498,11 +634,14 @@ export function collectTemplateInterpolationCompletions(
 export function collectTemplateCompletions(params: TemplateCompletionParams): TemplateCompletion[] {
   const { source, offset, activeFilename, openFilenames, analysis } = params;
 
-  if (!isOffsetInTemplateBlock(source, offset) || isInsideInterpolation(source, offset)) {
+  if (
+    !isOffsetInTemplateBlock(params.structure, source, offset) ||
+    isInsideInterpolation(params.structure, source, offset)
+  ) {
     return [];
   }
 
-  const closing = collectClosingTagCompletions(source, offset);
+  const closing = collectClosingTagCompletions(source, params.structure, offset);
   if (closing.length > 0) return closing;
 
   if (isTagNameContext(source, offset)) {
@@ -524,7 +663,7 @@ export function collectTemplateCompletions(params: TemplateCompletionParams): Te
     for (const component of collectComponentCandidates(activeFilename, openFilenames, analysis)) {
       if (prefix && !component.name.toLowerCase().startsWith(prefix)) continue;
       const importEdit = component.importPath
-        ? buildComponentImportEdit(source, component.name, component.importPath)
+        ? buildComponentImportEdit(source, params.structure, component.name, component.importPath)
         : null;
       out.push({
         label: component.name,
@@ -540,7 +679,7 @@ export function collectTemplateCompletions(params: TemplateCompletionParams): Te
     return out;
   }
 
-  if (isTagAttributeContext(source, offset)) {
+  if (isTagAttributeContext(params.structure, source, offset)) {
     return TEMPLATE_ATTR_COMPLETIONS.map((item) => ({
       label: item.label,
       insertText: item.insertText,

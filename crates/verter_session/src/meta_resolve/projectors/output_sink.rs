@@ -837,7 +837,7 @@ pub(crate) fn surface_member_to_expanded_field(
                 // REQUIRED value-type position (runtime/unannotated positions
                 // are separately typed `Absent` at their producers). Emit
                 // PAYLOAD sources never land here — the normalized
-                // `ResolvedEmitField.payload_source` rows (closed tuple /
+                // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
                 // member-path / callable-params replay) own them.
                 None => match value_position {
                     MemberValuePosition::ShallowMember => {
@@ -887,17 +887,24 @@ pub(crate) fn surface_member_to_expanded_field(
     // (the cross-file-simple discriminating positive test rejects that accident).
     let declared_in_macro_type_arg = member.declared_in_macro_type_arg.get()
         && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
-    ExpandedField {
-        name: member_name.to_string(),
+    let authored_evidence =
+        shallow_source
+            .as_ref()
+            .zip(raw_type.as_deref())
+            .map(|(locator, text)| {
+                crate::authored_evidence_producer::from_admitted_member(admitted, locator, text)
+            });
+    ExpandedField::from_source_position(
+        member_name.to_string(),
         r#type,
-        raw_type,
-        optional: member.optional,
+        authored_evidence,
+        member.optional,
         exactness,
-        execution_status: ExpansionExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-        shallow_source,
+        ExpansionExecutionStatus::Completed,
+        Vec::new(),
         declared_in_macro_type_arg,
-    }
+        verter_type_expr::ResolutionProvenance::SessionProjector,
+    )
 }
 
 /// Resolve a surface member's value to its underlying body for
@@ -1118,21 +1125,21 @@ pub(crate) fn project_model(
 
     let name = model_name;
 
-    Some(ExpandedField {
+    Some(ExpandedField::from_source_position(
         name,
         r#type,
-        raw_type: None,
-        optional: false,
+        None,
+        false,
         exactness,
-        execution_status: ExpansionExecutionStatus::Completed,
-        diagnostics: Vec::new(),
-        shallow_source: None,
+        ExpansionExecutionStatus::Completed,
+        Vec::new(),
         // `defineModel<T>()` synthesizes the model member at the
         // macro's T position. The member is structurally
         // author-declared in the macro's type argument by virtue of
         // the `defineModel` syntax itself — set `true`.
-        declared_in_macro_type_arg: true,
-    })
+        true,
+        verter_type_expr::ResolutionProvenance::SessionProjector,
+    ))
 }
 
 /// The ONE centralized missing-source output policy: a lane position whose
@@ -1224,6 +1231,43 @@ fn materialize_output_source(
                     }
                     crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::UnknownMaterializing(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior { path }
+                    }
+                    // A ROOT-level typed query failure. Previously EVERY
+                    // one of these collapsed into the raise's `Ok(None)` and
+                    // surfaced as `UnraisableSource` — indistinguishable from
+                    // a genuine absence. The typed error now decides, through
+                    // the single disposition authority.
+                    crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::QueryFailure(err) => {
+                        use crate::project_semantic_dispatch::query_error_disposition::{
+                            query_error_disposition, QueryErrorDisposition,
+                        };
+                        match query_error_disposition(&err) {
+                            // A publishable control carrier reaches the failure
+                            // arm ONLY when its carrier could not be interned —
+                            // i.e. the source genuinely has no live graph
+                            // representation. That is `UnraisableSource`.
+                            QueryErrorDisposition::RecursionCarrier
+                            | QueryErrorDisposition::ExpandableDecl
+                            // Optional absence never reaches here (it is
+                            // `Ok(None)`); if the raise contract ever changed,
+                            // absence is still the correct answer for it.
+                            | QueryErrorDisposition::OptionalAbsence => {
+                                crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
+                            }
+                            // Every other disposition is a carrier whose shell
+                            // fold would render a completed `unknown`. Fail at
+                            // the ROOT position (empty path — that arm's
+                            // documented convention for a direct source-root
+                            // deref).
+                            QueryErrorDisposition::ControlCarrier
+                            | QueryErrorDisposition::UnsupportedSurface
+                            | QueryErrorDisposition::Partial
+                            | QueryErrorDisposition::Failure => {
+                                crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {
+                                    path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                                }
+                            }
+                        }
                     }
                 })?
                 .ok_or(crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource)?;

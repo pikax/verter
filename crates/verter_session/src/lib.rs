@@ -48,7 +48,6 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
-
 pub mod app_config_proof_db;
 #[cfg(test)]
 mod audit_caps_truncation_tests;
@@ -57,11 +56,19 @@ mod audit_warm_cache_tests;
 pub mod audited_request;
 #[cfg(test)]
 mod audited_request_tests;
+mod authored_evidence_producer;
 pub mod binder_identity_facts;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
+mod block_content;
 mod cache;
 pub mod cache_schema;
+pub mod carrier_artifact_cohort;
+#[cfg(test)]
+mod carrier_fixture_tests;
+pub mod carrier_publication_store;
+#[cfg(test)]
+mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
@@ -226,9 +233,9 @@ mod svelte_vertical_tests;
 #[cfg(test)]
 mod artifact_reads_pinned_tests;
 #[cfg(test)]
-mod overlay_bundle_memo_tests;
-#[cfg(test)]
 mod program_analysis_fact_tests;
+#[cfg(test)]
+mod request_bundle_memo_tests;
 // `SessionView::content_hash_for` is a view-authoritative current-
 // content oracle, consistent with `source()` — base + overlay
 // fallthrough route through the scheduler authority, never a
@@ -338,7 +345,6 @@ pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
-pub(crate) mod source_map_remap;
 #[cfg(test)]
 mod source_root_retention_tests;
 #[cfg(test)]
@@ -399,6 +405,7 @@ pub mod projection_bench_support {
     };
 }
 
+pub use block_content::hash_block_content;
 pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
@@ -408,15 +415,10 @@ pub use verter_language::{
     LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 
-// Per-call-site instrumentation accessors. Production-on
-// (the counter map is bumped on every `HostStoreView::from_host`
-// invocation) so the bench can dump the attribution table at the end
-// of each pass. The dump is keyed by `&'static Location` propagated
+// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation).
 // through the `#[track_caller]` rail from the warm-hit validator
 // down to `HostStoreView::from_host`.
-// The coherent-build sweep counter is the batch-saturation gate's actual
-// base-view sweep count (NOT the per-call `from_host` count, which also
-// bumps on cheap token-stable Arc-clone hits): warm batches sweep ~O(1).
+// The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
 pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 pub use resolver_store::{
@@ -444,8 +446,7 @@ use shared::Shared;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
-/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
-/// compile slots. It is designed to be long-lived (one per Vite dev server or
+/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is designed to be long-lived (one per Vite dev server or
 /// WASM session) and provides the full upsert-resolve-load lifecycle:
 ///
 /// 1. [`upsert`](Self::upsert) â€” parse and store a file, returning change info
@@ -456,6 +457,15 @@ use shared::Shared;
 pub struct VerterHost {
     pub(crate) instance_id: u64,
     pub(crate) config: HostConfig,
+    pub(crate) registered_source_authority: carrier_publication_store::SourceAuthorityHandle,
+    pub(crate) carrier_grammar_authority: carrier_publication_store::GrammarAuthorityHandle,
+    pub(crate) carrier_publication_store: carrier_publication_store::PublicationStoreHandle,
+    pub(crate) block_content_state: Shared<crate::block_content::BlockContentState>,
+    pub(crate) block_content_admission_fence: parking_lot::Mutex<()>,
+    pub(crate) block_content_correlation_counter: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(crate) block_content_admission_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// The single host-level language classification authority:
     /// composes the static `LanguageRegistry` with the project
     /// capability snapshot (empty until a capability producer lands).
@@ -505,12 +515,10 @@ pub struct VerterHost {
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
     #[cfg(feature = "session_metrics")]
     pub(crate) metrics: HostMetrics,
-    /// Scheduler for async per-file staging.
-    ///
-    /// The scheduler coordinates Sourceâ†’Analysisâ†’Artifact progression
-    /// with generation tracking, priority queuing, and blocker management.
-    /// It is the sole parser â€” upsert() delegates to the scheduler.
+    /// Scheduler for async per-file staging and blocker management.
+    /// Upsert delegates coherent source transitions to it.
     pub(crate) scheduler: Arc<verter_scheduler::scheduler::Scheduler>,
+    pub(crate) registered_envelope_ingest: carrier_publication_store::RegisteredEnvelopeIngest,
     /// Provenance counters for component-meta observability.
     /// Shared with sessions via `Arc`.
     pub(crate) provenance: Arc<MetaProvenance>,

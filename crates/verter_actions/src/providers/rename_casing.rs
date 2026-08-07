@@ -175,6 +175,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = RenameCasing.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -210,6 +211,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let actions = RenameCasing.fixes_for_diagnostic(&diag, &ctx);
         assert_eq!(actions.len(), 1);
@@ -239,6 +241,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         assert!(RenameCasing.fixes_for_diagnostic(&diag, &ctx).is_empty());
     }

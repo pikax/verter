@@ -2,8 +2,8 @@
  * Discriminating regression tests for the shape-heuristic behaviour.
  *
  * The legacy compat layer's `looksLike*` helpers (`looksLikeBareTypeReference`,
- * `looksLikeIndexedAccessType`, `looksLikeSlotsHelperRawType`,
- * `looksLikeUiHelperRawType`) ran regex / substring checks against
+ * `looksLikeIndexedAccessType` and the slots/UI descriptor-marker predicates)
+ * ran regex / substring checks against
  * `prop.rawType` text.
  *
  * Every helper now switches on `TypeDescriptor.kind`. These tests would
@@ -59,7 +59,7 @@ function makeSlot(
 }
 
 describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.rawType)", () => {
-  describe("looksLikeSlotsHelperRawType (gate for buildCompatSlotsPropMeta)", () => {
+  describe("slots descriptor marker (gate for compat slots projection)", () => {
     it("projects slots-helper shape when descriptor is a ComponentSlots ref, regardless of rawType decoy", () => {
       // Descriptor: `ComponentSlots<typeof Theme>` — the Vue helper ref kind
       // tag. `unwrapComponentSlotsDescriptor` understands this shape and
@@ -116,10 +116,10 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
     });
   });
 
-  describe("looksLikeUiHelperRawType (gate for buildCompatUiBindingType in slot bindings)", () => {
+  describe("UI descriptor marker (gate for compat slot bindings)", () => {
     it("projects UI-helper binding shape when descriptor is a ComponentUI ref, regardless of rawType decoy", () => {
       // Slot binding descriptor: `ComponentUI<typeof Theme>` — the Vue helper
-      // ref. The typed `looksLikeUiHelperRawType` matches the ref
+      // ref. The typed descriptor-marker predicate matches the ref
       // structurally, and `extractCompatUiBindingFieldNames` extracts the slot
       // field names via `unwrapComponentUiDescriptor`.
       const slotsFunctionMap: TypeDescriptor = {
@@ -224,6 +224,7 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
   });
 
   describe("looksLikeIndexedAccessType (used by shouldPreferDescriptorForProp / shouldPreferRawSchemaType)", () => {
+    // @ai-generated - Preserves optionality while terminal indexed text remains display-only.
     it("declines descriptor-over-rawType swap when descriptor is primitive (no indexed-access marker), even if rawType TEXT has bracket syntax", () => {
       // Descriptor: union of `string | undefined` — primitives, NOT indexed access.
       const prop = makeProp({
@@ -242,7 +243,8 @@ describe("shape-detection heuristics switch on TypeDescriptor.kind (not prop.raw
       // rawType passthrough wins → `Foo["bar"]` (normalised
       // single-to-double-quote rendering). (The legacy path produced
       // "string | undefined" via the text-based shape sniff.)
-      expect(result.type).toBe('Foo["bar"]');
+      // Optionality remains descriptor-owned, so display appends `| undefined`.
+      expect(result.type).toBe('Foo["bar"] | undefined');
     });
 
     it("triggers descriptor-over-rawType swap when descriptor is IndexedAccess, regardless of rawType text", () => {

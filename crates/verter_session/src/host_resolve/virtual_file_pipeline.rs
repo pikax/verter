@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::vue_script_extract::template_converter_inputs;
-use crate::compile::{assemble_vue_main_module, merge_external_sources};
+use crate::compile::assemble_vue_main_module;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
 use crate::types::*;
@@ -117,6 +117,24 @@ fn content_mode_profile_hash(profile: &CompileProfile) -> Hash16 {
     buf.extend_from_slice(&CompileCacheMode::Content.stable_hash());
     buf.extend_from_slice(&compile_profile_hash(profile).to_le_bytes());
     crate::hash::hash_16(&buf)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_registered_carrier_inputs(
+    _input: &CompileInput,
+    profile: &CompileProfile,
+) -> Result<(), HostError> {
+    let grammar_matches = profile
+        .delimiters
+        .as_ref()
+        .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+        && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+    if !grammar_matches {
+        return Err(HostError::GrammarMismatch(
+            crate::carrier_publication_store::GrammarMismatch,
+        ));
+    }
+    Ok(())
 }
 
 /// Deployment version hash for the compiler crate. Two builds of a
@@ -655,19 +673,10 @@ impl VerterHost {
                 // is a candidate slot worth validating. A cold miss (no
                 // `ProfileState`, or a present `ProfileState` with no slot
                 // for this profile_hash) and a hash mismatch both fall
-                // through to recompile WITHOUT building a full-workspace
-                // store-view snapshot.
+                // through to recompile WITHOUT requesting a store-view root
+                // capture.
                 if let Some(cc) = self.compile_cache().get(&canonical) {
-                    let soh = cc
-                        .style_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.hash)
-                        .unwrap_or(0);
-                    let coh = cc
-                        .content_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.hash)
-                        .unwrap_or(0);
+                    let coh = 0;
                     // R3/R26/R28: the warm hit must validate the SAME
                     // predicate `get_virtual_file` / `compile_slot_is_warm`
                     // use — own-content identity (`semantic_hash`), both
@@ -685,7 +694,6 @@ impl VerterHost {
                             &cc,
                             profile_hash,
                             &hd.parse.semantic_hash,
-                            soh,
                             coh,
                             profile.svelte_css_hash_override.as_deref(),
                             || {
@@ -757,7 +765,7 @@ impl VerterHost {
     ) -> bool {
         let view = current_view.view();
         use crate::resolver_core::StoreView;
-        signature.facts.iter().all(|fact| view.validates(fact))
+        view.validates_fact_signature(&signature.facts)
     }
 
     /// Read-only predicate: would `get_virtual_file(query)` for this
@@ -766,8 +774,8 @@ impl VerterHost {
     ///
     /// Mirrors the freshness predicate the writer uses inside
     /// `get_virtual_file` (`slot.semantic_hash == parse.semantic_hash
-    /// && slot.style_override_hash == soh && slot.content_override_hash
-    /// == coh && fact-signature validates`). The predicate stays in
+    /// && slot.content_override_hash == coh && fact-signature validates`).
+    /// The predicate stays in
     /// lockstep with the writer; if the writer's predicate ever
     /// changes, this accessor changes with it.
     ///
@@ -798,16 +806,7 @@ impl VerterHost {
             Some(c) => c,
             None => return false,
         };
-        let soh = cc
-            .style_overrides
-            .get(&profile_hash)
-            .map(|o| o.hash)
-            .unwrap_or(0);
-        let coh = cc
-            .content_overrides
-            .get(&profile_hash)
-            .map(|o| o.layer.hash)
-            .unwrap_or(0);
+        let coh = 0;
         // Mirror the writer's warm-hit gate exactly. The store-view read
         // is threaded through `acquire_view`, which `lookup` invokes ONLY
         // after the cheap slot-present + carrier + hash predicates pass —
@@ -822,7 +821,6 @@ impl VerterHost {
                 &cc,
                 profile_hash,
                 &parse.semantic_hash,
-                soh,
                 coh,
                 profile.svelte_css_hash_override.as_deref(),
                 || {
@@ -919,14 +917,21 @@ impl VerterHost {
     ) -> Result<RenderOnlyMain, HostError> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
+        // External block bytes are VFS-owned compiler inputs. Resolve and
+        // load those blockers before taking the coherent owner/content
+        // capture below; `selected_block` is intentionally a read-only
+        // selector and must not perform workspace or scheduler mutation.
+        self.hydrate_compile_blockers(&canonical);
+
         // The SAME profile hash `apply_block_overrides` / `get_virtual_file`
-        // key request-time block / style overrides under. The bundler's
+        // key validated supplied block content under. The bundler's
         // preprocessor path (Pug / CoffeeScript templates+scripts, custom
-        // blocks, non-Vite styles) stores overrides for this profile
+        // blocks, non-Vite styles) admits supplied artifacts for this profile
         // immediately before rendering, so the render lane must read the
         // override-aware effective state — otherwise it compiles the RAW
         // (un-preprocessed) block content.
         let profile_hash = compile_profile_hash(profile);
+        let block_content_capture_fence = self.block_content_admission_fence.lock();
 
         // ── ONE coherent source snapshot ──
         // Every content-determined input derives from this single read
@@ -960,41 +965,29 @@ impl VerterHost {
             // overrides project over the raw parse meta).
             let effective_meta =
                 self.effective_meta_from_base(parse.meta.clone(), &canonical, Some(profile_hash));
-            // The stored request-time override layers for this profile —
-            // read exactly like the HostBacked cache-miss path.
-            let cc_ref = self.compile_cache().get(&canonical);
-            let style_override_layer = cc_ref.as_ref().and_then(|cc| {
-                cc.style_overrides
-                    .get(&profile_hash)
-                    .map(|o| o.layer.clone())
-            });
-            let content_override_layer = cc_ref.as_ref().and_then(|cc| {
-                cc.content_overrides
-                    .get(&profile_hash)
-                    .map(|o| o.layer.clone())
-            });
-            drop(cc_ref);
             // The byte-load-bearing `CompileInput` — the SAME field mapping
             // the HostBacked cache-miss path builds (source, macro deps,
             // style v-bind vars from the same parse snapshot; override
             // layers from the same host state).
             // The SOUND OXC-derived roots recorded on each analyzed v-bind —
             // never a text split of the expression.
-            let style_v_bind_vars = parse
-                .style_analyses
-                .iter()
-                .flat_map(|sa| &sa.v_binds)
-                .flat_map(|vb| vb.expr_roots.iter().cloned())
-                .collect();
+            let style_content = self.capture_compiler_style_content_for_profile(
+                &canonical,
+                &parse.style_analyses,
+                profile,
+            );
+            let style_v_bind_vars = style_content.v_bind_vars;
+            let block_content = self.capture_compiler_block_content(&canonical, profile)?;
             CompileInput {
                 canonical_id: canonical.clone(),
                 source: efs.source,
+                whole_hash: efs.whole_hash,
                 meta: effective_meta,
                 parse_diagnostics: parse.parse_diagnostics.clone(),
                 src_blocks: parse.src_blocks.clone(),
                 external_requests: parse.external_requests.clone(),
-                style_override_layer,
-                content_override_layer,
+                has_supplied_block_content: block_content.has_supplied,
+                block_content_inputs: block_content.inputs,
                 macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
                 script_imports: efs.script_analysis.imports.clone(),
                 script_macros: efs.script_analysis.macros.clone(),
@@ -1003,8 +996,12 @@ impl VerterHost {
                 script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                 framework_parse: efs.framework_parse,
                 style_v_bind_vars,
+                style_v_bind_usage_complete: style_content.usage_complete,
             }
         };
+        drop(block_content_capture_fence);
+
+        validate_registered_carrier_inputs(&compile_input, profile)?;
 
         // The render-only compile: the SAME shared substrate + host-side
         // `Main` assembly as `compile_entry`, without the per-file wrapper
@@ -1131,8 +1128,18 @@ impl VerterHost {
         let profile_hash = compile_profile_hash(profile);
         let requested_mode = profile.requested_mode;
 
+        // `get_virtual_file` is a first-class compile entry, not merely the
+        // projection half of `ensure_compiled`. Hydrate resolved external
+        // block canonicals here so every entry observes VFS-owned bytes
+        // before the single coherent compiler block-content capture. This
+        // stays outside the admission fence because loading publishes source
+        // state; the capture and its post-compile currentness check provide
+        // the atomicity boundary.
+        self.hydrate_compile_blockers(&canonical_id);
+        let block_content_capture_fence = self.block_content_admission_fence.lock();
+
         // Cache hit check and compile input extraction under a single read lock.
-        // This avoids cloning the full FileEntry (with all compile_slots, style_overrides, etc.)
+        // This avoids cloning the full file entry and its compile slots.
         // on the hot path.
         struct CacheMiss {
             compile_input: CompileInput,
@@ -1166,6 +1173,11 @@ impl VerterHost {
             /// under a new-current identity. `None` for `Session` /
             /// `Stateless`.
             content_publish_stamp: Option<(crate::cache_runtime::CompileOutputPureContentKey, u64)>,
+            /// Exact compiler block-content projection captured with the owner
+            /// snapshot. Publish revalidates this after the cold compute so a
+            /// concurrent supplied apply or external/owner publication cannot
+            /// re-admit stale output after clearing the live slots.
+            block_content_stamp: BlockContentHashToken,
         }
 
         // The request's SINGLE scheduler source snapshot. ALL
@@ -1196,34 +1208,26 @@ impl VerterHost {
                     })?;
                 let parse = &hd.parse;
 
+                let grammar_matches = profile
+                    .delimiters
+                    .as_ref()
+                    .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+                    && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+                if !grammar_matches {
+                    return Err(HostError::GrammarMismatch(
+                        crate::carrier_publication_store::GrammarMismatch,
+                    ));
+                }
+
                 // Test-only seam: the snapshot→compile-input window.
                 // Fence tests land a content upsert here to prove the
                 // compiled bytes and the content-addressed key cohere
                 // with ONE source snapshot and the publish fence
                 // detects the content movement.
-                #[cfg(test)]
-                {
-                    let hook = self.compile_input_seam_hook.lock().clone();
-                    if let Some(hook) = hook {
-                        hook();
-                    }
-                }
-
                 let cc_ref = self.compile_cache().get(&canonical_id);
 
                 // Cache hit check from compile_cache
-                let soh = cc_ref
-                    .as_ref()
-                    .and_then(|cc| cc.style_overrides.get(&profile_hash).map(|o| o.hash))
-                    .unwrap_or(0);
-                let coh = cc_ref
-                    .as_ref()
-                    .and_then(|cc| {
-                        cc.content_overrides
-                            .get(&profile_hash)
-                            .map(|o| o.layer.hash)
-                    })
-                    .unwrap_or(0);
+                let coh = 0;
 
                 // Build this request's effective compile input (override-
                 // aware) and classify the cache mode BEFORE any warm-hit
@@ -1232,7 +1236,7 @@ impl VerterHost {
                 // classifies to `Stateless` must not consult any host cache
                 // node, and a `Content` warm hit is valid only when the
                 // request actually classifies to `Content`. A request-time
-                // block / style override removes the session slot but does
+                // supplied block content removes the session slot but does
                 // not bump `whole_hash` nor evict the content-addressed
                 // entry, so consulting before classification would serve a
                 // stale `Content` entry for an input the override forces to
@@ -1259,16 +1263,6 @@ impl VerterHost {
                     Some(profile_hash),
                 );
 
-                let style_override_layer = cc_ref.as_ref().and_then(|cc| {
-                    cc.style_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.clone())
-                });
-                let content_override_layer = cc_ref.as_ref().and_then(|cc| {
-                    cc.content_overrides
-                        .get(&profile_hash)
-                        .map(|o| o.layer.clone())
-                });
                 // Fact-validated like the warm-hit consult below: a
                 // cross-file edit that invalidates the slot's recorded
                 // read set suppresses the last-good fallback too, so a
@@ -1309,17 +1303,23 @@ impl VerterHost {
                 // scheduler's Source→Analysis commit window and would
                 // compile — and publish warm under an unmoved key —
                 // EMPTY v-bind vars.
-                let style_analyses = &parse.style_analyses;
+                let style_content = self.capture_compiler_style_content_for_profile(
+                    &canonical_id,
+                    &parse.style_analyses,
+                    profile,
+                );
+                let block_content = self.capture_compiler_block_content(&canonical_id, profile)?;
 
                 let compile_input = CompileInput {
                     canonical_id: canonical_id.clone(),
                     source: efs.source,
+                    whole_hash: effective_whole_hash,
                     meta: effective_meta.clone(),
                     parse_diagnostics: parse.parse_diagnostics.clone(),
                     src_blocks: parse.src_blocks.clone(),
                     external_requests: parse.external_requests.clone(),
-                    style_override_layer,
-                    content_override_layer,
+                    has_supplied_block_content: block_content.has_supplied,
+                    block_content_inputs: block_content.inputs,
                     macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
                     script_imports: efs.script_analysis.imports.clone(),
                     script_macros: efs.script_analysis.macros.clone(),
@@ -1327,13 +1327,10 @@ impl VerterHost {
                     script_macro_usage: efs.script_analysis.macro_usage.clone(),
                     script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
                     framework_parse: efs.framework_parse,
-                    // The SOUND OXC-derived roots recorded on each analyzed
-                    // v-bind — never a text split of the expression.
-                    style_v_bind_vars: style_analyses
-                        .iter()
-                        .flat_map(|sa| &sa.v_binds)
-                        .flat_map(|vb| vb.expr_roots.iter().cloned())
-                        .collect(),
+                    // Compiler-only SOUND roots remain available even when
+                    // source-located facts fail closed for another space.
+                    style_v_bind_vars: style_content.v_bind_vars,
+                    style_v_bind_usage_complete: style_content.usage_complete,
                 };
 
                 // Classify EXACTLY ONCE per compile, here under the read
@@ -1418,7 +1415,7 @@ impl VerterHost {
                     // the `acquire_view` callback `lookup` invokes ONLY after
                     // its cheap slot-present + carrier + hash predicates pass, so
                     // that cold/profile-miss path (and a hash mismatch) never
-                    // builds a full-workspace store-view snapshot.
+                    // requests a store-view root capture.
                     CompileCacheMode::Session => cc_ref.as_ref().and_then(|cc| {
                         let session_node =
                             crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
@@ -1427,7 +1424,6 @@ impl VerterHost {
                                 cc,
                                 profile_hash,
                                 &parse.semantic_hash,
-                                soh,
                                 coh,
                                 profile.svelte_css_hash_override.as_deref(),
                                 || {
@@ -1469,18 +1465,7 @@ impl VerterHost {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                     // Build effective meta for cache-hit render_ids.
-                    let mut hit_meta = parse.meta.clone();
-                    if let Some(ref cc) = cc_ref {
-                        if let Some(so) = cc.style_overrides.get(&profile_hash) {
-                            for (idx, lang) in so.lang_overrides.iter().enumerate() {
-                                if let Some(ref l) = lang {
-                                    if idx < hit_meta.style_langs.len() {
-                                        hit_meta.style_langs[idx] = Some(l.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let hit_meta = parse.meta.clone();
 
                     // A warm hit is served only for the classified mode.
                     // A `Content` warm hit implies no reason fired — a reason
@@ -1526,9 +1511,22 @@ impl VerterHost {
                     whole_hash: parse.whole_hash,
                     classification,
                     content_publish_stamp,
+                    block_content_stamp: block_content.stamp,
                 }
             }
         };
+        drop(block_content_capture_fence);
+
+        // Test-only seam after the coherent owner + block-content capture and
+        // before cold compute. A source/content mutation landed here must make
+        // the post-compute publication stamp decline.
+        #[cfg(test)]
+        {
+            let hook = self.compile_input_seam_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
 
         let CacheMiss {
             compile_input,
@@ -1538,6 +1536,7 @@ impl VerterHost {
             whole_hash: captured_whole_hash,
             classification,
             content_publish_stamp,
+            block_content_stamp: captured_block_content_stamp,
         } = cache_miss;
 
         #[cfg(feature = "session_metrics")]
@@ -1556,16 +1555,7 @@ impl VerterHost {
         #[cfg(feature = "session_metrics")]
         let compile_start = Instant::now();
 
-        let style_override_hash = compile_input
-            .style_override_layer
-            .as_ref()
-            .map(|o| o.hash)
-            .unwrap_or(0);
-        let content_override_hash = compile_input
-            .content_override_layer
-            .as_ref()
-            .map(|o| o.hash)
-            .unwrap_or(0);
+        let content_override_hash = 0;
 
         // The mode classification was computed once under the read lock
         // (it gated the warm-hit consult). The classifier is the sole
@@ -1632,46 +1622,47 @@ impl VerterHost {
         // have NO fact rail, so they compile directly without the tracer
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
-            let (result, fact_read_set) = self.with_fact_tracer(|| {
-                // Replay the prefetch's BY-VALUE fenced-serve consumption
-                // into THIS tracer scope: the compile's payload derives from
-                // the prefetch-populated state, so a fenced serve consumed
-                // there taints this compile exactly as an in-scope fenced
-                // serve would — one admission rail
-                // (`non_cacheable_read_observed`), consulted below.
-                if prefetch_observation.fenced_serve_observed {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+            let (result, fact_read_set) =
+                self.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                    // Replay the prefetch's BY-VALUE fenced-serve consumption
+                    // into THIS tracer scope: the compile's payload derives from
+                    // the prefetch-populated state, so a fenced serve consumed
+                    // there taints this compile exactly as an in-scope fenced
+                    // serve would — one admission rail
+                    // (`non_cacheable_read_observed`), consulted below.
+                    if prefetch_observation.fenced_serve_observed {
+                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                         crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
                     );
-                }
-                crate::compile_fact_emission::observe_compile_tier_dependencies(
-                    self,
-                    &canonical_id,
-                    &compile_input.script_imports,
-                    &compile_input.macro_type_deps,
-                    &compile_input.external_requests,
-                );
-                // Test-only fact injection: when armed, emit `N`
-                // synthetic `FileWholeHash` observations into the active
-                // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
-                // tracer to `Overflow` deterministically, exercising the
-                // refuse-publish-on-overflow path without a pathological
-                // workspace fixture.
-                let force_n = self
-                    .compile_force_overflow_observations
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if force_n > 0 {
-                    for n in 0..force_n {
-                        crate::resolver_core::resolver_context::observe_fan_out(
-                            crate::resolver_core::FactVersionRef::FileWholeHash {
-                                canonical_id: format!("__compile_force_overflow_{n}.ts"),
-                                hash: [(n & 0xff) as u8; 16],
-                            },
-                        );
                     }
-                }
-                self.compile_entry(&compile_input, profile)
-            });
+                    crate::compile_fact_emission::observe_compile_tier_dependencies(
+                        self,
+                        &canonical_id,
+                        &compile_input.script_imports,
+                        &compile_input.macro_type_deps,
+                        &compile_input.external_requests,
+                    );
+                    // Test-only fact injection: when armed, emit `N`
+                    // synthetic `FileWholeHash` observations into the active
+                    // tracer. `N > FACT_SIGNATURE_CAP` (1024) drives the
+                    // tracer to `Overflow` deterministically, exercising the
+                    // refuse-publish-on-overflow path without a pathological
+                    // workspace fixture.
+                    let force_n = self
+                        .compile_force_overflow_observations
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if force_n > 0 {
+                        for n in 0..force_n {
+                            crate::resolver_core::resolver_context::observe_fan_out(
+                                crate::resolver_core::FactVersionRef::FileWholeHash {
+                                    canonical_id: format!("__compile_force_overflow_{n}.ts"),
+                                    hash: [(n & 0xff) as u8; 16],
+                                },
+                            );
+                        }
+                    }
+                    self.compile_entry(&compile_input, profile)
+                });
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
             // `NonCacheable` (fenced serve, overflow) → the session node
@@ -1707,18 +1698,34 @@ impl VerterHost {
             stale,
             compiled_tsx,
             compiled_template_analysis,
+            template_class_admission,
             runtime_surface_refused,
         ) = match compile_result {
-            Ok((outputs, diagnostics, tsx, tpl, refused)) => {
-                (outputs, diagnostics, false, tsx, tpl, refused)
-            }
+            Ok((outputs, diagnostics, tsx, tpl, class_admission, refused)) => (
+                outputs,
+                diagnostics,
+                false,
+                tsx,
+                tpl,
+                class_admission,
+                refused,
+            ),
             Err(diagnostics) => {
-                self.store_latest_diagnostics_if_source_unmoved(
+                let publication_fence = self.block_content_admission_fence.lock();
+                if self.compiler_block_content_capture_is_current(
                     &canonical_id,
-                    profile_hash,
+                    profile,
                     captured_whole_hash,
-                    diagnostics.clone(),
-                );
+                    &captured_block_content_stamp,
+                ) {
+                    self.store_latest_diagnostics_if_source_unmoved(
+                        &canonical_id,
+                        profile_hash,
+                        captured_whole_hash,
+                        diagnostics.clone(),
+                    );
+                }
+                drop(publication_fence);
                 let policy = self.config.compile_error_policy;
                 // `fallback_last_good` is session-published output. A
                 // `Stateless` compile bypasses ALL host cache reads —
@@ -1733,7 +1740,15 @@ impl VerterHost {
                 if serve_last_good {
                     if let Some(last_good) = fallback_last_good.clone() {
                         // A last-good serve is not a fresh runtime refusal.
-                        (last_good, diagnostics, true, None, None, false)
+                        (
+                            last_good,
+                            diagnostics,
+                            true,
+                            None,
+                            None,
+                            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::refused(),
+                            false,
+                        )
                     } else {
                         return Err(HostError::CompileError(CompileFailure {
                             diagnostics,
@@ -1775,7 +1790,6 @@ impl VerterHost {
         // publish paths. Stateless drops it after returning the response.
         let compile_output_value = crate::cache_runtime::CompileOutputValue::from_compile_record(
             captured_semantic_hash,
-            style_override_hash,
             content_override_hash,
             profile.svelte_css_hash_override.as_deref().map(Arc::from),
             compiled_outputs.clone(),
@@ -1796,13 +1810,6 @@ impl VerterHost {
         // cache entry — which is exactly why it is fenced on the source
         // identity these diagnostics were computed from rather than
         // written blind (see the writer's contract).
-        self.store_latest_diagnostics_if_source_unmoved(
-            &canonical_id,
-            profile_hash,
-            captured_whole_hash,
-            diagnostics.clone(),
-        );
-
         // Test-only seam: the compute→publish window. Fence tests land
         // an env / project mutation here to prove the mode-routed
         // publish below declines instead of stamping the old-input
@@ -1815,154 +1822,177 @@ impl VerterHost {
             }
         }
 
-        // Publish, routed by the actual cache mode.
-        match actual_mode {
-            CompileCacheMode::Stateless => {
-                // Bypass both typed cache nodes: publish nothing. The
-                // caller still receives the freshly computed virtual
-                // file below.
-            }
-            CompileCacheMode::Content => {
-                // Publish into the content-addressed node ONLY. No fact
-                // rail, no session slot, no scheduler artifact: the
-                // content key's env-hash dimensions already invalidate
-                // on every observable env change.
-                //
-                // Flight-captured stamp discipline: the key — content
-                // hash INCLUDED — and the generation were captured
-                // BEFORE the compile, from the same source snapshot
-                // that supplied the compiled bytes. The publish fences
-                // on the LIVE identity across EVERY key dimension:
-                // when the content hash, the env-hash bundle, or the
-                // project identity moved in the compute→publish
-                // window, the compile may have observed a torn mix of
-                // the two states (the analysis-node and override-layer
-                // reads are taken against the captured version), so
-                // the output is attributable to NEITHER identity:
-                // decline the publish (ReturnOnly — the caller is
-                // still served the fresh output) and stamp nothing. A
-                // vanished live source declines the same way. On an
-                // unmoved identity the entry lands under the captured
-                // key with the captured generation (conservatively
-                // stale, never a forged-current stamp).
-                let (captured_key, captured_generation) =
-                    content_publish_stamp.expect("Content mode always captures its publish stamp");
-                let live_key = self
-                    .scheduler
-                    .try_get_source(&canonical_id)
-                    .and_then(|snap| {
-                        snap.downcast_data::<crate::host_executor::HostSourceData>()
-                            .map(|live_hd| {
-                                self.compile_pure_content_key(
-                                    &canonical_id,
-                                    live_hd.parse.whole_hash,
-                                    profile,
-                                )
-                            })
-                    });
-                if live_key.as_ref() == Some(&captured_key) {
-                    self.compile_output_pure_content().publish_content(
-                        captured_key,
-                        compile_output_value,
-                        captured_generation,
-                    );
-                }
-            }
-            CompileCacheMode::Session => {
-                // Route the finalised admission through the typed session
-                // node. `Cacheable(sig)` publishes the slot under the
-                // path-precise signature AND commits the scheduler
-                // artifact snapshot — both observable warm-hit substrates
-                // land together. `NonCacheable(_)` (overflow) skips both
-                // and removes any prior slot so the carrier invariant
-                // `present in the session slot map ⇒ admitted cache entry
-                // for the current version` survives an overflowing
-                // recompute after a prior successful publish.
-                let admission =
-                    compile_admission.expect("Session mode always finalises a SignatureAdmission");
-                let is_cacheable = matches!(
-                    admission,
-                    crate::cache_runtime::SignatureAdmission::Cacheable(_)
-                );
-                if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
-                    let session_node =
-                        crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                    session_node.publish(
-                        &mut cc,
-                        profile_hash,
-                        admission,
-                        compile_output_value,
-                        last_tick,
-                    );
-                }
+        let block_content_publication_fence = self.block_content_admission_fence.lock();
+        let compile_capture_is_current = self.compiler_block_content_capture_is_current(
+            &canonical_id,
+            profile,
+            captured_whole_hash,
+            &captured_block_content_stamp,
+        );
+        if compile_capture_is_current {
+            self.store_latest_diagnostics_if_source_unmoved(
+                &canonical_id,
+                profile_hash,
+                captured_whole_hash,
+                diagnostics.clone(),
+            );
 
-                if is_cacheable {
-                    // Persist raw template analysis on DerivedRawState
-                    // (the profileless source-derived cache) through
-                    // the slot's single write authority. The admission
-                    // states this lane's facts: the bytes are
-                    // store-authoritative only without a content
-                    // override; the stamp is the flight's captured
-                    // source generation — the compile derives entirely
-                    // from `source_snap`; external-src SFCs and
-                    // parse-affecting profile extractions decline (the
-                    // slot stores the DEFAULT extraction of the
-                    // canonical's own inline bytes only).
-                    if let Some(template_analysis) = compiled_template_analysis.clone() {
-                        self.persist_raw_template_analysis(
-                            &canonical_id,
-                            Arc::new(template_analysis),
-                            crate::types::RawTemplateSlotAdmission {
-                                store_published: compile_input.content_override_layer.is_none(),
-                                source_generation: Some(source_snap.generation),
-                                has_src_blocks: !compile_input.src_blocks.is_empty(),
-                                default_extraction: !profile.has_parse_affecting_template_options(),
-                            },
+            // Publish, routed by the actual cache mode.
+            match actual_mode {
+                CompileCacheMode::Stateless => {
+                    // Bypass both typed cache nodes: publish nothing. The
+                    // caller still receives the freshly computed virtual
+                    // file below.
+                }
+                CompileCacheMode::Content => {
+                    // Publish into the content-addressed node ONLY. No fact
+                    // rail, no session slot, no scheduler artifact: the
+                    // content key's env-hash dimensions already invalidate
+                    // on every observable env change.
+                    //
+                    // Flight-captured stamp discipline: the key — content
+                    // hash INCLUDED — and the generation were captured
+                    // BEFORE the compile, from the same source snapshot
+                    // that supplied the compiled bytes. The publish fences
+                    // on the LIVE identity across EVERY key dimension:
+                    // when the content hash, the env-hash bundle, or the
+                    // project identity moved in the compute→publish
+                    // window, the compile may have observed a torn mix of
+                    // the two states (the analysis-node and override-layer
+                    // reads are taken against the captured version), so
+                    // the output is attributable to NEITHER identity:
+                    // decline the publish (ReturnOnly — the caller is
+                    // still served the fresh output) and stamp nothing. A
+                    // vanished live source declines the same way. On an
+                    // unmoved identity the entry lands under the captured
+                    // key with the captured generation (conservatively
+                    // stale, never a forged-current stamp).
+                    let (captured_key, captured_generation) = content_publish_stamp
+                        .expect("Content mode always captures its publish stamp");
+                    let live_key = self
+                        .scheduler
+                        .try_get_source(&canonical_id)
+                        .and_then(|snap| {
+                            snap.downcast_data::<crate::host_executor::HostSourceData>()
+                                .map(|live_hd| {
+                                    self.compile_pure_content_key(
+                                        &canonical_id,
+                                        live_hd.parse.whole_hash,
+                                        profile,
+                                    )
+                                })
+                        });
+                    if live_key.as_ref() == Some(&captured_key)
+                        && template_class_admission.owner_only
+                    {
+                        self.compile_output_pure_content().publish_content(
+                            captured_key,
+                            compile_output_value,
+                            captured_generation,
+                        );
+                    }
+                }
+                CompileCacheMode::Session => {
+                    // Route the finalised admission through the typed session
+                    // node. `Cacheable(sig)` publishes the slot under the
+                    // path-precise signature AND commits the scheduler
+                    // artifact snapshot — both observable warm-hit substrates
+                    // land together. `NonCacheable(_)` (overflow) skips both
+                    // and removes any prior slot so the carrier invariant
+                    // `present in the session slot map ⇒ admitted cache entry
+                    // for the current version` survives an overflowing
+                    // recompute after a prior successful publish.
+                    let admission = compile_admission
+                        .expect("Session mode always finalises a SignatureAdmission");
+                    let is_cacheable = matches!(
+                        admission,
+                        crate::cache_runtime::SignatureAdmission::Cacheable(_)
+                    );
+                    if let Some(mut cc) = self.compile_cache().get_mut(&canonical_id) {
+                        let session_node =
+                            crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+                        session_node.publish(
+                            &mut cc,
+                            profile_hash,
+                            admission,
+                            compile_output_value,
+                            last_tick,
                         );
                     }
 
-                    // Commit to scheduler artifact snapshot (scheduler
-                    // path only). Gated on `Cacheable` admission so the
-                    // carrier invariant holds at the artifact substrate
-                    // layer too — a refused compile must not be observable
-                    // via `try_get_artifact` or pending Artifact requests.
-                    self.scheduler.commit_artifact(
-                        &canonical_id,
-                        profile_hash,
-                        verter_scheduler::node::ArtifactSnapshot {
-                            generation: source_snap.generation,
+                    if is_cacheable {
+                        // Persist raw template analysis on DerivedRawState
+                        // (the profileless source-derived cache) through
+                        // the slot's single write authority. The admission
+                        // states this lane's facts: the bytes are
+                        // store-authoritative only without a content
+                        // override; the stamp is the flight's captured
+                        // source generation — the compile derives entirely
+                        // from `source_snap`; external-src SFCs and
+                        // parse-affecting profile extractions decline (the
+                        // slot stores the DEFAULT extraction of the
+                        // canonical's own inline bytes only).
+                        if let Some(template_analysis) = compiled_template_analysis.clone() {
+                            self.persist_raw_template_analysis(
+                                &canonical_id,
+                                Arc::new(template_analysis),
+                                crate::types::RawTemplateSlotAdmission {
+                                    store_published: true,
+                                    source_generation: Some(source_snap.generation),
+                                    has_src_blocks: !compile_input.src_blocks.is_empty(),
+                                    default_extraction: !profile
+                                        .has_parse_affecting_template_options(),
+                                    template_class_signature: template_class_admission
+                                        .signature
+                                        .clone(),
+                                },
+                            );
+                        }
+
+                        // Commit to scheduler artifact snapshot (scheduler
+                        // path only). Gated on `Cacheable` admission so the
+                        // carrier invariant holds at the artifact substrate
+                        // layer too — a refused compile must not be observable
+                        // via `try_get_artifact` or pending Artifact requests.
+                        self.scheduler.commit_artifact(
+                            &canonical_id,
                             profile_hash,
-                            data: Arc::new(crate::host_executor::HostArtifactData {
-                                outputs: compiled_outputs.clone(),
-                                diagnostics: diagnostics.clone(),
-                            }),
-                        },
-                    );
-                } else {
-                    // Refused admission. Symmetrically evict any prior
-                    // scheduler artifact snapshot so `try_get_artifact`
-                    // and pending Artifact requests cannot return a stale
-                    // result on the companion warm-hit substrate; no fresh
-                    // artifact is committed.
-                    //
-                    // The eviction is gated on the compile's
-                    // start-of-compile generation captured on the
-                    // request's single source snapshot: a slow refused
-                    // compile that started at generation N can race with
-                    // a fast successful compile at N+k that already
-                    // committed a newer artifact, and an unconditional
-                    // evict would clobber it. Passing the captured start
-                    // generation as `max_generation` makes the eviction
-                    // symmetric with `commit_artifact`'s own
-                    // node-generation rejection.
-                    self.scheduler.remove_artifact_if_not_newer_than(
-                        &canonical_id,
-                        profile_hash,
-                        source_snap.generation,
-                    );
+                            verter_scheduler::node::ArtifactSnapshot {
+                                generation: source_snap.generation,
+                                profile_hash,
+                                data: Arc::new(crate::host_executor::HostArtifactData {
+                                    outputs: compiled_outputs.clone(),
+                                    diagnostics: diagnostics.clone(),
+                                }),
+                            },
+                        );
+                    } else {
+                        // Refused admission. Symmetrically evict any prior
+                        // scheduler artifact snapshot so `try_get_artifact`
+                        // and pending Artifact requests cannot return a stale
+                        // result on the companion warm-hit substrate; no fresh
+                        // artifact is committed.
+                        //
+                        // The eviction is gated on the compile's
+                        // start-of-compile generation captured on the
+                        // request's single source snapshot: a slow refused
+                        // compile that started at generation N can race with
+                        // a fast successful compile at N+k that already
+                        // committed a newer artifact, and an unconditional
+                        // evict would clobber it. Passing the captured start
+                        // generation as `max_generation` makes the eviction
+                        // symmetric with `commit_artifact`'s own
+                        // node-generation rejection.
+                        self.scheduler.remove_artifact_if_not_newer_than(
+                            &canonical_id,
+                            profile_hash,
+                            source_snap.generation,
+                        );
+                    }
                 }
             }
         }
+        drop(block_content_publication_fence);
 
         // Write per-profile state to files (WASM path only).
 
@@ -2178,11 +2208,6 @@ impl VerterHost {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
         self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
-            .into_iter()
-            .map(|projection| {
-                projection.map(|projection| projection.map(|projection| projection.response))
-            })
-            .collect()
     }
 
     /// The shared per-item public-API render body (scalar `N=1` + batch `N`).
@@ -2193,6 +2218,15 @@ impl VerterHost {
     /// session view threaded via the `render_seed` ctx carrier so the render
     /// takes ZERO per-call store-view reads. Scalar and batch are byte-identical
     /// by construction (both are THIS body).
+    ///
+    /// RESPONSE-ONLY by design: the render is adapter declaration output and
+    /// never composes the structured component contract. The contract is
+    /// projection-entry-scoped — [`Self::get_public_api_projection`] composes
+    /// it at the demand that consumes it, under the same `(fixed, view)`
+    /// capture as its render. Response-only consumers (carrier sync,
+    /// background drains, batch, MCP, NAPI) therefore never pay a
+    /// composed-then-discarded component-meta walk, and a completion-time
+    /// reconcile never cold-loads a child through it.
     fn render_public_api_items(
         &self,
         canonical_ids: &[&str],
@@ -2200,12 +2234,7 @@ impl VerterHost {
         profile: Option<&CompileProfile>,
         fixed: &crate::resolver_store::BatchFixedView,
         view: &dyn crate::session_view::SessionView,
-    ) -> Vec<
-        Result<
-            Option<crate::framework::api_projector::ComponentApiProjection>,
-            crate::PublicApiProjectionError,
-        >,
-    > {
+    ) -> Vec<Result<Option<TscResponse>, crate::PublicApiProjectionError>> {
         canonical_ids
             .iter()
             .map(|canonical_id| {
@@ -2246,6 +2275,37 @@ impl VerterHost {
                 })
             })
             .collect()
+    }
+
+    /// Compose one canonical's mandatory structured contract under the SAME
+    /// `(fixed, view)` capture its declaration render used — the
+    /// projection-entry half of the "one coherent projector invocation"
+    /// contract. Composition never gates the response: an absent or failed
+    /// component-meta output degrades to the typed `Unsupported` availability.
+    fn compose_component_contract(
+        &self,
+        canonical: &str,
+        adapter_id: &verter_language::FrameworkAdapterId,
+        view: &dyn crate::session_view::SessionView,
+        fixed: &crate::resolver_store::BatchFixedView,
+    ) -> crate::framework::ComponentContractAvailability {
+        match self.get_component_meta_output_via_view_with_fixed_store_view(
+            canonical, view, fixed, false,
+        ) {
+            Ok(Some(output)) => output.contract().clone(),
+            Ok(None) => crate::framework::ComponentContractAvailability::Unsupported(
+                crate::framework::ComponentContractUnsupported {
+                    adapter_id: adapter_id.clone(),
+                    reason:
+                        crate::framework::ComponentContractUnsupportedReason::ComponentMetaUnavailable,
+                    diagnostics: std::sync::Arc::from([]),
+                },
+            ),
+            Err(error) => crate::framework::public_contract::unsupported_from_output_error(
+                adapter_id.clone(),
+                &error,
+            ),
+        }
     }
 
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
@@ -2316,34 +2376,9 @@ impl VerterHost {
             .into_iter()
             .next()
             .unwrap_or(Ok(None))
-            .map(|projection| projection.map(|projection| projection.response))
         };
 
-        if let Some(profile) = profile {
-            let canonical = self.resolve_alias_or_canonical(canonical_id);
-            let profile_hash = compile_profile_hash(profile);
-            let content_override = self.compile_cache().get(&canonical).and_then(|cache| {
-                cache
-                    .content_overrides
-                    .get(&profile_hash)
-                    .map(|state| (state.source.clone(), state.parse.whole_hash))
-            });
-            if let Some((source, whole_hash)) = content_override {
-                let mut overlays = FxHashMap::default();
-                overlays.insert(canonical.clone(), source);
-                let mut overlay_hashes = FxHashMap::default();
-                overlay_hashes.insert(canonical, whole_hash);
-                let tombstones = std::collections::HashSet::new();
-                let view = crate::session_view::OverlaidViewRef::new(
-                    self,
-                    &overlays,
-                    &overlay_hashes,
-                    &tombstones,
-                );
-                let fixed = self.capture_batch_fixed_view(&view);
-                return render(&fixed, &view);
-            }
-        }
+        let _ = profile;
 
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
@@ -2354,9 +2389,15 @@ impl VerterHost {
     /// contract from one coherent projector invocation.
     ///
     /// Editor consumers use the sidecar instead of reparsing generated
-    /// declaration text. Adapters that do not expose a structured contract
-    /// retain their existing declaration-only behavior through `contract:
-    /// None`.
+    /// declaration text. When structured metadata is unavailable, the
+    /// declaration remains available with typed `Unsupported` contract
+    /// availability.
+    ///
+    /// THIS entry is where the mandatory contract composes (demand-scoped):
+    /// the declaration renders and the contract composes under ONE shared
+    /// `(fixed, view)` capture. Response-only entries ([`Self::get_public_api`],
+    /// [`Self::get_public_api_with_mode`], [`Self::get_public_api_batch`])
+    /// render the declaration only and never run the component-meta walk.
     pub fn get_public_api_projection(
         &self,
         canonical_id: &str,
@@ -2366,16 +2407,39 @@ impl VerterHost {
     > {
         let view = crate::session_view::HostViewRef::new(self);
         let fixed = self.capture_batch_fixed_view(&view);
-        self.render_public_api_items(
-            std::slice::from_ref(&canonical_id),
-            PublicApiMode::Public,
-            None,
-            &fixed,
-            &view,
-        )
-        .into_iter()
-        .next()
-        .unwrap_or(Ok(None))
+        let response = self
+            .render_public_api_items(
+                std::slice::from_ref(&canonical_id),
+                PublicApiMode::Public,
+                None,
+                &fixed,
+                &view,
+            )
+            .into_iter()
+            .next()
+            .unwrap_or(Ok(None))?;
+        let Some(response) = response else {
+            return Ok(None);
+        };
+        // A rendered response proves the same classification chain the render
+        // ran resolves; re-derive the adapter identity for the contract's
+        // typed `Unsupported` arms.
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let Some(adapter_id) = self
+            .scheduler
+            .try_get_source(&canonical)
+            .and_then(|snap| {
+                snap.downcast_data::<crate::host_executor::HostSourceData>()
+                    .map(|hd| hd.file_language.clone())
+            })
+            .and_then(|file_language| file_language.adapter_id().cloned())
+        else {
+            return Ok(None);
+        };
+        let contract = self.compose_component_contract(&canonical, &adapter_id, &view, &fixed);
+        Ok(Some(
+            crate::framework::api_projector::ComponentApiProjection { response, contract },
+        ))
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the
@@ -2403,11 +2467,7 @@ impl VerterHost {
         // existing `&canonical` / `.clone()` consumers without re-resolving.
         let canonical = resolved_canonical.to_string();
         let profile_hash = profile.map(compile_profile_hash);
-        let has_content_override = profile_hash.is_some_and(|profile_hash| {
-            self.compile_cache()
-                .get(&canonical)
-                .is_some_and(|cache| cache.content_overrides.contains_key(&profile_hash))
-        });
+        let has_content_override = false;
 
         if self.is_canonical_evicted(&canonical) {
             return Ok(None);
@@ -2566,10 +2626,7 @@ impl VerterHost {
             let arc = Arc::new(fresh);
             if !has_content_override {
                 // cached_tsc_extract lives on DerivedRawState (D48 split).
-                let mut derived_ref = self
-                    .derived_raw_cache()
-                    .entry(canonical.clone())
-                    .or_default();
+                let mut derived_ref = self.derived_raw_entry_or_default(canonical.clone());
                 derived_ref.value_mut().cached_tsc_extract = Some((whole_hash, Arc::clone(&arc)));
             }
 
@@ -2701,6 +2758,7 @@ impl VerterHost {
             DiagnosticsSnapshot,
             Option<CachedTsx>,
             Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
             // Whether the carrier fail-closed on an unsupported runtime surface (the
             // TYPED runtime-refusal signal, sourced from the bundle).
             bool,
@@ -2716,47 +2774,6 @@ impl VerterHost {
         self.test_force
             .wrapper_source_clone_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut merged_source = snapshot.source.to_string();
-        if !snapshot.src_blocks.is_empty() {
-            let ext_sources = {
-                let mut map = FxHashMap::default();
-                for req in &snapshot.external_requests {
-                    if let Some(dep_source) = self.resolve_dep_source(
-                        &snapshot.canonical_id,
-                        &req.resolved_canonical_id,
-                        &req.specifier,
-                    ) {
-                        map.insert(req.resolved_canonical_id.clone(), dep_source);
-                    }
-                }
-                map
-            };
-
-            for (idx, req) in snapshot.external_requests.iter().enumerate() {
-                if !ext_sources.contains_key(&req.resolved_canonical_id) {
-                    let span = snapshot.src_blocks.get(idx).map(|block| {
-                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
-                    });
-                    diagnostics =
-                        diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
-                            message: format!(
-                                "missing external source '{}' for '{}'",
-                                req.specifier, snapshot.canonical_id
-                            ),
-                            span,
-                        }]));
-                }
-            }
-
-            if diagnostics.has_errors {
-                return Err(diagnostics);
-            }
-
-            merged_source =
-                merge_external_sources(&merged_source, &snapshot.src_blocks, &ext_sources);
-        }
 
         let alloc = Allocator::new();
 
@@ -2810,6 +2827,7 @@ impl VerterHost {
                 macro_runtime: macro_output.and_then(|output| output.runtime),
                 prop_constness_overrides: None, // populated by the cross-file optimizer
                 style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+                style_v_bind_usage_complete: snapshot.style_v_bind_usage_complete,
             },
         );
 
@@ -2849,6 +2867,7 @@ impl VerterHost {
             embed_ambient_types: profile.embed_ambient_types,
             conditional_root_narrowing: profile.conditional_root_narrowing,
             strict_slots: profile.strict_slots,
+            block_content: snapshot.block_content_inputs.clone(),
             framework_extras: Some(vue_extras),
         };
 
@@ -2893,29 +2912,25 @@ impl VerterHost {
         // parse-affecting template options (custom delimiters / custom
         // elements). Otherwise the carrier re-parses the merged source.
         // Either way the carrier owns the typed downcast + native compile.
-        let can_use_cache =
-            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
-        let fresh_artifact = if can_use_cache {
-            None
-        } else {
-            // Route the re-parse through the COUNTED chokepoint so it stays
-            // visible to the `carrier_parses` dedup rail (an uncounted raw
-            // `compiler.parse` is invisible to it).
-            Some(crate::parse::parse_carrier_counted(
-                &self.provenance,
-                compiler.as_ref(),
-                &merged_source,
-                &verter_compiler::framework_common::ParseOptions {
-                    delimiters: profile.delimiters.clone(),
-                    custom_elements: profile.custom_elements.clone(),
-                },
-            ))
-        };
-        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+        let grammar_matches = profile
+            .delimiters
+            .as_ref()
+            .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+            && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+        if !grammar_matches {
+            return Err(
+                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
+                    message: "compile profile grammar differs from registered grammar".to_string(),
+                    span: None,
+                }])),
+            );
+        }
 
         let compiled = match compiler.compile_bundle(
-            &merged_source,
-            compile_artifact,
+            snapshot.source.as_ref(),
+            artifact,
             &runtime_opts,
             &alloc,
         ) {
@@ -2924,6 +2939,12 @@ impl VerterHost {
                 let code = match unsupported {
                     CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
                     CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
+                    CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
+                        "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
+                    }
+                    CompileUnsupported::BlockContentIdeUnavailable { .. } => {
+                        "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
+                    }
                 };
                 return Err(diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
                     HostDiagnostic {
@@ -3075,27 +3096,16 @@ impl VerterHost {
             );
         }
 
-        let style_layer = snapshot.style_override_layer.as_ref();
-
         for (i, style) in compiled.styles.into_iter().enumerate() {
-            let override_entry = style_layer.and_then(|layer| layer.by_index.get(&i));
-            // The compiler-produced css map (`RuntimeStyleBlock.source_map`,
-            // present only when the compile demanded maps) — bound BEFORE
-            // `style.code` moves into the `Arc` below. It rides the cached
-            // file ONLY when NO override is active: an override's code is
-            // DIFFERENT text, so the original style's map must never be
-            // attached to it (the override supplies its own map, or none).
+            // The compiler-produced CSS and map already reflect the single
+            // host-selected block artifact. There is no ordinal override
+            // layer at this boundary.
             let style_source_map: Option<Arc<str>> = style.source_map.map(Arc::from);
             outputs.insert(
                 VirtualNodeKind::Style { index: i },
                 CachedVirtualFile {
-                    code: override_entry
-                        .map(|e| e.code.clone())
-                        .unwrap_or_else(|| Arc::from(style.code)),
-                    source_map: match override_entry {
-                        Some(entry) => entry.source_map.clone(),
-                        None => style_source_map,
-                    },
+                    code: Arc::from(style.code),
+                    source_map: style_source_map,
                     lang: Some(style.lang.unwrap_or_else(|| "css".to_string())),
                     meta: VirtualMeta {
                         style_index: Some(i),
@@ -3134,13 +3144,35 @@ impl VerterHost {
         });
 
         // Convert raw template data into analysis types when available
+        let mut template_class_admission =
+            crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
         let template_analysis = compiled.template_data.as_ref().map(|raw| {
             // Build script import pairs for component â†’ source resolution
-            let (all_imports, binding_class_unions, props_binding_name) = template_converter_inputs(
-                &snapshot.script_imports,
-                &snapshot.script_macros,
-                &snapshot.script_bindings,
+            let all_imports =
+                template_converter_inputs(&snapshot.script_imports, &snapshot.script_bindings);
+            let facts = self.build_template_class_semantic_facts(
+                &snapshot.canonical_id,
+                snapshot.whole_hash,
+                Arc::clone(&snapshot.source),
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+                    macros: &snapshot.script_macros,
+                    bindings: &snapshot.script_bindings,
+                },
+                raw,
+                // The compile lane's bytes attestation: an override layer is a
+                // fenced input, plain snapshot bytes are store-published. The
+                // seed-currentness half is composed inside the wrapper.
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
             );
+            let class_domains =
+                crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
+                    &facts,
+                    &snapshot.canonical_id,
+                    snapshot.whole_hash,
+                )
+                .unwrap_or_else(crate::template_convert::TemplateClassDomainIndex::empty);
+            template_class_admission =
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::from_facts(&facts);
             let unused_ctx = crate::template_convert::UnusedDeclarationContext::from_analysis(
                 &snapshot.script_macros,
                 snapshot.script_macro_usage.as_ref(),
@@ -3153,8 +3185,7 @@ impl VerterHost {
             crate::template_convert::convert_raw_to_analysis(
                 raw,
                 &all_imports,
-                &binding_class_unions,
-                props_binding_name.as_deref(),
+                &class_domains,
                 Some(&unused_ctx),
             )
         });
@@ -3164,6 +3195,7 @@ impl VerterHost {
             compile_diags,
             cached_tsx,
             template_analysis,
+            template_class_admission,
             // The TYPED runtime-refusal signal the carrier set on the bundle (no
             // `Main` was produced for an unsupported runtime surface), captured
             // before the bundle's fields were moved out.
@@ -3195,62 +3227,11 @@ impl VerterHost {
         snapshot: &CompileInput,
         profile: &CompileProfile,
     ) -> Result<RenderOnlyMain, HostError> {
-        let mut diagnostics = snapshot.parse_diagnostics.clone();
+        let diagnostics = snapshot.parse_diagnostics.clone();
 
         // (a) DROP the source re-clone for the common case. Only the
         // external-`src=` merge (rare, and inherently allocating) builds an
         // owned String; otherwise the substrate borrows the snapshot bytes.
-        let merged_source: std::borrow::Cow<'_, str> = if snapshot.src_blocks.is_empty() {
-            std::borrow::Cow::Borrowed(&*snapshot.source)
-        } else {
-            let ext_sources = {
-                let mut map = FxHashMap::default();
-                for req in &snapshot.external_requests {
-                    if let Some(dep_source) = self.resolve_dep_source(
-                        &snapshot.canonical_id,
-                        &req.resolved_canonical_id,
-                        &req.specifier,
-                    ) {
-                        map.insert(req.resolved_canonical_id.clone(), dep_source);
-                    }
-                }
-                map
-            };
-
-            for (idx, req) in snapshot.external_requests.iter().enumerate() {
-                if !ext_sources.contains_key(&req.resolved_canonical_id) {
-                    let span = snapshot.src_blocks.get(idx).map(|block| {
-                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
-                    });
-                    diagnostics =
-                        diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: crate::types::HOST_MISSING_EXTERNAL_SOURCE.to_string(),
-                            message: format!(
-                                "missing external source '{}' for '{}'",
-                                req.specifier, snapshot.canonical_id
-                            ),
-                            span,
-                        }]));
-                }
-            }
-
-            // Site 1 (missing external `src=`) stays FATAL on the render lane.
-            if diagnostics.has_errors {
-                return Err(HostError::CompileError(CompileFailure {
-                    diagnostics,
-                    requested_mode: profile.requested_mode,
-                    actual_mode: profile.requested_mode,
-                    downgrade_reason: None,
-                }));
-            }
-
-            std::borrow::Cow::Owned(merge_external_sources(
-                &snapshot.source,
-                &snapshot.src_blocks,
-                &ext_sources,
-            ))
-        };
 
         // The compiler's own parse scratch. A local `Allocator` per render
         // call passed straight into `compile_bundle` is NOT carrier-lifecycle
@@ -3270,6 +3251,7 @@ impl VerterHost {
                 macro_runtime: macro_output.runtime,
                 prop_constness_overrides: None,
                 style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+                style_v_bind_usage_complete: snapshot.style_v_bind_usage_complete,
             },
         );
 
@@ -3308,6 +3290,7 @@ impl VerterHost {
             embed_ambient_types: profile.embed_ambient_types,
             conditional_root_narrowing: profile.conditional_root_narrowing,
             strict_slots: profile.strict_slots,
+            block_content: snapshot.block_content_inputs.clone(),
             framework_extras: Some(vue_extras),
         };
 
@@ -3357,26 +3340,31 @@ impl VerterHost {
         // The host OWNS the cached-parse validity decision — identical to
         // `compile_entry` so the substrate sees the same parse for the same
         // bytes/options.
-        let can_use_cache =
-            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
-        let fresh_artifact = if can_use_cache {
-            None
-        } else {
-            Some(crate::parse::parse_carrier_counted(
-                &self.provenance,
-                compiler.as_ref(),
-                &merged_source,
-                &verter_compiler::framework_common::ParseOptions {
-                    delimiters: profile.delimiters.clone(),
-                    custom_elements: profile.custom_elements.clone(),
-                },
-            ))
-        };
-        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+        let grammar_matches = profile
+            .delimiters
+            .as_ref()
+            .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+            && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+        if !grammar_matches {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
+                        message: "compile profile grammar differs from registered grammar"
+                            .to_string(),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
 
         let compiled = match compiler.compile_bundle(
-            &merged_source,
-            compile_artifact,
+            snapshot.source.as_ref(),
+            artifact,
             &runtime_opts,
             &alloc,
         ) {
@@ -3386,6 +3374,12 @@ impl VerterHost {
                 let code = match unsupported {
                     CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
                     CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
+                    CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
+                        "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
+                    }
+                    CompileUnsupported::BlockContentIdeUnavailable { .. } => {
+                        "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
+                    }
                 };
                 return Err(HostError::CompileError(CompileFailure {
                     diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![

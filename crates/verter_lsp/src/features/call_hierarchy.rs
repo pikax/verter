@@ -3,8 +3,8 @@
 use tower_lsp_server::ls_types::*;
 use verter_session::FileAnalysisSnapshot;
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 
 /// Prepare a call hierarchy item at the given position.
 ///
@@ -15,7 +15,7 @@ use crate::documents::sfc_scanner::SfcBlock;
 pub fn prepare_call_hierarchy(
     position: &Position,
     _source: &str,
-    blocks: &[SfcBlock],
+    blocks: &[CarrierBlockView],
     analysis: Option<&FileAnalysisSnapshot>,
     line_index: &LineIndex,
     uri: &Uri,
@@ -219,13 +219,13 @@ pub fn outgoing_calls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::documents::sfc_scanner::scan_sfc_blocks;
+    use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::*;
 
     #[test]
     fn test_prepare_on_binding() {
         let source = "<script setup>\nconst foo = ref(0)\n</script>";
-        let blocks = scan_sfc_blocks(source);
+        let blocks = test_carrier_blocks(source);
         let line_index = LineIndex::new_utf16(source);
         let uri: Uri = "file:///test.vue".parse().unwrap();
 

@@ -837,16 +837,16 @@ fn object_one_member(
         spans: Default::default(),
         declaration_origin: None,
     };
-    dispatch.graph().intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+    dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        },
-    ))
+        }))
 }
 
 /// An `Intersection` over the given arms.
@@ -1009,8 +1009,9 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
             spans: Default::default(),
             declaration_origin: None,
         };
-        dispatch.graph().intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from(
                     vec![member("a", string_ty), member("b", number_ty)].into_boxed_slice(),
                 ),
@@ -1019,8 +1020,7 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
                 index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-            },
-        ))
+            }))
     };
     let lit_a = dispatch.graph().intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("a".to_string()),

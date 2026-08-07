@@ -63,14 +63,15 @@ pub(crate) fn collect_define_props_root_names(
         // The type argument's root reference name is read off its structural
         // mirror node (the ONE sanctioned type-arg producer; parens are
         // structurally transparent there) — never a stored body.
-        let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             ctx,
             owner_canonical,
             macro_index,
         ) else {
             continue;
         };
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, handle.node()) else {
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, product.hot.node())
+        else {
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {
@@ -126,19 +127,25 @@ pub(crate) fn slot_binding_targets_define_props_root(
             crate::semantic_query::ProjectionMode::Navigate,
         );
     let raised = field
-        .shallow_source
+        .authored_evidence
         .as_ref()
-        .and_then(|locator| dispatch.raise_authored_locator_to_hot(locator, transit_ctx))
+        .and_then(|evidence| {
+            dispatch
+                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+                .at_optional_boundary()
+        })
         .or_else(|| {
-            dispatch.raise_semantic_type_source_to_hot(
-                field.r#type.present()?,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
-                    scope_owner: owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            )
+            dispatch
+                .raise_semantic_type_source_to_hot(
+                    field.authority.source()?,
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        scope_owner: owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary()
         });
     let Some(raised) = raised else {
         return false;

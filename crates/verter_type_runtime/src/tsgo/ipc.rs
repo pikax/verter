@@ -1682,6 +1682,50 @@ fn position_to_offset_checked(content: &str, line: u32, character: u32) -> Optio
     Some(offset)
 }
 
+/// Split TSGO's PLAINTEXT hover block into (display, documentation).
+///
+/// SHAPE DEPENDENCY: `build_client_capabilities()` (this file, sent on the
+/// `initialize` handshake) advertises NO `textDocument.hover` member — hence no
+/// `contentFormat`, hence (per LSP 3.17) tsgo's hover is BARE PLAINTEXT with no
+/// markdown fence. The display block is the text up to the first blank line
+/// (`\n\n`); anything after it is documentation. A future capability change
+/// that turns the hover into markdown must revisit this split deliberately:
+/// the `MarkedString[]` normalization arms in `get_hover` exist for a
+/// markdown-capable driver, and a FENCED blob yields NO display signature
+/// (fail closed) rather than a fence-contaminated one. LSP hover carries no
+/// kind field, so the structured `kind` stays `None` on this engine — never
+/// fabricated, never sniffed from display-string prefixes.
+fn split_plaintext_hover_display(contents: &str) -> (Option<&str>, Option<String>) {
+    if contents.contains("```") {
+        return (None, None);
+    }
+    match contents.find("\n\n") {
+        Some(idx) => {
+            let display = contents[..idx].trim();
+            let docs = contents[idx + 2..].trim();
+            (
+                (!display.is_empty()).then_some(display),
+                (!docs.is_empty()).then(|| docs.to_string()),
+            )
+        }
+        None => {
+            let display = contents.trim();
+            ((!display.is_empty()).then_some(display), None)
+        }
+    }
+}
+
+/// Parse an LSP wire position object (`{"line": L, "character": C}`, 0-based
+/// UTF-16) into a byte offset against `content`, failing CLOSED on a malformed
+/// or out-of-range position (a hover range is display metadata — a clamped
+/// wrong offset would highlight the wrong span, so it is dropped).
+fn lsp_wire_pos_to_byte_offset(content: &str, pos: Option<&serde_json::Value>) -> Option<u32> {
+    let pos = pos?;
+    let line = u32::try_from(pos.get("line")?.as_u64()?).ok()?;
+    let character = u32::try_from(pos.get("character")?.as_u64()?).ok()?;
+    position_to_offset_checked(content, line, character)
+}
+
 /// Parse an LSP Location JSON value into a `TypeLocation`, using content for offset resolution.
 ///
 /// Converts TSGO's `file://` URI to a filesystem path so downstream code
@@ -3187,6 +3231,7 @@ impl TypeProvider for TsgoTypeProvider {
         let path_owned = path.to_string();
         let transport = Arc::clone(&self.transport);
         let contents_cache = Arc::clone(&self.contents);
+        let witness = self.provider_wire_witness();
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
@@ -3290,10 +3335,39 @@ impl TypeProvider for TsgoTypeProvider {
                         ),
                     );
 
+                    // Producer-side one-shot normalization into the neutral
+                    // protocol (the producer's job — the only place this
+                    // engine's wire shape is known). See
+                    // [`split_plaintext_hover_display`] for the shape
+                    // dependency on `build_client_capabilities()`.
+                    let (display, documentation) = split_plaintext_hover_display(&contents);
+                    let display_signature = display
+                        .map(|display| DisplaySignature::from_provider_wire(witness, display));
+
+                    // The LSP response's `range` maps onto generated-file byte
+                    // offsets through the synced content snapshot; a missing
+                    // snapshot or malformed position fails closed to `None`.
+                    let (range_start, range_end) = {
+                        let cache = contents_cache.lock().await;
+                        match cache.get(&contents_key(&path_owned)) {
+                            Some(content) => (
+                                lsp_wire_pos_to_byte_offset(
+                                    content,
+                                    result.pointer("/range/start"),
+                                ),
+                                lsp_wire_pos_to_byte_offset(content, result.pointer("/range/end")),
+                            ),
+                            None => (None, None),
+                        }
+                    };
+
                     Ok(Some(HoverInfo {
                         contents,
-                        range_start: None,
-                        range_end: None,
+                        range_start,
+                        range_end,
+                        display_signature,
+                        kind: None,
+                        documentation,
                     }))
                 }
             )

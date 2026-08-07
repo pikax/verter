@@ -144,6 +144,10 @@ async fn serve() {
     )
     .custom_method("$/getCompiledCode", VerterLanguageServer::get_compiled_code)
     .custom_method(
+        "$/verter/documentStructure",
+        VerterLanguageServer::document_structure,
+    )
+    .custom_method(
         "$/verter/getStatistics",
         VerterLanguageServer::get_statistics,
     )
@@ -167,10 +171,6 @@ async fn serve() {
     .custom_method(
         "$/verter/documentDropEdit",
         VerterLanguageServer::document_drop_edit,
-    )
-    .custom_method(
-        "$/verter/applyStyleOverrides",
-        VerterLanguageServer::apply_style_overrides,
     )
     .custom_method(
         "$/verter/getRouteTree",

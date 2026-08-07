@@ -166,6 +166,37 @@ pub struct ConservativeObservations<'a, T> {
     values: &'a [T],
 }
 
+/// Positive-only resolved Svelte snippet-import identities.
+///
+/// Unresolved route evidence is deliberately not visitable through this
+/// partial-evidence surface, and the wrapper exposes no iterator or
+/// exact-empty operation.
+#[derive(Clone, Copy)]
+pub struct ConservativeResolvedSnippetImports<'a> {
+    values: &'a [verter_type_expr::facts::SvelteSnippetImportFact],
+}
+
+impl<'a> ConservativeResolvedSnippetImports<'a> {
+    fn new(values: &'a [verter_type_expr::facts::SvelteSnippetImportFact]) -> Self {
+        Self { values }
+    }
+
+    /// Visit each positively resolved snippet import.
+    pub fn visit(
+        self,
+        mut visitor: impl FnMut(&'a verter_type_expr::facts::SvelteSnippetImportFact),
+    ) {
+        for value in self.values {
+            if matches!(
+                value,
+                verter_type_expr::facts::SvelteSnippetImportFact::Resolved { .. }
+            ) {
+                visitor(value);
+            }
+        }
+    }
+}
+
 impl<'a, T> ConservativeObservations<'a, T> {
     fn new(values: &'a [T]) -> Self {
         Self { values }
@@ -262,6 +293,12 @@ impl<'a> ConservativeSvelteScriptObservations<'a> {
     #[must_use]
     pub fn validated_snippet_members(self) -> ConservativeObservations<'a, String> {
         ConservativeObservations::new(&self.facts.resolution().validated_snippet_members)
+    }
+
+    /// Positively resolved snippet-import identities.
+    #[must_use]
+    pub fn resolved_snippet_imports(self) -> ConservativeResolvedSnippetImports<'a> {
+        ConservativeResolvedSnippetImports::new(&self.facts.resolution().snippet_imports)
     }
 
     /// The observed provenance-validated dispatcher payload, when captured.
@@ -829,39 +866,43 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // The scope is opened by NAME so a test can target THIS boundary's overflow
     // rail specifically — see `named_cacheability_scope!`. The name is erased in a
     // production build.
-    let (resolved_import_targets_opt, import_non_cacheable): (
+    let (resolved_import_targets_opt, mut import_non_cacheable): (
         Option<Vec<ResolvedImportTarget>>,
         bool,
-    ) = named_cacheability_scope!(host, TracerScope::ScriptFactsImportRoute, || {
-        let mut snapshot = host.get_analysis(canonical)?;
-        host.resolve_snapshot_imports(canonical, &mut snapshot);
-        Some(
-            snapshot
-                .imports
-                .iter()
-                .map(|imp| {
-                    // The TYPED resolved-package identity (P2): a bare specifier
-                    // whose resolved canonical is PACKAGE-BACKED per the
-                    // session's classifier (`workspace_is_package_backed` — NOT
-                    // a path substring) names its package; a relative /
-                    // workspace-owned / unresolved import carries no package
-                    // identity, so a userland `./fake-svelte` look-alike never
-                    // claims to be the `svelte` package.
-                    let package = resolved_package_for_import(
-                        host,
-                        &imp.source,
-                        imp.resolved_canonical_id.as_deref(),
-                    );
-                    ResolvedImportTarget {
-                        specifier: imp.source.clone(),
-                        resolved_canonical: imp.resolved_canonical_id.clone(),
-                        package,
-                    }
-                })
-                .collect(),
-        )
-    });
-    let Some(resolved_import_targets) = resolved_import_targets_opt else {
+    ) = named_cacheability_scope!(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
+        TracerScope::ScriptFactsImportRoute,
+        || {
+            let mut snapshot = host.get_analysis(canonical)?;
+            host.resolve_snapshot_imports(canonical, &mut snapshot);
+            Some(
+                snapshot
+                    .imports
+                    .iter()
+                    .map(|imp| {
+                        // The TYPED resolved-package identity (P2): a bare specifier
+                        // whose resolved canonical is PACKAGE-BACKED per the
+                        // session's classifier (`workspace_is_package_backed` — NOT
+                        // a path substring) names its package; a relative /
+                        // workspace-owned / unresolved import carries no package
+                        // identity, so a userland `./fake-svelte` look-alike never
+                        // claims to be the `svelte` package.
+                        let package = resolved_package_for_import(
+                            host,
+                            &imp.source,
+                            imp.resolved_canonical_id.as_deref(),
+                        );
+                        ResolvedImportTarget {
+                            specifier: imp.source.clone(),
+                            resolved_canonical: imp.resolved_canonical_id.clone(),
+                            package,
+                        }
+                    })
+                    .collect(),
+            )
+        }
+    );
+    let Some(mut resolved_import_targets) = resolved_import_targets_opt else {
         return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
             ScriptFactUnavailableReason::AnalysisUnavailable,
         ));
@@ -945,6 +986,78 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         }
     };
 
+    // ── Candidate-referenced specifiers OUTSIDE the import statements ──
+    //
+    // A binding-less inline `import("…")` type reference names a module with
+    // no import statement, so the snapshot-imports resolution above cannot
+    // see its specifier. The provider surfaces those candidate specifiers as
+    // DATA (`candidate_import_specifiers` — a pure candidate read); the
+    // session resolves them through the SAME resolver + typed package
+    // classification as statement imports, under the same import-route
+    // cacheability scope, and appends them so the fan-out observation and
+    // `provider.validate` see ONE uniform resolved-target list.
+    let extra_specifiers: Vec<String> = provider
+        .candidate_import_specifiers(candidates.candidates())
+        .into_iter()
+        .filter(|specifier| {
+            !resolved_import_targets
+                .iter()
+                .any(|target| &target.specifier == specifier)
+        })
+        .collect();
+    if !extra_specifiers.is_empty() {
+        let ((extra_targets, extra_refused), extra_scope_non_cacheable): (
+            (Vec<ResolvedImportTarget>, bool),
+            bool,
+        ) = named_cacheability_scope!(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
+                host,
+                request_ctx
+            ),
+            TracerScope::ScriptFactsImportRoute,
+            || {
+                let mut refused = false;
+                let targets = extra_specifiers
+                    .iter()
+                    .map(|specifier| {
+                        let resolved =
+                            host.authoritative_import_route(canonical, specifier)
+                                .and_then(|resolution| {
+                                    resolution.resolved_canonical_id.clone().or_else(|| {
+                                        resolution.effective_target().map(str::to_string)
+                                    })
+                                })
+                                .or_else(|| {
+                                    let ctx = verter_workspace::ResolutionContext {
+                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                                        kind: verter_workspace::ResolveRequestKind::TypeImport,
+                                    };
+                                    match host.resolve_via_vfs(canonical, specifier, ctx) {
+                                        verter_workspace::ResolutionPublication::Admitted(
+                                            admitted,
+                                        ) => admitted.into_result(),
+                                        verter_workspace::ResolutionPublication::Refused(_) => {
+                                            refused = true;
+                                            None
+                                        }
+                                    }
+                                });
+                        let package =
+                            resolved_package_for_import(host, specifier, resolved.as_deref());
+                        ResolvedImportTarget {
+                            specifier: specifier.clone(),
+                            resolved_canonical: resolved,
+                            package,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (targets, refused)
+            }
+        );
+        resolved_import_targets.extend(extra_targets);
+        import_non_cacheable = import_non_cacheable || extra_scope_non_cacheable || extra_refused;
+    }
+
     // ── Resolved-fact lookup ──
     let project_identity = host.host_view_project_identity_for(canonical).0;
     let consumed_capability_bits = capability_bits_hash(host, provider.consumed_capabilities());
@@ -1027,7 +1140,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
     let (payload_opt, finalise) = named_fact_tracer!(
-        host,
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
         TracerScope::ScriptFactsProviderValidate,
         || {
             // Observe the owner's whole hash + every resolved import contributor so

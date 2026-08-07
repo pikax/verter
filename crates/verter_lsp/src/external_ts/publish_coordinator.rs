@@ -75,6 +75,8 @@ pub struct CarrierCompanion {
     /// The `CodeTransform` source-map JSON, threaded so the store writes a map
     /// blob the plugin reads for navigation remapping. `None` ⇒ no map blob.
     pub map_json: Option<Arc<str>>,
+    /// Content-free carrier ownership facts for store-backed editor consumers.
+    pub structure: Option<verter_session::external_ts::SnapshotStructureStamp>,
     /// The contract role of this companion (`CarrierIde` / `CarrierApi`).
     pub role: SnapshotRole,
     /// The companion's TypeScript script kind (TSX/JSX for IDE, TS for API).
@@ -103,6 +105,7 @@ impl CarrierCompanion {
             provider_uri,
             content: CompanionContent::Verbatim(content),
             map_json,
+            structure: None,
             role,
             script_kind,
             version: 0,
@@ -122,6 +125,7 @@ impl CarrierCompanion {
             provider_uri,
             content: CompanionContent::ProjectedIde(prepared),
             map_json,
+            structure: None,
             role: SnapshotRole::CarrierIde,
             script_kind,
             version: 0,
@@ -631,6 +635,7 @@ fn snapshot_file_of(source_canonical: &str, companion: &CarrierCompanion) -> Sna
         content_hash,
         map_hash,
         map_json: companion.map_json.clone(),
+        structure: companion.structure.clone(),
         version: companion.version,
         open_state: OpenState::Closed,
     }

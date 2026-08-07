@@ -1,0 +1,17 @@
+error[E0451]: fields `authority`, `canonical_digest`, `file_incarnation`, `generation`, `content_hash` and `resolved_file_language` of struct `RegisteredSourceSnapshotId` are private
+  --> tests/compile-fail/registered_snapshot_id_outside_mint.rs:16:9
+   |
+15 |     RegisteredSourceSnapshotId {
+   |     -------------------------- in this type
+16 |         authority,
+   |         ^^^^^^^^^ private field
+17 |         canonical_digest,
+   |         ^^^^^^^^^^^^^^^^ private field
+18 |         file_incarnation,
+   |         ^^^^^^^^^^^^^^^^ private field
+19 |         generation,
+   |         ^^^^^^^^^^ private field
+20 |         content_hash,
+   |         ^^^^^^^^^^^^ private field
+21 |         resolved_file_language,
+   |         ^^^^^^^^^^^^^^^^^^^^^^ private field

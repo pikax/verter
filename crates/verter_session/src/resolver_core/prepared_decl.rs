@@ -664,6 +664,16 @@ pub(crate) fn prepare_local_value_decl_outcome_in(
 /// base: a `Some` caller (the prepared-decl cache, which builds the base
 /// once per bundle) shares it via `Arc`; `None` builds it fresh — the
 /// pre-split per-call behavior for standalone entry points.
+/// Append an external dependency edge only if an identical edge is not already
+/// recorded. A prepared declaration must never carry a duplicate edge: the edge
+/// list feeds the recorded rooting/read set, so a duplicate widens it for no
+/// semantic gain.
+fn push_unique_external_dep(edges: &mut Vec<PreparedExternalDep>, edge: PreparedExternalDep) {
+    if !edges.contains(&edge) {
+        edges.push(edge);
+    }
+}
+
 fn prepare_local_value_decl_outcome_with_base(
     canonical_id: &Arc<str>,
     state: &ShallowFileState,
@@ -695,6 +705,85 @@ fn prepare_local_value_decl_outcome_with_base(
     prepared.signatures = lowered.signatures.clone();
     prepared.object_shape = lowered.object_shape.clone();
     prepared.enum_members = lowered.enum_members.clone();
+
+    let authored_route = match &prepared.type_annotation.reference_head {
+        verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. } => {
+            Some((Arc::clone(local_name), Arc::<[Arc<str>]>::from([])))
+        }
+        verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified {
+            local_root,
+            member_path,
+            ..
+        } => Some((Arc::clone(local_root), Arc::clone(member_path))),
+        _ => None,
+    };
+    if let Some((local_name, member_path)) = authored_route {
+        if let Some(target) =
+            state
+                .owner_import_targets
+                .get(&verter_type_expr::DeclBindingKey::new(
+                    owner,
+                    local_name.as_ref(),
+                ))
+        {
+            if target.is_namespace {
+                // A namespace binding is not itself a declaration identity, and
+                // preparation resolves nothing — so an unroutable first hop is
+                // SKIPPED, never a preparation failure. This mirrors the policy
+                // `insert_value_space_import_resolutions` states explicitly: an
+                // unrelated non-canonicalizable binding must not make every
+                // local value declaration in the owner unavailable. Failing here
+                // would degrade `typeof variant` — and hover/definition on that
+                // binding — from "unresolved `Ref`" to nothing at all.
+                //
+                // The shared namespace-member resolver validates and
+                // canonicalizes the selected export at demand time. Preparation
+                // retains only the authored first-hop edge, with the
+                // FILE-DEFAULT top-level owner every sibling arm records for an
+                // ordinary declaring file — `owner` participates in the derived
+                // `Hash`/serde identity, so the SFC-instance owner would be a
+                // stable-but-wrong discriminant.
+                let routed = member_path.split_first().and_then(|(member, rest)| {
+                    let target_canonical = dep_edges
+                        .and_then(|edges| edges.get(&target.source_specifier))
+                        .cloned()
+                        .unwrap_or_default();
+                    (!target_canonical.is_empty()).then(|| PreparedExternalDep {
+                        local_name: local_name.to_string(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: member.to_string(),
+                        member_path: Arc::from(rest),
+                        canonical_id: target_canonical,
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol_name: member.to_string(),
+                    })
+                });
+                if let Some(edge) = routed {
+                    push_unique_external_dep(&mut prepared.external_deps, edge);
+                }
+            } else {
+                let Some(identity) = import_canonicalization.final_resolution.get(
+                    &verter_type_expr::DeclBindingKey::new(owner, local_name.as_ref()),
+                ) else {
+                    return PreparedDeclOutcome::Failed(PreparationFailure::MissingExternalOwner {
+                        local_name: local_name.to_string(),
+                    });
+                };
+                push_unique_external_dep(
+                    &mut prepared.external_deps,
+                    PreparedExternalDep {
+                        local_name: local_name.to_string(),
+                        source_specifier: target.source_specifier.clone(),
+                        imported_name: target.imported_name.clone(),
+                        member_path,
+                        canonical_id: identity.canonical_id.to_string(),
+                        owner: identity.owner,
+                        symbol_name: identity.symbol_name.to_string(),
+                    },
+                );
+            }
+        }
+    }
 
     // name_resolution for type annotations / `typeof` references that
     // reference imported or local symbols in the defining file — the per-FILE

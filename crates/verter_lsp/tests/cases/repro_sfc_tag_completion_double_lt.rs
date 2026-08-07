@@ -36,14 +36,14 @@
 use tower_lsp_server::ls_types::{
     CompletionItem, CompletionTextEdit, InsertTextFormat, Position, TextEdit,
 };
+use verter_lsp::documents::carrier_structure::test_carrier_blocks;
 use verter_lsp::documents::line_index::LineIndex;
-use verter_lsp::documents::sfc_scanner::scan_sfc_blocks;
 use verter_lsp::features::completion::completions_at_position;
 
 /// Drive the real completion entry-point at a `<script|`-style position and
 /// return the items the provider would ship to the client.
 fn root_items_at(source: &str, cursor_offset: usize) -> Vec<CompletionItem> {
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let pos: Position = line_index
         .offset_to_position(cursor_offset as u32)
@@ -58,6 +58,7 @@ fn root_items_at(source: &str, cursor_offset: usize) -> Vec<CompletionItem> {
         None,        // workspace_components
         None,        // doc_uri
         false,       // ssr_context
+        None,
     );
     result
         .expect("root-level position must yield completions")

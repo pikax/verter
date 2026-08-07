@@ -136,6 +136,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
         let diag = make_diag(rule, 0, source.len() as u32);
         SsrWrap.fixes_for_diagnostic(&diag, &ctx)

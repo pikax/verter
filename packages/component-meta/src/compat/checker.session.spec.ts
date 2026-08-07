@@ -5,6 +5,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { ComponentMetaChecker } from "./checker.js";
 
+function resolvedTypeRow(display: string) {
+  return {
+    publication: {
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactConcrete",
+      reason: { kind: "resolvedExactConcrete" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    } as const,
+    terminalDisplay: { text: display },
+  };
+}
+
 describe("ComponentMetaChecker session requirement", () => {
   it("rejects adapter-only getComponentMeta calls instead of rebuilding metadata from snapshots", async () => {
     const checker = new ComponentMetaChecker(
@@ -53,6 +66,12 @@ describe("ComponentMetaChecker session requirement", () => {
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
     }));
 
     const checker = new ComponentMetaChecker(
@@ -146,7 +165,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
-          rawType: "string",
+          ...resolvedTypeRow("string"),
           required: true,
           hasDefault: false,
         },
@@ -176,6 +195,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("string"),
           required: true,
           provenance: { kind: "declared" },
           availability: { kind: "always" },
@@ -184,6 +204,7 @@ describe("ComponentMetaChecker session requirement", () => {
         {
           name: "id",
           type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("string"),
           required: false,
           provenance: { kind: "inherited", sources: [{ kind: "nativeTag", tag: "div" }] },
           availability: { kind: "always" },
@@ -194,6 +215,12 @@ describe("ComponentMetaChecker session requirement", () => {
       acceptedSurfaceCompleteness: "exact",
       rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
       fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
     };
     const getComponentMeta = vi.fn(() => fullMeta);
 
@@ -238,5 +265,89 @@ describe("ComponentMetaChecker session requirement", () => {
     // Inherited members were dropped by the declared-only projection.
     expect(meta._verter?.acceptedProps?.map((p: any) => p.name)).toEqual(["label"]);
     expect(meta._verter?.acceptedSurfaceCompleteness).toBe("exact");
+  });
+
+  // @ai-generated - Proves terminal display text cannot rewrite a structurally rendered schema.
+  it("keeps Booleanish terminal display text from rewriting a non-Booleanish schema", async () => {
+    const nativeMeta: any = {
+      filePath: "C:/project/src/App.vue",
+      optionsApi: false,
+      props: [
+        {
+          name: "decoy",
+          type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("Booleanish"),
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
+    };
+    const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "C:\\project", {}, {
+      closed: false,
+      engine: { state: "active" as const },
+      upsert() {},
+      delete() {},
+      getComponentMeta() {
+        return nativeMeta;
+      },
+      getProvenance() {
+        return "{}";
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ decoy: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    } as any);
+
+    checker.updateFile(
+      "src\\App.vue",
+      `<script setup lang="ts">defineProps<{ decoy: string }>()</script>`,
+    );
+
+    const meta = await checker.getComponentMeta("src\\App.vue");
+
+    expect(meta.props[0]).toMatchObject({
+      name: "decoy",
+      type: "Booleanish",
+      schema: "string",
+    });
   });
 });

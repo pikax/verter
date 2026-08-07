@@ -175,7 +175,7 @@ fn merge_projected_fields_by_name(
             if std::env::var("VERTER_PROJECTOR_MERGE_TRACE").is_ok() {
                 eprintln!(
                     "[MERGE] name={} existing={:?} projected={:?}",
-                    field.name, existing.r#type, field.r#type
+                    field.name, existing.authority, field.authority
                 );
             }
             // Projector pipeline is the sole post-projection authority
@@ -195,7 +195,7 @@ fn merge_projected_fields_by_name(
 /// (exactness / execution status / diagnostics / raw display types for the
 /// `evaluate_types` payload) — NEVER a published-source authority: every
 /// published `SourcePosition` is owned by the NORMALIZED macro rows
-/// (`ResolvedPropField` / `ResolvedEmitField` / `ResolvedExposeField` and
+/// (`ResolvedPropField` / `ResolvedEmitOccurrence` / `ResolvedExposeField` and
 /// the `define_*` shape lanes built from them). The driver:
 ///
 /// 1. For each `defineProps<T>`, calls [`project_props`] and extends
@@ -303,7 +303,7 @@ pub(crate) fn project_evaluated_types(
             AnalyzedMacroKind::DefineExpose => {
                 let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Exposed);
                 // The projected surface members carry the exposed members'
-                // typed sources (`ExpandedField.r#type`); publish them on
+                // typed sources (`ExpandedField.authority`); publish them on
                 // the canonical aggregate's per-macro `exposed` lane so the
                 // exposed-analysis join pairs them by the stable
                 // `(macro_index, member name)` identity. Idempotent per
@@ -614,7 +614,7 @@ pub(crate) fn resolve_macro_payload(
             file,
             macro_index,
         ) {
-            Some(handle) => Arc::from(vec![handle.node()].into_boxed_slice()),
+            Some(product) => Arc::from(vec![product.hot.node()].into_boxed_slice()),
             None => {
                 diag_sink.push(macro_expansion_for_query_error(
                     macro_index,
@@ -745,9 +745,9 @@ pub(crate) fn resolve_macro_payload(
                 file,
                 macro_index,
             )
-            .map(|handle| {
+            .map(|product| {
                 let probe_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                    base: handle.node(),
+                    base: product.hot.node(),
                     path: empty_path(),
                     context:
                         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
@@ -758,7 +758,7 @@ pub(crate) fn resolve_macro_payload(
                 match probe_read.value {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => id,
-                    QueryResult::Error(_) => handle.node(),
+                    QueryResult::Error(_) => product.hot.node(),
                 }
             });
             if let Some(probe_node) = probe_node {

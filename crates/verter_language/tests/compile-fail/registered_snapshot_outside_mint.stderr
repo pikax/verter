@@ -1,0 +1,13 @@
+error[E0451]: fields `id`, `canonical`, `byte_len` and `source` of struct `RegisteredSourceSnapshot` are private
+  --> tests/compile-fail/registered_snapshot_outside_mint.rs:9:9
+   |
+ 8 |     let _ = RegisteredSourceSnapshot {
+   |             ------------------------ in this type
+ 9 |         id,
+   |         ^^ private field
+10 |         canonical,
+   |         ^^^^^^^^^ private field
+11 |         byte_len: 0,
+   |         ^^^^^^^^ private field
+12 |         source: Arc::from("caller bytes"),
+   |         ^^^^^^ private field

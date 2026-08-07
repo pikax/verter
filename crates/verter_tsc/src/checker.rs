@@ -26,10 +26,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use oxc_allocator::Allocator;
 use rayon::prelude::*;
 use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_session::{
     FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject, UpsertRequest,
     VerterHost,
@@ -153,6 +153,15 @@ type TscDeclarationRows = Vec<(PathBuf, String, PathBuf)>;
 /// per-source projection failures.
 type DeclarationStageResult = (Vec<Diagnostic>, Vec<PathBuf>, Vec<PublicApiFailure>);
 
+/// Canonical store/module identity for a filesystem path.
+///
+/// In particular, this folds Windows drive letters so host keys and generated
+/// import specifiers cannot disagree solely because one originated in a
+/// `PathBuf` (`D:/...`) and the other in TypeScript (`d:/...`).
+fn canonical_path_id(path: &Path) -> String {
+    verter_span::path::canonicalize_path(&path.to_string_lossy())
+}
+
 /// Generate public-API stub carriers for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a stub containing the component's public API
@@ -185,7 +194,7 @@ fn generate_public_api_stubs(
     // input order, one per id.
     let canonical_ids: Vec<String> = vue_files
         .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|path| canonical_path_id(path))
         .collect();
     let responses = {
         let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
@@ -300,7 +309,7 @@ fn generate_all_tsx(
     let macro_inputs: Vec<verter_compiler::compile::VueMacroSemanticInput> = vue_files
         .iter()
         .map(|vue_path| {
-            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let canonical_id = canonical_path_id(vue_path);
             host.vue_macro_semantic_input(&canonical_id, CompileTarget::TSX)
         })
         .collect();
@@ -322,8 +331,7 @@ fn generate_all_tsx(
                 .unwrap_or("Component");
             let component_name = sanitize_component_name(raw_name);
 
-            let filename = vue_path.to_string_lossy().replace('\\', "/");
-            let alloc = Allocator::default();
+            let filename = canonical_path_id(vue_path);
             let options = CodegenOptions {
                 filename: Some(filename),
                 target: CompileTarget::TSX,
@@ -335,12 +343,11 @@ fn generate_all_tsx(
                 source_map: true,
                 ..Default::default()
             };
-            let result = verter_compiler::compile::compile(
-                &source,
+            let result = StandaloneCompiler.compile_source(
+                &StandaloneSourceBytes::copied_from(&source),
                 &options,
                 &verter_options,
                 macro_input,
-                &alloc,
             );
 
             let tsx_block = result.tsx.ok_or_else(|| {
@@ -362,7 +369,7 @@ fn generate_all_tsx(
             // EMPTY `DefineComponent<{}, {}, any>`. Without this the widening
             // is simply absent for every alias-importing consumer, which is the
             // headline case of issue #97 for a project using `paths`.
-            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let canonical_id = canonical_path_id(vue_path);
             code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
             // Append inline source map so `map_tsc_position()` can remap errors.
@@ -432,7 +439,7 @@ fn generate_all_tsc(
     // advanced the store-view token). Slots come back in input order, one per id.
     let canonical_ids: Vec<String> = vue_files
         .iter()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .map(|path| canonical_path_id(path))
         .collect();
     let responses = {
         let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
@@ -690,7 +697,7 @@ pub fn run(
             ))
         })?;
         admission.admit(vue_path, &source);
-        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+        let canonical_id = canonical_path_id(vue_path);
         let _update = host
             .upsert(UpsertRequest {
                 canonical_id: Some(canonical_id.clone()),
@@ -6036,7 +6043,7 @@ defineProps<{ msg: string }>()
         .unwrap();
 
         let host = VerterHost::new_standalone(HostConfig::default());
-        let canonical_id = child_vue.to_string_lossy().replace('\\', "/");
+        let canonical_id = canonical_path_id(&child_vue);
         let source = fs::read_to_string(&child_vue).unwrap();
         let _ = host
             .upsert(UpsertRequest {

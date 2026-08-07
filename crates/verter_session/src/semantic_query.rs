@@ -3379,8 +3379,24 @@ pub struct IndexSignature {
     pub declaration_origin: Option<Arc<str>>,
 }
 
-/// One-level surface view of a semantic node. Members are ordered to keep
-/// hashing stable.
+/// One canonical entry in a resolved declaration surface.
+///
+/// This stream is the ordering authority. Kind-specific collections on
+/// [`SurfaceView`] are lookup indexes and must not be joined positionally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SurfaceEntry {
+    /// Named property or method member.
+    Member(SurfaceMember),
+    /// Root call signature.
+    CallSignature(SemanticNodeId),
+    /// Root construct signature.
+    ConstructSignature(SemanticNodeId),
+    /// Index signature.
+    IndexSignature(IndexSignature),
+}
+
+/// One-level surface view of a semantic node. The entry stream is ordered to
+/// keep declaration semantics and hashing stable.
 ///
 /// The single node-native surface carrier. Named members are exposed only as
 /// positive evidence; complete-domain, emptiness, and absence operations
@@ -3389,6 +3405,9 @@ pub struct IndexSignature {
 /// terminal sink (`surface_view_to_registry_type_expr`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceView {
+    /// Canonical resolver-produced declaration stream. This is the primary
+    /// stored surface; all kind-specific collections below are derived indexes.
+    pub entries: Arc<[SurfaceEntry]>,
     members: Arc<[SurfaceMember]>,
     pub call_signatures: Arc<[SemanticNodeId]>,
     pub construct_signatures: Arc<[SemanticNodeId]>,
@@ -3463,11 +3482,70 @@ impl SurfaceView {
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
     ) -> Self {
+        // Grouped construction names no canonical entry order; derive the
+        // stream in the fixture macro's fixed member → call → construct →
+        // index order so `entries`-keyed hashing agrees with `from_entries`.
+        let entries: Arc<[SurfaceEntry]> = members
+            .iter()
+            .cloned()
+            .map(SurfaceEntry::Member)
+            .chain(
+                call_signatures
+                    .iter()
+                    .copied()
+                    .map(SurfaceEntry::CallSignature),
+            )
+            .chain(
+                construct_signatures
+                    .iter()
+                    .copied()
+                    .map(SurfaceEntry::ConstructSignature),
+            )
+            .chain(
+                index_signatures
+                    .iter()
+                    .cloned()
+                    .map(SurfaceEntry::IndexSignature),
+            )
+            .collect();
         Self {
+            entries,
             members,
             call_signatures,
             construct_signatures,
             index_signatures,
+            keyspace,
+            has_index_signature,
+        }
+    }
+
+    /// Store one canonical ordered surface and derive its kind indexes.
+    #[must_use]
+    pub fn from_entries(
+        entries: Vec<SurfaceEntry>,
+        keyspace: Option<SemanticNodeId>,
+        has_index_signature: bool,
+    ) -> Self {
+        let mut members = Vec::new();
+        let mut call_signatures = Vec::new();
+        let mut construct_signatures = Vec::new();
+        let mut index_signatures = Vec::new();
+        for entry in &entries {
+            match entry {
+                SurfaceEntry::Member(member) => members.push(member.clone()),
+                SurfaceEntry::CallSignature(signature) => call_signatures.push(*signature),
+                SurfaceEntry::ConstructSignature(signature) => {
+                    construct_signatures.push(*signature);
+                }
+                SurfaceEntry::IndexSignature(signature) => index_signatures.push(signature.clone()),
+            }
+        }
+        Self {
+            entries: Arc::from(entries.into_boxed_slice()),
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(call_signatures.into_boxed_slice()),
+            construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
+            index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace,
             has_index_signature,
         }
@@ -3482,6 +3560,21 @@ impl SurfaceView {
             init.keyspace,
             init.has_index_signature,
         )
+    }
+
+    /// Store a member-only surface in its producer order.
+    #[must_use]
+    pub fn from_members(members: Vec<SurfaceMember>, keyspace: Option<SemanticNodeId>) -> Self {
+        Self::from_entries(
+            members.into_iter().map(SurfaceEntry::Member).collect(),
+            keyspace,
+            false,
+        )
+    }
+
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::from_entries(Vec::new(), None, false)
     }
 
     /// Known members are positive evidence only. Their omission never proves
@@ -3640,14 +3733,53 @@ pub(crate) fn visible_overload_ordinals(
     }
 }
 
+/// Test-fixture constructor for legacy grouped fixture inputs. Production
+/// surfaces must name their canonical entry order with [`SurfaceView::from_entries`].
+#[cfg(test)]
+#[macro_export]
+macro_rules! test_surface_view {
+    (
+        members: $members:expr,
+        call_signatures: $calls:expr,
+        construct_signatures: $constructs:expr,
+        index_signatures: $indexes:expr,
+        keyspace: $keyspace:expr,
+        has_index_signature: $has_index_signature:expr $(,)?
+    ) => {{
+        let members: std::sync::Arc<[$crate::semantic_query::SurfaceMember]> = $members;
+        let calls: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $calls;
+        let constructs: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $constructs;
+        let indexes: std::sync::Arc<[$crate::semantic_query::IndexSignature]> = $indexes;
+        let entries = members
+            .iter()
+            .cloned()
+            .map($crate::semantic_query::SurfaceEntry::Member)
+            .chain(
+                calls
+                    .iter()
+                    .copied()
+                    .map($crate::semantic_query::SurfaceEntry::CallSignature),
+            )
+            .chain(
+                constructs
+                    .iter()
+                    .copied()
+                    .map($crate::semantic_query::SurfaceEntry::ConstructSignature),
+            )
+            .chain(
+                indexes
+                    .iter()
+                    .cloned()
+                    .map($crate::semantic_query::SurfaceEntry::IndexSignature),
+            )
+            .collect();
+        $crate::semantic_query::SurfaceView::from_entries(entries, $keyspace, $has_index_signature)
+    }};
+}
+
 impl std::hash::Hash for SurfaceView {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        for member in self.members.iter() {
-            member.hash(state);
-        }
-        self.call_signatures.hash(state);
-        self.construct_signatures.hash(state);
-        self.index_signatures.hash(state);
+        self.entries.hash(state);
         self.keyspace.hash(state);
         self.has_index_signature.hash(state);
     }
@@ -4398,31 +4530,15 @@ impl QueryError {
     ///   `TypeExpr::RecursiveRef` to STOP the walk.
     /// - [`BudgetExceeded`](Self::BudgetExceeded) / [`UnstableState`](Self::UnstableState)
     ///   — resource / completion-fence control (`ReturnOnly`-routed).
+    ///
+    /// Derived from the SINGLE `QueryError` disposition authority
+    /// (`project_semantic_dispatch::query_error_disposition`) — the §22 error
+    /// type is exactly the `Failure` disposition. There is no second listing
+    /// of which arms are errors.
     #[must_use]
     pub(crate) fn is_error_type(&self) -> bool {
-        match self {
-            QueryError::Other(_)
-            | QueryError::UnsupportedIntrinsic { .. }
-            | QueryError::ValueDomainMismatch { .. } => true,
-            QueryError::Miss
-            | QueryError::BudgetExceeded(_)
-            | QueryError::Cancelled
-            | QueryError::UnstableState { .. }
-            | QueryError::AliasCycle { .. }
-            | QueryError::RecursiveRef { .. }
-            | QueryError::DeclPlaceholder { .. }
-            // The typed semantic-sentinel carriers are CONTROL signals
-            // (cycle / miss / unrepresentable / macro-placeholder), not the
-            // §22 error type — they keep their typed control semantics under
-            // relation / raise / absorption.
-            | QueryError::RaiseAliasCycle
-            | QueryError::TypeParamCycle
-            | QueryError::RaiseMiss
-            | QueryError::OpenSurface
-            | QueryError::UnrepresentableSurface
-            | QueryError::UnmodeledPosition
-            | QueryError::UnrepresentableSurfaceMember => false,
-        }
+        crate::project_semantic_dispatch::query_error_disposition::query_error_disposition(self)
+            .is_error_type()
     }
 }
 

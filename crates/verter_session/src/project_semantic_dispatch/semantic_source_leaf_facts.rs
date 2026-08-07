@@ -85,7 +85,7 @@ impl ProjectSemanticDispatch<'_> {
     /// fact (a LEAF, or a LEAF-UNION for an instantiated `string | number`
     /// element), preserving label / optionality / rest / ORDER. `None` when
     /// ANY param is richer — a partial closed tuple is never published (the
-    /// caller publishes the projected CALLABLE-PARAMS replay route instead,
+    /// caller publishes the exact callable-occurrence replay route instead,
     /// or its honest typed failure when no replay base exists). Pure
     /// node→fact projection: no reduction, no dispatch execution, no
     /// `TypeExpr` materialisation.

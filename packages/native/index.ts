@@ -191,7 +191,6 @@ export type DowngradeReason =
   | "HasWorkspaceAlias"
   | "HasModuleAugmentation"
   | "HasBlockOverride"
-  | "HasStyleOverride"
   | "HasIdeOnlyAnalysis"
   | "HasDevLastGood";
 
@@ -320,12 +319,22 @@ export interface CompileBatchEntry {
 // VerterHost (in-memory virtual file host)
 //
 // Shared types re-exported from host-types.ts. Native-specific overrides
-// (Buffer support) for HostUpsertRequest are defined below.
-// HostStyleOverrideEntry and HostStyleOverrideRequest are kept for
-// compatibility with @verter/wasm and host-types re-exports.
+// (Buffer support) for HostUpsertRequest and sealed block results are defined
+// below.
 // =============================================================================
 
 export type {
+  ArtifactBlockToken,
+  FrameworkArtifactToken,
+  BlockContentOwnerRevisionToken,
+  BlockContentBasisToken,
+  BlockContentCorrelationToken,
+  BlockContentSourceSpaceToken,
+  BlockContentArtifactToken,
+  BlockContentHashToken,
+  HostBlockContentPreCaptureEcho,
+  HostBlockContentCapturedEcho,
+  HostBlockContentCapturedEchoFields,
   HostConfig,
   HostCompileProfile,
   HostIdeResponse,
@@ -358,7 +367,13 @@ export type {
   HostIdeProjectConfig,
 } from "./host-types";
 
-import type { HostCompileProfile, HostDiagnostic } from "./host-types";
+import type {
+  BlockContentHashToken,
+  BlockContentSourceSpaceToken,
+  HostBlockContentCapturedEchoFields,
+  HostCompileProfile,
+  HostDiagnostic,
+} from "./host-types";
 
 // ---------------------------------------------------------------------------
 // Native-specific overrides: accept Buffer in addition to string
@@ -373,28 +388,15 @@ export interface HostUpsertRequest {
   aliases?: string[];
 }
 
-export interface HostStyleOverrideEntry {
-  index: number;
-  /** Preprocessed CSS. Accepts a string or a Buffer (UTF-8 bytes). */
-  code: string | Buffer;
-  sourceMap?: string;
-}
-
-export interface HostStyleOverrideRequest {
-  canonicalId: string;
-  compileProfile?: HostCompileProfile;
-  overrides: HostStyleOverrideEntry[];
-}
-
-export interface NativeBlockOverrideEntry {
-  /** Block type: "template", "script", "style", or "custom". */
-  blockType: "template" | "script" | "style" | "custom";
-  /** Block index (0 for template/script, 0..N for styles/custom blocks). */
-  index: number;
+export interface NativeBlockOverrideEntry extends HostBlockContentCapturedEchoFields {
+  sourceSpaceToken: BlockContentSourceSpaceToken;
   /** Preprocessed code. Accepts a string or a Buffer (UTF-8 bytes). */
   code: string | Buffer;
+  codeHash: BlockContentHashToken;
   /** Source map from the preprocessor, if available. */
   sourceMap?: string;
+  sourceMapHash?: BlockContentHashToken;
+  suppliedProvenance?: string;
 }
 
 export interface NativeBlockOverrideRequest {
@@ -706,6 +708,8 @@ export declare class VerterHost {
    * doesn't exist. When `analysisLevel` is not "full", computes analysis on demand.
    */
   getAnalysis(canonicalOrAlias: string): string | null;
+  /** Returns the registered content-free carrier structure as a JSON string. */
+  getDocumentStructure(canonicalOrAlias: string): string | null;
   /**
    * Returns all exports of a file, following re-export chains to their ultimate source.
    * For barrel files, resolves through chains to return the ultimate source file and name.

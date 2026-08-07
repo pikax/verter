@@ -382,7 +382,8 @@ The seam splits across the crate that owns each domain:
   session resolver types. Publication is `SignatureAdmission::Cacheable`-only
   and accepts only producer-minted `ExactScriptFacts` (overflow ⇒ `ReturnOnly`,
   no warm); partial and unavailable results never warm. The cold tracer
-  observes the owner's `ImportRoute` fact (a re-route stale-serves otherwise).
+  observes the owner's request-bound path-precise resolution witness (a
+  re-route stale-serves otherwise).
   `ScriptFactEvidence` preserves exact, partial, unavailable, and
   not-applicable top-level outcomes without collapsing them to `Option`.
   `PartialScriptFacts` has no whole-payload accessor: Svelte consumers use

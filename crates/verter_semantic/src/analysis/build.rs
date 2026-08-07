@@ -1332,6 +1332,47 @@ fn extract_destructured_bindings(
     initializer: &Option<BindingInitializer>,
     bindings: &mut Vec<AnalyzedBinding>,
 ) {
+    // A destructuring pattern binds MEMBERS of the initializer's value, never
+    // the whole value. Normalize once here — the sole entry to the leaf walk —
+    // so every member name the walk emits carries the fail-closed flag, and a
+    // consumer reading a whole-return answer cannot apply it to a member.
+    let member_initializer = initializer.as_ref().map(|initializer| match initializer {
+        BindingInitializer::FunctionCall {
+            callee,
+            callee_import_source,
+            vue_api,
+            async_component_source,
+            binds_whole_call_result: _,
+        } => BindingInitializer::FunctionCall {
+            callee: callee.clone(),
+            callee_import_source: callee_import_source.clone(),
+            vue_api: *vue_api,
+            async_component_source: async_component_source.clone(),
+            binds_whole_call_result: false,
+        },
+        other => other.clone(),
+    });
+    extract_destructured_binding_leaves(
+        pattern,
+        kind,
+        is_reactive,
+        reactivity_kind,
+        &member_initializer,
+        bindings,
+    );
+}
+
+/// The recursive leaf walk. Reached only through
+/// [`extract_destructured_bindings`], which has already normalized the shared
+/// initializer for member binding.
+fn extract_destructured_binding_leaves(
+    pattern: &BindingPattern<'_>,
+    kind: AnalyzedBindingKind,
+    is_reactive: bool,
+    reactivity_kind: ReactivityKind,
+    initializer: &Option<BindingInitializer>,
+    bindings: &mut Vec<AnalyzedBinding>,
+) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             bindings.push(AnalyzedBinding {
@@ -1348,7 +1389,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &prop.value,
                     kind,
                     is_reactive,
@@ -1358,7 +1399,7 @@ fn extract_destructured_bindings(
                 );
             }
             if let Some(rest) = &obj.rest {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &rest.argument,
                     kind,
                     is_reactive,
@@ -1370,7 +1411,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     elem,
                     kind,
                     is_reactive,
@@ -1380,7 +1421,7 @@ fn extract_destructured_bindings(
                 );
             }
             if let Some(rest) = &arr.rest {
-                extract_destructured_bindings(
+                extract_destructured_binding_leaves(
                     &rest.argument,
                     kind,
                     is_reactive,
@@ -1392,7 +1433,7 @@ fn extract_destructured_bindings(
         }
         BindingPattern::AssignmentPattern(assign) => {
             // `a = default` — extract the left-hand binding
-            extract_destructured_bindings(
+            extract_destructured_binding_leaves(
                 &assign.left,
                 kind,
                 is_reactive,
@@ -1460,6 +1501,11 @@ fn classify_initializer(
                         callee_import_source,
                         vue_api,
                         async_component_source,
+                        // This classifies a declarator's WHOLE initializer
+                        // expression. The destructuring entry
+                        // (`extract_destructured_bindings`) clears the flag
+                        // before cloning the initializer onto each member name.
+                        binds_whole_call_result: true,
                     }),
                     is_reactive,
                     reactivity_kind,
@@ -2090,7 +2136,6 @@ fn analyze_exported_functions(
                                     false,
                                     func.r#async,
                                     &func.params,
-                                    func.return_type.as_deref(),
                                     func.body.as_deref(),
                                     import_map,
                                 ));
@@ -2132,7 +2177,6 @@ fn analyze_exported_functions(
                         true,
                         func.r#async,
                         &func.params,
-                        func.return_type.as_deref(),
                         func.body.as_deref(),
                         import_map,
                     ));
@@ -2152,30 +2196,16 @@ fn analyze_exported_functions(
 }
 
 /// Analyze a single named function (either `function` declaration or expression).
-#[allow(clippy::too_many_arguments)]
 fn analyze_single_function(
     content: &str,
     name: &str,
     is_default: bool,
     is_async: bool,
     params: &FormalParameters<'_>,
-    return_type: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
     body: Option<&FunctionBody<'_>>,
     import_map: &ImportBindingMap,
 ) -> AnalyzedExportedFunction {
     let extracted_params = extract_function_params(content, params);
-    let return_type_annotation = return_type.map(|rt| {
-        content[rt.type_annotation.span().start as usize..rt.type_annotation.span().end as usize]
-            .to_string()
-    });
-
-    let return_reactivity = if let Some(annotation) = &return_type_annotation {
-        classify_return_type_annotation(annotation)
-    } else if let Some(body) = body {
-        classify_return_reactivity_from_body(body, import_map)
-    } else {
-        ReturnReactivity::Unknown
-    };
 
     let composable = if is_composable_name(name) {
         Some(build_composable_info(name, body, import_map))
@@ -2187,8 +2217,6 @@ fn analyze_single_function(
         name: name.to_string(),
         is_default,
         params: extracted_params,
-        return_type_annotation,
-        return_reactivity,
         is_async,
         composable,
     }
@@ -2203,26 +2231,10 @@ fn analyze_arrow_function(
     import_map: &ImportBindingMap,
 ) -> AnalyzedExportedFunction {
     let extracted_params = extract_function_params(content, &arrow.params);
-    let return_type_annotation = arrow.return_type.as_ref().map(|rt| {
-        content[rt.type_annotation.span().start as usize..rt.type_annotation.span().end as usize]
-            .to_string()
-    });
 
     // Arrow functions in OXC always have a FunctionBody.
     // Expression arrows have a single ExpressionStatement in the body.
     let body: &FunctionBody<'_> = &arrow.body;
-    let return_reactivity = if let Some(annotation) = &return_type_annotation {
-        classify_return_type_annotation(annotation)
-    } else if arrow.expression {
-        // Arrow with expression body: `() => ref(0)` — single expression statement
-        if let Some(Statement::ExpressionStatement(expr_stmt)) = body.statements.first() {
-            classify_single_return_expr(&expr_stmt.expression, import_map, &[])
-        } else {
-            ReturnReactivity::Unknown
-        }
-    } else {
-        classify_return_reactivity_from_body(body, import_map)
-    };
 
     let composable = if is_composable_name(name) {
         Some(build_composable_info(name, Some(body), import_map))
@@ -2234,8 +2246,6 @@ fn analyze_arrow_function(
         name: name.to_string(),
         is_default,
         params: extracted_params,
-        return_type_annotation,
-        return_reactivity,
         is_async: arrow.r#async,
         composable,
     }
@@ -2263,7 +2273,6 @@ fn extract_function_from_expr(
                 false,
                 func.r#async,
                 &func.params,
-                func.return_type.as_deref(),
                 func.body.as_deref(),
                 import_map,
             ))
@@ -2306,49 +2315,6 @@ fn extract_function_params(content: &str, params: &FormalParameters<'_>) -> Vec<
 /// Check if a name follows the composable convention (`useXxx`).
 fn is_composable_name(name: &str) -> bool {
     name.starts_with("use") && name.len() > 3 && name.as_bytes()[3].is_ascii_uppercase()
-}
-
-/// Classify return reactivity from a TS return type annotation string.
-/// Checks for well-known Vue type wrappers.
-fn classify_return_type_annotation(annotation: &str) -> ReturnReactivity {
-    let trimmed = annotation.trim();
-    if trimmed.starts_with("Ref<")
-        || trimmed.starts_with("ShallowRef<")
-        || trimmed.starts_with("ComputedRef<")
-    {
-        ReturnReactivity::Ref
-    } else if trimmed.starts_with("Reactive<") || trimmed.starts_with("ShallowReactive<") {
-        ReturnReactivity::Reactive
-    } else if trimmed == "void" || trimmed == "undefined" || trimmed == "never" {
-        ReturnReactivity::Plain
-    } else {
-        // Cannot determine from annotation alone — could be object, union, etc.
-        ReturnReactivity::Unknown
-    }
-}
-
-/// Classify return reactivity by walking return statements in a function body (heuristic).
-fn classify_return_reactivity_from_body(
-    body: &FunctionBody<'_>,
-    import_map: &ImportBindingMap,
-) -> ReturnReactivity {
-    let mut return_kinds = Vec::new();
-    collect_return_expressions(body, import_map, &[], &mut return_kinds);
-
-    if return_kinds.is_empty() {
-        return ReturnReactivity::Plain;
-    }
-    if return_kinds.len() == 1 {
-        return return_kinds.into_iter().next().unwrap();
-    }
-
-    // Multiple return paths: check if they're all the same
-    let first = &return_kinds[0];
-    if return_kinds.iter().all(|k| k == first) {
-        return_kinds.into_iter().next().unwrap()
-    } else {
-        ReturnReactivity::Unknown
-    }
 }
 
 /// Collect return reactivity from all return statements in a function body.

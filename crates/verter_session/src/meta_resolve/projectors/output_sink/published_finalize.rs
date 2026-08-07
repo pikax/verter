@@ -49,77 +49,9 @@ pub(crate) fn reduce_published_field_types(
             ProjectionMode::Navigate,
         );
 
-    // A field whose source is the first-class synthetic binding carrier is a
-    // session-raised row: its own value was already node-resolved at
-    // publication, and a consumer deepening it routes through the
-    // content-free synthetic-binding identity
-    // (`ShapeCacheKey::synthetic_binding_whole_with_context`), never a
-    // per-row parent-shell reduction here. The typed SOURCE-variant identity
-    // is the skip signal.
-    let is_synthetic_binding_carrier =
-        |source: &SemanticTypeSource| matches!(source, SemanticTypeSource::SyntheticSlotBinding(_));
-    // The graph publisher's shallow named-reference carrier is likewise
-    // FINAL for a binding row (`message: MessageBase<T>` publishes the
-    // re-resolvable `Ref` — shallow-by-default): a Navigate reduction could
-    // only keep the carrier, so re-dispatching it per row is pure fan-out
-    // (30 cyclic-heritage bindings re-resolving one identical ref blew the
-    // audit structured-event envelope).
-    let is_final_shallow_ref_carrier = |source: &SemanticTypeSource| {
-        matches!(
-            source,
-            SemanticTypeSource::Closed(verter_type_expr::facts::ClosedTypeFact::Leaf(
-                verter_type_expr::facts::LeafTypeFact::Ref(_)
-            ))
-        )
-    };
-    // The graph publisher's arg-preserving authored USE-SITE carrier
-    // (`Authored(DeclBody)` — the declaring decl's member-value slot for an
-    // argument-bearing named-reference binding value) is equally FINAL for a
-    // binding row: a Navigate reduction could only keep the instantiation
-    // carrier, so re-dispatching it per row is the same pure fan-out the
-    // named-reference skip above closes. Binding rows carry `DeclBody`
-    // sources ONLY from that publisher (parser-path rows are
-    // `Authored(MacroPayload)` and still reduce).
-    let is_publisher_use_site_carrier = |source: &SemanticTypeSource| {
-        matches!(
-            source,
-            SemanticTypeSource::Authored(
-                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(_)
-            )
-        )
-    };
-    // A projected REPLAY-ROUTE source (member-path / callable-params /
-    // index-position) is FINAL for every row: it is the content-free
-    // consumer-demand address the member sink just minted from the SAME
-    // reduction pipeline — re-raising it here would EXECUTE the replay per
-    // row at publication time (a `ProjectPath` member walk per member — the
-    // Rule-5 audit-footprint fan-out the `block_6i` guards pin closed). The
-    // replay executes ONLY on consumer demand.
-    let is_final_projected_replay = |source: &SemanticTypeSource| {
-        matches!(
-            source,
-            SemanticTypeSource::Projected(
-                verter_type_expr::facts::ProjectedTypeFact::MemberPath { .. }
-                    | verter_type_expr::facts::ProjectedTypeFact::CallableParams { .. }
-                    | verter_type_expr::facts::ProjectedTypeFact::IndexPosition { .. }
-            )
-        )
-    };
+    // Expanded rows already own immutable resolved authority. Finalization
+    // cannot replace it with an authored representation or a later reduction.
 
-    for field in evaluated_types.props.iter_mut() {
-        // FLAT rows keep the leaf-only closed upgrade (their member sink
-        // already applied the ref-identity upgrade at publication).
-        finalize_published_prop_source(
-            query_engine,
-            &dispatch,
-            transit_ctx,
-            scope_canonical_id,
-            scope_owner,
-            &mut field.r#type,
-            field.shallow_source.as_ref(),
-            false,
-        );
-    }
     // The `define_props` SHAPE lane properties are the NORMALIZED macro
     // rows' sources (`define_props_shape` publishes them directly — the
     // prop-type authority) finalized HERE through the SAME per-position
@@ -155,116 +87,6 @@ pub(crate) fn reduce_published_field_types(
     // authority). Copying the finalized FLAT sources over the lane would
     // re-impose the flat projection as a competing semantic producer — the
     // authority inversion the emit-authority rule closed.
-    for field in evaluated_types.emits.iter_mut() {
-        let Some(current) = field.r#type.present().cloned() else {
-            continue;
-        };
-        // A projected replay-route source is already final — never re-raised
-        // at publication.
-        if is_final_projected_replay(&current) {
-            continue;
-        }
-        let Some(input) = dispatch.raise_semantic_type_source_to_hot(
-            &current,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        ) else {
-            continue;
-        };
-        let carrier = reduce_field_value_node(
-            query_engine,
-            scope_canonical_id,
-            input.node(),
-            ProjectionMode::Navigate,
-        );
-        field.r#type = verter_type_expr::facts::SourcePosition::Present(published_source_for_node(
-            &dispatch,
-            carrier.node_id(),
-            current,
-        ));
-    }
-    for field in evaluated_types.slot_bindings.iter_mut() {
-        // A synthetic binding carrier is a session-raised binding row — its
-        // own value was already node-resolved at publication; the published
-        // source stays the shallow carrier and deepening is demand-side.
-        // The published shallow named-reference carrier and the
-        // arg-preserving authored use-site carrier are equally final.
-        let Some(current) = field.r#type.present().cloned() else {
-            continue;
-        };
-        if is_synthetic_binding_carrier(&current)
-            || is_final_shallow_ref_carrier(&current)
-            || is_publisher_use_site_carrier(&current)
-            || is_final_projected_replay(&current)
-        {
-            continue;
-        }
-        let Some(input) = dispatch.raise_semantic_type_source_to_hot(
-            &current,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        ) else {
-            continue;
-        };
-        // Navigate (shallow-by-default): an explicit selector reduces
-        // path-precisely, but a symbolic `AppProps['avatar']` through an open
-        // `[k: string]: any` index signature STAYS the indexed-access carrier.
-        let carrier = reduce_field_value_node(
-            query_engine,
-            scope_canonical_id,
-            input.node(),
-            ProjectionMode::Navigate,
-        );
-        field.r#type = verter_type_expr::facts::SourcePosition::Present(published_source_for_node(
-            &dispatch,
-            carrier.node_id(),
-            current,
-        ));
-    }
-    for field in evaluated_types.bindings.iter_mut() {
-        let Some(current) = field.r#type.present().cloned() else {
-            continue;
-        };
-        if is_synthetic_binding_carrier(&current)
-            || is_final_shallow_ref_carrier(&current)
-            || is_final_projected_replay(&current)
-        {
-            continue;
-        }
-        let Some(input) = dispatch.raise_semantic_type_source_to_hot(
-            &current,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id,
-                scope_owner,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        ) else {
-            continue;
-        };
-        // Navigate (shallow-by-default), matching the props / emits /
-        // slot_bindings reducers: an explicit selector reduces
-        // path-precisely; a plain alias / open generic carrier stays shallow.
-        let carrier = reduce_field_value_node(
-            query_engine,
-            scope_canonical_id,
-            input.node(),
-            ProjectionMode::Navigate,
-        );
-        field.r#type = verter_type_expr::facts::SourcePosition::Present(published_source_for_node(
-            &dispatch,
-            carrier.node_id(),
-            current,
-        ));
-    }
 }
 
 /// Finalize ONE published prop SOURCE POSITION — the per-position half of
@@ -296,7 +118,7 @@ fn finalize_published_prop_source(
             source,
             SemanticTypeSource::Projected(
                 verter_type_expr::facts::ProjectedTypeFact::MemberPath { .. }
-                    | verter_type_expr::facts::ProjectedTypeFact::CallableParams { .. }
+                    | verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence { .. }
                     | verter_type_expr::facts::ProjectedTypeFact::IndexPosition { .. }
             )
         )
@@ -314,15 +136,18 @@ fn finalize_published_prop_source(
     }
     // Raise the resolved source ONCE — the observed INPUT node for the
     // reducer AND its no-poison input fact (one lowering, no re-lower).
-    let Some(input) = dispatch.raise_semantic_type_source_to_hot(
-        &current,
-        crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-            scope_canonical_id,
-            scope_owner,
-            context: transit_ctx,
-            interior_failures: None,
-        },
-    ) else {
+    let Some(input) = dispatch
+        .raise_semantic_type_source_to_hot(
+            &current,
+            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id,
+                scope_owner,
+                context: transit_ctx,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()
+    else {
         // Unraisable under the live view — the source publishes shallow
         // verbatim (never a fabricated stand-in).
         return;
@@ -339,8 +164,11 @@ fn finalize_published_prop_source(
     // `reduce_published_raises_the_shallow_form_only_in_the_props_loop`)
     // and shared by the node-compare below and the name-preservation gate
     // after it.
-    let shallow_node = shallow_source
-        .and_then(|shallow| dispatch.raise_authored_locator_to_hot(shallow, transit_ctx));
+    let shallow_node = shallow_source.and_then(|shallow| {
+        dispatch
+            .raise_authored_locator_to_hot(shallow, transit_ctx)
+            .at_optional_boundary()
+    });
     if let Some(shallow) = shallow_source {
         let ctx = query_engine.ctx;
         // The shallow form is an INPUT (untainted); compare in NODE DOMAIN

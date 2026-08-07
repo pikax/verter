@@ -627,7 +627,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         // at production time; the only correct span anchor.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
     };
-    let view = crate::semantic_query::surface_view! {
+    let view = crate::test_surface_view! {
         members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
@@ -734,7 +734,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         )
         .stamp_role(MemberMergeRole::OwnBody),
     };
-    let view = crate::semantic_query::surface_view! {
+    let view = crate::test_surface_view! {
         members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),

@@ -131,15 +131,11 @@ describe("P3: Default Values", () => {
   test("JS options API: should extract default value from defineProps options", async () => {
     const prop = await getProp("P3a-JSDefaults.vue", "size");
     expect(prop).toBeDefined();
-    // Post-W7.2 the descriptor-over-rawType swap is structural: only `Ref`-shaped
-    // descriptors (or `IndexedAccessType`) prefer their descriptor display over the
-    // user-authored rawType passthrough. The runtime constructor `String` surfaces
-    // as the rawType "String | undefined" rather than the lowercase primitive
-    // expansion "string | undefined". The default-value extraction (and string-
-    // compatible JSON-stringification of unquoted defaults) remains driven by the
-    // descriptor's typed `kind` walk.
+    // T-A1 terminal display comes from the structured publication sink. The
+    // retired runtime-constructor rawType fallback cannot override the
+    // resolved primitive descriptor.
     expect(prop).toMatchObject({
-      type: "String | undefined",
+      type: "string | undefined",
       default: '"md"',
     });
   });
@@ -153,11 +149,11 @@ describe("P3: Default Values", () => {
     });
   });
 
-  test("runtime defineProps object syntax should preserve default values", async () => {
+  test("runtime defineProps object syntax preserves defaults without raw display authority", async () => {
     const prop = await getProp("StringPropDefault.vue", "hello");
     expect(prop).toBeDefined();
     expect(prop).toMatchObject({
-      type: "string | undefined",
+      type: "unknown | undefined",
       default: '"Hello"',
     });
   });
@@ -167,16 +163,17 @@ describe("P3: Default Values", () => {
 // P4: DOM Types
 // =============================================================================
 describe("P4: DOM & Advanced Types", () => {
-  test("HTMLCanvasElement prop should have { kind: 'object', schema: {} } not flat string", async () => {
+  test("unresolved HTMLCanvasElement stays structured unknown without raw display fallback", async () => {
     const prop = await getProp("P4a-DomTypes.vue", "canvas");
     expect(prop).toBeDefined();
-    expect(prop!.type).toBe("HTMLCanvasElement | undefined");
-    // Non-required prop produces an enum schema wrapping HTMLCanvasElement | undefined
+    expect(prop!.type).toBe("unknown | undefined");
+    // T-A2 owns DOM descriptor completeness. T-A1 must keep the unresolved
+    // result structured instead of restoring HTMLCanvasElement from text.
     expect(typeof prop!.schema).not.toBe("string");
     if (typeof prop!.schema !== "string") {
       expect(prop!.schema).toMatchObject({
         kind: "enum",
-        type: "HTMLCanvasElement | undefined",
+        type: "unknown | undefined",
       });
     }
   });

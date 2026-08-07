@@ -99,7 +99,7 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
     let shallow = verter_session::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/c.vue",
-        value_field.r#type.present().expect("present source"),
+        value_field.authority.source().expect("present source"),
     )
     .unwrap_or_else(|| panic!("`value`'s published source must shell-materialize"));
 

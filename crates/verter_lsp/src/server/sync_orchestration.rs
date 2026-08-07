@@ -20,7 +20,7 @@ use crate::documents::line_index::LineIndex;
 use crate::external_ts::AbsentReason;
 use crate::provider_sync::ProviderPathKind;
 use crate::type_provider::auto_import::{
-    resolve_script_import_anchor, ScriptImportInsertionAnchor,
+    resolve_script_import_anchor_from_structure, ScriptImportInsertionAnchor,
 };
 use crate::type_provider::merge;
 
@@ -258,7 +258,11 @@ impl VerterLanguageServer {
             .iter()
             .map(|imp| (imp.span.start, imp.span.end))
             .collect();
-        let anchor = resolve_script_import_anchor(&doc.source, &user_import_spans);
+        let anchor = resolve_script_import_anchor_from_structure(
+            &doc.source,
+            &user_import_spans,
+            doc.feature_snapshot.as_ref()?.structure(),
+        );
         let ScriptImportInsertionAnchor::ExistingScriptSetup { .. } = anchor else {
             return None;
         };

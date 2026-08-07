@@ -711,6 +711,101 @@ fn test_format_quickinfo_hover_with_docs() {
     assert!(result.contains("A string variable"));
 }
 
+// ---------------------------------------------------------------------------
+// quickinfo wire position → byte offset (hover range population, fail-closed)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quickinfo_wire_pos_maps_to_byte_offset() {
+    let content = "const x = 1;\nconst y = 2;\n";
+    // tsserver positions are 1-based: line 2, offset 7 → byte 13 + 6.
+    let pos = serde_json::json!({ "line": 2, "offset": 7 });
+    assert_eq!(
+        quickinfo_wire_pos_to_byte_offset(content, Some(&pos)),
+        Some(19)
+    );
+}
+
+#[test]
+fn quickinfo_wire_pos_fails_closed_on_out_of_range_or_malformed() {
+    let content = "const x = 1;\n";
+    let past_eof = serde_json::json!({ "line": 9, "offset": 1 });
+    assert_eq!(
+        quickinfo_wire_pos_to_byte_offset(content, Some(&past_eof)),
+        None,
+        "a past-EOF wire position must be dropped, not clamped"
+    );
+    let malformed = serde_json::json!({ "line": 0, "offset": 0 });
+    assert_eq!(
+        quickinfo_wire_pos_to_byte_offset(content, Some(&malformed)),
+        None,
+        "a 0-based (malformed) tsserver position must be dropped"
+    );
+    assert_eq!(quickinfo_wire_pos_to_byte_offset(content, None), None);
+}
+
+// ---------------------------------------------------------------------------
+// HoverInfo::kind_labeled_signature — the shared `(kind) display` boundary
+// formatter (same composition `format_quickinfo_hover` renders `contents`
+// with; consumed by the v-bind completion detail and the LSP hover boundary).
+// ---------------------------------------------------------------------------
+
+/// In-crate test mint (the witness minting fn is `pub(crate)`; out-of-crate
+/// consumers go through a provider impl).
+fn test_display_signature(value: &str) -> DisplaySignature {
+    DisplaySignature::from_provider_wire(
+        crate::protocol::DisplaySignatureWireWitness::mint(),
+        value,
+    )
+}
+
+#[test]
+fn kind_labeled_signature_composes_kind_and_display() {
+    let hover = HoverInfo {
+        contents: String::new(),
+        display_signature: Some(test_display_signature("const x: string")),
+        kind: QuickInfoKind::from_tsserver_wire("const"),
+        ..Default::default()
+    };
+    assert_eq!(
+        hover.kind_labeled_signature().as_deref(),
+        Some("(const) const x: string")
+    );
+}
+
+#[test]
+fn kind_labeled_signature_is_idempotent_and_fails_closed() {
+    // TypeScript's own in-display prefix is never doubled.
+    let hover = HoverInfo {
+        display_signature: Some(test_display_signature("(alias) const Foo: number")),
+        kind: QuickInfoKind::from_tsserver_wire("alias"),
+        ..Default::default()
+    };
+    assert_eq!(
+        hover.kind_labeled_signature().as_deref(),
+        Some("(alias) const Foo: number"),
+        "the exact ({{kind}}) prefix is never double-applied"
+    );
+
+    // No structured signature ⇒ no line — the rendered `contents` blob is
+    // NEVER a fallback source.
+    let no_signature = HoverInfo {
+        contents: "```typescript\nconst x: string\n```".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(no_signature.kind_labeled_signature(), None);
+
+    // kind-less (tsgo) ⇒ the bare display line.
+    let kindless = HoverInfo {
+        display_signature: Some(test_display_signature("const count: Ref<number>")),
+        ..Default::default()
+    };
+    assert_eq!(
+        kindless.kind_labeled_signature().as_deref(),
+        Some("const count: Ref<number>")
+    );
+}
+
 #[test]
 fn test_parse_tsserver_location_with_content() {
     let content = "const x = 1;\nconst y = 2;\nconst z = 3;";

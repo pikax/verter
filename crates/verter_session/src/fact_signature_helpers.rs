@@ -73,7 +73,7 @@ use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSp
 
 use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
 use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
+    FactReadSet, FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
     FACT_SIGNATURE_CAP,
 };
 use crate::semantic_query::{DepSignature, DepVersion};
@@ -97,15 +97,20 @@ use crate::types::Hash16;
 /// superseded artifact — an entry the read-side fact rail cannot
 /// reject, so every shared-cache admission point MUST refuse it
 /// (serve the value to the caller, publish nothing).
-pub(crate) fn install_fact_tracer<F, R>(host: &crate::VerterHost, f: F) -> (R, FactReadSetFinalise)
+pub(crate) fn install_fact_tracer<F, R>(
+    source: &FactTracerBasisSource<'_>,
+    f: F,
+) -> (R, FactReadSetFinalise)
 where
     F: FnOnce() -> R,
 {
-    let (value, read_set) = host.with_fact_tracer(|| {
+    let host = source.host();
+    let (value, mut read_set) = source.with_fact_tracer(|| {
         #[cfg(test)]
         force_tracer_overflow_observations(host, None);
         f()
     });
+    note_basis_recheck(source, &mut read_set);
     let finalise = read_set.finalise();
     // The overflow audit event + host counter are emitted HERE and ONLY here —
     // at the ONE signature-CONSUMING boundary per compute. The cacheability
@@ -124,6 +129,158 @@ where
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     (value, finalise)
+}
+
+/// Everything a fact-tracer scope needs to compose its compaction basis,
+/// bound together at the ONE point that can answer both halves.
+///
+/// A basis has a view-derived half and a live half. The view-derived half
+/// is captured ONCE, here, from a view the caller ALREADY HOLDS — a
+/// borrow, not a `StoreViewManager` read. The live half is five atomic
+/// loads. Neither end of a scope — installation, nor the movement
+/// re-check every admission boundary performs — ever builds a store view,
+/// which is the whole reason this type exists: the re-check runs on a
+/// hotter path than installation, and a per-scope store-view read there
+/// is the same `O(N)`-read regression the batch-fixed-view collapse
+/// removed.
+///
+/// Host and seed travel together because they must agree. A seed captured
+/// from one host's view composed against another host's counters would
+/// compare stamps from different worlds; binding them in one value that
+/// is only ever constructed from a single context or a single host makes
+/// that unrepresentable at the call site.
+pub struct FactTracerBasisSource<'h> {
+    host: &'h crate::VerterHost,
+    seed: verter_workspace::AggregateBasisSeed,
+}
+
+impl<'h> FactTracerBasisSource<'h> {
+    /// Seed from a request-bound resolver context.
+    ///
+    /// The seed is a BORROW of the view the request boundary already
+    /// bound, so this costs one virtual call and no store-view read. This
+    /// is the constructor every producer that holds a context should use:
+    /// a request-bound scope detects movement in the two composite
+    /// domains, and an unbound one cannot.
+    ///
+    /// It reads the seed through
+    /// [`ResolverContext::aggregate_basis_seed`](crate::resolver_core::ResolverContext::aggregate_basis_seed)
+    /// rather than through `ctx.store_view()`, because a context reached
+    /// with a bare host has no view to borrow and answering `store_view()`
+    /// there is an architectural panic. A bare-host context seeds nothing
+    /// and its scopes behave exactly as an unbound one.
+    #[must_use]
+    pub fn from_ctx(ctx: &'h dyn crate::resolver_core::ResolverContext) -> Self {
+        Self {
+            host: ctx.host_for_fact_tracer_install(),
+            seed: ctx.aggregate_basis_seed(),
+        }
+    }
+
+    /// Seed from a context the producer may or may not have been given.
+    ///
+    /// The shape for a producer reachable BOTH from a request-bound
+    /// resolver path and from a bare host entry: bound when a context
+    /// came with the call, unbound when it did not. Never a fabricated
+    /// context — the bare-host `store_view()` is an architectural panic,
+    /// not a fallback.
+    #[must_use]
+    pub fn from_optional_ctx(
+        host: &'h crate::VerterHost,
+        ctx: Option<&'h dyn crate::resolver_core::ResolverContext>,
+    ) -> Self {
+        match ctx {
+            Some(ctx) => Self::from_ctx(ctx),
+            None => Self::unbound(host),
+        }
+    }
+
+    /// Seed a scope that has NO bound view.
+    ///
+    /// Names no domain, so the scope compacts nothing and detects no
+    /// movement — the same state every tracer was in before a basis
+    /// existed. Deliberately NOT "read a view to find one": doing that
+    /// per scope is exactly the cost this seam removes, and a scope with
+    /// no bound view has no view to be validated against later either.
+    #[must_use]
+    pub fn unbound(host: &'h crate::VerterHost) -> Self {
+        Self {
+            host,
+            seed: verter_workspace::AggregateBasisSeed::Unvouched,
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub(crate) fn host(&self) -> &'h crate::VerterHost {
+        self.host
+    }
+
+    /// Open a tracer scope carrying this source's basis. Thin forward to
+    /// the one chokepoint, so a raw consumer that needs the finalised set
+    /// installs a basis by the same route the helpers do.
+    #[must_use]
+    pub fn with_fact_tracer<F, R>(&self, f: F) -> (R, FactReadSet)
+    where
+        F: FnOnce() -> R,
+    {
+        self.host.with_fact_tracer(self.seed, f)
+    }
+
+    /// [`Self::with_fact_tracer`], handing the closure the scope's cell.
+    #[must_use]
+    pub fn with_fact_tracer_cell<F, R>(&self, f: F) -> (R, FactReadSet)
+    where
+        F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+    {
+        self.host.with_fact_tracer_cell(self.seed, f)
+    }
+
+    /// Re-compose the basis against the CURRENT live counters.
+    ///
+    /// `O(1)`: the seed is already captured, so this is five atomic loads
+    /// and a struct build. It is the comparison side of movement
+    /// detection, and it is deliberately the SAME composition
+    /// installation used — a domain this source cannot answer for is
+    /// absent on both sides and never registers as spurious movement,
+    /// while a clock that becomes unreadable mid-scope correctly does.
+    #[must_use]
+    pub(crate) fn live_basis(&self) -> verter_workspace::AggregateGenerations {
+        verter_workspace::AggregateGenerations::from_seed(
+            &self.seed,
+            &self.host.live_aggregate_counters(),
+        )
+    }
+}
+
+/// Re-read the live generations into a tracer and record MUTATION
+/// INSTABILITY if a domain the scope compacts against has moved.
+///
+/// Short-circuits on a scope with no basis: such a scope mints no
+/// aggregate, so no generation movement can corrupt it and the live read
+/// would tell it nothing. That keeps the check byte-cheap for every
+/// tracer whose source vouches for nothing.
+#[inline]
+fn note_basis_recheck(source: &FactTracerBasisSource<'_>, read_set: &mut FactReadSet) {
+    if !read_set.aggregate_basis().names_any_domain() {
+        return;
+    }
+    read_set.note_basis_recheck(&source.live_basis());
+}
+
+/// [`note_basis_recheck`] through a scope's cell, for the CACHEABILITY
+/// seam — which reads its verdict MID-SCOPE and can authorise writes
+/// from inside its own closure, so an exit-only check would run after
+/// the write it was meant to gate.
+#[inline]
+fn note_basis_recheck_on_cell(
+    source: &FactTracerBasisSource<'_>,
+    cell: &crate::resolver_core::FactReadSetCell,
+) {
+    if !cell.has_aggregate_basis() {
+        return;
+    }
+    cell.note_basis_recheck(&source.live_basis());
 }
 
 /// Test-only fact-injection hook read at every tracer scope entry
@@ -168,6 +325,15 @@ fn force_tracer_overflow_observations(
     host: &crate::VerterHost,
     scope: Option<crate::host_test_force::TracerScope>,
 ) {
+    if host
+        .test_force
+        .force_fact_tracer_non_cacheable_read
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
+            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        );
+    }
     let sticky = host
         .test_force
         .force_fact_tracer_overflow_observations
@@ -190,18 +356,22 @@ fn force_tracer_overflow_observations(
 /// alone.
 #[cfg(test)]
 fn with_cacheability_scope_named<F, R>(
-    host: &crate::VerterHost,
+    source: &FactTracerBasisSource<'_>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, bool)
 where
     F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
 {
-    let (value, mut read_set) = host.with_fact_tracer_cell(|cell| {
+    let host = source.host();
+    let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
         force_tracer_overflow_observations(host, Some(scope));
-        f(&CacheabilityProbe { cell })
+        f(&CacheabilityProbe { cell, source })
     });
-    let non_cacheable = read_set.non_cacheable_read_observed() || read_set.would_overflow();
+    note_basis_recheck(source, &mut read_set);
+    let non_cacheable = read_set.mutation_unstable()
+        || read_set.non_cacheable_read_observed()
+        || read_set.would_overflow();
     (value, non_cacheable)
 }
 
@@ -209,31 +379,33 @@ where
 /// [`with_cacheability_scope_named`].
 #[cfg(test)]
 pub(crate) fn install_fact_tracer_cacheability_named<F, R>(
-    host: &crate::VerterHost,
+    source: &FactTracerBasisSource<'_>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, bool)
 where
     F: FnOnce() -> R,
 {
-    with_cacheability_scope_named(host, scope, |_probe| f())
+    with_cacheability_scope_named(source, scope, |_probe| f())
 }
 
 /// [`install_fact_tracer`] for an ADDRESSABLE scope. See
 /// [`with_cacheability_scope_named`].
 #[cfg(test)]
 pub(crate) fn install_fact_tracer_named<F, R>(
-    host: &crate::VerterHost,
+    source: &FactTracerBasisSource<'_>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, FactReadSetFinalise)
 where
     F: FnOnce() -> R,
 {
-    let (value, read_set) = host.with_fact_tracer(|| {
+    let host = source.host();
+    let (value, mut read_set) = source.with_fact_tracer(|| {
         force_tracer_overflow_observations(host, Some(scope));
         f()
     });
+    note_basis_recheck(source, &mut read_set);
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::host_manage::push_structured_event(
@@ -266,15 +438,15 @@ where
 /// UPSTREAM cannot silently retarget it (an unnamed scope claims nothing).
 #[cfg(test)]
 macro_rules! named_cacheability_scope {
-    ($host:expr, $scope:expr, $f:expr) => {
-        $crate::fact_signature_helpers::install_fact_tracer_cacheability_named($host, $scope, $f)
+    ($source:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_cacheability_named($source, $scope, $f)
     };
 }
 
 #[cfg(not(test))]
 macro_rules! named_cacheability_scope {
-    ($host:expr, $scope:expr, $f:expr) => {
-        $crate::fact_signature_helpers::install_fact_tracer_cacheability($host, $f)
+    ($source:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_cacheability($source, $f)
     };
 }
 
@@ -283,15 +455,15 @@ macro_rules! named_cacheability_scope {
 /// production footprint.
 #[cfg(test)]
 macro_rules! named_fact_tracer {
-    ($host:expr, $scope:expr, $f:expr) => {
-        $crate::fact_signature_helpers::install_fact_tracer_named($host, $scope, $f)
+    ($source:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer_named($source, $scope, $f)
     };
 }
 
 #[cfg(not(test))]
 macro_rules! named_fact_tracer {
-    ($host:expr, $scope:expr, $f:expr) => {
-        $crate::fact_signature_helpers::install_fact_tracer($host, $f)
+    ($source:expr, $scope:expr, $f:expr) => {
+        $crate::fact_signature_helpers::install_fact_tracer($source, $f)
     };
 }
 
@@ -323,6 +495,14 @@ pub(crate) use {named_cacheability_scope, named_fact_tracer};
 /// cannot be constructed by struct literal either.
 pub struct CacheabilityProbe<'t> {
     cell: &'t crate::resolver_core::FactReadSetCell,
+    /// The scope's basis source, RETAINED so [`Self::non_cacheable`] can
+    /// re-compose the live basis in `O(1)`. Held because this probe is an
+    /// ADMISSION BOUNDARY in its own right — it can authorise a write
+    /// from inside the scope's closure, so its verdict must include a
+    /// fresh movement check rather than inheriting one taken on exit.
+    /// Retaining the SOURCE rather than the host is what keeps that
+    /// per-admission check off the store-view read path.
+    source: &'t FactTracerBasisSource<'t>,
 }
 
 impl CacheabilityProbe<'_> {
@@ -357,13 +537,28 @@ impl CacheabilityProbe<'_> {
     /// validate the curated facts while an unenumerated dependency has moved.
     /// The rail therefore has a real cost (a legitimately fact-heavy compute
     /// is recomputed cold forever); it is not free correctness bookkeeping.
+    /// # Why MUTATION INSTABILITY refuses here too
+    ///
+    /// A third condition folds in: a compaction domain this scope
+    /// compacts against advanced since its basis was installed. It is
+    /// checked HERE, at the probe, and not only on scope exit, because
+    /// this probe can authorise a write from inside the closure — an
+    /// exit-only check would run after the write it was meant to gate.
+    /// It is a STABILITY refusal, not a cardinality one, and the
+    /// distinction is preserved in the typed
+    /// `FactReadSetFinalise::MutationUnstable` that the
+    /// signature-consuming boundary reports; this Boolean surface
+    /// carries the refusal, not its taxonomy.
     #[inline]
     pub fn non_cacheable(&self) -> bool {
         // Overflow is peeked, never finalised: no `Arc<[FactVersionRef]>`
         // allocation on the hot cold-member path, and no audit event — the
         // event stays owned by the ONE signature-consuming `install_fact_tracer`
         // boundary per compute (see its emission site).
-        self.cell.non_cacheable_read_observed() || self.cell.would_overflow()
+        note_basis_recheck_on_cell(self.source, self.cell);
+        self.cell.mutation_unstable()
+            || self.cell.non_cacheable_read_observed()
+            || self.cell.would_overflow()
     }
 }
 
@@ -382,16 +577,21 @@ impl CacheabilityProbe<'_> {
 /// Returns `(value, non_cacheable)` — the same verdict [`CacheabilityProbe`]
 /// reports, sampled once after the scope pops, for a producer that admits
 /// AFTER its compute rather than inside it.
-pub fn with_cacheability_scope<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
+pub fn with_cacheability_scope<F, R>(source: &FactTracerBasisSource<'_>, f: F) -> (R, bool)
 where
     F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
 {
-    let (value, mut read_set) = host.with_fact_tracer_cell(|cell| {
+    #[cfg(test)]
+    let host = source.host();
+    let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
         #[cfg(test)]
         force_tracer_overflow_observations(host, None);
-        f(&CacheabilityProbe { cell })
+        f(&CacheabilityProbe { cell, source })
     });
-    let non_cacheable = read_set.non_cacheable_read_observed() || read_set.would_overflow();
+    note_basis_recheck(source, &mut read_set);
+    let non_cacheable = read_set.mutation_unstable()
+        || read_set.non_cacheable_read_observed()
+        || read_set.would_overflow();
     (value, non_cacheable)
 }
 
@@ -406,11 +606,14 @@ where
 /// signature (building the entry's `ReadSetSignature` from it) uses
 /// [`install_fact_tracer`] and routes `Overflow` through
 /// [`SignatureAdmission::from_finalise`].
-pub(crate) fn install_fact_tracer_cacheability<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
+pub(crate) fn install_fact_tracer_cacheability<F, R>(
+    source: &FactTracerBasisSource<'_>,
+    f: F,
+) -> (R, bool)
 where
     F: FnOnce() -> R,
 {
-    with_cacheability_scope(host, |_probe| f())
+    with_cacheability_scope(source, |_probe| f())
 }
 
 /// Fan `sig` into every active tracer on the current thread's stack.
@@ -565,10 +768,10 @@ pub(crate) fn validate_fact_signature(
     // before validation runs.
     if ctx.is_request_bound() {
         let view = ctx.store_view();
-        signature.iter().all(|fact| view.validates(fact))
+        view.validates_fact_signature(signature)
     } else {
         let view = ctx.resolver_store_view();
-        signature.iter().all(|fact| view.validates(fact))
+        view.validates_fact_signature(signature)
     }
 }
 
@@ -623,24 +826,10 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     // strictly).
     if ctx.is_request_bound() {
         let view = ctx.store_view();
-        signature.iter().all(|fact| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, hash }
-                if self_root_canonicals.contains(&canonical_id.as_str()) =>
-            {
-                view.validates_self_root_whole_hash(canonical_id, hash)
-            }
-            other => view.validates(other),
-        })
+        view.validates_fact_signature_with_self_roots(signature, self_root_canonicals)
     } else {
         let view = ctx.resolver_store_view();
-        signature.iter().all(|fact| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, hash }
-                if self_root_canonicals.contains(&canonical_id.as_str()) =>
-            {
-                view.validates_self_root_whole_hash(canonical_id, hash)
-            }
-            other => view.validates(other),
-        })
+        view.validates_fact_signature_with_self_roots(signature, self_root_canonicals)
     }
 }
 
@@ -1054,11 +1243,82 @@ pub(crate) fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 /// `materialize_structure_read_set` returns
 /// `Result<StructuralCarrierReadSet, NonAdmissionReason>` so refusal
 /// modes (`SelfRootConflict`, `RouteGenerationDependency`) reach the
-/// caller verbatim; `ref_cycle_read_set` returns
-/// `Option<StructuralCarrierReadSet>` because its single refusal mode
-/// is a torn self-root observation (`SelfRootConflict`), which the
-/// caller attributes at the call site.
+/// caller verbatim; `ref_cycle_read_set` uses the same typed result for
+/// torn roots, unresolved strict-world provenance, and completed-carrier
+/// overflow.
 pub(crate) type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
+
+/// Finalize a structural cache carrier after every self-root, fence, prelude,
+/// and traced fact has been merged.
+///
+/// Oversized self-root sets are replaced by one strict-world witness only
+/// after every root validates in the exact effective view. Any remaining
+/// over-cap completed carrier is refused here, at the terminal publication
+/// boundary rather than at the earlier tracer finalization boundary.
+pub(crate) fn bound_completed_structural_carrier(
+    view: &dyn StoreView,
+    mut facts: Vec<FactVersionRef>,
+    mut self_root_canonicals: Vec<Arc<str>>,
+) -> Result<StructuralCarrierReadSet, NonAdmissionReason> {
+    facts.sort_unstable();
+    facts.dedup();
+    self_root_canonicals.sort();
+    self_root_canonicals.dedup();
+
+    if facts.len() > FACT_SIGNATURE_CAP && !self_root_canonicals.is_empty() {
+        let mut roots: Vec<(Arc<str>, Hash16)> = Vec::with_capacity(self_root_canonicals.len());
+        for canonical in &self_root_canonicals {
+            let Some(hash) = facts.iter().find_map(|fact| match fact {
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == canonical.as_ref() =>
+                {
+                    Some(*hash)
+                }
+                _ => None,
+            }) else {
+                return Err(NonAdmissionReason::UnresolvedProvenance);
+            };
+            roots.push((Arc::clone(canonical), hash));
+        }
+        let root_refs: Vec<(&str, Hash16)> = roots
+            .iter()
+            .map(|(canonical, hash)| (canonical.as_ref(), *hash))
+            .collect();
+        let world = view
+            .mint_strict_self_root_world(&root_refs)
+            .ok_or(NonAdmissionReason::UnresolvedProvenance)?;
+
+        facts.retain(|fact| match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. } => !self_root_canonicals
+                .binary_search_by(|root| root.as_ref().cmp(canonical_id.as_str()))
+                .is_ok(),
+            _ => true,
+        });
+        facts.push(FactVersionRef::StrictSelfRootWorld(world));
+        facts.sort_unstable();
+        facts.dedup();
+        self_root_canonicals.clear();
+    }
+
+    if facts.len() > FACT_SIGNATURE_CAP {
+        return Err(NonAdmissionReason::SignatureOverflow);
+    }
+    Ok((Arc::from(facts), Arc::from(self_root_canonicals)))
+}
+
+/// Run `f` against the exact effective store view of `ctx` without returning a
+/// borrow to a temporary bare-host view.
+pub(crate) fn with_effective_store_view<R>(
+    ctx: &dyn ResolverContext,
+    f: impl FnOnce(&dyn StoreView) -> R,
+) -> R {
+    if ctx.is_request_bound() {
+        f(ctx.store_view())
+    } else {
+        let view = ctx.resolver_store_view();
+        f(&view)
+    }
+}
 
 /// A cache entry's dependency signature — the path-precise fact
 /// signature captured by an `install_fact_tracer` scope.
@@ -1174,6 +1434,13 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// `cache_suppress`.
     #[inline]
     fn has_view_discriminating_self_root(&self, self_root_canonicals: &[Arc<str>]) -> bool {
+        if self
+            .facts
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::StrictSelfRootWorld(_)))
+        {
+            return true;
+        }
         if self_root_canonicals.is_empty() {
             return false;
         }
@@ -1320,3 +1587,7 @@ pub(crate) fn resolution_witness_fact_for_tests() -> FactVersionRef {
 #[cfg(test)]
 #[path = "fact_signature_helpers_tests.rs"]
 mod fact_signature_helpers_tests;
+
+#[cfg(test)]
+#[path = "mutation_stability_tests.rs"]
+mod mutation_stability_tests;

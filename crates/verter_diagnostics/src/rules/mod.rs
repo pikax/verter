@@ -36,6 +36,12 @@ pub struct FileContext<'a> {
     pub styles: &'a [StyleBlockAnalysis],
     /// Full SFC source text (for byte-level extraction).
     pub source: Option<&'a str>,
+    /// Ordered SFC section facts projected from the registered carrier
+    /// inventory (parsed roles + opening spans + parsed attributes). Block
+    /// structure rules read ONLY these facts — never raw-source delimiter
+    /// scans. Empty when the caller has no registered inventory (those rules
+    /// then stay silent — fail closed).
+    pub blocks: &'a [crate::block_facts::SfcBlockFact],
 }
 
 /// Category for lint rule classification.

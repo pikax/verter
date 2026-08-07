@@ -178,8 +178,9 @@ fn pick_consumer_materialises_only_selected_member_not_others() {
     // pins (a demand would run the resolution this test forbids from
     // happening eagerly).
     let picked_source = picked
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("`picked` prop must publish a typed source");
     let picked_shallow = verter_session::test_only::semantic_source_probe::shallow_type_expr(
         &host,

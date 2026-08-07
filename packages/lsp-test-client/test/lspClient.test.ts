@@ -31,7 +31,10 @@ describe("LspClient stderr capture", () => {
       FAKE_STAY_ALIVE: "1",
     });
 
-    const matched = await client.stderr.waitForLine((l) => l.includes("ready-marker"), 5000);
+    // The fake child prints the marker the moment it boots; the wait bound
+    // only exists to fail a child that never speaks, so it sits well above
+    // the spawn latency a loaded parallel workspace run can impose.
+    const matched = await client.stderr.waitForLine((l) => l.includes("ready-marker"), 15_000);
     expect(matched).toContain("ready-marker");
 
     const text = client.stderr.text();

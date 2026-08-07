@@ -185,7 +185,27 @@ pub trait TypeProvider: Send + Sync {
         Box::pin(async move { Ok(cloned) })
     }
 
+    /// Quick-info at a byte offset, as STRUCTURED display data.
+    ///
+    /// Producers normalize their engine's wire ONCE, here, into the neutral
+    /// [`HoverInfo`]: the branded [`HoverInfo::display_signature`], the closed
+    /// [`HoverInfo::kind`] (tsserver-family only — tsgo's LSP hover has no
+    /// kind and never fabricates one), [`HoverInfo::documentation`], and the
+    /// generated-file byte range. `contents` remains the rendered whole-blob
+    /// for passthrough consumers; markdown is NOT the semantic carrier, and
+    /// recovering structure by parsing it is forbidden.
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>>;
+
+    /// Mint the witness that authorizes constructing a [`DisplaySignature`].
+    ///
+    /// Provided (never overridden usefully — the witness type's field is
+    /// non-public, so only this default body can produce one): possession of a
+    /// provider impl IS the authorization, because per-engine normalization
+    /// into the neutral protocol is the producer's job, once, at the IPC
+    /// boundary.
+    fn provider_wire_witness(&self) -> DisplaySignatureWireWitness {
+        DisplaySignatureWireWitness::mint()
+    }
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>>;
 

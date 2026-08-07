@@ -162,16 +162,14 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         })
         .collect();
-    let object = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
-            members: Arc::from(explosive_members.into_boxed_slice()),
-            call_signatures: Arc::from([]),
-            construct_signatures: Arc::from([crate::semantic_query::SemanticNodeId(u64::MAX - 1)]),
-            index_signatures: Arc::from([]),
-            keyspace: Some(array),
-            has_index_signature: true,
-        },
-    ));
+    let object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        members: Arc::from(explosive_members.into_boxed_slice()),
+        call_signatures: Arc::from([]),
+        construct_signatures: Arc::from([crate::semantic_query::SemanticNodeId(u64::MAX - 1)]),
+        index_signatures: Arc::from([]),
+        keyspace: Some(array),
+        has_index_signature: true,
+    }));
     assert_eq!(
         classify(&ProjectSemanticDispatch::new(&host), object).kinds(),
         &[BroadRuntimeKind::Function, BroadRuntimeKind::Object],

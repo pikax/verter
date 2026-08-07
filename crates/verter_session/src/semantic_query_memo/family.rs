@@ -1944,8 +1944,10 @@ pub(super) fn carrier_facts_reference_canonical(
                 function.canonical_id.as_ref() == canonical_id
             }
         },
-        // Not file-scoped — references no canonical.
-        crate::resolver_core::FactVersionRef::ProjectGeneration { .. } => false,
+        // Not file-scoped — whole-project scalars reference no canonical.
+        crate::resolver_core::FactVersionRef::ProjectGeneration { .. }
+        | crate::resolver_core::FactVersionRef::DomainGeneration(_)
+        | crate::resolver_core::FactVersionRef::StrictSelfRootWorld(_) => false,
     })
 }
 

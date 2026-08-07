@@ -78,6 +78,38 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, src: &str) {
         .unwrap();
 }
 
+fn template_class_facts_for(
+    host: &VerterHost,
+    canonical: &str,
+) -> crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts {
+    let source = host
+        .scheduler
+        .try_get_source(canonical)
+        .expect("source snapshot");
+    let data = source
+        .downcast_data::<crate::host_executor::HostSourceData>()
+        .expect("host source data");
+    let raw = crate::parse::compile_template_data(
+        &data.file_language,
+        source.source.as_ref(),
+        data.framework_parse.as_deref(),
+        true,
+        &host.provenance,
+    )
+    .expect("raw template data");
+    host.build_template_class_semantic_facts(
+        canonical,
+        data.parse.whole_hash,
+        Arc::clone(&source.source),
+        crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs {
+            macros: &data.parse.script_analysis.macros,
+            bindings: &data.parse.script_analysis.bindings,
+        },
+        &raw,
+        crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::BasePublishable,
+    )
+}
+
 struct CountingWorkspace {
     inner: Arc<verter_workspace::MemoryWorkspace>,
     read_counts: parking_lot::Mutex<rustc_hash::FxHashMap<String, u64>>,
@@ -215,6 +247,15 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
 
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
+    }
+
+    /// The counting decorator is TRANSPARENT over its inner workspace: package
+    /// classification must delegate like every other method, or a
+    /// `CountingWorkspace`-backed host silently classifies nothing as
+    /// package-backed and every exact package-route proof fails closed for a
+    /// harness reason rather than a semantic one.
+    fn is_package_backed(&self, canonical_id: &str) -> bool {
+        self.inner.is_package_backed(canonical_id)
     }
 
     fn resolution_fact_generation(&self) -> u64 {
@@ -367,7 +408,7 @@ fn clear_framework_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_parse_artifact_still_extracts_script_blocks() {
+fn build_eval_script_source_without_parse_artifact_fails_closed() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -380,16 +421,15 @@ defineProps<Props>()
 
     let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
-        extracted.contains("interface Props"),
-        "script content should be preserved without cached parse, got: {extracted}"
+        extracted
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
+        "a registered carrier without its parse artifact must not be rescanned: {extracted:?}"
     );
-    assert!(
-        extracted.contains("defineProps<Props>()"),
-        "script setup content should be preserved without cached parse, got: {extracted}"
-    );
-    assert!(
-        !extracted.contains("<template>"),
-        "template markup must not be passed into type evaluation, got: {extracted}"
+    assert_eq!(
+        extracted.len(),
+        source.len(),
+        "fail-closed blanking preserves offsets"
     );
 }
 
@@ -425,21 +465,19 @@ export type Real = string | { path: string }
         );
     }
 
-    // Control: the SAME text under a carrier canonical keeps the artifact-less
-    // forgiving extraction (the raw scan applies to a genuine `.vue`).
+    // Control: the SAME text under a carrier canonical enters the carrier
+    // extraction path, but without its parse artifact it fails closed rather
+    // than falling back to a raw script scan.
     let (eval, extracted) =
         VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
     assert!(
         extracted,
-        "a carrier canonical keeps the artifact-less forgiving extraction"
+        "a carrier canonical still reports the fail-closed extraction path"
     );
     assert!(
-        eval.contains("const value = useReal()"),
-        "the carrier extraction keeps the script bytes, got: {eval}"
-    );
-    assert!(
-        !eval.contains("export type Real"),
-        "the carrier extraction blanks non-script bytes, got: {eval}"
+        eval.bytes()
+            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
+        "artifact-less carrier extraction must preserve offsets while blanking bytes, got: {eval}"
     );
 }
 
@@ -614,6 +652,7 @@ export interface CheckboxProps {
         matches!(
             host.prepared_type_decl_in_with_store_view(
                 &initial_view,
+                None,
                 "/workspace/Checkbox.vue",
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "CheckboxProps",
@@ -2816,6 +2855,91 @@ fn warm_upsert_still_returns_external_style_src_requests() {
     );
 }
 
+/// An external `<style src="...">` block must produce the TYPED deferred
+/// analysis state — never a fabricated empty (or inline-sliced) `CssAnalysis`
+/// presented as a positive zero-classes fact — and binding liveness must fail
+/// OPEN so a binding consumed only by the external sheet's `v-bind()` is never
+/// diagnosed unused.
+#[test]
+fn external_src_style_defers_content_and_fails_open_on_binding_liveness() {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    // The stray inline content inside a `src` block is IGNORED by Vue (the
+    // external file replaces the block content) — analyzing it would be a
+    // fabricated analysis of content the framework never uses.
+    let src = r#"<script setup>const themeColor = 'red'</script>
+<template><div class="x"/></template>
+<style src="./theme.css">.stray { color: #fff }</style>
+"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Themed.vue".to_string(),
+            source: Arc::from(src),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+
+    let analysis = host.get_analysis("/workspace/src/Themed.vue").unwrap();
+    assert_eq!(analysis.styles.len(), 1, "one style block");
+    let style = &analysis.styles[0];
+    assert!(
+        !style.content_is_available(),
+        "external src block must carry the typed deferred state"
+    );
+    assert!(
+        style.css.is_none(),
+        "no fabricated CssAnalysis for deferred external content: {:?}",
+        style.css
+    );
+    assert!(
+        style.v_binds.is_empty(),
+        "no v-bind facts may be minted from unseen external content"
+    );
+
+    let binding = analysis
+        .bindings
+        .iter()
+        .find(|b| b.name == "themeColor")
+        .expect("themeColor binding");
+    assert!(
+        binding.used_in_style,
+        "binding liveness must fail OPEN while the external sheet is deferred \
+         (no false unused-binding diagnostic)"
+    );
+
+    // Negative control: an INLINE style block still analyzes normally.
+    let inline = r#"<script setup>const inlineColor = 'red'</script>
+<template><div class="x"/></template>
+<style>.local { color: v-bind(inlineColor) }</style>
+"#;
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/src/Inline.vue".to_string(),
+            source: Arc::from(inline),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let inline_analysis = host.get_analysis("/workspace/src/Inline.vue").unwrap();
+    assert_eq!(inline_analysis.styles.len(), 1);
+    assert!(inline_analysis.styles[0].content_is_available());
+    assert!(
+        inline_analysis.styles[0].css.is_some(),
+        "inline blocks keep their scanned analysis"
+    );
+}
+
 #[test]
 fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_state() {
     let ws = Arc::new(CountingWorkspace::new());
@@ -3064,6 +3188,7 @@ import Child from './Child.vue'
             vue_api_calls: &resolved.snapshot.vue_api_calls,
             store_usages: &resolved.snapshot.store_usages,
             resolved_macros: &[],
+            resolved_binding_reactivity: &[],
             resolved_type_registry: &[],
             evaluated_types: None,
             file_path: "/src/App.vue",
@@ -3230,10 +3355,14 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         },
         fact_versions: Vec::new(),
     };
-    crate::fact_signature_helpers::with_cacheability_scope(&host, |probe| {
-        let admission = crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
-        host.cache_fallthrough_result(canonical, None, &result, &admission);
-    });
+    crate::fact_signature_helpers::with_cacheability_scope(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        |probe| {
+            let admission =
+                crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
+            host.cache_fallthrough_result(canonical, None, &result, &admission);
+        },
+    );
     let mirror_present = host
         .derived_raw_cache()
         .get(canonical)
@@ -3536,6 +3665,7 @@ fn raw_template_analysis_extracts_css_var_names() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+#[should_panic(expected = "CorrelationMismatch")]
 fn override_template_analysis_helper_uses_content_override() {
     let host = make_host();
     upsert_vue(
@@ -3545,22 +3675,18 @@ fn override_template_analysis_helper_uses_content_override() {
     );
 
     let profile = CompileProfile::default();
-    let profile_hash = crate::hash::compile_profile_hash(&profile);
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/A.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :style=\"{ '--theme-color': color }\">A</div>",
+            )],
         })
         .expect("template override should succeed");
 
     let template = host
-        .compute_override_template_analysis("/src/A.vue", profile_hash)
+        .raw_template_analysis_for_file("/src/A.vue")
         .expect("override template analysis should be computed");
     assert!(
         template
@@ -3596,6 +3722,62 @@ fn get_analysis_resolves_relative_import() {
         child_import.resolved_canonical_id.as_deref(),
         Some("/project/Child.vue"),
         "relative import should resolve to canonical ID"
+    );
+}
+
+/// Served style analyses carry the sealed inventory-minted block ref AND the
+/// session-validated public block token — including the external-`src`
+/// deferred block (identity is structure work; content stays deferred).
+#[test]
+fn get_analysis_attaches_sealed_refs_and_validated_public_block_tokens() {
+    let host = make_host();
+    upsert_vue(
+        &host,
+        "/project/Tokens.vue",
+        "<style>.a {}</style>\n<style src=\"./ext.css\"></style>\n<style>.b {}</style>",
+    );
+
+    let analysis = host.get_analysis("/project/Tokens.vue").unwrap();
+    assert_eq!(analysis.styles.len(), 3);
+    let (structure, _) = host
+        .registered_file_structure_snapshot("/project/Tokens.vue")
+        .expect("registered structure");
+    let inventory = structure.inventory();
+
+    let mut seen_tokens = std::collections::HashSet::new();
+    for style in analysis.styles.iter() {
+        let block_ref = style
+            .block_ref
+            .as_ref()
+            .expect("every produced style analysis carries a sealed ref");
+        assert!(
+            block_ref.validate(inventory),
+            "the sealed ref validates against the live registered inventory"
+        );
+        let expected_token = structure
+            .public_block_token(&structure.block_ref(block_ref.block_id()).unwrap())
+            .expect("same artifact")
+            .as_str()
+            .to_owned();
+        assert_eq!(
+            style.block_token.as_deref(),
+            Some(expected_token.as_str()),
+            "the served token is the session public block token for the \
+             sealed ref's block"
+        );
+        assert!(
+            seen_tokens.insert(expected_token),
+            "tokens are distinct per block"
+        );
+    }
+    let deferred = analysis
+        .styles
+        .iter()
+        .find(|style| !style.content_is_available())
+        .expect("external-src style stays a typed deferred analysis");
+    assert!(
+        deferred.block_ref.is_some() && deferred.block_token.is_some(),
+        "deferred content still carries full sealed identity"
     );
 }
 
@@ -5338,14 +5520,9 @@ defineEmits<Events>()
         .iter()
         .flat_map(|d| d.emit_fields().iter())
         .collect();
-    let change = emits.iter().find(|e| e.analysis.name == "change");
+    let change = emits.iter().find(|e| e.name == "change");
     assert!(change.is_some(), "should have 'change' emit");
-    let payload = change
-        .unwrap()
-        .analysis
-        .payload_type
-        .as_deref()
-        .unwrap_or("");
+    let payload = change.unwrap().payload_type.as_deref().unwrap_or("");
     assert!(
         payload.starts_with('[') && payload.ends_with(']'),
         "call-signature payload should be wrapped in brackets, got: {payload}"
@@ -5699,6 +5876,4286 @@ const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), 
         "`:class=\"props.variant\"` must resolve through the bound withDefaults root, \
          got: {classes:?}"
     );
+}
+
+#[test]
+fn template_class_facts_exact_domains_aliases_and_fail_closed_unions() {
+    let host = make_host();
+    let cases = [
+        (
+            "/Direct.vue",
+            "type Variant = 'primary' | 'secondary'; const variant: Variant = 'primary';",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/Alias.vue",
+            "type Base = 'primary' | 'secondary'; type Variant = Base; const variant: Variant = 'primary';",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/Mixed.vue",
+            "type Variant = 'primary' | string; const variant: Variant = 'primary';",
+            "variant",
+            vec![],
+        ),
+        (
+            "/Nullable.vue",
+            "type Variant = 'primary' | null; const variant: Variant = 'primary';",
+            "variant",
+            vec![],
+        ),
+        (
+            "/Formatting.vue",
+            "const variant:\n  'primary'\n  |\n  'secondary'\n  = 'primary';",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+    ];
+
+    for (canonical, script, expression, expected) in cases {
+        upsert_vue(
+            &host,
+            canonical,
+            &format!(
+                "<script setup lang=\"ts\">{script}</script><template><div :class=\"{expression}\" /></template>"
+            ),
+        );
+        let analysis = host.get_analysis(canonical).expect("analysis");
+        let classes = analysis
+            .template
+            .expect("template")
+            .elements
+            .iter()
+            .flat_map(|element| element.dynamic_classes.iter().cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(classes, expected, "wrong exact domain for {canonical}");
+    }
+}
+
+#[test]
+fn template_class_facts_accept_exact_vue_wrappers_and_reject_local_fakes() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        r#"
+export interface Ref<T> { value: T }
+export interface ShallowRef<T> { value: T }
+export interface ComputedRef<T> { readonly value: T }
+export interface WritableComputedRef<T> { value: T }
+export type Reactive<T> = T
+export type ShallowReactive<T> = T
+"#,
+    );
+    let wrappers = [
+        "Ref",
+        "ShallowRef",
+        "ComputedRef",
+        "WritableComputedRef",
+        "Reactive",
+        "ShallowReactive",
+    ];
+    for (index, wrapper) in wrappers.into_iter().enumerate() {
+        let canonical = format!("/workspace/src/Wrapper{index}.vue");
+        upsert_vue(
+            &host,
+            &canonical,
+            &format!(
+                r#"<script setup lang="ts">
+import type {{ {wrapper} as VueWrapper }} from 'vue'
+const variant: VueWrapper<'primary' | 'secondary'> = null as never
+</script><template><div :class="variant" /></template>"#
+            ),
+        );
+        host.set_import_dependencies(
+            &canonical,
+            vec![exact_dependency(
+                "vue",
+                "/workspace/node_modules/vue/index.d.ts",
+            )],
+        );
+        let analysis = host.get_analysis(&canonical).expect("analysis");
+        let template = analysis.template.expect("template");
+        let classes = template
+            .elements
+            .iter()
+            .flat_map(|element| element.dynamic_classes.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(classes, ["primary", "secondary"], "{wrapper}");
+    }
+
+    upsert_ts(
+        &host,
+        "/workspace/src/vue-types.ts",
+        "export type { Ref as IndirectWrapper } from 'vue'",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/vue-types.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    upsert_vue(
+        &host,
+        "/workspace/src/Indirect.vue",
+        r#"<script setup lang="ts">
+import type { IndirectWrapper as LocalWrapper } from './vue-types'
+const variant: LocalWrapper<'primary' | 'secondary'> = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/Indirect.vue",
+        vec![exact_dependency(
+            "./vue-types",
+            "/workspace/src/vue-types.ts",
+        )],
+    );
+    let indirect = host
+        .get_analysis("/workspace/src/Indirect.vue")
+        .expect("analysis");
+    let indirect_template = indirect.template.expect("template");
+    assert_eq!(
+        indirect_template.elements[0].dynamic_classes,
+        ["primary", "secondary"]
+    );
+
+    upsert_vue(
+        &host,
+        "/workspace/src/Fake.vue",
+        r#"<script setup lang="ts">
+type Ref<T> = { value: T }
+const variant: Ref<'primary' | 'secondary'> = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let fake = host
+        .get_analysis("/workspace/src/Fake.vue")
+        .expect("analysis");
+    assert!(
+        fake.template
+            .expect("template")
+            .elements
+            .iter()
+            .all(|element| element.dynamic_classes.is_empty()),
+        "a local same-name wrapper must not be treated as Vue provenance"
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_vue(
+        &host,
+        "/workspace/src/PackageFake.vue",
+        r#"<script setup lang="ts">
+import type { Ref } from 'not-vue'
+const variant: Ref<'primary' | 'secondary'> = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        "/workspace/src/PackageFake.vue",
+        vec![exact_dependency(
+            "not-vue",
+            "/workspace/node_modules/not-vue/index.d.ts",
+        )],
+    );
+    let package_fake = host
+        .get_analysis("/workspace/src/PackageFake.vue")
+        .expect("analysis");
+    assert!(
+        package_fake
+            .template
+            .expect("template")
+            .elements
+            .iter()
+            .all(|element| element.dynamic_classes.is_empty()),
+        "a package-backed same-shape wrapper outside the exact Vue route must fail closed"
+    );
+}
+
+#[test]
+fn template_class_facts_classify_fully_substituted_terminal_wrapper_inner() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let cases = [
+        (
+            "/workspace/src/Transparent.vue",
+            "type Wrapped<T> = Ref<T>; const variant: Wrapped<'primary' | 'secondary'> = null as never",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/workspace/src/Nullable.vue",
+            "type Wrapped<T> = Ref<T | null>; const variant: Wrapped<'primary'> = null as never",
+            vec![],
+        ),
+        (
+            "/workspace/src/Reordered.vue",
+            "type Wrapped<Noise, Value> = Ref<Value>; const variant: Wrapped<number, 'primary' | 'secondary'> = null as never",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/workspace/src/MultiHop.vue",
+            "type First<T> = Ref<T>; type Second<T> = First<T>; const variant: Second<'primary' | 'secondary'> = null as never",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/workspace/src/TransformedMultiHop.vue",
+            "type First<T> = Ref<T | string>; type Second<T> = First<T>; const variant: Second<'primary'> = null as never",
+            vec![],
+        ),
+    ];
+    for (canonical, declarations, expected) in cases {
+        upsert_vue(
+            &host,
+            canonical,
+            &format!(
+                r#"<script setup lang="ts">
+import type {{ Ref }} from 'vue'
+{declarations}
+</script><template><div :class="variant" /></template>"#
+            ),
+        );
+        host.set_import_dependencies(
+            canonical,
+            vec![exact_dependency(
+                "vue",
+                "/workspace/node_modules/vue/index.d.ts",
+            )],
+        );
+        let template = host
+            .get_analysis(canonical)
+            .expect("analysis")
+            .template
+            .expect("template");
+        assert_eq!(
+            template.elements[0].dynamic_classes, expected,
+            "terminal substitution mismatch for {canonical}"
+        );
+    }
+}
+
+#[test]
+fn template_class_wrapper_artifact_binds_each_duplicate_terminal_route_exactly() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let canonical = "/workspace/src/DuplicateRoutes.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref as A, Ref as B } from 'vue'
+type Wrapped<T> = B<T>
+const viaA: A<'a'> = null as never
+const viaB: Wrapped<'b'> = null as never
+</script><template><div :class="viaA" /><div :class="viaB" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let _ = host.get_analysis(canonical).expect("analysis");
+    let facts = template_class_facts_for(&host, canonical);
+    assert_eq!(facts.rows().len(), 2);
+    let first = &facts.rows()[0];
+    let second = &facts.rows()[1];
+    for (row, label, local, aliases, value) in [
+        (first, "viaA", "A", Vec::<&str>::new(), "a"),
+        (second, "viaB", "B", vec!["Wrapped"], "b"),
+    ] {
+        assert_eq!(row.subject.label(), label);
+        assert_eq!(row.wrapper.role, verter_type_expr::ReactiveWrapperRole::Ref);
+        assert_eq!(
+            row.wrapper
+                .symbol
+                .as_ref()
+                .expect("terminal")
+                .symbol
+                .as_ref(),
+            "Ref"
+        );
+        let provenance = row
+            .wrapper
+            .import_provenance
+            .as_ref()
+            .expect("exact route provenance");
+        assert_eq!(provenance.local_binding.as_ref(), local);
+        assert_eq!(provenance.import_source.as_ref(), "vue");
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+        assert_eq!(provenance.imported_name.as_ref(), "Ref");
+        assert_eq!(
+            provenance
+                .local_alias_hops
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            aliases
+        );
+        assert_eq!(
+            row.wrapper.inner_domain,
+            verter_type_expr::ClosedLiteralDomain::Strings(Arc::from([Arc::<str>::from(value)]))
+        );
+        assert_eq!(row.domain, row.wrapper.inner_domain);
+        assert!(row.wrapper.inner_source.is_some());
+        assert_eq!(
+            row.wrapper.completeness,
+            verter_semantic::analysis::TemplateClassFactsCompleteness::Complete
+        );
+    }
+}
+
+#[test]
+fn template_class_wrapper_routes_follow_import_then_export_and_local_alias_barrels() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-a.ts",
+        "import type { Ref } from 'vue'; export type { Ref as ImportedRef };",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-a.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-b.ts",
+        "import type { ImportedRef } from './barrel-a'; export type LocalRef<T> = ImportedRef<T>;",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-b.ts",
+        vec![exact_dependency("./barrel-a", "/workspace/src/barrel-a.ts")],
+    );
+    let canonical = "/workspace/src/BarrelRoute.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { LocalRef as Selected } from './barrel-b'
+const variant: Selected<'primary' | 'secondary'> = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency("./barrel-b", "/workspace/src/barrel-b.ts")],
+    );
+    let template = host
+        .get_analysis(canonical)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"]
+    );
+    let facts = template_class_facts_for(&host, canonical);
+    let provenance = facts.rows()[0]
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("route proof");
+    assert_eq!(provenance.local_binding.as_ref(), "Selected");
+    assert_eq!(provenance.import_source.as_ref(), "./barrel-b");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert_eq!(
+        facts.rows()[0]
+            .wrapper
+            .symbol
+            .as_ref()
+            .expect("terminal")
+            .symbol
+            .as_ref(),
+        "Ref"
+    );
+    assert!(provenance
+        .local_alias_hops
+        .iter()
+        .any(|hop| hop.as_ref() == "LocalRef"));
+}
+
+/// A5-03b — a NAMED or ALIASED `defineProps` type argument peels EXACT Vue
+/// wrapper routes, with the same proof the inline-object form produces.
+///
+/// `defineProps<Props>()` leases a `TypeExpr::Ref`, not a `TypeExpr::Object`, so
+/// the inline macro-mirror sidecar (`MacroHotProduct.prop_reference_heads`) mints
+/// nothing for it. The exact authored evidence lives on the props declaration's
+/// PREPARED MEMBER FACT (`PreparedMemberFact.reference_head`) — minted once at
+/// lazy decl-body lowering and copied at prepare time — and is composed through
+/// the SAME shared machinery the inline form uses:
+/// `resolve_authored_reference_route` → `wrapper_candidate_for_route` →
+/// `demand_terminal_symbol_instantiation`.
+///
+/// This test is the INVERSION of the T-A5 rider
+/// (`..._prop_wrapper_publishes_no_classes_and_no_route`), which pinned this
+/// capability's ABSENCE. Its fail-closed siblings are
+/// `template_class_imported_props_type_argument_fails_closed_with_local_control`
+/// (the ruled-negative imported arm) and the local/package fake + missing
+/// dependency arms below.
+///
+/// The published `authored_head` argument locator is asserted to be a
+/// `Value(TypeArgLocator)` rooted at the `Props` DECLARATION with a
+/// `[Member, MemberValue]` path — not a `MacroPayload` locator. That is what
+/// discriminates the member-fact producer from the inline sidecar: if the route
+/// came from the macro mirror the locator arm would differ.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_named_type_argument_prop_wrappers_peel_exact_vue_routes() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+
+    // ── (A) a named `interface Props`: one exact positive plus the two
+    // same-shape fakes that must stay fail-closed in the SAME props body.
+    let named = "/workspace/src/NamedPropWrapper.vue";
+    upsert_vue(
+        &host,
+        named,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+import type { Ref as OtherRef } from 'not-vue'
+type LocalRef<T> = { value: T }
+interface Props {
+  variant: Ref<'primary' | 'secondary'>
+  localFake: LocalRef<'local'>
+  packageFake: OtherRef<'package'>
+}
+const props = defineProps<Props>()
+</script><template>
+  <div :class="props.variant" />
+  <div :class="props.localFake" />
+  <div :class="props.packageFake" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        named,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("not-vue", "/workspace/node_modules/not-vue/index.d.ts"),
+        ],
+    );
+
+    let template = host
+        .get_analysis(named)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template
+            .elements
+            .iter()
+            .map(|element| element.dynamic_classes.clone())
+            .collect::<Vec<_>>(),
+        [
+            vec!["primary".to_string(), "secondary".to_string()],
+            vec![],
+            vec![],
+        ],
+        "a named-type-argument prop wrapper must peel its exact Vue route while \
+         same-shape local and foreign-package fakes stay fail-closed"
+    );
+
+    let facts = template_class_facts_for(&host, named);
+    let row = facts
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .expect("the named prop subject must join to an artifact row");
+    assert_eq!(row.wrapper.role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let verter_type_expr::ClosedLiteralDomain::Strings(values) = &row.wrapper.inner_domain else {
+        panic!(
+            "expected a closed wrapper inner domain, got {:?}",
+            row.wrapper.inner_domain
+        );
+    };
+    assert_eq!(
+        values.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+        ["primary", "secondary"],
+        "the TERMINAL substituted argument drives the inner closed domain"
+    );
+    let provenance = row
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact named-type-argument prop route");
+    assert_eq!(provenance.import_source.as_ref(), "vue");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert_eq!(provenance.package.as_ref(), "vue");
+    assert_eq!(provenance.local_binding.as_ref(), "Ref");
+    assert!(
+        provenance.local_alias_hops.is_empty(),
+        "a direct `Ref` member annotation crosses no local alias hop, got {:?}",
+        provenance.local_alias_hops
+    );
+
+    // The authored head is the MEMBER's, addressed through the props
+    // DECLARATION anchor — the producer discriminator against the inline
+    // macro-mirror sidecar (which mints `MacroPayload` argument locators).
+    let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args } =
+        &provenance.authored_head
+    else {
+        panic!(
+            "expected a bare authored member head, got {:?}",
+            provenance.authored_head
+        );
+    };
+    assert_eq!(local_name.as_ref(), "Ref");
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(arg)] = args.as_ref() else {
+        panic!(
+            "a named-type-argument route must publish the MEMBER's Value argument \
+             locator, not a macro-payload locator, got {args:?}"
+        );
+    };
+    assert_eq!(arg.anchor.canonical_id.as_ref(), named);
+    assert_eq!(arg.anchor.symbol.as_ref(), "Props");
+    assert_eq!(
+        arg.anchor.space,
+        verter_type_expr::locators::LocatorSymbolSpace::Type
+    );
+    assert_eq!(
+        &*arg.path,
+        &[
+            verter_type_expr::locators::TypeBodyPathStep::Member { ordinal: 0 },
+            verter_type_expr::locators::TypeBodyPathStep::MemberValue
+        ],
+        "the head argument locator must address the member's authored value position"
+    );
+    assert_eq!(arg.arg_index, 0);
+
+    // The two fakes: no route, no closed subset, no `Ref` role.
+    for label in ["localFake", "packageFake"] {
+        let fake = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .unwrap_or_else(|| panic!("row for {label}"));
+        assert!(
+            fake.wrapper.import_provenance.is_none(),
+            "{label} must claim no import provenance"
+        );
+        assert_ne!(
+            fake.wrapper.role,
+            verter_type_expr::ReactiveWrapperRole::Ref,
+            "{label} must not be granted the `Ref` wrapper role"
+        );
+        assert!(
+            !matches!(
+                fake.wrapper.inner_domain,
+                verter_type_expr::ClosedLiteralDomain::Strings(_)
+            ),
+            "{label} must publish no closed wrapper inner domain, got {:?}",
+            fake.wrapper.inner_domain
+        );
+    }
+
+    // ── (B) an ALIASED type argument (`type AliasProps = { ... }`).
+    let aliased = "/workspace/src/AliasPropWrapper.vue";
+    upsert_vue(
+        &host,
+        aliased,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+type AliasProps = { other: Ref<'x' | 'y'> }
+const props = defineProps<AliasProps>()
+</script><template><div :class="props.other" /></template>"#,
+    );
+    host.set_import_dependencies(
+        aliased,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let alias_template = host
+        .get_analysis(aliased)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        alias_template.elements[0].dynamic_classes,
+        ["x", "y"],
+        "an aliased object-literal type argument must peel the same exact route"
+    );
+    let alias_row = template_class_facts_for(&host, aliased)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "other")
+        .cloned()
+        .expect("the aliased prop subject must join");
+    assert_eq!(
+        alias_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref
+    );
+    let alias_provenance = alias_row
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact aliased prop route");
+    assert_eq!(alias_provenance.import_source.as_ref(), "vue");
+    assert_eq!(alias_provenance.terminal_import_source.as_ref(), "vue");
+    let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare {
+        args: alias_args, ..
+    } = &alias_provenance.authored_head
+    else {
+        panic!("expected a bare authored member head for the alias arm");
+    };
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(alias_arg)] =
+        alias_args.as_ref()
+    else {
+        panic!("expected the member Value argument locator for the alias arm");
+    };
+    assert_eq!(alias_arg.anchor.symbol.as_ref(), "AliasProps");
+
+    // ── (C) MISSING DEPENDENCY: the same authored member shape whose import
+    // edge resolves to a canonical the host has no state for. The routed
+    // terminal cannot be reached, so no route is claimed.
+    let unresolved = "/workspace/src/MissingDepPropWrapper.vue";
+    upsert_vue(
+        &host,
+        unresolved,
+        r#"<script setup lang="ts">
+import type { Ref } from './gone'
+interface Props { variant: Ref<'primary' | 'secondary'> }
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        unresolved,
+        vec![exact_dependency("./gone", "/workspace/src/gone.ts")],
+    );
+    let missing_template = host
+        .get_analysis(unresolved)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert!(
+        missing_template.elements[0].dynamic_classes.is_empty(),
+        "a missing `vue` dependency must publish no closed subset, got {:?}",
+        missing_template.elements[0].dynamic_classes
+    );
+    let missing_row = template_class_facts_for(&host, unresolved)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .cloned()
+        .expect("the subject must still join");
+    assert!(
+        missing_row.wrapper.import_provenance.is_none(),
+        "a missing dependency must claim no import provenance"
+    );
+    assert_ne!(
+        missing_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref
+    );
+}
+
+/// The RULED fail-closed negative of A5-03b: an IMPORTED props type publishes no
+/// classes and claims no route, and the boundary is LOCALITY — not a broken
+/// fixture.
+///
+/// An imported `Props` yields NO analyzer prop field at all (`mac.prop_fields`
+/// is written only by the analyzer's LOCAL type-registry resolution), so
+/// `join_prop_field` returns `Unresolved` and `classify_prop` is never reached.
+/// Serving it positively needs cross-file macro prop-field materialisation or a
+/// new subject/locator vocabulary — a distinct capability, REJECTED for this
+/// campaign by ruling (`T-A7-scope-ruling-RESULT.md` Q2), not deferred.
+///
+/// The CONTROL is what makes this discriminating: the byte-identical props body,
+/// declared LOCALLY in the same test, DOES peel. Without it the negative could
+/// pass because the fixture never resolved anything at all.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_imported_props_type_argument_fails_closed_with_local_control() {
+    const PROPS_BODY: &str = "{ variant: Ref<'primary' | 'secondary'> }";
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/imported-props.ts",
+        &format!("import type {{ Ref }} from 'vue'\nexport type Props = {PROPS_BODY}\n"),
+    );
+    host.set_import_dependencies(
+        "/workspace/src/imported-props.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    // ── The NEGATIVE: `Props` is imported.
+    let imported = "/workspace/src/ImportedProps.vue";
+    upsert_vue(
+        &host,
+        imported,
+        r#"<script setup lang="ts">
+import type { Props } from './imported-props'
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        imported,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("./imported-props", "/workspace/src/imported-props.ts"),
+        ],
+    );
+
+    let imported_template = host
+        .get_analysis(imported)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert!(
+        imported_template.elements[0].dynamic_classes.is_empty(),
+        "an imported props type must publish no closed subset, got {:?}",
+        imported_template.elements[0].dynamic_classes
+    );
+    let imported_row = template_class_facts_for(&host, imported)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .cloned()
+        .expect("the requested subject must produce a row, not vanish");
+    assert!(
+        imported_row.wrapper.import_provenance.is_none(),
+        "an imported props member must claim NO import provenance"
+    );
+    assert_ne!(
+        imported_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "an imported props member must not be granted the `Ref` wrapper role"
+    );
+    assert!(
+        !matches!(
+            imported_row.domain,
+            verter_type_expr::ClosedLiteralDomain::Strings(_)
+        ),
+        "the subject domain must not be a closed string set, got {:?}",
+        imported_row.domain
+    );
+    assert!(
+        !matches!(
+            imported_row.wrapper.inner_domain,
+            verter_type_expr::ClosedLiteralDomain::Strings(_)
+        ),
+        "the wrapper inner domain must not be a closed string set, got {:?}",
+        imported_row.wrapper.inner_domain
+    );
+
+    // ── The CONTROL: the SAME props body, declared locally, DOES peel. This is
+    // what proves the negative above discriminates locality rather than passing
+    // vacuously on a broken fixture.
+    let local = "/workspace/src/LocalPropsControl.vue";
+    upsert_vue(
+        &host,
+        local,
+        &format!(
+            r#"<script setup lang="ts">
+import type {{ Ref }} from 'vue'
+type Props = {PROPS_BODY}
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#
+        ),
+    );
+    host.set_import_dependencies(
+        local,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let local_template = host
+        .get_analysis(local)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        local_template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "CONTROL: the byte-identical props body declared LOCALLY must peel — \
+         otherwise the imported negative above proves nothing"
+    );
+    let local_row = template_class_facts_for(&host, local)
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "variant")
+        .cloned()
+        .expect("the control subject must join");
+    assert_eq!(
+        local_row.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "CONTROL: the local arm must be granted the exact `Ref` role"
+    );
+    assert_eq!(
+        local_row
+            .wrapper
+            .import_provenance
+            .as_ref()
+            .expect("CONTROL: the local arm must publish an exact route")
+            .terminal_import_source
+            .as_ref(),
+        "vue"
+    );
+}
+
+/// Classifying ONE named-type-argument prop subject must not open unrelated
+/// wrapper-shaped imports. The member-head route resolves only the requested
+/// member's own authored reference; there is no owner-wide candidate scan and no
+/// whole-props-surface materialisation.
+///
+/// Mirrors `template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import`
+/// for the member-fact producer: the decoy is imported by the props DECLARATION's
+/// file and referenced by a SIBLING member the template never requests.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_named_type_argument_subject_does_not_read_unrelated_cold_wrapper_import() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    ws.inject_file(
+        "/workspace/node_modules/cold-pkg/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let canonical = "/workspace/src/ColdMemberDecoy.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+import type { Ref as ColdRef } from 'cold-pkg'
+interface Props {
+  variant: Ref<'primary' | 'secondary'>
+  unrequested: ColdRef<'cold-a' | 'cold-b'>
+}
+const props = defineProps<Props>()
+</script><template><div :class="props.variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("cold-pkg", "/workspace/node_modules/cold-pkg/index.d.ts"),
+        ],
+    );
+    ws.reset_reads();
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "the requested member must still peel its exact route"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/cold-pkg/index.d.ts"),
+        0,
+        "classifying one named-type-argument prop member must not traverse an \
+         unrelated sibling member's wrapper-shaped import"
+    );
+}
+
+/// `ModelRef` is part of the closed Vue reactive-wrapper vocabulary.
+///
+/// `defineModel` is the one wrapper source Verter itself synthesises, so
+/// omitting its wrapper type from the role vocabulary was a silent gap: an
+/// exactly-routed `vue` `ModelRef<'a' | 'b'>` annotation published no domain.
+/// The negative half still holds — a same-shaped LOCAL `ModelRef` has no
+/// package-backed `vue` import edge, so it claims no route and publishes nothing.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn template_class_model_ref_is_in_the_wrapper_vocabulary() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface ModelRef<T> { value: T }\n",
+    );
+    let canonical = "/workspace/src/ModelWrapper.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { ModelRef } from 'vue'
+type LocalModelRef<T> = { value: T }
+const modelled: ModelRef<'model-a' | 'model-b'> = null as never
+const fake: LocalModelRef<'fake'> = null as never
+const inferred = defineModel<'infer-a' | 'infer-b'>()
+</script><template>
+  <div :class="modelled" />
+  <span :class="fake" />
+  <em :class="inferred" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["model-a", "model-b"],
+        "an exact vue `ModelRef` route must peel to its inner closed domain"
+    );
+    assert!(
+        template.elements[1].dynamic_classes.is_empty(),
+        "a LOCAL type named `ModelRef` has no vue import edge and must publish \
+         no closed domain"
+    );
+    // BOUNDARY, pinned rather than assumed: an UNANNOTATED
+    // `defineModel<'a'|'b'>()` binding has no authored annotation, therefore no
+    // producer-minted authored reference head, therefore no route candidate —
+    // adding `ModelRef` to the vocabulary does NOT reach it. That is the
+    // deferred inferred-head class, fail-closed and at scanner parity, not a
+    // wrapper-vocabulary gap. This assertion fails if a future change ever
+    // fabricates a domain for it without an exact composed route.
+    assert!(
+        template.elements[2].dynamic_classes.is_empty(),
+        "an unannotated `defineModel()` binding has no authored head, so it must \
+         publish no closed domain rather than a route-less guess"
+    );
+
+    let facts = template_class_facts_for(&host, canonical);
+    let modelled = facts
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "modelled")
+        .expect("modelled row");
+    assert_eq!(
+        modelled.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::ModelRef,
+        "`ModelRef` must classify as its OWN role, not collapse into `Ref`"
+    );
+    let provenance = modelled
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact vue route");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+
+    let fake = facts
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "fake")
+        .expect("fake row");
+    assert!(
+        fake.wrapper.import_provenance.is_none(),
+        "a local fake must claim no import provenance"
+    );
+    assert_ne!(
+        fake.wrapper.role,
+        verter_type_expr::ReactiveWrapperRole::ModelRef,
+        "a local fake must not be granted the `ModelRef` role"
+    );
+}
+
+#[test]
+fn template_class_prop_wrappers_use_exact_routes_and_terminal_substitution() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let canonical = "/workspace/src/PropWrappers.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+import type { Ref as OtherRef } from 'not-vue'
+type Wrapped<T> = Ref<T>
+type Transformed<T> = Ref<T | 'transformed-extra'>
+type LocalRef<T> = { value: T }
+const props = defineProps<{
+  direct: Ref<'direct-a' | 'direct-b'>
+  alias: Wrapped<'alias-a' | 'alias-b'>
+  transformed: Transformed<'closed'>
+  localFake: LocalRef<'local'>
+  packageFake: OtherRef<'package'>
+}>()
+</script><template>
+  <div :class="direct" />
+  <div :class="props.alias" />
+  <div :class="props.transformed" />
+  <div :class="localFake" />
+  <div :class="props.packageFake" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("not-vue", "/workspace/node_modules/not-vue/index.d.ts"),
+        ],
+    );
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    let classes = template
+        .elements
+        .iter()
+        .map(|element| element.dynamic_classes.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        classes,
+        [
+            vec!["direct-a".to_string(), "direct-b".to_string()],
+            vec!["alias-a".to_string(), "alias-b".to_string()],
+            vec!["closed".to_string(), "transformed-extra".to_string()],
+            vec![],
+            vec![],
+        ],
+        "bare and root/member prop subjects must share exact wrapper routing"
+    );
+
+    let session = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: CompileProfile::default(),
+        })
+        .expect("normal compile");
+    assert_eq!(session.actual_mode, CompileCacheMode::Session);
+    let content = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: CompileProfile {
+                requested_mode: CompileCacheMode::Content,
+                ..CompileProfile::default()
+            },
+        })
+        .expect("content compile");
+    assert_eq!(
+        content.actual_mode,
+        CompileCacheMode::Stateless,
+        "a Content request with cross-file wrapper facts must downgrade rather than admit"
+    );
+    assert!(!content.cache_hit);
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "dependency-derived macro wrapper facts stay visible but return-only in Content"
+    );
+
+    let facts = template_class_facts_for(&host, canonical);
+    for (label, authored_head, aliases, expected) in [
+        (
+            "direct",
+            "Ref",
+            Vec::<&str>::new(),
+            vec!["direct-a", "direct-b"],
+        ),
+        (
+            "alias",
+            "Wrapped",
+            vec!["Wrapped"],
+            vec!["alias-a", "alias-b"],
+        ),
+        (
+            "transformed",
+            "Transformed",
+            vec!["Transformed"],
+            vec!["closed", "transformed-extra"],
+        ),
+    ] {
+        let row = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .expect("requested prop row");
+        assert_eq!(row.wrapper.role, verter_type_expr::ReactiveWrapperRole::Ref);
+        let verter_type_expr::ClosedLiteralDomain::Strings(values) = &row.wrapper.inner_domain
+        else {
+            panic!("expected closed wrapper inner for {label}");
+        };
+        assert_eq!(
+            values.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+            expected
+        );
+        let provenance = row
+            .wrapper
+            .import_provenance
+            .as_ref()
+            .expect("exact prop route");
+        assert_eq!(provenance.import_source.as_ref(), "vue");
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+        let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args } =
+            &provenance.authored_head
+        else {
+            panic!("expected bare authored macro head for {label}");
+        };
+        assert_eq!(local_name.as_ref(), authored_head);
+        let [verter_type_expr::facts::AuthoredReferenceArgLocator::MacroPayload {
+            payload: arg_payload,
+            arg_index: 0,
+        }] = args.as_ref()
+        else {
+            panic!("expected exact macro payload argument locator for {label}");
+        };
+        let verter_semantic::analysis::TemplateClassSubject::Prop {
+            payload: subject_payload,
+            ..
+        } = &row.subject
+        else {
+            panic!("expected prop subject for {label}");
+        };
+        assert_eq!(arg_payload, subject_payload);
+        assert_eq!(
+            provenance
+                .local_alias_hops
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>(),
+            aliases
+        );
+    }
+    for label in ["localFake", "packageFake"] {
+        let row = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .expect("negative prop row");
+        assert!(
+            !matches!(
+                row.domain,
+                verter_type_expr::ClosedLiteralDomain::Strings(_)
+            ),
+            "{label} must not publish a closed class subset"
+        );
+    }
+
+    let missing_canonical = "/workspace/src/MissingPropWrapper.vue";
+    upsert_vue(
+        &host,
+        missing_canonical,
+        r#"<script setup lang="ts">
+import type { Ref as MissingRef } from 'missing-vue'
+const props = defineProps<{ missing: MissingRef<'missing'> }>()
+</script><template><div :class="props.missing" /></template>"#,
+    );
+    assert!(host
+        .get_analysis(missing_canonical)
+        .expect("missing lazy analysis")
+        .template
+        .expect("missing template")
+        .elements[0]
+        .dynamic_classes
+        .is_empty());
+    let missing_facts = template_class_facts_for(&host, missing_canonical);
+    let missing = missing_facts
+        .rows()
+        .iter()
+        .find(|row| row.subject.label() == "missing")
+        .expect("missing prop row");
+    assert!(missing.wrapper.import_provenance.is_none());
+    assert!(!matches!(
+        missing.domain,
+        verter_type_expr::ClosedLiteralDomain::Strings(_)
+    ));
+}
+
+fn assert_exact_value_reference_arg(
+    args: &Arc<[verter_type_expr::facts::AuthoredReferenceArgLocator]>,
+    canonical: &str,
+    symbol: &str,
+) {
+    let [verter_type_expr::facts::AuthoredReferenceArgLocator::Value(locator)] = args.as_ref()
+    else {
+        panic!("expected one exact value-annotation argument locator for {symbol}");
+    };
+    assert_eq!(locator.anchor.canonical_id.as_ref(), canonical);
+    assert_eq!(
+        locator.anchor.owner,
+        verter_type_expr::TopLevelOwnerId::instance(0)
+    );
+    assert_eq!(locator.anchor.symbol.as_ref(), symbol);
+    assert_eq!(
+        locator.anchor.space,
+        verter_type_expr::locators::LocatorSymbolSpace::Value
+    );
+    assert!(locator.path.is_empty());
+    assert_eq!(locator.arg_index, 0);
+}
+
+/// Authored route provenance is value-side EVIDENCE, never semantic query or
+/// cache identity (the route-provenance ruling's forbidden path "no local alias
+/// in semantic query/cache identity").
+///
+/// `Ref as A` and `Ref as B` are two authored routes to ONE vue `Ref`
+/// declaration. Annotated with the SAME type argument they are the same
+/// instantiation, so they MUST hash-cons to a single interned
+/// `InstantiationRef` node — while the artifact still reports the two DISTINCT
+/// authored local bindings. Identity equal, provenance distinct: that pair is
+/// what proves the alias was kept out of identity without destroying the proof.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn authored_local_alias_is_evidence_not_semantic_cache_identity() {
+    let host = strict_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let canonical = "/workspace/src/AliasIdentity.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref as A, Ref as B } from 'vue'
+const first: A<'shared-x' | 'shared-y'> = null as never
+const second: B<'shared-x' | 'shared-y'> = null as never
+</script><template>
+  <div :class="first" />
+  <span :class="second" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("lazy analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template
+            .elements
+            .iter()
+            .map(|element| element.dynamic_classes.clone())
+            .collect::<Vec<_>>(),
+        [
+            vec!["shared-x".to_string(), "shared-y".to_string()],
+            vec!["shared-x".to_string(), "shared-y".to_string()],
+        ],
+        "two authored aliases of one terminal publish the same closed domain"
+    );
+
+    let facts = template_class_facts_for(&host, canonical);
+    let row_for = |label: &str| {
+        facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .expect("requested binding row")
+            .clone()
+    };
+    let first = row_for("first");
+    let second = row_for("second");
+
+    // PROVENANCE DISTINCT — the exact authored local binding is retained per
+    // declaration and the two proofs are NOT interchangeable.
+    let first_provenance = first
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact route for the `A` alias");
+    let second_provenance = second
+        .wrapper
+        .import_provenance
+        .as_ref()
+        .expect("exact route for the `B` alias");
+    assert_eq!(first_provenance.local_binding.as_ref(), "A");
+    assert_eq!(second_provenance.local_binding.as_ref(), "B");
+    for (provenance, expected_alias) in [(first_provenance, "A"), (second_provenance, "B")] {
+        let verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. } =
+            &provenance.authored_head
+        else {
+            panic!("expected a bare authored value-annotation head for {expected_alias}");
+        };
+        assert_eq!(local_name.as_ref(), expected_alias);
+        assert_eq!(provenance.imported_name.as_ref(), "Ref");
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    }
+    assert_ne!(
+        first_provenance, second_provenance,
+        "route provenance must still DISCRIMINATE the two authored aliases"
+    );
+
+    // IDENTITY EQUAL — the resolved terminal is one and the same declaration.
+    assert_eq!(
+        first.wrapper.symbol, second.wrapper.symbol,
+        "two aliases of one import must resolve to ONE terminal symbol identity"
+    );
+    assert_eq!(
+        first.domain, second.domain,
+        "the alias must not change the classified domain"
+    );
+
+    // THE CACHE-IDENTITY PIN: `InstantiationRef` identity is `(DeclIdentity,
+    // args)`, so structurally equivalent generic applications intern to the
+    // SAME node. If the authored alias re-entered semantic/cache identity, `A`
+    // and `B` would fork into TWO interned instantiations of the same vue
+    // `Ref` with the same argument.
+    let graph = host.project_type_store().semantic_graph();
+    let mut vue_instantiations = std::collections::HashSet::new();
+    for id in 0u64..(graph.node_count() as u64) {
+        let node = crate::semantic_query::SemanticNodeId(id);
+        let Some(data) = graph.node_data(node) else {
+            continue;
+        };
+        if let crate::semantic_query::SemanticNodeData::InstantiationRef { base, args } =
+            data.as_ref()
+        {
+            // Scope the sweep by the DECLARING FILE, never by the decl name —
+            // an alias leaking into identity would change the name, and a
+            // name-filtered sweep would then silently find nothing instead of
+            // reporting the fork.
+            if base.canonical_id.as_ref() == "/workspace/node_modules/vue/index.d.ts" {
+                vue_instantiations.insert((base.clone(), args.clone()));
+            }
+        }
+    }
+    assert_eq!(
+        vue_instantiations.len(),
+        1,
+        "`Ref as A` and `Ref as B` with the SAME argument must hash-cons to ONE \
+         interned instantiation — a local alias must never fork semantic/cache \
+         identity, got {vue_instantiations:?}"
+    );
+    let (interned_base, _) = vue_instantiations
+        .into_iter()
+        .next()
+        .expect("checked non-empty above");
+    assert_eq!(
+        interned_base.decl_name.as_ref(),
+        "Ref",
+        "the interned instantiation must be keyed by the RESOLVED declaration \
+         name, never by the authored local alias"
+    );
+}
+
+/// A subject's own semantic decision is final: a DIFFERENT subject that happens
+/// to share its label may never supply a domain the facts refused to assert.
+///
+/// `props.variant` (a closed prop union) and a bare local `variant` are two
+/// distinct subjects. When the local's own row is `Unresolved` or `NotClosed`,
+/// the bare `:class="variant"` position must publish NOTHING — never the
+/// same-named prop's closed domain.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_bare_subject_never_inherits_a_same_named_prop_domain() {
+    let host = strict_host();
+
+    // (1) The local's own row is UNRESOLVED (missing dependency).
+    let unresolved = "/workspace/src/BareUnresolved.vue";
+    upsert_vue(
+        &host,
+        unresolved,
+        r#"<script setup lang="ts">
+import type { Later } from './later-absent'
+const props = defineProps<{ variant: 'primary' | 'secondary' }>()
+const variant: Later = null as never
+</script><template>
+  <div :class="props.variant" />
+  <span :class="variant" />
+</template>"#,
+    );
+    let template = host
+        .get_analysis(unresolved)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "the prop subject still publishes its own closed domain"
+    );
+    assert!(
+        template.elements[1].dynamic_classes.is_empty(),
+        "a bare local the resolver reported UNRESOLVED must publish no closed \
+         domain — least of all the same-named prop's"
+    );
+
+    // (2) The local's own row is merely OPEN (`NotClosed`) — the true domain is
+    // not the prop's, so inheriting it would mis-attribute CSS class usage.
+    let open = "/workspace/src/BareOpen.vue";
+    upsert_vue(
+        &host,
+        open,
+        r#"<script setup lang="ts">
+const props = defineProps<{ variant: 'primary' | 'secondary' }>()
+const variant: string = props.variant + '-x'
+</script><template>
+  <div :class="props.variant" />
+  <span :class="variant" />
+</template>"#,
+    );
+    let open_template = host
+        .get_analysis(open)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        open_template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "the prop subject still publishes its own closed domain"
+    );
+    assert!(
+        open_template.elements[1].dynamic_classes.is_empty(),
+        "a bare local whose own domain is OPEN must publish no closed domain"
+    );
+
+    // ARMING CONTROL: a bare-requested subject that DOES resolve still
+    // publishes, so the two `is_empty()` assertions above are real refusals
+    // rather than a bare lookup that never works.
+    let resolves = "/workspace/src/BareResolves.vue";
+    upsert_vue(
+        &host,
+        resolves,
+        r#"<script setup lang="ts">
+const props = defineProps<{ variant: 'primary' | 'secondary' }>()
+const local: 'own-a' | 'own-b' = 'own-a'
+</script><template>
+  <div :class="props.variant" />
+  <span :class="local" />
+  <em :class="variant" />
+</template>"#,
+    );
+    let resolves_template = host
+        .get_analysis(resolves)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        resolves_template.elements[0].dynamic_classes,
+        ["primary", "secondary"]
+    );
+    assert_eq!(
+        resolves_template.elements[1].dynamic_classes,
+        ["own-a", "own-b"],
+        "a bare local with its own closed domain publishes it"
+    );
+    assert_eq!(
+        resolves_template.elements[2].dynamic_classes,
+        ["primary", "secondary"],
+        "a bare-REQUESTED prop (no local binding shadows it) still resolves \
+         through the prop surface"
+    );
+}
+
+#[test]
+fn template_class_qualified_and_import_type_routes_are_exact() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/ambiguous.ts",
+        "export * from 'vue'\nexport * from 'not-vue'\n",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/ambiguous.ts",
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("not-vue", "/workspace/node_modules/not-vue/index.d.ts"),
+        ],
+    );
+    let canonical = "/workspace/src/AuthoredHeadShapes.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import * as Vue from 'vue'
+import * as Other from 'not-vue'
+import * as Ambiguous from './ambiguous'
+namespace Local { export type Ref<T> = { value: T } }
+const namespaceRef: Vue.Ref<'namespace-a' | 'namespace-b'> = null as never
+const importTypeRef: import('vue').Ref<'import-a' | 'import-b'> = null as never
+const namespaceFake: Other.Ref<'bad'> = null as never
+const importTypeFake: import('not-vue').Ref<'bad'> = null as never
+const missingNamespace: Vue.Missing<'bad'> = null as never
+const missingImport: import('missing-vue').Ref<'bad'> = null as never
+const ambiguousNamespace: Ambiguous.Ref<'bad'> = null as never
+const ambiguousImport: import('./ambiguous').Ref<'bad'> = null as never
+const localNamespace: Local.Ref<'bad'> = null as never
+</script><template>
+  <div :class="namespaceRef" />
+  <div :class="importTypeRef" />
+  <div :class="namespaceFake" />
+  <div :class="importTypeFake" />
+  <div :class="missingNamespace" />
+  <div :class="missingImport" />
+  <div :class="ambiguousNamespace" />
+  <div :class="ambiguousImport" />
+  <div :class="localNamespace" />
+</template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![
+            exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+            exact_dependency("not-vue", "/workspace/node_modules/not-vue/index.d.ts"),
+            exact_dependency("./ambiguous", "/workspace/src/ambiguous.ts"),
+        ],
+    );
+    let template = host
+        .get_analysis(canonical)
+        .expect("analysis")
+        .template
+        .expect("template");
+    let classes = template
+        .elements
+        .iter()
+        .map(|element| element.dynamic_classes.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        classes,
+        [
+            vec!["namespace-a".to_string(), "namespace-b".to_string()],
+            vec!["import-a".to_string(), "import-b".to_string()],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ]
+    );
+
+    let facts = template_class_facts_for(&host, canonical);
+    for (label, local) in [("namespaceRef", "Vue"), ("importTypeRef", "")] {
+        let row = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .expect("authored-head route row");
+        let provenance = row
+            .wrapper
+            .import_provenance
+            .as_ref()
+            .expect("exact authored route");
+        assert_eq!(provenance.local_binding.as_ref(), local);
+        assert_eq!(provenance.package.as_ref(), "vue");
+        assert_eq!(provenance.import_source.as_ref(), "vue");
+        assert_eq!(provenance.owner_canonical.as_ref(), canonical);
+        assert_eq!(provenance.imported_name.as_ref(), "Ref");
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+        assert!(provenance.local_alias_hops.is_empty());
+        assert_eq!(
+            provenance.exactness,
+            verter_type_expr::ResolutionExactness::ExactSymbolic
+        );
+        assert_eq!(
+            provenance.provenance,
+            verter_type_expr::ResolutionProvenance::FrameworkSurface
+        );
+        match (label, &provenance.authored_head) {
+            (
+                "namespaceRef",
+                verter_type_expr::facts::AuthoredReferenceHeadFact::Qualified {
+                    local_root,
+                    member_path,
+                    args,
+                },
+            ) => {
+                assert_eq!(local_root.as_ref(), "Vue");
+                assert_eq!(
+                    member_path.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+                    ["Ref"]
+                );
+                assert_exact_value_reference_arg(args, canonical, "namespaceRef");
+            }
+            (
+                "importTypeRef",
+                verter_type_expr::facts::AuthoredReferenceHeadFact::ImportType {
+                    specifier,
+                    member_path,
+                    args,
+                },
+            ) => {
+                assert_eq!(specifier.as_ref(), "vue");
+                assert_eq!(
+                    member_path.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+                    ["Ref"]
+                );
+                assert_exact_value_reference_arg(args, canonical, "importTypeRef");
+            }
+            _ => panic!("unexpected authored head for {label}"),
+        }
+        let terminal = row.wrapper.symbol.as_ref().expect("terminal");
+        assert_eq!(
+            terminal.canonical_id.as_ref(),
+            "/workspace/node_modules/vue/index.d.ts"
+        );
+        assert_eq!(
+            terminal.owner,
+            verter_type_expr::TopLevelOwnerId::ordinary_file()
+        );
+        assert_eq!(terminal.symbol.as_ref(), "Ref");
+    }
+    for label in [
+        "namespaceFake",
+        "importTypeFake",
+        "missingNamespace",
+        "missingImport",
+        "ambiguousNamespace",
+        "ambiguousImport",
+        "localNamespace",
+    ] {
+        let row = facts
+            .rows()
+            .iter()
+            .find(|row| row.subject.label() == label)
+            .expect("negative authored-head row");
+        assert!(row.wrapper.import_provenance.is_none());
+        assert!(!matches!(
+            row.domain,
+            verter_type_expr::ClosedLiteralDomain::Strings(_)
+        ));
+    }
+}
+
+#[test]
+fn template_class_requested_subject_does_not_read_unrelated_cold_wrapper_import() {
+    let ws = Arc::new(CountingWorkspace::new());
+    // The decoy must be PACKAGE-BACKED: a relative `./cold` decoy is invisible
+    // to an owner-wide scan by construction (proven by the T-A5b M8 mutation —
+    // the same plant that stayed GREEN against a relative decoy REDs against
+    // this one), so only a node_modules decoy makes this footprint rail
+    // load-bearing.
+    ws.inject_file(
+        "/workspace/node_modules/cold-pkg/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let canonical = "/workspace/src/ColdDecoy.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Ref as ColdRef } from 'cold-pkg'
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "cold-pkg",
+            "/workspace/node_modules/cold-pkg/index.d.ts",
+        )],
+    );
+    ws.reset_reads();
+
+    let template = host
+        .get_analysis(canonical)
+        .expect("analysis")
+        .template
+        .expect("template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"]
+    );
+    assert_eq!(
+        ws.read_count("/workspace/node_modules/cold-pkg/index.d.ts"),
+        0,
+        "requested-subject classification must not traverse unrelated wrapper-shaped imports"
+    );
+}
+
+#[test]
+fn mutual_recursive_union_domain_is_typed_cycle_and_return_only() {
+    let host = make_host();
+    let canonical = "/workspace/src/Cycle.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+type A = 'a' | B
+type B = 'b' | A
+const variant: A = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let analysis = host.get_analysis(canonical).expect("analysis");
+    assert!(analysis.template.expect("template").elements[0]
+        .dynamic_classes
+        .is_empty());
+    let facts = template_class_facts_for(&host, canonical);
+    assert_eq!(
+        facts.completeness(),
+        verter_semantic::analysis::TemplateClassFactsCompleteness::ReturnOnly
+    );
+    assert!(matches!(
+        facts.rows()[0].domain,
+        verter_type_expr::ClosedLiteralDomain::Unresolved {
+            reason: verter_type_expr::ClosedLiteralDomainUnresolvedReason::Cycle,
+            ..
+        }
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Value-signature return wrapper role (T-A6)
+//
+// The demand boundary for the authored return-reference head. Every case below
+// goes through the SAME shared route/demand machinery the template-class facts
+// use — there is no return-specific classifier, and no `&str` is an input to any
+// role decision.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The vue package surface every return-wrapper fixture routes to.
+///
+/// Every wrapper is declared as a NON-FORWARDING declaration. That is a
+/// deliberate fixture property, not a convenience: the shared authored-route
+/// walk resolves THROUGH a transparent alias to its terminal, so a package
+/// wrapper authored as `type Reactive<T> = Other<T>` routes past its own name
+/// and lands on `Other` — outside the closed vocabulary. That boundary is a
+/// property of the shared route walk (identical for the template-class path) and
+/// is asserted explicitly by
+/// `return_wrapper_role_fails_closed_for_a_transparent_alias_wrapper` below
+/// rather than hidden by the fixture.
+const RETURN_WRAPPER_VUE_DTS: &str = r#"
+export interface Ref<T> { value: T }
+export interface ShallowRef<T> { value: T }
+export interface ComputedRef<T> { readonly value: T }
+export interface WritableComputedRef<T> { value: T }
+export interface ModelRef<T> { value: T }
+export interface Reactive<T> { __reactive: T }
+export interface ShallowReactive<T> { __shallowReactive: T }
+"#;
+
+/// Demand one exported value's whole-return wrapper role on the SAME
+/// request-bound rail the production consumer uses: an installed
+/// `RequestContext` (so the projection fuse is armed and
+/// `ProjectSemanticDispatch::new` sees `is_request_bound() == true` rather than
+/// counting a bare construction) over a cold-seed `HostResolverContext`.
+fn return_wrapper_role_for(
+    host: &VerterHost,
+    canonical: &str,
+    symbol: &str,
+) -> (
+    verter_type_expr::ReactiveWrapperRole,
+    Option<verter_type_expr::ReactiveWrapperImportProvenance>,
+) {
+    let _ctx_guard =
+        host.install_request_budget_context_if_none(host.next_request_id(), canonical, false);
+    let view = crate::session_view::HostViewRef::new(host);
+    let fixed = host.capture_batch_fixed_view(&view);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::from_cold_seed(host, fixed.cold_seed(), overlay);
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
+        &dispatch,
+        canonical,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        symbol,
+    )
+}
+
+/// A6-01 — every direct wrapper role in the closed Vue vocabulary is decided
+/// STRUCTURALLY, from the lowered authored return head plus a composed
+/// package-backed route proof. Restoring a type-text prefix classifier collapses
+/// `ComputedRef`/`ShallowRef`/`ModelRef` onto `Ref`, cannot produce
+/// `WritableComputedRef → ComputedRef`, and publishes no provenance at all.
+#[test]
+fn return_wrapper_roles_cover_the_exact_vue_vocabulary_structurally() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let cases = [
+        ("Ref", verter_type_expr::ReactiveWrapperRole::Ref),
+        (
+            "ShallowRef",
+            verter_type_expr::ReactiveWrapperRole::ShallowRef,
+        ),
+        (
+            "ComputedRef",
+            verter_type_expr::ReactiveWrapperRole::ComputedRef,
+        ),
+        // The vocabulary NORMALIZATION: a distinct authored export folds onto
+        // the same role.
+        (
+            "WritableComputedRef",
+            verter_type_expr::ReactiveWrapperRole::ComputedRef,
+        ),
+        ("ModelRef", verter_type_expr::ReactiveWrapperRole::ModelRef),
+        ("Reactive", verter_type_expr::ReactiveWrapperRole::Reactive),
+        (
+            "ShallowReactive",
+            verter_type_expr::ReactiveWrapperRole::ShallowReactive,
+        ),
+    ];
+    for (index, (wrapper, expected_role)) in cases.into_iter().enumerate() {
+        let canonical = format!("/workspace/src/direct{index}.ts");
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!(
+                "import type {{ {wrapper} }} from 'vue'\n\
+                 export function getValue(): {wrapper}<number> {{ return null as never; }}\n"
+            ),
+        );
+        host.set_import_dependencies(
+            &canonical,
+            vec![exact_dependency(
+                "vue",
+                "/workspace/node_modules/vue/index.d.ts",
+            )],
+        );
+        let (role, provenance) = return_wrapper_role_for(&host, &canonical, "getValue");
+        assert_eq!(role, expected_role, "{wrapper} must classify structurally");
+        let provenance = provenance
+            .unwrap_or_else(|| panic!("{wrapper} must publish a complete route provenance"));
+        assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+        assert_eq!(provenance.package.as_ref(), "vue");
+        assert_eq!(provenance.import_source.as_ref(), "vue");
+        assert_eq!(provenance.local_binding.as_ref(), wrapper);
+        assert_eq!(provenance.imported_name.as_ref(), wrapper);
+        assert_eq!(provenance.owner_canonical.as_ref(), canonical);
+        // The published head is the AUTHORED spelling, never the terminal name.
+        assert!(
+            matches!(
+                &provenance.authored_head,
+                verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, .. }
+                    if local_name.as_ref() == wrapper
+            ),
+            "{wrapper} provenance must carry the authored head, got {:?}",
+            provenance.authored_head
+        );
+        // Negative: the role is never the fail-closed default, and never `None`.
+        assert!(!matches!(
+            role,
+            verter_type_expr::ReactiveWrapperRole::Unresolved { .. }
+                | verter_type_expr::ReactiveWrapperRole::None
+        ));
+    }
+}
+
+/// The FAIL-CLOSED boundary of the vocabulary gate: a package wrapper authored
+/// as a TRANSPARENT ALIAS is not recognized by its own name.
+///
+/// The shared authored-route walk follows a forwarding declaration to its
+/// terminal, so `type Reactive<T> = Unwrapped<T>` in the package routes past
+/// `Reactive` and terminates at `Unwrapped`, which is outside the closed
+/// vocabulary. This is landed shared-route-walk semantics — the template-class
+/// path behaves identically — and it fails CLOSED: no role is guessed from the
+/// authored spelling `Reactive`, and no provenance is published. This test
+/// exists so the boundary is visible instead of being hidden by the fixture
+/// shape; a future change to where the route walk stops inverts it.
+#[test]
+fn return_wrapper_role_fails_closed_for_a_transparent_alias_wrapper() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Unwrapped<T> { __u: T }\nexport type Reactive<T> = Unwrapped<T>\n",
+    );
+    let canonical = "/workspace/src/transparent.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "import type { Reactive } from 'vue'\n\
+         export function getValue(): Reactive<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, canonical, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "the route terminates outside the closed vocabulary, so the wrapper is \
+         proven absent rather than claimed from the authored name"
+    );
+    assert!(provenance.is_none());
+}
+
+/// A6-02 — renamed imports, one- and multi-hop local aliases, a direct
+/// re-export and an import-then-export barrel all resolve to the SAME role as
+/// the direct form, through the shared demand. The ordered alias hops and the
+/// final `vue` edge are retained; dropping a hop or canonicalizing the edge
+/// before proof composition REDs.
+#[test]
+fn return_wrapper_routes_follow_renamed_imports_local_aliases_and_barrels() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+
+    // Renamed import + two local alias hops in the OWNER file.
+    let aliased = "/workspace/src/aliased.ts";
+    upsert_ts(
+        &host,
+        aliased,
+        "import type { Ref as R } from 'vue'\n\
+         type W<T> = R<T>\n\
+         type Outer<T> = W<T>\n\
+         export function getValue(): Outer<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        aliased,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, aliased, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("route proof");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert_eq!(
+        provenance.local_binding.as_ref(),
+        "R",
+        "the exact renamed local import binding must be retained"
+    );
+    assert_eq!(provenance.imported_name.as_ref(), "Ref");
+    assert_eq!(
+        provenance
+            .local_alias_hops
+            .iter()
+            .map(|hop| hop.as_ref())
+            .collect::<Vec<_>>(),
+        ["Outer", "W"],
+        "the ORDERED local alias hops must be retained"
+    );
+
+    // Direct re-export.
+    upsert_ts(
+        &host,
+        "/workspace/src/reexport.ts",
+        "export type { Ref as ReRef } from 'vue'\n",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/reexport.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let via_reexport = "/workspace/src/via-reexport.ts";
+    upsert_ts(
+        &host,
+        via_reexport,
+        "import type { ReRef } from './reexport'\n\
+         export function getValue(): ReRef<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        via_reexport,
+        vec![exact_dependency("./reexport", "/workspace/src/reexport.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, via_reexport, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("re-export route proof");
+    assert_eq!(provenance.import_source.as_ref(), "./reexport");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+
+    // Import-then-export barrel plus a barrel-local generic alias.
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-a.ts",
+        "import type { Ref } from 'vue'; export type { Ref as ImportedRef };",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-a.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    upsert_ts(
+        &host,
+        "/workspace/src/barrel-b.ts",
+        "import type { ImportedRef } from './barrel-a'; export type LocalRef<T> = ImportedRef<T>;",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/barrel-b.ts",
+        vec![exact_dependency("./barrel-a", "/workspace/src/barrel-a.ts")],
+    );
+    let via_barrel = "/workspace/src/via-barrel.ts";
+    upsert_ts(
+        &host,
+        via_barrel,
+        "import type { LocalRef as Selected } from './barrel-b'\n\
+         export function getValue(): Selected<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        via_barrel,
+        vec![exact_dependency("./barrel-b", "/workspace/src/barrel-b.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, via_barrel, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    let provenance = provenance.expect("barrel route proof");
+    assert_eq!(provenance.local_binding.as_ref(), "Selected");
+    assert_eq!(provenance.import_source.as_ref(), "./barrel-b");
+    assert_eq!(provenance.terminal_import_source.as_ref(), "vue");
+    assert!(provenance
+        .local_alias_hops
+        .iter()
+        .any(|hop| hop.as_ref() == "LocalRef"));
+}
+
+/// A6-03 — a wrapper-SHAPED head that is not Vue's is never classified. A
+/// resolved non-Vue terminal is a COMPLETE non-wrapper proof (`None`); an
+/// unresolvable bare name fails closed (typed unresolved) rather than claiming
+/// either a wrapper or a completed non-wrapper. No case publishes provenance.
+#[test]
+fn return_wrapper_role_rejects_local_and_foreign_package_fakes() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+
+    // A local declaration that merely SPELLS the wrapper name.
+    let local_fake = "/workspace/src/local-fake.ts";
+    upsert_ts(
+        &host,
+        local_fake,
+        "interface Ref<T> { value: T }\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, local_fake, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a local same-name declaration is a COMPLETE non-wrapper proof"
+    );
+    assert!(provenance.is_none());
+
+    // A package-backed same-shape wrapper outside the exact Vue route.
+    let package_fake = "/workspace/src/package-fake.ts";
+    upsert_ts(
+        &host,
+        package_fake,
+        "import type { Ref } from 'not-vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        package_fake,
+        vec![exact_dependency(
+            "not-vue",
+            "/workspace/node_modules/not-vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, package_fake, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a non-`vue` package terminal must fail the exact route gate"
+    );
+    assert!(provenance.is_none());
+
+    // A WORKSPACE-OWNED file that resolves the specifier `vue`. The terminal
+    // import source is spelled exactly `vue` and the terminal export is named
+    // exactly `Ref`, so the specifier half of the route gate passes: only the
+    // package-backed half rejects it. Dropping that half classifies a userland
+    // `vue.ts` as Vue's reactive wrapper.
+    upsert_ts(
+        &host,
+        "/workspace/src/vue.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    let workspace_vue = "/workspace/src/workspace-vue.ts";
+    upsert_ts(
+        &host,
+        workspace_vue,
+        "import type { Ref } from 'vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        workspace_vue,
+        vec![exact_dependency("vue", "/workspace/src/vue.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, workspace_vue, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "a workspace-owned `vue` terminal must fail the package-backed half of the route gate"
+    );
+    assert!(provenance.is_none());
+
+    // The pinned defect, inverted: the `build_tests.rs` fixture that imported
+    // NOTHING and was still reported as Vue's `Ref` on spelling alone. An
+    // unbound name is not resolvable, so it fails closed — never `Ref`, and
+    // never a fabricated provenance.
+    let unimported = "/workspace/src/unimported.ts";
+    upsert_ts(
+        &host,
+        unimported,
+        "export function getRef(): Ref<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, unimported, "getRef");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        },
+        "an unbound `Ref<number>` must fail closed, not classify as Vue's Ref"
+    );
+    assert!(provenance.is_none());
+
+    // Positive control in the SAME host: the exact Vue route still classifies,
+    // so the rejections above are not a blanket refusal.
+    let exact = "/workspace/src/exact.ts";
+    upsert_ts(
+        &host,
+        exact,
+        "import type { Ref } from 'vue'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        exact,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, exact, "getValue");
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    assert!(provenance.is_some());
+}
+
+/// A6-04 — cycle, missing dependency, an unsupported head and a budget-clamped
+/// host each publish the EXACT typed reason with no provenance, and re-demanding
+/// never promotes a partial into an exact role (nothing warm was admitted).
+/// Collapsing the reasons onto one value REDs; promoting a partial REDs.
+#[test]
+fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
+    let host = make_host();
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+
+    // Cycle: a mutually recursive local alias pair on the return head.
+    let cycle = "/workspace/src/cycle.ts";
+    upsert_ts(
+        &host,
+        cycle,
+        "type A<T> = B<T>\n\
+         type B<T> = A<T>\n\
+         export function getValue(): A<number> { return null as never; }\n",
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, cycle, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Cycle
+        }
+    );
+    assert!(provenance.is_none());
+    // Re-demand: still the same typed cycle, never a promoted exact role.
+    assert_eq!(
+        return_wrapper_role_for(&host, cycle, "getValue").0,
+        role,
+        "a partial must not be promoted warm into an exact role"
+    );
+    // (Non-warmth is proven by RECOVERY at the end of this test, after the
+    // reason-distinctness control has read the degraded roles.)
+
+    // Missing dependency: the import edge resolves to a canonical the host has
+    // no state for, so the routed terminal cannot be reached.
+    let missing = "/workspace/src/missing.ts";
+    upsert_ts(
+        &host,
+        missing,
+        "import type { Ref } from './gone'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        missing,
+        vec![exact_dependency("./gone", "/workspace/src/gone.ts")],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, missing, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::MissingDependency
+        }
+    );
+    assert!(provenance.is_none());
+    assert_eq!(return_wrapper_role_for(&host, missing, "getValue").0, role);
+    // (Arrival recovery is asserted at the end of this test.)
+
+    // A wholly UNRESOLVABLE import specifier is a distinct typed state: the
+    // declaration cannot be prepared at all, so the demand has no fact to read.
+    // It must never collapse onto either of the two reasons above.
+    let unprepared = "/workspace/src/unprepared.ts";
+    upsert_ts(
+        &host,
+        unprepared,
+        "import type { Ref } from 'nowhere'\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    let (unprepared_role, provenance) = return_wrapper_role_for(&host, unprepared, "getValue");
+    assert_eq!(
+        unprepared_role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::AnalysisUnavailable
+        }
+    );
+    assert!(provenance.is_none());
+
+    // Unsupported: an INFERRED return has no authored head at all, so the
+    // demand has nothing to resolve. This is the mint gate surfacing at the
+    // demand boundary — it must never become a complete non-wrapper proof.
+    let inferred = "/workspace/src/inferred.ts";
+    upsert_ts(
+        &host,
+        inferred,
+        "import type { Ref } from 'vue'\n\
+         export function getValue() { return null as unknown as Ref<number>; }\n",
+    );
+    host.set_import_dependencies(
+        inferred,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (role, provenance) = return_wrapper_role_for(&host, inferred, "getValue");
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        },
+        "an inferred return publishes no authored head, so the demand fails closed"
+    );
+    assert!(provenance.is_none());
+    assert_ne!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::None,
+        "an inferred return is NOT a complete non-wrapper proof"
+    );
+
+    // The connected-work / projection ENVELOPE arm is proven in the demand
+    // entry's own module, where the envelope limit is settable: see
+    // `project_semantic_dispatch::reactive_wrapper::tests::
+    // clamped_connected_work_envelope_degrades_the_return_role_typed`. Faking a
+    // trip here would assert a state this fixture cannot actually reach — the
+    // routes are one hop long and the armed projection budget is nowhere near
+    // exhausted, so the envelope class is proven where it is reachable.
+
+    // Control: the degradations are DISTINCT typed values — an implementation
+    // that collapsed them onto one reason fails here.
+    let cycle_role = return_wrapper_role_for(&host, cycle, "getValue").0;
+    let missing_role = return_wrapper_role_for(&host, missing, "getValue").0;
+    let inferred_role = return_wrapper_role_for(&host, inferred, "getValue").0;
+    for (a, b) in [
+        (&cycle_role, &missing_role),
+        (&missing_role, &inferred_role),
+        (&cycle_role, &inferred_role),
+        (&cycle_role, &unprepared_role),
+        (&missing_role, &unprepared_role),
+        (&inferred_role, &unprepared_role),
+    ] {
+        assert_ne!(a, b, "each failure class keeps its own typed reason");
+    }
+
+    // A re-demand equality alone cannot distinguish a cold recompute from a
+    // WARMED partial (both answer the same reason), so prove non-warmth by
+    // RECOVERY at the public boundary: fix each degraded input and re-demand —
+    // a warmed partial would keep answering its `Unresolved` reason forever,
+    // while a recomputing demand resolves exactly. (A TLS cold-compute-scope
+    // probe is the wrong instrument here: the cycle stop is the route
+    // resolver's own visited-set, not a folding query, so no scope partiality
+    // manifests at this boundary.)
+    //
+    // Cycle recovery: break the recursion.
+    upsert_ts(
+        &host,
+        cycle,
+        "import type { Ref } from 'vue'\n\
+         type A<T> = Ref<T>\n\
+         type B<T> = A<T>\n\
+         export function getValue(): A<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        cycle,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (recovered_role, recovered_provenance) = return_wrapper_role_for(&host, cycle, "getValue");
+    assert_eq!(
+        recovered_role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "breaking the cycle must recover the exact role — a warmed partial cannot"
+    );
+    assert!(
+        recovered_provenance.is_some(),
+        "the recovered route must carry exact provenance"
+    );
+    // Missing-dependency ARRIVAL (route-provenance required test #10): once
+    // the dependency exists, the demand must resolve exactly.
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/gone.ts",
+        "export type { Ref } from 'vue'\n",
+    );
+    host.set_import_dependencies(
+        "/workspace/src/gone.ts",
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    let (arrived_role, arrived_provenance) = return_wrapper_role_for(&host, missing, "getValue");
+    assert_eq!(
+        arrived_role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "after the missing dependency arrives, the demand must resolve exactly — \
+         a warmed partial cannot recover"
+    );
+    assert!(
+        arrived_provenance.is_some(),
+        "the arrived route must carry exact provenance"
+    );
+}
+
+/// A6-05 — the structural twin of the A5-05 footprint test: resolving ONE
+/// requested return head must not read an unrelated cold wrapper-shaped import,
+/// and must not lower unrelated declarations in the owner. Reintroducing an
+/// owner-wide wrapper-candidate scan, or resolving at the analyzer boundary,
+/// makes the cold read count non-zero.
+#[test]
+fn return_wrapper_demand_does_not_read_unrelated_cold_wrapper_import() {
+    /// Resolve one requested return head in a fresh host whose owner file
+    /// carries `unrelated` extra deep declarations, and report the cold decoy's
+    /// read count plus the number of declaration bodies the demand lowered.
+    fn measure(unrelated: usize) -> (verter_type_expr::ReactiveWrapperRole, u64, u64) {
+        let ws = Arc::new(CountingWorkspace::new());
+        ws.inject_file(
+            "/workspace/src/cold.ts",
+            "export interface Ref<T> { value: T }\n",
+        );
+        let host = VerterHost::new(HostConfig::default(), ws.clone());
+        upsert_non_sfc(
+            &host,
+            "/workspace/node_modules/vue/index.d.ts",
+            RETURN_WRAPPER_VUE_DTS,
+        );
+        let decoys = (0..unrelated)
+            .map(|index| {
+                format!(
+                    "export type DeepUnrelated{index} = {{ a: {{ b: {{ c: ColdRef<{index}> }} }} }}\n"
+                )
+            })
+            .collect::<String>();
+        let canonical = "/workspace/src/cold-decoy.ts";
+        upsert_ts(
+            &host,
+            canonical,
+            &format!(
+                "import type {{ Ref }} from 'vue'\n\
+                 import type {{ Ref as ColdRef }} from './cold'\n\
+                 {decoys}\
+                 export function getValue(): Ref<number> {{ return null as never; }}\n"
+            ),
+        );
+        host.set_import_dependencies(
+            canonical,
+            vec![
+                exact_dependency("vue", "/workspace/node_modules/vue/index.d.ts"),
+                exact_dependency("./cold", "/workspace/src/cold.ts"),
+            ],
+        );
+        host.provenance().reset();
+        ws.reset_reads();
+        let (role, provenance) = return_wrapper_role_for(&host, canonical, "getValue");
+        assert_eq!(
+            provenance
+                .expect("route proof")
+                .terminal_import_source
+                .as_ref(),
+            "vue"
+        );
+        (
+            role,
+            ws.read_count("/workspace/src/cold.ts"),
+            host.provenance().snapshot().decl_bodies_lowered,
+        )
+    }
+
+    let (role, cold_reads, lowered_one) = measure(1);
+    assert_eq!(
+        role,
+        verter_type_expr::ReactiveWrapperRole::Ref,
+        "the requested subject must still resolve exactly"
+    );
+    assert_eq!(
+        cold_reads, 0,
+        "requested-subject return classification must not traverse unrelated \
+         wrapper-shaped imports"
+    );
+
+    // Differential footprint proof for the OWNER-local declarations: growing the
+    // file's unrelated deep declarations from 1 to 4 must not change how many
+    // declaration bodies the demand lowers. An owner-wide walk (or resolution at
+    // the analyzer boundary) scales with the file; a demand-scoped one does not.
+    let (role, cold_reads, lowered_four) = measure(4);
+    assert_eq!(role, verter_type_expr::ReactiveWrapperRole::Ref);
+    assert_eq!(cold_reads, 0);
+    assert_eq!(
+        lowered_one, lowered_four,
+        "the demand's lowering footprint must be independent of the owner's \
+         unrelated declaration count ({lowered_one} vs {lowered_four})"
+    );
+}
+
+/// Producer contract: publishing the canonical post-parse artifact mints NO
+/// authored return head (zero declaration bodies lower), and carrying the head
+/// to the prepared declaration is a COPY — no locator deref, no import
+/// resolution, no semantic dispatch at the producer boundary.
+#[test]
+fn signature_return_head_is_minted_without_extra_lowering_or_resolution() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    let canonical = "/workspace/src/producer.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        "import type { Ref } from 'vue'\n\
+         export type Filler0 = { v: 0 }\n\
+         export type Filler1 = { v: 1 }\n\
+         export function getValue(): Ref<number> { return null as never; }\n",
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    host.provenance().reset();
+    ws.reset_reads();
+    let indexed = host
+        .ensure_indexed_ready(canonical)
+        .expect("artifact must materialise");
+    assert!(indexed.shallow_state.has_value_symbol("getValue"));
+    assert_eq!(
+        host.provenance().snapshot().decl_bodies_lowered,
+        0,
+        "publishing IndexedReady must lower ZERO declaration bodies, so it mints \
+         ZERO authored return heads"
+    );
+    // `read_count` is inert for an UPSERTED canonical (served from the host's
+    // own store, `read_file` never fires), so the load-bearing rail is the
+    // artifact store: upserting does not index, so any producer-side resolution
+    // of the import would have to materialise the dependency's IndexedReady.
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_none(),
+        "the producer boundary must resolve nothing — the vue dependency must \
+         not be indexed by minting the head"
+    );
+
+    host.provenance().reset();
+    let prepared = host
+        .prepared_value_decl_in(
+            canonical,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            "getValue",
+        )
+        .expect("prepared value decl");
+    let head = &prepared.signatures[0].return_reference_head;
+    assert!(
+        matches!(
+            head,
+            verter_type_expr::facts::AuthoredReferenceHeadFact::Bare { local_name, args }
+                if local_name.as_ref() == "Ref" && args.len() == 1
+        ),
+        "the prepared declaration carries the producer-minted head by copy, got {head:?}"
+    );
+    assert_eq!(
+        host.provenance().snapshot().decl_bodies_lowered,
+        1,
+        "preparing the requested declaration lowers exactly its own body — never \
+         the file's unrelated declarations"
+    );
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_none(),
+        "carrying the head to the prepared declaration must not resolve the \
+         import — the dependency stays unindexed"
+    );
+    // Positive control: the probe itself can detect indexing — materialise the
+    // dependency deliberately and the same probe flips.
+    host.ensure_indexed_ready("/workspace/node_modules/vue/index.d.ts")
+        .expect("control materialisation");
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get_any("/workspace/node_modules/vue/index.d.ts")
+            .is_some(),
+        "control: the unindexed probe must be capable of detecting an index"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A6-06 — the component-meta consumer of the whole-return wrapper role
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A BODILESS composable declaration. This is the capability, not a convenience:
+/// the value-space authority (`build_composable_info` → `detect_composable_return
+/// _shape`) is gated on a function BODY, so a declaration with none can never be
+/// classified by it and today publishes the undecided `MaybeRef`. Only the
+/// AUTHORED RETURN TYPE can answer it, and only the shared type resolver can
+/// prove that `Ref` is `vue`'s.
+const A6_BODILESS_COMPOSABLE_DTS: &str = r#"import type { Ref, ComputedRef } from 'vue'
+export declare function useCounter(): Ref<number>
+export declare function useTotal(): ComputedRef<number>
+export declare function usePlain(): number
+export declare function useOverloaded(): Ref<number>
+export declare function useOverloaded(flag: boolean): Ref<string>
+"#;
+
+/// Wire the owner SFC's `./composables` edge plus the composable file's own
+/// `vue` edge — the two-hop route every A6-06 fixture resolves through.
+fn a6_wire_composable_host(host: &VerterHost, owner: &str, composables: &str, dts: &str) {
+    upsert_non_sfc(
+        host,
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    upsert_non_sfc(host, composables, dts);
+    host.set_import_dependencies(
+        composables,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(owner, vec![exact_dependency("./composables", composables)]);
+}
+
+fn a6_binding<'a>(
+    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    name: &str,
+) -> &'a verter_semantic::analysis::component_meta::BindingAnalysis {
+    meta.bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "binding `{name}` must be published; got {:?}",
+                meta.bindings
+                    .iter()
+                    .map(|binding| binding.name.as_str())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+/// A6-06 — the named public-boundary acceptance test. The component-meta
+/// consumer publishes the demand-resolved whole-return wrapper role on its
+/// binding surface with its EXACTNESS intact, across three classes on one
+/// fixture: exact (from a BODILESS declaration the value path cannot reach), a
+/// completed non-wrapper proof, and a typed degradation. Warm re-reads are
+/// stable.
+///
+/// Discriminating mutations: making the demand return no rows leaves every role
+/// `None` and every kind `MaybeRef`; mapping `ReactiveWrapperRole::None` onto
+/// `ReactivityKind::None` flips the non-wrapper arm; collapsing the degradation
+/// reasons flips the overload arm.
+#[test]
+fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
+    let host = make_host();
+    let owner = "/workspace/src/App.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ counter }}{{ total }}{{ plain }}{{ ambiguous }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter, useTotal, usePlain, useOverloaded } from './composables'\n\
+         const counter = useCounter()\n\
+         const total = useTotal()\n\
+         const plain = usePlain()\n\
+         const ambiguous = useOverloaded()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let meta = host
+        .get_component_meta(owner)
+        .expect("component meta must resolve");
+
+    // EXACT — a bodiless `Ref<number>` return decides the binding's reactivity,
+    // where the value-space walk publishes only `MaybeRef`.
+    let counter = a6_binding(&meta, "counter");
+    assert_eq!(
+        counter.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the bodiless composable's authored return type must publish the exact role"
+    );
+    assert_eq!(
+        counter.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "an exact role must REFINE the collapsed decoration kind"
+    );
+
+    // EXACT, second family — the vocabulary is not collapsed onto `Ref`.
+    let total = a6_binding(&meta, "total");
+    assert_eq!(
+        total.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::ComputedRef)
+    );
+    assert_eq!(
+        total.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Computed
+    );
+    assert_ne!(
+        total.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "ComputedRef must not collapse onto the ref decoration"
+    );
+
+    // COMPLETED NON-WRAPPER PROOF — published as such, and it does NOT downgrade
+    // the value-space classification (see the monotonicity test for why).
+    let plain = a6_binding(&meta, "plain");
+    assert_eq!(
+        plain.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a resolved non-wrapper return type is a COMPLETE proof, not a degradation"
+    );
+    assert_eq!(
+        plain.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a proven non-wrapper return type must NOT downgrade the reactivity kind"
+    );
+
+    // TYPED DEGRADATION — an overload group cannot be resolved without
+    // argument-based overload resolution, so it fails closed with its exact
+    // reason rather than guessing the first overload's family.
+    let ambiguous = a6_binding(&meta, "ambiguous");
+    assert_eq!(
+        ambiguous.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        }),
+        "an overload group must degrade typed, never guess ordinal 0"
+    );
+    assert_eq!(
+        ambiguous.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a degradation must claim no reactivity"
+    );
+
+    // The four classes are mutually distinguishable on the published surface —
+    // an implementation that collapsed any pair fails here.
+    let published = [
+        counter.return_wrapper_role.clone(),
+        total.return_wrapper_role.clone(),
+        plain.return_wrapper_role.clone(),
+        ambiguous.return_wrapper_role.clone(),
+    ];
+    for index in 1..published.len() {
+        assert!(
+            !published[..index].contains(&published[index]),
+            "published role {:?} must not alias an earlier class",
+            published[index]
+        );
+    }
+
+    // Warm-hit stability: a second read serves the same exact + degraded roles.
+    let warm = host
+        .get_component_meta(owner)
+        .expect("warm component meta must resolve");
+    for name in ["counter", "total", "plain", "ambiguous"] {
+        assert_eq!(
+            a6_binding(&warm, name).return_wrapper_role,
+            a6_binding(&meta, name).return_wrapper_role,
+            "the second read must serve `{name}`'s role unchanged"
+        );
+        assert_eq!(
+            a6_binding(&warm, name).reactivity_kind,
+            a6_binding(&meta, name).reactivity_kind,
+            "the second read must serve `{name}`'s refined kind unchanged"
+        );
+    }
+}
+
+/// MONOTONE REFINEMENT — `ReactiveWrapperRole::None` is a proof about the
+/// WRAPPER FAMILY of the whole return type, never a proof of non-reactivity.
+/// Vue's `reactive<T>(t: T): UnwrapNestedRefs<T>` means a composable that
+/// returns a `reactive()` object has a return type that is NOT `Reactive<T>` —
+/// so a `None` role must not downgrade a value-space classification.
+///
+/// Discriminating mutation: map `None` onto `ReactivityKind::None` in
+/// `refined_reactivity_kind` and the `reactive`-returning binding loses its
+/// value-space answer.
+#[test]
+fn component_meta_binding_role_none_never_downgrades_value_space_reactivity() {
+    let host = make_host();
+    let owner = "/workspace/src/Monotone.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ state }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useStore } from './composables'\n\
+         const state = useStore()\n\
+         </script>\n",
+    );
+    // The composable's authored return type is a PLAIN interface — a resolvable,
+    // proven non-wrapper — exactly the shape `reactive()` produces in real Vue.
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        "export interface StoreState { count: number }\n\
+         export declare function useStore(): StoreState\n",
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let state = a6_binding(&meta, "state");
+    assert_eq!(
+        state.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a resolvable plain return type is a completed non-wrapper proof"
+    );
+    assert_eq!(
+        state.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "the value-space classification must survive a `None` role untouched"
+    );
+    assert_ne!(
+        state.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::None,
+        "`ReactiveWrapperRole::None` must NEVER downgrade to `ReactivityKind::None`"
+    );
+}
+
+/// PRECISION — a whole-return role answers a different question from a
+/// destructured member's reactivity, so it must never decide one. `const { count
+/// } = useCounter()` publishes NO role and keeps `MaybeRef`, while the
+/// whole-value form on the SAME composable in the SAME file resolves exactly —
+/// the control that proves the gate discriminates rather than disabling demand.
+///
+/// Discriminating mutation: drop the `binds_whole_call_result` gate (or stop
+/// clearing the flag in `extract_destructured_bindings`) and `count` becomes
+/// `Ref`.
+#[test]
+fn component_meta_destructured_member_is_not_decided_by_the_whole_return_role() {
+    let host = make_host();
+    let owner = "/workspace/src/Destructured.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ count }}{{ whole }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const { count } = useCounter()\n\
+         const whole = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let count = a6_binding(&meta, "count");
+    assert_eq!(
+        count.return_wrapper_role, None,
+        "a destructured member must never be demanded a WHOLE-return role"
+    );
+    assert_eq!(
+        count.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        "a destructured member keeps its value-space classification"
+    );
+    // Control on the same fixture: the whole-value form DOES resolve, so the
+    // gate is discriminating and not merely switching the demand off.
+    let whole = a6_binding(&meta, "whole");
+    assert_eq!(
+        whole.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "control: the whole-value binding on the same composable resolves exactly"
+    );
+}
+
+/// FAIL-CLOSED NEGATIVES — a wrapper-SHAPED but non-Vue return head publishes no
+/// reactive kind from the type path. A local `interface Ref<T>` and a `Ref` from
+/// a non-`vue` package are both completed non-wrapper proofs, never `Ref`.
+///
+/// Discriminating mutation: drop the `workspace_is_package_backed` half of
+/// `wrapper_candidate_for_route`'s gate, or accept terminal-name equality, and
+/// the local fake classifies as `Ref`.
+#[test]
+fn component_meta_binding_role_rejects_local_and_foreign_wrapper_fakes() {
+    // (a) a LOCAL `interface Ref<T>` in the composable file itself.
+    let host = make_host();
+    let owner = "/workspace/src/LocalFake.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ fake }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useFake } from './composables'\n\
+         const fake = useFake()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        "export interface Ref<T> { value: T }\n\
+         export declare function useFake(): Ref<number>\n",
+    );
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let fake = a6_binding(&meta, "fake");
+    assert_eq!(
+        fake.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a LOCAL wrapper-shaped return type is proven non-Vue, not guessed"
+    );
+    assert_ne!(
+        fake.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "a local fake `Ref` must publish NO reactive kind from the type path"
+    );
+
+    // (b) a `Ref` from a DIFFERENT package.
+    let host = make_host();
+    let owner = "/workspace/src/ForeignFake.vue";
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/not-vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n",
+    );
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ foreign }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useForeign } from './composables'\n\
+         const foreign = useForeign()\n\
+         </script>\n",
+    );
+    let composables = "/workspace/src/composables.d.ts";
+    upsert_non_sfc(
+        &host,
+        composables,
+        "import type { Ref } from 'not-vue'\n\
+         export declare function useForeign(): Ref<number>\n",
+    );
+    host.set_import_dependencies(
+        composables,
+        vec![exact_dependency(
+            "not-vue",
+            "/workspace/node_modules/not-vue/index.d.ts",
+        )],
+    );
+    host.set_import_dependencies(owner, vec![exact_dependency("./composables", composables)]);
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let foreign = a6_binding(&meta, "foreign");
+    assert_eq!(
+        foreign.return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::None),
+        "a foreign-package `Ref` is a completed non-wrapper proof"
+    );
+    assert_ne!(
+        foreign.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref
+    );
+}
+
+/// A6-06 degradation rail — a typed `Unresolved` role refuses the WHOLE
+/// component-meta result warm admission (the no-poison invariant), and yet does
+/// NOT drop the row: the degraded role is still published per-binding, and the
+/// exact sibling binding in the same file still publishes its exact role.
+///
+/// Discriminating mutations: drop the `fold_result_completeness` call and the
+/// degraded result is admitted; make a degradation abort the row (or the whole
+/// meta) and the sibling's exact role disappears.
+#[test]
+fn component_meta_binding_role_degradation_refuses_warm_without_dropping_rows() {
+    let host = make_host();
+    let owner = "/workspace/src/Degraded.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ ambiguous }}{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useOverloaded, useCounter } from './composables'\n\
+         const ambiguous = useOverloaded()\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    let results_before = host.project_type_store().component_meta_results().len();
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let results_after = host.project_type_store().component_meta_results().len();
+
+    // The degraded row is PUBLISHED — a degradation is a per-row fail-closed
+    // answer, not a dropped row.
+    assert_eq!(
+        a6_binding(&meta, "ambiguous").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Unresolved {
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::Unsupported
+        })
+    );
+    // …and one binding's degradation must NOT cost the whole meta its other
+    // answers: the exact sibling still resolves exactly.
+    assert_eq!(
+        a6_binding(&meta, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "one row's degradation must not suppress a sibling row's exact role"
+    );
+    // …nor its declared surface: the meta is a real, usable result.
+    assert_eq!(
+        meta.bindings.len(),
+        2,
+        "both bindings must be published despite the degradation"
+    );
+
+    // The no-poison rail: the degraded result is refused warm admission.
+    assert_eq!(
+        results_after, results_before,
+        "a typed whole-return degradation must refuse the component-meta result \
+         warm admission (before={results_before} after={results_after})"
+    );
+}
+
+/// ZERO REGRESSION + ZERO COST — a binding the value-space walk already decided
+/// is never demanded, and a non-call binding is never demanded at all. The
+/// value-space classification authority is untouched.
+///
+/// The fixture is deliberately RESOLVABLE: `vue` declares `ref<T>(): Ref<T>`, so
+/// dropping the `MaybeRef` gate would genuinely resolve a role for `decided` and
+/// publish it — the assertion below then goes RED. A vue surface without that
+/// declaration would make the test pass either way (the demand would find no
+/// prepared declaration), i.e. would not discriminate.
+#[test]
+fn component_meta_binding_role_is_not_demanded_when_value_space_decided() {
+    let host = make_host();
+    let owner = "/workspace/src/NoDemand.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ decided }}{{ literal }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { ref } from 'vue'\n\
+         const decided = ref(0)\n\
+         const literal = 42\n\
+         </script>\n",
+    );
+    upsert_non_sfc(
+        &host,
+        "/workspace/node_modules/vue/index.d.ts",
+        "export interface Ref<T> { value: T }\n\
+         export declare function ref<T>(value: T): Ref<T>\n",
+    );
+    host.set_import_dependencies(
+        owner,
+        vec![exact_dependency(
+            "vue",
+            "/workspace/node_modules/vue/index.d.ts",
+        )],
+    );
+
+    let meta = host.get_component_meta(owner).expect("component meta");
+    let decided = a6_binding(&meta, "decided");
+    assert_eq!(
+        decided.reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Ref,
+        "the value-space `ref()` classification is unchanged"
+    );
+    assert_eq!(
+        decided.return_wrapper_role, None,
+        "a value-space-decided binding must never be demanded a whole-return role"
+    );
+    assert_eq!(
+        a6_binding(&meta, "literal").return_wrapper_role,
+        None,
+        "a non-call binding must never be demanded"
+    );
+}
+
+/// The FIXED MECHANISM, proven by an OBSERVABLE consequence rather than a
+/// counter: the demand resolves through the caller's request-bound
+/// `ResolverContext`, so a SESSION OVERLAY is visible to it.
+///
+/// A session overlay rewrites the composable's authored return type from
+/// `Ref<number>` to `ComputedRef<number>` WITHOUT touching the shared base. A
+/// demand routed through the request's own context reads the overlay and
+/// publishes `ComputedRef`; a demand routed through the bare `&VerterHost` (the
+/// deleted entry's shape) reads BASE content and publishes `Ref`. The base host
+/// is asserted unchanged afterwards, so the overlay cannot have leaked.
+///
+/// `bare_engine_constructions` is deliberately NOT the instrument here: the
+/// counter is snapshotted from the finalising thread's request context and does
+/// not observe this demand's dispatch construction at all, so asserting on it
+/// would be a non-discriminating assertion dressed as a mechanism proof.
+///
+/// Discriminating mutation: build the demand's dispatch from
+/// `ctx.host_for_fact_tracer_install()` instead of `ctx` and the overlay answer
+/// reverts to the base `Ref`.
+#[test]
+fn component_meta_binding_return_wrapper_role_demand_is_request_bound() {
+    let meta_host = crate::component_meta_host::ComponentMetaHost::new_standalone(HostConfig {
+        analysis_level: AnalysisLevel::Full,
+        ..HostConfig::default()
+    });
+    let host = meta_host.host();
+    let owner = "/workspace/src/Overlaid.vue";
+    let composables = "/workspace/src/composables.d.ts";
+    upsert_vue(
+        host,
+        owner,
+        "<template><div>{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(host, owner, composables, A6_BODILESS_COMPOSABLE_DTS);
+
+    // Baseline on the shared base: the authored `Ref<number>` return.
+    let base = host.get_component_meta(owner).expect("base component meta");
+    assert_eq!(
+        a6_binding(&base, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "baseline: the base composable returns Ref<number>"
+    );
+
+    // A session overlay rewrites ONLY the composable's return annotation.
+    let session = meta_host.open_session_batch().expect("session opens");
+    session
+        .upsert(
+            composables,
+            "import type { Ref, ComputedRef } from 'vue'\n\
+             export declare function useCounter(): ComputedRef<number>\n\
+             export declare function unused(): Ref<number>\n"
+                .to_string(),
+        )
+        .expect("overlay upsert");
+    let overlaid = session
+        .get_component_meta(owner)
+        .expect("session component meta")
+        .expect("session meta present");
+    assert_eq!(
+        a6_binding(&overlaid, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::ComputedRef),
+        "the demand must resolve through the REQUEST's context, so the session \
+         overlay decides the role — a bare-host dispatch would answer from the \
+         shared base and still report Ref"
+    );
+    assert_eq!(
+        a6_binding(&overlaid, "counter").reactivity_kind,
+        verter_semantic::analysis::types::ReactivityKind::Computed,
+        "and the refined decoration kind follows the overlay too"
+    );
+
+    // The overlay must not have leaked into the shared base.
+    drop(session);
+    let base_again = host.get_component_meta(owner).expect("base component meta");
+    assert_eq!(
+        a6_binding(&base_again, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the session overlay must never poison the shared base answer"
+    );
+}
+
+/// FOOTPRINT — the demand opens only its own subject's route. An unrelated
+/// wrapper-shaped cold module in the workspace is never read, and the demand's
+/// declaration-lowering footprint does not scale with the composable file's
+/// unrelated declarations.
+///
+/// Discriminating mutation: demand for every binding regardless of the gates, or
+/// reintroduce an owner-wide scan, and the cold decoy is read.
+#[test]
+fn component_meta_binding_role_demand_does_not_read_unrelated_cold_module() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts",
+        RETURN_WRAPPER_VUE_DTS,
+    );
+    ws.inject_file(
+        "/workspace/src/cold.ts",
+        "export interface Ref<T> { value: T }\nexport declare function useCold(): Ref<number>\n",
+    );
+    let host = VerterHost::new(HostConfig::default(), ws.clone());
+    let owner = "/workspace/src/Footprint.vue";
+    upsert_vue(
+        &host,
+        owner,
+        "<template><div>{{ counter }}</div></template>\n\
+         <script setup lang=\"ts\">\n\
+         import { useCounter } from './composables'\n\
+         const counter = useCounter()\n\
+         </script>\n",
+    );
+    a6_wire_composable_host(
+        &host,
+        owner,
+        "/workspace/src/composables.d.ts",
+        A6_BODILESS_COMPOSABLE_DTS,
+    );
+
+    ws.reset_reads();
+    let meta = host.get_component_meta(owner).expect("component meta");
+    assert_eq!(
+        a6_binding(&meta, "counter").return_wrapper_role,
+        Some(verter_type_expr::ReactiveWrapperRole::Ref),
+        "the requested subject must still resolve exactly"
+    );
+    assert_eq!(
+        ws.read_count("/workspace/src/cold.ts"),
+        0,
+        "the demand must not traverse an unrelated wrapper-shaped cold module"
+    );
+    // Positive control: the probe itself CAN see a read of that path, so the
+    // zero above is a real absence and not an inert counter.
+    let _ = host.ensure_indexed_ready("/workspace/src/cold.ts");
+    assert!(
+        ws.read_count("/workspace/src/cold.ts") > 0,
+        "control: the read probe must be capable of observing this path"
+    );
+}
+
+#[test]
+fn bare_template_subjects_fall_back_to_unique_define_props_fields() {
+    let host = make_host();
+    let cases = [
+        (
+            "/UnboundProps.vue",
+            "defineProps<{ variant: 'primary' | 'secondary' }>()",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/BoundBareProps.vue",
+            "const props = defineProps<{ variant: 'primary' | 'secondary' }>()",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/DefaultsBareProps.vue",
+            "const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), { variant: 'primary' })",
+            "variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/BoundMemberProps.vue",
+            "const props = defineProps<{ variant: 'primary' | 'secondary' }>()",
+            "props.variant",
+            vec!["primary", "secondary"],
+        ),
+        (
+            "/MissingBareProps.vue",
+            "defineProps<{ size: 'sm' | 'lg' }>()",
+            "variant",
+            vec![],
+        ),
+    ];
+    for (canonical, declarations, expression, expected) in cases {
+        upsert_vue(
+            &host,
+            canonical,
+            &format!(
+                r#"<script setup lang="ts">{declarations}</script>
+<template><div :class="{expression}" /></template>"#
+            ),
+        );
+        let template = host
+            .get_analysis(canonical)
+            .expect("analysis")
+            .template
+            .expect("template");
+        assert_eq!(
+            template.elements[0].dynamic_classes, expected,
+            "bare prop projection mismatch for {canonical}"
+        );
+    }
+}
+
+#[test]
+fn lazy_template_class_cache_revalidates_dependency_edits_and_missing_arrival() {
+    let host = make_host();
+    let canonical = "/workspace/src/DependencyDomain.vue";
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/types.ts",
+        "export type Variant = 'primary';",
+    );
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+import type { Variant } from './types'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        canonical,
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+    let profile = CompileProfile::default();
+    let query = || VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(canonical.to_string()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile.clone(),
+    };
+    let cold_compile = host
+        .get_virtual_file(query())
+        .expect("cold session compile");
+    assert!(!cold_compile.cache_hit);
+    let warm_compile = host
+        .get_virtual_file(query())
+        .expect("warm session compile");
+    assert!(
+        warm_compile.cache_hit,
+        "unchanged normal virtual-file compilation must reach its validated session warm hit"
+    );
+    let first = host.get_analysis(canonical).expect("analysis");
+    assert_eq!(
+        first.template.expect("template").elements[0].dynamic_classes,
+        ["primary"]
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/types.ts",
+        "export type Variant = 'secondary';",
+    );
+    let changed_compile = host
+        .get_virtual_file(query())
+        .expect("dependency-edited session compile");
+    assert!(
+        !changed_compile.cache_hit,
+        "a template-class dependency edit must reject the normal compile warm slot"
+    );
+    let second = host.get_analysis(canonical).expect("analysis");
+    assert_eq!(
+        second.template.expect("template").elements[0].dynamic_classes,
+        ["secondary"],
+        "the raw-template warm slot must validate its semantic dependency signature"
+    );
+
+    let missing = "/workspace/src/MissingArrival.vue";
+    upsert_vue(
+        &host,
+        missing,
+        r#"<script setup lang="ts">
+import type { Later } from './later'
+const variant: Later = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let initial = host.get_analysis(missing).expect("analysis");
+    assert!(initial.template.expect("template").elements[0]
+        .dynamic_classes
+        .is_empty());
+    assert!(
+        host.derived_raw_cache()
+            .get(missing)
+            .is_none_or(|derived| derived.raw_template_analysis().is_none()),
+        "ReturnOnly missing-dependency facts must not warm the raw-template slot"
+    );
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/later.ts",
+        "export type Later = 'arrived';",
+    );
+    host.set_import_dependencies(
+        missing,
+        vec![exact_dependency("./later", "/workspace/src/later.ts")],
+    );
+    let arrived = host.get_analysis(missing).expect("analysis");
+    assert_eq!(
+        arrived.template.expect("template").elements[0].dynamic_classes,
+        ["arrived"]
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn base_content_dependency_class_facts_are_fresh_but_never_admitted() {
+    let host = strict_host();
+    let profile = CompileProfile {
+        requested_mode: CompileCacheMode::Content,
+        ..CompileProfile::default()
+    };
+    let compile = |canonical: &str| {
+        host.get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .expect("content compile")
+    };
+
+    let edited = "/workspace/src/ContentDependency.vue";
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/content-types.ts",
+        "export type Variant = 'primary';",
+    );
+    upsert_vue(
+        &host,
+        edited,
+        r#"<script setup lang="ts">
+import type { Variant } from './content-types'
+const variant: Variant = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    host.set_import_dependencies(
+        edited,
+        vec![exact_dependency(
+            "./content-types",
+            "/workspace/src/content-types.ts",
+        )],
+    );
+    let first = compile(edited);
+    assert_eq!(first.actual_mode, CompileCacheMode::Content);
+    assert!(!first.cache_hit);
+    assert_eq!(
+        host.get_analysis(edited)
+            .expect("first analysis")
+            .template
+            .expect("template")
+            .elements[0]
+            .dynamic_classes,
+        ["primary"]
+    );
+    assert_eq!(host.compile_output_pure_content_entry_count(), 0);
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/content-types.ts",
+        "export type Variant = 'secondary';",
+    );
+    let second = compile(edited);
+    assert_eq!(second.actual_mode, CompileCacheMode::Content);
+    assert!(!second.cache_hit);
+    assert_eq!(
+        host.get_analysis(edited)
+            .expect("edited analysis")
+            .template
+            .expect("template")
+            .elements[0]
+            .dynamic_classes,
+        ["secondary"]
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "dependency-derived Content output must remain return-only after an edit"
+    );
+
+    let arrival = "/workspace/src/ContentArrival.vue";
+    upsert_vue(
+        &host,
+        arrival,
+        r#"<script setup lang="ts">
+import type { Later } from './content-later'
+const variant: Later = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let missing = compile(arrival);
+    assert_eq!(missing.actual_mode, CompileCacheMode::Content);
+    assert!(!missing.cache_hit);
+    assert!(host
+        .get_analysis(arrival)
+        .expect("missing analysis")
+        .template
+        .expect("template")
+        .elements[0]
+        .dynamic_classes
+        .is_empty());
+    assert_eq!(host.compile_output_pure_content_entry_count(), 0);
+
+    upsert_non_sfc(
+        &host,
+        "/workspace/src/content-later.ts",
+        "export type Later = 'arrived';",
+    );
+    host.set_import_dependencies(
+        arrival,
+        vec![exact_dependency(
+            "./content-later",
+            "/workspace/src/content-later.ts",
+        )],
+    );
+    let arrived = compile(arrival);
+    assert_eq!(arrived.actual_mode, CompileCacheMode::Content);
+    assert!(!arrived.cache_hit);
+    assert_eq!(
+        host.get_analysis(arrival)
+            .expect("arrival analysis")
+            .template
+            .expect("template")
+            .elements[0]
+            .dynamic_classes,
+        ["arrived"]
+    );
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "missing-dependency arrival must not seed the pure-content cache"
+    );
+}
+
+/// A template-class subject the class-fact builder cannot join is a DEMAND
+/// outcome, not a cacheability verdict about the whole compile.
+///
+/// A `v-for` alias is neither a script binding nor a `defineProps` field, so
+/// its row is `TemplateClassSubject::Unresolved` and the artifact completeness
+/// is `ReturnOnly`. That must decline ONLY the class-fact-bearing rails (the
+/// raw-template slot's semantic signature and the pure-content publish), never
+/// taint the ENCLOSING compile tracer: an ordinary, diagnostic-free SFC must
+/// keep its Session compile cache and its persisted raw-template analysis.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn unjoinable_class_subjects_keep_the_enclosing_compile_cacheable() {
+    let host = make_host();
+    let compile = |canonical: &str| {
+        host.get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: CompileProfile::default(),
+        })
+        .expect("compile")
+    };
+
+    // (1) A `v-for` alias in a `:class` position — a completely valid SFC.
+    let loop_alias = "/workspace/src/LoopAlias.vue";
+    upsert_vue(
+        &host,
+        loop_alias,
+        r#"<script setup lang="ts">
+const items = ['a', 'b']
+</script>
+<template>
+  <div v-for="item in items" :key="item" :class="item" />
+</template>"#,
+    );
+    let first = compile(loop_alias);
+    assert!(!first.cache_hit, "the first compile is cold");
+    let second = compile(loop_alias);
+    assert!(
+        second.cache_hit,
+        "an unjoinable `v-for` alias class subject must not make the whole \
+         compile permanently non-cacheable"
+    );
+
+    // (2) An unresolvable IMPORTED class type — the row is `Unresolved`
+    // through a missing dependency rather than an unjoinable subject.
+    let missing_dep = "/workspace/src/MissingClassType.vue";
+    upsert_vue(
+        &host,
+        missing_dep,
+        r#"<script setup lang="ts">
+import type { Absent } from './absent-module'
+const variant: Absent = null as never
+</script>
+<template><div :class="variant" /></template>"#,
+    );
+    let cold = compile(missing_dep);
+    assert!(!cold.cache_hit, "the first compile is cold");
+    let warm = compile(missing_dep);
+    assert!(
+        warm.cache_hit,
+        "an unresolvable imported class type must not make the whole compile \
+         permanently non-cacheable"
+    );
+
+    // NEGATIVE half: the two NARROW class-fact rails are still in force. A
+    // `ReturnOnly` fact set publishes no closed domain AND still declines the
+    // raw-template semantic slot (`template_class_signature == None`), so a
+    // later dependency arrival cannot be served a stale empty domain.
+    assert!(
+        host.get_analysis(loop_alias)
+            .expect("loop analysis")
+            .template
+            .expect("template")
+            .elements
+            .iter()
+            .all(|element| element.dynamic_classes.is_empty()),
+        "an unjoinable subject must never publish a closed domain"
+    );
+    assert!(
+        host.get_analysis(missing_dep)
+            .expect("missing analysis")
+            .template
+            .expect("template")
+            .elements[0]
+            .dynamic_classes
+            .is_empty(),
+        "a missing-dependency subject must never publish a closed domain"
+    );
+    assert!(
+        host.derived_raw_cache()
+            .get(missing_dep)
+            .is_none_or(|derived| derived.raw_template_analysis().is_none()),
+        "a ReturnOnly class-fact set must still DECLINE the raw-template \
+         semantic slot — deleting the transitive taint must not weaken the \
+         narrow signature rail"
+    );
+
+    // ARMING CONTROL: the raw-template slot is not permanently closed. The
+    // same host/profile admits it for an SFC whose class subjects all join and
+    // resolve, so the `is_none()` assertion above is a real decline rather
+    // than a slot nothing could ever populate.
+    let resolved = "/workspace/src/ResolvedClass.vue";
+    upsert_vue(
+        &host,
+        resolved,
+        r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script>
+<template><div :class="variant" /></template>"#,
+    );
+    let _ = compile(resolved);
+    assert_eq!(
+        host.get_analysis(resolved)
+            .expect("resolved analysis")
+            .template
+            .expect("template")
+            .elements[0]
+            .dynamic_classes,
+        ["primary", "secondary"],
+        "a fully joined and resolved class subject still publishes its domain"
+    );
+    assert!(
+        host.derived_raw_cache()
+            .get(resolved)
+            .is_some_and(|derived| derived.raw_template_analysis().is_some()),
+        "a Complete class-fact set must still ADMIT the raw-template slot"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[should_panic(expected = "CorrelationMismatch")]
+fn content_override_template_class_facts_are_return_only_but_visible() {
+    let host = make_host();
+    let canonical = "/workspace/src/OverrideClasses.vue";
+    upsert_vue(
+        &host,
+        canonical,
+        r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div /></template>"#,
+    );
+    let profile = CompileProfile {
+        requested_mode: CompileCacheMode::Content,
+        ..CompileProfile::default()
+    };
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: canonical.to_string(),
+            compile_profile: profile.clone(),
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :class=\"variant\" />",
+            )],
+        })
+        .expect("override");
+    let template = host
+        .raw_template_analysis_for_file(canonical)
+        .expect("override template");
+    assert_eq!(
+        template.elements[0].dynamic_classes,
+        ["primary", "secondary"]
+    );
+    let response = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile,
+        })
+        .expect("content override virtual file");
+    assert!(!response.cache_hit);
+    assert_eq!(
+        host.compile_output_pure_content_entry_count(),
+        0,
+        "overlay-derived template-class output must never enter the base content store"
+    );
+    assert!(
+        host.derived_raw_cache()
+            .get(canonical)
+            .is_none_or(|derived| derived.raw_template_analysis().is_none()),
+        "content override facts are served return-only and never base-published"
+    );
+}
+
+/// The file's authoritative current `whole_hash`, for probing whether the
+/// content-addressed artifact store already holds its `IndexedReady`.
+fn current_whole_hash(host: &VerterHost, canonical: &str) -> verter_semantic::analysis::Hash16 {
+    let snapshot = host
+        .scheduler
+        .try_get_source(canonical)
+        .expect("source snapshot");
+    snapshot
+        .downcast_data::<crate::host_executor::HostSourceData>()
+        .expect("host source data")
+        .parse
+        .whole_hash
+}
+
+/// The persisted raw-template entry's `(template, class-fact signature)` pair,
+/// or `None` when the slot declined.
+fn persisted_raw_template(
+    host: &VerterHost,
+    canonical: &str,
+) -> Option<(
+    Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    crate::fact_signature_helpers::ReadSetSignature,
+)> {
+    host.derived_raw_cache().get(canonical).and_then(|derived| {
+        derived.raw_template_analysis().map(|entry| {
+            (
+                Arc::clone(&entry.template),
+                entry.template_class_signature.clone(),
+            )
+        })
+    })
+}
+
+/// A COLD artifact store is not a fence.
+///
+/// The lazy `raw_template_analysis_for_file` lane attests
+/// `store_published = true` — live scheduler reads joined at one generation.
+/// Whether the content-addressed `FileArtifactStore` happens to hold an
+/// `IndexedReady` at that `whole_hash` yet is a CACHE-WARMTH fact: not an
+/// overlay, not a fenced input, and not one of the enumerated `ReturnOnly`
+/// triggers (overflow, budget exhaustion, cancellation, generation
+/// supersession, incomplete self-rooting, unresolved provenance). Folding it
+/// into the attestation made a zero-`:class` file's class-fact set
+/// `ReturnOnly`, which made `complete_dependency_signature()` `None`, which
+/// made `RawTemplateSlotAdmission::admitted_generation()` decline — so a file
+/// with NO class content lost its raw-template persist entirely.
+///
+/// POSITIVE: the persist happens on a cold store, and the recorded signature
+/// is EMPTY — a dependency-free fact set is an empty PRESENT signature, never
+/// an absent one (empty and overflowed/absent are different states).
+///
+/// NEGATIVE (same test): an otherwise identical file whose only class subject
+/// is unresolvable still declines the slot — the fix restored the persist
+/// without widening what `ReturnOnly` declines.
+#[test]
+fn cold_artifact_store_does_not_fence_a_store_published_class_fact_set() {
+    let host = make_host();
+
+    let zero_subject = "/workspace/src/ColdZeroSubject.vue";
+    upsert_vue(
+        &host,
+        zero_subject,
+        r#"<script setup lang="ts">
+const label = 'plain'
+</script><template><div>{{ label }}</div></template>"#,
+    );
+
+    // FIXTURE INVARIANT: the lane must run against a COLD artifact store, so
+    // it takes the cold-seed fork. A warm `IndexedReady` would take the base
+    // fork and the test would prove nothing about the cold classification.
+    let whole_hash = current_whole_hash(&host, zero_subject);
+    assert!(
+        host.project_type_store()
+            .indexed()
+            .get(zero_subject, whole_hash)
+            .is_none(),
+        "fixture invariant: no IndexedReady may be cached at the file's current \
+         whole_hash before the lazy lane runs",
+    );
+
+    let template = host
+        .raw_template_analysis_for_file(zero_subject)
+        .expect("the store-published lazy lane must serve its template");
+    assert!(
+        template
+            .elements
+            .iter()
+            .all(|element| element.dynamic_classes.is_empty()),
+        "fixture invariant: the file carries no `:class` subject at all",
+    );
+
+    let (_, signature) = persisted_raw_template(&host, zero_subject).expect(
+        "a store-published lane must persist its raw template even when the \
+         artifact store is COLD — artifact-cache warmth is not a fence and \
+         cannot decide publication scope",
+    );
+    assert!(
+        !signature.overflowed,
+        "a dependency-free class-fact set is not an overflow",
+    );
+    assert!(
+        signature.facts.is_empty(),
+        "a dependency-free class-fact set records an EMPTY PRESENT signature; \
+         got {} facts",
+        signature.facts.len(),
+    );
+
+    // NEGATIVE half — the decline is not widened. The same host, the same
+    // lane, the same store-published attestation: a file whose ONLY class
+    // subject is unresolvable has no rail that could fire when the dependency
+    // later arrives, so it must still decline.
+    let unresolvable = "/workspace/src/ColdUnresolvableSubject.vue";
+    upsert_vue(
+        &host,
+        unresolvable,
+        r#"<script setup lang="ts">
+import type { Absent } from './absent-module'
+const variant: Absent = null as never
+</script><template><div :class="variant" /></template>"#,
+    );
+    let unresolvable_template = host
+        .raw_template_analysis_for_file(unresolvable)
+        .expect("the lane still serves the template");
+    assert!(
+        unresolvable_template.elements[0].dynamic_classes.is_empty(),
+        "an unresolvable class subject publishes no closed domain",
+    );
+    assert!(
+        persisted_raw_template(&host, unresolvable).is_none(),
+        "an unresolvable class row keeps the raw-template slot DECLINED — \
+         admitting it would serve a stale empty domain forever",
+    );
+}
+
+/// Run the lazy raw-template lane once on a fresh host, optionally pre-warming
+/// the file's `IndexedReady` artifact first so the lane takes the BASE fork
+/// instead of the cold-seed fork. Returns the published class domain of the
+/// first element and the persisted entry's class-fact signature — `None` when
+/// the slot declined.
+#[allow(clippy::type_complexity)]
+fn lazy_template_lane_arm(
+    canonical: &str,
+    owner_source: &str,
+    dependency: Option<(&str, &str, &str)>,
+    prewarm_indexed: bool,
+) -> (
+    Vec<String>,
+    Option<crate::fact_signature_helpers::ReadSetSignature>,
+) {
+    let host = make_host();
+    if let Some((_, dep_path, dep_source)) = dependency {
+        upsert_non_sfc(&host, dep_path, dep_source);
+    }
+    upsert_vue(&host, canonical, owner_source);
+    if let Some((specifier, dep_path, _)) = dependency {
+        host.set_import_dependencies(canonical, vec![exact_dependency(specifier, dep_path)]);
+    }
+
+    let whole_hash = current_whole_hash(&host, canonical);
+    if prewarm_indexed {
+        let indexed = host
+            .ensure_indexed_ready(canonical)
+            .expect("the pre-warm indexing read must materialise IndexedReady");
+        assert_eq!(
+            indexed.whole_hash, whole_hash,
+            "warm-arm invariant: the pre-warmed artifact is at the file's CURRENT hash",
+        );
+    }
+    assert_eq!(
+        host.project_type_store()
+            .indexed()
+            .get(canonical, whole_hash)
+            .is_some(),
+        prewarm_indexed,
+        "arm invariant: the artifact store's warmth for this whole_hash must be \
+         exactly what the arm asked for (prewarm_indexed = {prewarm_indexed})",
+    );
+
+    let template = host
+        .raw_template_analysis_for_file(canonical)
+        .expect("the lazy lane must serve its template");
+    let domain = template.elements[0].dynamic_classes.clone();
+    (
+        domain,
+        persisted_raw_template(&host, canonical).map(|(_, signature)| signature),
+    )
+}
+
+/// The CROSS-FILE facts a signature recorded — every fact attributed to a
+/// canonical other than `owner`. These are the rails the owner's own
+/// `source_generation` stamp cannot see, so losing one is the only way a
+/// different observation granularity could actually weaken invalidation.
+fn cross_file_facts(
+    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    owner: &str,
+) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+    signature
+        .facts
+        .iter()
+        .filter(|fact| fact.canonical_id().is_some_and(|id| id != owner))
+        .cloned()
+        .collect()
+}
+
+/// The owner-rooted `FileWholeHash` facts a signature recorded — the rail every
+/// entry must carry.
+fn owner_whole_hash_facts(
+    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    owner: &str,
+) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+    signature
+        .facts
+        .iter()
+        .filter(|fact| {
+            matches!(fact, crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                if canonical_id == owner)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Cache population is path-independent: the raw-template persist verdict, the
+/// served template, and the recorded class-fact invalidation rail must not
+/// depend on whether the `IndexedReady` artifact happened to be cached first.
+///
+/// Two hosts, the SAME bytes, two orders — one pre-warms the artifact store
+/// through `ensure_indexed_ready` (the lane then takes the base fork), one does
+/// not (the cold-seed fork). Run for a purely LOCAL closed domain and again for
+/// a CROSS-FILE one.
+///
+/// On the recorded signature this asserts what path-independence actually
+/// requires, not raw set equality: the same owner `FileWholeHash` rooting, and
+/// the SAME cross-file fact set — no rail the owner's `source_generation` stamp
+/// cannot see may be lost by taking the cold fork. The two forks legitimately
+/// differ by OWNER-SCOPED incidental observations (the base context reads the
+/// owner's already-materialised route surface; the cold-seed context resolves
+/// without it), and a signature must record what its compute actually observed
+/// — fabricating the missing observation to force byte equality would be the
+/// real defect. The cross-file pair proves the cross-file assertion is not
+/// vacuous: its shared fact set is non-empty.
+///
+/// DISCRIMINATION: the last arm's verdict is legitimately `false` (a
+/// content-override lane never populates the base slot), so the agreeing
+/// verdicts above are not "both `true` by construction".
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[should_panic(expected = "CorrelationMismatch")]
+fn raw_template_persist_is_independent_of_indexed_artifact_warmth() {
+    // ── Pair 1: a purely LOCAL closed domain ──
+    const LOCAL: &str = "/workspace/src/WarmthIndependentLocal.vue";
+    const LOCAL_SOURCE: &str = r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+
+    let (cold_domain, cold_signature) = lazy_template_lane_arm(LOCAL, LOCAL_SOURCE, None, false);
+    let (warm_domain, warm_signature) = lazy_template_lane_arm(LOCAL, LOCAL_SOURCE, None, true);
+    let cold_signature = cold_signature.expect(
+        "path-independent cache population: the COLD-store order must reach the \
+         SAME persist verdict as the warm-store order — a cold artifact store is \
+         not a fence",
+    );
+    let warm_signature =
+        warm_signature.expect("the warm-store order persists (the pre-fix behaviour)");
+
+    assert_eq!(
+        cold_domain,
+        ["primary", "secondary"],
+        "the cold-store order still publishes the closed domain",
+    );
+    assert_eq!(
+        cold_domain, warm_domain,
+        "the served class domain must not depend on artifact-cache warmth",
+    );
+    assert_eq!(
+        cold_signature.overflowed, warm_signature.overflowed,
+        "the overflow state must not depend on artifact-cache warmth",
+    );
+    let cold_root = owner_whole_hash_facts(&cold_signature, LOCAL);
+    assert!(
+        !cold_root.is_empty(),
+        "every admitted entry roots on the owner's own FileWholeHash",
+    );
+    assert_eq!(
+        cold_root,
+        owner_whole_hash_facts(&warm_signature, LOCAL),
+        "the owner rooting must not depend on artifact-cache warmth",
+    );
+    assert_eq!(
+        cross_file_facts(&cold_signature, LOCAL),
+        cross_file_facts(&warm_signature, LOCAL),
+        "no cross-file rail may be lost by taking the cold fork: cold={:?} warm={:?}",
+        cold_signature.facts,
+        warm_signature.facts,
+    );
+
+    // ── Pair 2: a CROSS-FILE closed domain — proves the cross-file assertion
+    // above is not vacuously satisfied by two empty sets. ──
+    const IMPORTED: &str = "/workspace/src/WarmthIndependentImported.vue";
+    const IMPORTED_SOURCE: &str = r#"<script setup lang="ts">
+import type { Variant } from './warmth-types'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+    let dependency = Some((
+        "./warmth-types",
+        "/workspace/src/warmth-types.ts",
+        "export type Variant = 'primary' | 'secondary';",
+    ));
+
+    let (cold_imported_domain, cold_imported_signature) =
+        lazy_template_lane_arm(IMPORTED, IMPORTED_SOURCE, dependency, false);
+    let (warm_imported_domain, warm_imported_signature) =
+        lazy_template_lane_arm(IMPORTED, IMPORTED_SOURCE, dependency, true);
+    let cold_imported_signature = cold_imported_signature.expect(
+        "path-independent cache population: a cross-file closed domain persists \
+         from the COLD-store order too",
+    );
+    let warm_imported_signature =
+        warm_imported_signature.expect("the warm-store order persists the cross-file domain");
+
+    assert_eq!(
+        cold_imported_domain,
+        ["primary", "secondary"],
+        "the cold-store order resolves the IMPORTED closed domain",
+    );
+    assert_eq!(
+        cold_imported_domain, warm_imported_domain,
+        "the served cross-file class domain must not depend on artifact-cache warmth",
+    );
+    let cold_cross = cross_file_facts(&cold_imported_signature, IMPORTED);
+    assert!(
+        !cold_cross.is_empty(),
+        "non-vacuity: a cross-file class domain records at least one cross-file \
+         rail; got {:?}",
+        cold_imported_signature.facts,
+    );
+    assert_eq!(
+        cold_cross,
+        cross_file_facts(&warm_imported_signature, IMPORTED),
+        "no cross-file rail may be lost by taking the cold fork: cold={:?} warm={:?}",
+        cold_imported_signature.facts,
+        warm_imported_signature.facts,
+    );
+    assert_eq!(
+        owner_whole_hash_facts(&cold_imported_signature, IMPORTED),
+        owner_whole_hash_facts(&warm_imported_signature, IMPORTED),
+        "the owner rooting must not depend on artifact-cache warmth",
+    );
+
+    // ── DISCRIMINATION: a verdict that is legitimately `false`. A
+    // content-override lane is a genuinely fenced input and must never populate
+    // the base slot, so the agreeing verdicts above are a real agreement rather
+    // than an unfalsifiable one. ──
+    let override_host = make_host();
+    upsert_vue(&override_host, LOCAL, LOCAL_SOURCE);
+    let profile = CompileProfile::default();
+    let _ = override_host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: LOCAL.to_string(),
+            compile_profile: profile,
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :class=\"variant\" /><span :class=\"variant\" />",
+            )],
+        })
+        .expect("template override must apply");
+    let override_template = override_host
+        .raw_template_analysis_for_file(LOCAL)
+        .expect("the override lane must serve its own template");
+    assert_eq!(
+        override_template.elements.len(),
+        2,
+        "discrimination invariant: the served template is the OVERRIDE's template",
+    );
+    assert_eq!(
+        override_template.elements[0].dynamic_classes,
+        ["primary", "secondary"],
+        "discrimination invariant: the override lane still SERVES its resolved \
+         domain — it is fenced from publishing, not from resolving",
+    );
+    assert!(
+        persisted_raw_template(&override_host, LOCAL).is_none(),
+        "a content-override lane is a fenced INPUT and must never populate the \
+         base raw-template slot — this is the arm whose verdict is legitimately \
+         false, so the arms above are not both true by construction",
+    );
+}
+
+/// THE DIRECT GUARD on the ratified sentence: "overlay or fenced inputs remain
+/// return-only and cannot populate base caches".
+///
+/// Three arms, all NEGATIVE, one per producer of a genuine fence. Each arm
+/// first proves its lane still RESOLVES and SERVES the closed domain, so the
+/// decline is a publication fence and not a resolution failure — a decline that
+/// happened because nothing resolved would guard nothing.
+///
+/// 1. content-override bytes (`compute_override_template_analysis` →
+///    `build_template_analysis`);
+/// 2. store-published bytes over a NON-CURRENT cold seed
+///    (`ColdSeedHostStoreView::is_current() == false`) with a fully resolvable
+///    closed domain — no base slot AND no pure-content entry;
+/// 3. session-overlay bytes (`get_analysis_via_view`, `store_published == false`).
+///
+/// WHICH ARM CATCHES WHICH REGRESSION — recorded, because the three arms are
+/// NOT equally railed, and claiming otherwise would overstate them.
+///
+/// * Arm 2's base-slot decline is carried by the class-fact publication scope
+///   ALONE: removing the fenced arm from the builder turns it RED, as does
+///   making the scope ignore the seed's currentness. It is the discriminating
+///   arm for this rail.
+/// * Arms 1 and 3 are genuinely fenced lanes whose base-slot decline is held by
+///   rails OUTSIDE the class-fact scope, so no scope mutation can falsify them:
+///   `build_template_analysis` (arm 1) has no persist site at all, and the
+///   overlay builder (arm 3) attests `source_generation: None` on top of
+///   `store_published: false` — either alone declines. They are therefore
+///   characterization guards on the ratified sentence (they fire if a future
+///   change adds a persist site to the override lane, or lets an overlay lane
+///   attest a node generation), not discriminators of this change. Their
+///   non-vacuity halves — each fenced lane still RESOLVES and SERVES its own
+///   closed domain — are the assertions that discriminate here: a fence that
+///   suppressed resolution rather than publication would fail them.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+#[should_panic(expected = "CorrelationMismatch")]
+fn fenced_and_overridden_class_fact_lanes_still_never_populate_the_base_slot() {
+    const SOURCE: &str = r#"<script setup lang="ts">
+type Variant = 'primary' | 'secondary'
+const variant: Variant = 'primary'
+</script><template><div :class="variant" /></template>"#;
+
+    // ── Arm 1: content-override bytes ──
+    {
+        let host = make_host();
+        let canonical = "/workspace/src/FencedOverride.vue";
+        upsert_vue(&host, canonical, SOURCE);
+        let profile = CompileProfile::default();
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: canonical.to_string(),
+                compile_profile: profile,
+                overrides: vec![BlockOverrideEntry::unissued_for_test(
+                    "<span :class=\"variant\" />",
+                )],
+            })
+            .expect("template override must apply");
+        let served = host
+            .raw_template_analysis_for_file(canonical)
+            .expect("the override lane must serve its own template");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["primary", "secondary"],
+            "arm 1 non-vacuity: the override lane RESOLVES and SERVES the closed \
+             domain — it is fenced from publishing, not from resolving",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 1: content-override bytes must never populate the base \
+             raw-template slot",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 1: content-override facts must never seed the pure-content cache",
+        );
+    }
+
+    // ── Arm 2: store-published bytes over a NON-CURRENT cold seed ──
+    {
+        let host = make_host();
+        let canonical = "/workspace/src/FencedStaleSeed.vue";
+        upsert_vue(&host, canonical, SOURCE);
+        // The lane must take the COLD-SEED fork, where the seed's own
+        // currentness is the second half of the derivation. A warm
+        // `IndexedReady` would take the base fork and the seed would never be
+        // consulted.
+        let whole_hash = current_whole_hash(&host, canonical);
+        assert!(
+            host.project_type_store()
+                .indexed()
+                .get(canonical, whole_hash)
+                .is_none(),
+            "arm 2 invariant: the artifact store must be cold so the lane takes \
+             the cold-seed fork",
+        );
+
+        // Force every store-view publish to decline WITHOUT advancing any token
+        // dimension, so the read exhausts its bounded retry and hands back a
+        // `StoreViewRead::ReturnOnly` — a known-stale seed and nothing else.
+        let _ = host.resolver_store_view_read();
+        host.bump_store_view_epoch();
+        crate::resolver_store::HostStoreView::arm_reset_fence_decline_always_for_tests();
+        let seed_is_stale = !host.resolver_store_view_read().is_current_for_tests();
+        let served = host.raw_template_analysis_for_file(canonical);
+        crate::resolver_store::HostStoreView::disarm_reset_fence_decline_always_for_tests();
+
+        assert!(
+            seed_is_stale,
+            "arm 2 choreography: the armed knob must produce a known non-current \
+             store-view read",
+        );
+        let served = served.expect("arm 2: a fenced lane still SERVES its caller");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["primary", "secondary"],
+            "arm 2 non-vacuity: the domain is fully resolvable, so the decline \
+             below is attributable to the non-current seed alone",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 2: store-published bytes resolved against a KNOWN-STALE seed are \
+             return-only — they must not populate the base raw-template slot",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 2: a non-current seed must not seed the pure-content cache",
+        );
+    }
+
+    // ── Arm 3: session-overlay bytes ──
+    {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+        let canonical = "/workspace/src/FencedOverlay.vue";
+        upsert_vue(&host, canonical, SOURCE);
+
+        let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
+            rustc_hash::FxHashMap::default();
+        overlays.insert(
+            canonical.to_string(),
+            Arc::from(
+                r#"<script setup lang="ts">
+type Variant = 'overlaid-a' | 'overlaid-b'
+const variant: Variant = 'overlaid-a'
+</script><template><div :class="variant" /></template>"#,
+            ),
+        );
+        let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+        let snapshot = host
+            .get_analysis_via_view(canonical, &view)
+            .expect("the overlay arm must serve the overlay snapshot");
+        let served = snapshot
+            .template
+            .as_ref()
+            .expect("the overlay caller must be served a template");
+        assert_eq!(
+            served.elements[0].dynamic_classes,
+            ["overlaid-a", "overlaid-b"],
+            "arm 3 non-vacuity: the overlay lane RESOLVES and SERVES the OVERLAY's \
+             own closed domain — it is fenced from publishing, not from resolving",
+        );
+        assert!(
+            persisted_raw_template(&host, canonical).is_none(),
+            "arm 3: session-overlay bytes must never populate the base \
+             raw-template slot (overlay results never populate base caches)",
+        );
+        assert_eq!(
+            host.compile_output_pure_content_entry_count(),
+            0,
+            "arm 3: overlay facts must never seed the pure-content cache",
+        );
+    }
 }
 
 /// @ai-generated - template slots computed even when type deps are unresolved
@@ -12308,7 +16765,11 @@ defineProps<{ ui: typeof importedTheme }>()
     let ui_ty = crate::test_only::semantic_source_probe::demand_type_expr(
         &host,
         "/App.vue",
-        ui_prop.type_source.present().expect("typed ui prop"),
+        ui_prop
+            .publication
+            .source_position()
+            .present()
+            .expect("typed ui prop"),
     )
     .unwrap_or_else(|| panic!("ui's published source must demand-materialize"));
     assert!(

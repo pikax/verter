@@ -1,11 +1,9 @@
-//! `impl VerterHost` — read-side scheduler / override-aware views.
+//! `impl VerterHost` — read-side scheduler views.
 //!
 //! Contains:
 //! - lock-free reads from the scheduler's `ArcSwap`-backed source,
 //!   analysis, and artifact snapshots
-//! - override-aware "effective" projections of file state, style
-//!   analyses, and meta (profile content/style overrides merged on top
-//!   of the raw scheduler reads)
+//! - request-pinned projections of raw file state, style analyses, and meta
 //!
 //! These methods do not mutate the scheduler or compile cache; they are
 //! the read surface consumers use to assemble compile inputs.
@@ -31,6 +29,63 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<Arc<verter_scheduler::node::SourceSnapshot>> {
         self.scheduler.try_get_source(canonical_id)
+    }
+
+    /// Clone the sole registered envelope owner for a committed carrier source.
+    #[doc(hidden)]
+    pub fn registered_file_structure(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
+        self.scheduler
+            .try_get_source(&canonical_id)?
+            .downcast_data::<host_executor::HostSourceData>()?
+            .structure
+            .clone()
+    }
+
+    /// Clone the structure and revision stamp from one committed source record.
+    #[doc(hidden)]
+    pub fn registered_file_structure_snapshot(
+        &self,
+        canonical_id: &str,
+    ) -> Option<(
+        crate::carrier_publication_store::RegisteredFileStructure,
+        crate::carrier_publication_store::HostSourceRevisionToken,
+    )> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
+        let source = self.scheduler.try_get_source(&canonical_id)?;
+        let data = source.downcast_data::<host_executor::HostSourceData>()?;
+        Some((data.structure.clone()?, data.revision_token))
+    }
+
+    /// Return the projection host's local revision stamp for the same Source-stage
+    /// record that owns the registered carrier structure.
+    #[doc(hidden)]
+    pub fn registered_source_revision_token(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::carrier_publication_store::HostSourceRevisionToken> {
+        let canonical_id = self.resolve_alias_or_canonical(canonical_id);
+        Some(
+            self.scheduler
+                .try_get_source(&canonical_id)?
+                .downcast_data::<host_executor::HostSourceData>()?
+                .revision_token,
+        )
+    }
+
+    /// Return the content-free schema-8 projection for one committed carrier.
+    /// The projection is derived solely from the registered envelope.
+    pub fn ordered_sfc_structure(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis> {
+        let structure = self.registered_file_structure(canonical_id)?;
+        Some(crate::host_resolve::ordered_sfc_structure_analysis(
+            &structure,
+        ))
     }
 
     /// Get the scheduler's analysis snapshot for a file.
@@ -137,26 +192,14 @@ impl VerterHost {
     pub(crate) fn effective_file_state_from_snapshot(
         &self,
         snap: &Arc<verter_scheduler::node::SourceSnapshot>,
-        canonical_id: &str,
+        _canonical_id: &str,
         profile: Option<u64>,
     ) -> Option<EffectiveFileState> {
         use crate::host_executor::HostSourceData;
 
         let hd = snap.downcast_data::<HostSourceData>()?;
 
-        if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache().get(canonical_id) {
-                if let Some(ovr) = cc.content_overrides.get(&profile_hash) {
-                    return Some(EffectiveFileState {
-                        source: ovr.source.clone(),
-                        meta: ovr.parse.meta.clone(),
-                        script_analysis: ovr.parse.script_analysis.clone(),
-                        framework_parse: ovr.framework_parse.clone(),
-                        whole_hash: ovr.parse.whole_hash,
-                    });
-                }
-            }
-        }
+        let _ = profile;
 
         Some(EffectiveFileState {
             source: snap.source.clone(),
@@ -167,15 +210,15 @@ impl VerterHost {
         })
     }
 
-    /// Override-aware style analyses for a profile.
+    /// Raw style analyses from the scheduler.
     ///
-    /// Merges per-index overrides from `StyleOverrideWithAnalysis` with raw
-    /// style analyses from the scheduler. Returns `None` if file not in scheduler.
+    /// Processed block content is compiler input and never mutates the carrier's
+    /// authored analysis. Returns `None` if the file is not in the scheduler.
     #[allow(dead_code)] // Used by css_var_flow migration (upcoming)
     pub(crate) fn effective_style_analyses(
         &self,
         canonical_id: &str,
-        profile: Option<u64>,
+        _profile: Option<u64>,
     ) -> Option<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
         use crate::host_executor::HostAnalysisData;
 
@@ -183,55 +226,18 @@ impl VerterHost {
         let ad = analysis_snap.downcast_data::<HostAnalysisData>()?;
         let raw = &ad.style_analyses;
 
-        if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache().get(canonical_id) {
-                if let Some(so) = cc.style_overrides.get(&profile_hash) {
-                    let merged: Vec<_> = raw
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, raw_sa)| {
-                            if let Some(Some(override_sa)) = so.analyses.get(idx) {
-                                override_sa.clone()
-                            } else {
-                                raw_sa.clone()
-                            }
-                        })
-                        .collect();
-                    return Some(merged);
-                }
-            }
-        }
-
         Some(raw.as_ref().clone())
     }
 
-    /// Override-aware meta projection: applies `style_langs` overrides
-    /// from `StyleOverrideWithAnalysis` over a CALLER-SUPPLIED base
-    /// meta. The compile pipeline passes the meta from its single
-    /// per-request source snapshot (see
-    /// [`Self::effective_file_state_from_snapshot`]) so the effective
-    /// meta cannot be derived from a newer source version than the
-    /// compiled bytes.
+    /// Return the carrier meta from the request's pinned source snapshot.
+    /// Processed block metadata is projected directly into compiler inputs and
+    /// never mutates or overlays this authored carrier metadata.
     pub(crate) fn effective_meta_from_base(
         &self,
-        mut meta: FileMeta,
-        canonical_id: &str,
-        profile: Option<u64>,
+        meta: FileMeta,
+        _canonical_id: &str,
+        _profile: Option<u64>,
     ) -> FileMeta {
-        if let Some(profile_hash) = profile {
-            if let Some(cc) = self.compile_cache().get(canonical_id) {
-                if let Some(so) = cc.style_overrides.get(&profile_hash) {
-                    for (idx, lang) in so.lang_overrides.iter().enumerate() {
-                        if let Some(ref l) = lang {
-                            if idx < meta.style_langs.len() {
-                                meta.style_langs[idx] = Some(l.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         meta
     }
 }

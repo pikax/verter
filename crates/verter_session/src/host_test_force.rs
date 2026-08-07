@@ -93,6 +93,12 @@ pub(crate) struct TestForceKnobs {
     /// hazard). `#[cfg(test)]`-gated: the only reader is the `#[cfg(test)]`
     /// override at the top of `ensure_indexed_ready_serve`.
     pub(crate) force_indexed_ready_serve_fence_for_tests: std::sync::atomic::AtomicBool,
+    /// Force the owner import-route witness to take its typed refusal arm.
+    /// Decision facts make the former over-cap fixture impractically large;
+    /// the workspace Decision-DAG contract tests cover the upstream
+    /// `ResolutionPublication::Refused` producers, while this seam isolates
+    /// the session-side `UnrootableRoute` propagation and reuse carrier.
+    pub(crate) force_import_route_witness_refusal_for_tests: std::sync::atomic::AtomicBool,
     /// Number of synthetic `FileWholeHash` observations every
     /// `fact_signature_helpers::install_fact_tracer` scope fans into its
     /// freshly-installed tracer. A value above `FACT_SIGNATURE_CAP` (1024)
@@ -104,6 +110,11 @@ pub(crate) struct TestForceKnobs {
     /// process-global concurrency hazard). `#[cfg(test)]`-gated: the only reader
     /// is the `#[cfg(test)]` injection at the shared tracer installer.
     pub(crate) force_fact_tracer_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Mark every freshly-installed tracer as having consumed one typed
+    /// non-cacheable read. Unlike the overflow injector, this knob is
+    /// independent of fact cardinality and therefore remains a valid
+    /// anti-poisoning fixture when observed domains compact.
+    pub(crate) force_fact_tracer_non_cacheable_read: std::sync::atomic::AtomicBool,
     /// A rendezvous every `macro_type_arg_hot_ref` demand waits on AFTER its
     /// lock-free warm-miss check and BEFORE it takes the per-slot build lock.
     /// The concurrent-first-demand singleflight test installs an N-party barrier

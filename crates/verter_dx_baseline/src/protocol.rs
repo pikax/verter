@@ -330,6 +330,12 @@ pub struct NormalizedHover {
     pub range_start: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_end: Option<u32>,
+    /// The provider's structured display signature, mirrored as a PLAIN string
+    /// (this baseline DTO derives `Deserialize`, which the branded
+    /// `rt::DisplaySignature` deliberately does not — the baseline records
+    /// what the provider returned, it never re-enters the display domain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_signature: Option<String>,
 }
 
 /// Normalized source location.
@@ -587,6 +593,10 @@ impl From<&rt::HoverInfo> for NormalizedHover {
             contents: h.contents.clone(),
             range_start: h.range_start,
             range_end: h.range_end,
+            display_signature: h
+                .display_signature
+                .as_ref()
+                .map(|signature| signature.as_display_str().to_string()),
         }
     }
 }
@@ -872,6 +882,7 @@ mod tests {
                 contents: "const x: string".to_string(),
                 range_start: Some(1),
                 range_end: Some(2),
+                display_signature: None,
             }),
         };
         let json = serde_json::to_string(&hover).unwrap();
@@ -1000,10 +1011,15 @@ mod tests {
             contents: "string".to_string(),
             range_start: Some(3),
             range_end: Some(9),
+            ..Default::default()
         };
         let n: NormalizedHover = (&hov).into();
         assert_eq!(n.contents, "string");
         assert_eq!(n.range_start, Some(3));
+        assert_eq!(
+            n.display_signature, None,
+            "a signature-less provider hover mirrors as absent, never fabricated"
+        );
 
         let diag = rt::TypeDiagnostic {
             message: "Cannot find name 'x'".to_string(),

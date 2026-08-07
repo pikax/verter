@@ -2,38 +2,28 @@
 //! shaping — the session's Vue-bridge extraction module.
 //!
 //! Owns:
-//! - `template_converter_inputs` — projects analysed imports / macros /
-//!   bindings into the `(all_imports, unions, props_binding_name)` tuple
-//!   consumed by `crate::template_convert::convert_raw_to_analysis`.
+//! - `template_converter_inputs` — projects analysed imports and value bindings
+//!   into runtime component-linkage pairs. Semantic class domains are
+//!   owned by the project semantic dispatcher.
 //! - `extract_vue_script_content` — public Vue-SFC `<script>` /
 //!   `<script setup>` position-preserving source builder used by the
 //!   eval-program pipeline. It copies each script block's content to its
 //!   RAW SFC byte range and whitespace-blanks every non-script byte, so
 //!   every OXC-produced span is SFC-absolute by construction. Carrier
-//!   parse spans are used when they agree with the raw scan; otherwise it
-//!   falls through to the raw scanner.
-//! - The forgiving raw-byte scanner used as a fall-back when the parser
-//!   produced lossy spans (`script_content_spans_from_*` and the ASCII
-//!   tag/needle helpers).
+//!   parser-owned spans are the sole geometry source.
 //! - The `<script setup generic="…">` type-parameter reader
 //!   (`sfc_script_setup_type_params`) and the component-meta
-//!   `populate_sfc_blocks_sidecar` — Vue-semantic leaves that open the
+//!   `populate_ordered_sfc_structure` — Vue-semantic leaves that open the
 //!   neutral parse artifact through the blessed `vue_parse()` accessor,
 //!   keeping `host_manage/**` free of Vue parse types. Generic parameters
 //!   BIND through the prepared-decl bundle's script-setup type bindings
 //!   (the dispatch `DeclarationScopePayload` rail), never through an eval
 //!   env.
 
-#[allow(clippy::type_complexity)]
 pub(crate) fn template_converter_inputs(
     imports: &[verter_semantic::analysis::AnalyzedImport],
-    macros: &[verter_semantic::analysis::AnalyzedMacro],
     bindings: &[verter_semantic::analysis::AnalyzedBinding],
-) -> (
-    Vec<(String, String)>,
-    Vec<(String, Vec<String>)>,
-    Option<String>,
-) {
+) -> Vec<(String, String)> {
     // Carrier-linkage map for template components. A `import type { X }` (or a
     // per-specifier `import { type X }`) is a TYPE-ONLY binding — it has no
     // runtime value, so a tag `<X/>` must NEVER be carrier-linked to it as a
@@ -66,36 +56,7 @@ pub(crate) fn template_converter_inputs(
         }
     }
 
-    let mut unions = Vec::new();
-    let define_props = macros
-        .iter()
-        .find(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps);
-    if let Some(dp) = define_props {
-        for field in &dp.prop_fields {
-            if let Some(type_ann) = &field.type_annotation {
-                let classes = verter_semantic::analysis::parse_string_literal_union(type_ann);
-                if !classes.is_empty() {
-                    unions.push((field.name.clone(), classes));
-                }
-            }
-        }
-    }
-
-    for binding in bindings {
-        if let Some(type_ann) = &binding.type_annotation {
-            let effective_type =
-                verter_semantic::analysis::unwrap_reactive_type(type_ann).unwrap_or(type_ann);
-            let classes = verter_semantic::analysis::parse_string_literal_union(effective_type);
-            if !classes.is_empty() {
-                unions.push((binding.name.clone(), classes));
-            }
-        }
-    }
-
-    let props_binding_name =
-        verter_semantic::analysis::props_root_binding(macros).map(str::to_owned);
-
-    (all_imports, unions, props_binding_name)
+    all_imports
 }
 
 /// Read the `<script setup generic="…">` type-parameter clause from the
@@ -148,30 +109,11 @@ pub(crate) fn indexed_script_setup_type_params(
 /// parser produces from this source is SFC-ABSOLUTE by construction — there is
 /// no compact-concatenation coordinate system to translate back from.
 ///
-/// Cached parse spans are used when they agree with a raw-source scan. If the
-/// parser produced lossy spans for forgiving SFC input, fall back to the raw
-/// scan so type resolution still sees the original script text.
 pub(crate) fn extract_vue_script_content(
     source: &str,
-    parsed_sfc: Option<&verter_compiler::parser::types::ParsedSfc>,
+    parsed_sfc: &verter_compiler::parser::types::ParsedSfc,
 ) -> Option<String> {
-    let scanned = script_content_spans_from_source(source);
-    let parsed = parsed_sfc.and_then(script_content_spans_from_parsed);
-
-    // Prefer the parser's spans when they AGREE with the raw scan (same
-    // semantics as the previous compact extractor, which compared the two
-    // concatenated strings). On disagreement / parser miss, the raw scan is
-    // authoritative so forgiving SFC input still yields script text.
-    let spans = match (parsed, scanned) {
-        (Some(parsed), Some(scanned)) if parsed == scanned => parsed,
-        (_, Some(scanned)) => scanned,
-        (Some(parsed), None) => parsed,
-        (None, None) => return None,
-    };
-    if spans.is_empty() {
-        return None;
-    }
-
+    let spans = script_content_spans_from_parsed(parsed_sfc)?;
     Some(build_position_preserving_script_source(source, &spans))
 }
 
@@ -188,163 +130,6 @@ fn script_content_spans_from_parsed(
         .collect();
     spans.sort_by_key(|(start, _)| *start);
     (!spans.is_empty()).then_some(spans)
-}
-
-/// Forgiving raw-byte scanner: collect the sorted `<script>` content byte
-/// ranges from SFC source when the parser produced lossy spans. Ranges are RAW
-/// SFC byte offsets `[start, end)`.
-fn script_content_spans_from_source(source: &str) -> Option<Vec<(u32, u32)>> {
-    const SCRIPT_OPEN: &[u8] = b"<script";
-    const SCRIPT_CLOSE: &[u8] = b"</script>";
-
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    let mut spans: Vec<(u32, u32)> = Vec::new();
-
-    while let Some(open_start) = find_ascii_tag(bytes, SCRIPT_OPEN, cursor) {
-        let Some(tag_end) = find_tag_end(bytes, open_start) else {
-            break;
-        };
-        if is_self_closing_tag(bytes, tag_end) {
-            cursor = tag_end.saturating_add(1);
-            continue;
-        }
-
-        let content_start = tag_end.saturating_add(1);
-        // Close tag must be found with JS-aware scanning: a comment or string
-        // containing `` `<style scoped>` `` / `"</script>"` must NOT truncate
-        // the script block (reka-ui RadioGroupItem, and the existing
-        // `</script>`-in-string case).
-        let Some(close_start) = find_script_close_outside_js_context(bytes, content_start) else {
-            cursor = content_start;
-            continue;
-        };
-
-        if close_start > content_start && source.is_char_boundary(content_start) {
-            spans.push((content_start as u32, close_start as u32));
-        }
-        cursor = close_start.saturating_add(SCRIPT_CLOSE.len());
-    }
-
-    spans.sort_by_key(|(start, _)| *start);
-    (!spans.is_empty()).then_some(spans)
-}
-
-/// Find the first `</script>` after `from` that is not inside a JS string,
-/// template literal, or line/block comment.
-///
-/// A naive scan that stops at the next SFC root tag (`<style` / `<template`)
-/// false-positives on comments like `` // `<style scoped>` keeps working ``,
-/// truncating the setup block and dropping every `defineProps` macro.
-fn find_script_close_outside_js_context(bytes: &[u8], from: usize) -> Option<usize> {
-    const CLOSE: &[u8] = b"</script>";
-    if from >= bytes.len() {
-        return None;
-    }
-
-    let mut i = from;
-    // 0 = code, 1 = line comment, 2 = block comment, 3 = ', 4 = ", 5 = `
-    let mut state: u8 = 0;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            0 => {
-                // Line comment
-                if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
-                    state = 1;
-                    i += 2;
-                    continue;
-                }
-                // Block comment
-                if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-                    state = 2;
-                    i += 2;
-                    continue;
-                }
-                // Quotes
-                if b == b'\'' {
-                    state = 3;
-                    i += 1;
-                    continue;
-                }
-                if b == b'"' {
-                    state = 4;
-                    i += 1;
-                    continue;
-                }
-                if b == b'`' {
-                    state = 5;
-                    i += 1;
-                    continue;
-                }
-                // Potential </script> (case-insensitive). The needle already
-                // ENDS in `>` — the match is a complete close tag, so no
-                // after-byte boundary check applies (an after-byte rule
-                // belongs to a `<script`-PREFIX needle; requiring one here
-                // silently dropped spans for the adjacent
-                // `</script><template>` spelling).
-                if b == b'<'
-                    && i + CLOSE.len() <= bytes.len()
-                    && bytes[i..i + CLOSE.len()].eq_ignore_ascii_case(CLOSE)
-                {
-                    return Some(i);
-                }
-                i += 1;
-            }
-            1 => {
-                // Line comment ends at newline
-                if b == b'\n' || b == b'\r' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            2 => {
-                // Block comment ends at */
-                if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                    state = 0;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            3 => {
-                // Single-quoted string (no multi-line escape handling beyond \')
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'\'' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            4 => {
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'"' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            5 => {
-                // Template literal: ignore ${} nesting for close-tag search;
-                // only unescaped ` ends the template.
-                if b == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                    continue;
-                }
-                if b == b'`' {
-                    state = 0;
-                }
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    None
 }
 
 /// Build a same-length, position-preserving script-only source.
@@ -416,263 +201,130 @@ pub(crate) fn build_position_preserving_script_source(
     })
 }
 
-fn find_ascii_tag(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || bytes.len() < needle.len() || from >= bytes.len() {
-        return None;
-    }
-
-    let last_start = bytes.len() - needle.len();
-    let mut idx = from;
-    while idx <= last_start {
-        if bytes[idx..idx + needle.len()].eq_ignore_ascii_case(needle)
-            && matches!(
-                bytes.get(idx + needle.len()),
-                None | Some(b'>')
-                    | Some(b'/')
-                    | Some(b' ')
-                    | Some(b'\t')
-                    | Some(b'\n')
-                    | Some(b'\r')
-            )
-        {
-            return Some(idx);
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn find_tag_end(bytes: &[u8], open_start: usize) -> Option<usize> {
-    let mut idx = open_start.saturating_add(1);
-    let mut quote = None;
-
-    while idx < bytes.len() {
-        let ch = bytes[idx];
-        match quote {
-            Some(active) if ch == active => quote = None,
-            Some(_) => {}
-            None if ch == b'\'' || ch == b'"' => quote = Some(ch),
-            None if ch == b'>' => return Some(idx),
-            None => {}
-        }
-        idx += 1;
-    }
-
-    None
-}
-
-fn is_self_closing_tag(bytes: &[u8], tag_end: usize) -> bool {
-    if tag_end == 0 {
-        return false;
-    }
-
-    let mut idx = tag_end;
-    while idx > 0 {
-        idx -= 1;
-        match bytes[idx] {
-            b' ' | b'\t' | b'\n' | b'\r' => continue,
-            b'/' => return true,
-            _ => return false,
-        }
-    }
-
-    false
-}
-
-fn string_from_span(source: &str, span: Option<verter_compiler::common::Span>) -> Option<String> {
-    span.map(|span| source[span.start as usize..span.end as usize].to_string())
-}
-
-fn sfc_attributes_from_props(
-    props: &[verter_compiler::types::NodeProp],
-    source: &str,
-) -> Vec<verter_semantic::analysis::component_meta::SfcAttributeAnalysis> {
-    crate::parse::extract_attrs(props, source)
-        .into_iter()
-        .map(
-            |(name, value)| verter_semantic::analysis::component_meta::SfcAttributeAnalysis {
-                name: name.to_string(),
-                value: if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                },
-            },
-        )
-        .collect()
-}
-
-fn sfc_custom_block_type(source: &str, tag_open: &verter_compiler::types::NodeTag) -> String {
-    source[tag_open.start as usize + 1..tag_open.name_end as usize].to_string()
-}
-
-/// Populate the component-meta SFC-blocks sidecar from the carrier
-/// parse (template/script/style/custom block attrs). Vue-semantic leaf:
-/// opens the neutral artifact through the blessed `vue_parse()`
-/// accessor. No-op for non-Vue canonicals and artifact-less state.
-pub(crate) fn populate_sfc_blocks_sidecar(
+/// Bind schema-8 metadata to the registered content-free structure.
+pub(crate) fn populate_ordered_sfc_structure(
     host: &crate::VerterHost,
     canonical_id: &str,
     meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
 ) {
-    let Some((source, framework_parse, _)) = host.current_eval_state(canonical_id) else {
+    let Some((structure, _)) = host.registered_file_structure_snapshot(canonical_id) else {
         return;
     };
-    let Some(parsed) = framework_parse
-        .as_deref()
-        .and_then(crate::typeinfo::adapters::vue::vue_parse)
-    else {
-        return;
-    };
-    let source = source.as_ref();
+    meta.ordered_sfc_structure = Some(ordered_sfc_structure_analysis(&structure));
+}
 
-    let template = parsed.template_ast().map(|template| {
-        let attrs = crate::parse::extract_attrs(&template.root.attributes, source);
-        verter_semantic::analysis::component_meta::TemplateBlockAnalysis {
-            lang: string_from_span(source, template.root.lang),
-            src: crate::parse::find_attr(&attrs, "src"),
-            attributes: sfc_attributes_from_props(&template.root.attributes, source),
-        }
-    });
+/// Project the registered carrier inventory into the shared schema-8 envelope.
+/// This is deliberately content-free and never reparses source bytes.
+pub(crate) fn ordered_sfc_structure_analysis(
+    structure: &crate::carrier_publication_store::RegisteredFileStructure,
+) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+    let inventory = structure.inventory();
 
-    let script = parsed.script().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let script_setup = parsed.script_setup().map(|script| {
-        let attrs = crate::parse::extract_attrs(&script.attributes, source);
-        verter_semantic::analysis::component_meta::ScriptBlockAnalysis {
-            lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-            src: crate::parse::find_attr(&attrs, "src"),
-            generic: string_from_span(source, script.generic),
-            attrs_type: string_from_span(source, script.attrs),
-            attributes: sfc_attributes_from_props(&script.attributes, source),
-        }
-    });
-
-    let styles = parsed
-        .style_nodes()
+    let source_space_tokens = inventory
+        .source_spaces()
         .iter()
-        .enumerate()
-        .map(|(index, style)| {
-            let attrs = crate::parse::extract_attrs(&style.attributes, source);
-            verter_semantic::analysis::component_meta::StyleBlockInfoAnalysis {
-                index,
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                scoped: style.scoped,
-                is_module: style.module,
-                module_name: crate::parse::find_attr(&attrs, "module")
-                    .filter(|value| value != "true"),
-                attributes: sfc_attributes_from_props(&style.attributes, source),
-            }
+        .map(|space| {
+            structure
+                .public_source_space_token(space.id)
+                .expect("validated source space")
+                .as_str()
+                .to_owned()
         })
-        .collect();
-
-    let custom = parsed
-        .unknown_nodes()
+        .collect::<Vec<_>>();
+    let block_tokens = inventory
+        .blocks()
         .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let attrs = crate::parse::extract_attrs(&block.attributes, source);
-            verter_semantic::analysis::component_meta::CustomBlockAnalysis {
-                index,
-                block_type: sfc_custom_block_type(source, &block.tag_open),
-                lang: crate::parse::find_attr(&attrs, "lang").filter(|lang| lang != "true"),
-                src: crate::parse::find_attr(&attrs, "src"),
-                attributes: sfc_attributes_from_props(&block.attributes, source),
-            }
+        .map(|block| {
+            let block_ref = structure.block_ref(block.id()).expect("validated block");
+            structure
+                .public_block_token(&block_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let markup_node_tokens = inventory
+        .markup()
+        .nodes()
+        .iter()
+        .map(|node| {
+            let node_ref = structure.node_ref(node.id).expect("validated markup node");
+            structure
+                .public_node_token(&node_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let mut attributes = inventory
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::Section {
+                syntax,
+                ..
+            } => Some(syntax.attributes.as_ref()),
+            verter_language::parse_artifact::carrier_inventory::CarrierBlock::MarkupRoot {
+                ..
+            } => None,
+        })
+        .flatten()
+        .chain(
+            inventory
+                .markup()
+                .nodes()
+                .iter()
+                .flat_map(|node| node.kind().attributes()),
+        )
+        .map(|attribute| attribute.id())
+        .collect::<Vec<_>>();
+    attributes.sort_unstable();
+    attributes.dedup();
+    let attribute_tokens = attributes
+        .into_iter()
+        .map(|id| {
+            let attribute_ref = structure.attribute_ref(id).expect("validated attribute");
+            structure
+                .public_attribute_token(&attribute_ref)
+                .expect("same artifact")
+                .as_str()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
 
-    meta.sfc_blocks = Some(
-        verter_semantic::analysis::component_meta::SfcBlocksAnalysis {
-            template,
-            script,
-            script_setup,
-            styles,
-            custom,
-        },
-    );
+    verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+        schema_version: 1,
+        artifact_token: structure.public_artifact_token().as_str().to_owned(),
+        inventory: std::sync::Arc::clone(inventory),
+        source_space_tokens: source_space_tokens.into(),
+        block_tokens: block_tokens.into(),
+        markup_node_tokens: markup_node_tokens.into(),
+        attribute_tokens: attribute_tokens.into(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    /// `const props = withDefaults(defineProps<T>(), …)`: the props-root
-    /// binding lives on the OUTER `WithDefaults` macro — the converter input
-    /// projection must surface it, while the prop fields (and their string
-    /// literal unions) stay on the INNER `DefineProps`.
+    /// Macro expression statements likewise contribute no runtime linkage.
     #[test]
-    fn template_converter_inputs_surfaces_bound_with_defaults_props_root() {
-        let alloc = oxc_allocator::Allocator::new();
-        let snapshot = verter_semantic::analysis::build_script_analysis(
-            "const props = withDefaults(defineProps<{ variant: 'primary' | 'secondary' }>(), { variant: 'primary' });",
-            oxc_span::SourceType::ts(),
-            &alloc,
-        );
-        let (_imports, unions, props_binding_name) = super::template_converter_inputs(
-            &snapshot.imports,
-            &snapshot.macros,
-            &snapshot.bindings,
-        );
-        assert_eq!(
-            props_binding_name.as_deref(),
-            Some("props"),
-            "the props-root binding bound through withDefaults must surface"
-        );
-        assert!(
-            unions.iter().any(|(name, classes)| name == "variant"
-                && classes.iter().any(|c| c == "primary")
-                && classes.iter().any(|c| c == "secondary")),
-            "union classes must still be read off the inner defineProps fields, got: {unions:?}"
-        );
-    }
-
-    /// The expression-statement form has NO declarator — the root correctly
-    /// stays unnamed (no binding to attribute `props.x` reads to). The bound
-    /// form in the same test is the arming half: selection must reach the
-    /// OUTER `WithDefaults` macro (which carries the declarator's binding),
-    /// not stop at the inner `DefineProps`' `None`.
-    #[test]
-    fn template_converter_inputs_expression_statement_with_defaults_has_no_root() {
+    fn template_converter_inputs_is_linkage_only_for_macro_statements() {
         let alloc = oxc_allocator::Allocator::new();
         let snapshot = verter_semantic::analysis::build_script_analysis(
             "withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
             oxc_span::SourceType::ts(),
             &alloc,
         );
-        let (_imports, _unions, props_binding_name) = super::template_converter_inputs(
-            &snapshot.imports,
-            &snapshot.macros,
-            &snapshot.bindings,
-        );
-        assert_eq!(
-            props_binding_name, None,
-            "the expression-statement form has no declarator — no root to surface"
-        );
+        let imports = super::template_converter_inputs(&snapshot.imports, &snapshot.bindings);
+        assert!(imports.is_empty());
 
-        // Arming proof: the SAME projection surfaces the root exactly when a
-        // declarator binds the `withDefaults` result.
+        // Bound macros remain linkage-neutral too.
         let alloc = oxc_allocator::Allocator::new();
         let bound = verter_semantic::analysis::build_script_analysis(
             "const props = withDefaults(defineProps<{ variant: string }>(), { variant: 'x' });",
             oxc_span::SourceType::ts(),
             &alloc,
         );
-        let (_imports, _unions, bound_name) =
-            super::template_converter_inputs(&bound.imports, &bound.macros, &bound.bindings);
-        assert_eq!(
-            bound_name.as_deref(),
-            Some("props"),
-            "arming proof: the bound form must surface the root — selection that \
-             stops at the inner defineProps' None binding yields None here"
-        );
+        let imports = super::template_converter_inputs(&bound.imports, &bound.bindings);
+        assert!(imports.is_empty());
     }
 }

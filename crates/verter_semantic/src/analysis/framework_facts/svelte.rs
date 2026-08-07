@@ -42,7 +42,7 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_no_typeexpr::NoTypeExpr;
 use verter_span::Span;
 use verter_type_expr::facts::{
-    SvelteLegacyPropFact, SvelteModuleExportFact, SvelteScriptFactsFact,
+    SvelteLegacyPropFact, SvelteModuleExportFact, SvelteScriptFactsFact, SvelteSnippetImportFact,
 };
 
 #[path = "svelte_payload.rs"]
@@ -203,19 +203,59 @@ pub struct SveltePropsLocalBinding {
     pub span: Span,
 }
 
-/// One member annotated with a type IMPORTED-AS-`Snippet`-CANDIDATE.
+/// One `Snippet`-candidate reference to a module's `Snippet` export.
 ///
-/// Recorded as `(local_binding, raw_import_source)` — the local type name and
-/// the module specifier it was imported from. NOT validated here: the
+/// Two authored forms mint candidates: a named import STATEMENT
+/// (`import { Snippet } from 'svelte'`) and a binding-less inline
+/// `import("svelte").Snippet<…>` TYPE reference. NOT validated here: the
 /// resolved-validation half rejects a candidate whose `import_source` does not
 /// resolve to the `svelte` package.
 #[derive(Debug, Clone, NoTypeExpr)]
 pub struct SvelteSnippetImportCandidate {
-    /// The local type binding the member is annotated with (e.g. `Snippet`).
-    pub local_binding: String,
-    /// The raw module specifier the binding was imported from.
+    /// Imported export name (`Snippet`).
+    pub imported_name: String,
+    /// How the reference is authored — a statement binding or the
+    /// binding-less inline import()-type form.
+    pub binding: SvelteSnippetCandidateBinding,
+    /// The raw module specifier the reference names.
     pub import_source: String,
-    /// The annotated member name on the props destructuring.
+}
+
+/// The authored binding form of one [`SvelteSnippetImportCandidate`].
+#[derive(Debug, Clone, NoTypeExpr)]
+pub enum SvelteSnippetCandidateBinding {
+    /// A named import STATEMENT binding — the local type name, including an
+    /// authored alias (`import { Snippet as Nip } from 'svelte'`).
+    Statement {
+        /// The local lexical binding name.
+        local_binding: String,
+    },
+    /// A binding-less inline `import("…").Snippet` type reference — no local
+    /// lexical binding exists (typed absence, never a sentinel string).
+    ImportTypeReference,
+}
+
+impl SvelteSnippetCandidateBinding {
+    /// The local lexical binding, when the authored form has one.
+    #[must_use]
+    pub fn local_binding(&self) -> Option<&str> {
+        match self {
+            Self::Statement { local_binding } => Some(local_binding),
+            Self::ImportTypeReference => None,
+        }
+    }
+}
+
+/// One props member whose annotation names a statement-imported `Snippet`
+/// candidate. The resolved-validation half accepts it only when the matching
+/// import produced a resolved [`SvelteSnippetImportFact`] identity.
+#[derive(Debug, Clone, NoTypeExpr)]
+pub struct SvelteSnippetMemberCandidate {
+    /// The local type binding used by the member annotation.
+    pub local_binding: String,
+    /// The raw module specifier associated with the binding.
+    pub import_source: String,
+    /// The annotated props member name.
     pub member_name: String,
 }
 
@@ -274,8 +314,11 @@ pub struct SvelteScriptCandidates {
     /// because duplicate calls are invalid Svelte and therefore have no valid
     /// combined semantic surface.
     pub props_calls: Vec<SveltePropsCall>,
-    /// Members annotated with a `Snippet`-candidate import (validated by the resolved-validation half).
-    pub snippet_candidates: Vec<SvelteSnippetImportCandidate>,
+    /// Statement and inline-import `Snippet` identities, validated by the
+    /// resolved-validation half.
+    pub snippet_imports: Vec<SvelteSnippetImportCandidate>,
+    /// Props members whose annotations reference statement-import candidates.
+    pub snippet_candidates: Vec<SvelteSnippetMemberCandidate>,
     /// INSTANCE-script export names — the synth folds these onto the component
     /// instance (`<script module>` exports do NOT appear here).
     pub instance_exports: Vec<SvelteInstanceExport>,
@@ -305,6 +348,21 @@ pub struct SvelteScriptCandidates {
     pub dispatcher_import_source: Option<String>,
 }
 
+impl SvelteScriptCandidates {
+    /// Whether the component carries any captured candidate.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.props.is_none()
+            && self.props_calls.is_empty()
+            && self.snippet_imports.is_empty()
+            && self.snippet_candidates.is_empty()
+            && self.instance_exports.is_empty()
+            && self.module_exports.is_empty()
+            && self.legacy_props.is_empty()
+            && self.dispatcher_events.is_none()
+            && self.dispatcher_import_source.is_none()
+    }
+}
 impl FrameworkScriptFactPayload for SvelteScriptCandidates {
     fn as_any(&self) -> &dyn Any {
         self
@@ -363,6 +421,8 @@ impl SvelteScriptSyntaxFacts {
 /// distinct channel from [`SvelteScriptSyntaxFacts`].
 #[derive(Debug, Clone, Default, NoTypeExpr)]
 pub struct SvelteScriptResolutionFacts {
+    /// `Snippet` imports with package-validated symbol identity.
+    pub snippet_imports: Arc<[SvelteSnippetImportFact]>,
     /// Members whose `Snippet` import resolved to the `svelte` package.
     pub validated_snippet_members: Arc<[String]>,
     /// The dispatcher event-map payload when its import resolved to `svelte`.
@@ -399,6 +459,7 @@ impl SvelteScriptFacts {
         SvelteScriptFactsFact {
             props_type: self.syntax.props_type.clone(),
             bindable_members: Arc::clone(&self.syntax.bindable_members),
+            snippet_imports: Arc::clone(&self.resolution.snippet_imports),
             validated_snippet_members: Arc::clone(&self.resolution.validated_snippet_members),
             legacy_props: self
                 .syntax
@@ -470,13 +531,21 @@ impl SvelteScriptProvider {
     /// `9` — resolved and persisted Svelte facts retain module-script exports
     /// as exact, span-free owner-qualified facts. Old resolved-fact keys miss.
     ///
-    /// `10` — syntax-capture and resolved facts retain per-call `$props()`
-    /// public-key/local-binding spans plus top-level rest openness. Old
-    /// candidate and resolved-fact keys intentionally miss.
+    /// `10` — snippet facts retain package-backed named-import identities
+    /// instead of syntax-scanned prop member names. Old candidate and resolved
+    /// fact keys intentionally miss.
     ///
-    /// `11` — exact-empty candidates are retained and resolved facts split
-    /// syntax-owned observations from resolution-owned provenance.
-    pub const VERSION: u32 = 11;
+    /// `11` — snippet candidates additionally capture binding-less inline
+    /// `import("…").Snippet` type references (a typed binding-form axis joins
+    /// the candidate shape + hash). Old candidate and resolved fact keys
+    /// intentionally miss.
+    ///
+    /// `12` — the unified candidate and resolved schemas retain per-call
+    /// `$props()` public-key/local-binding spans, top-level rest openness,
+    /// exact-empty evidence, syntax/resolution provenance, and both statement
+    /// and inline snippet-import identities. Old candidate and resolved-fact
+    /// keys intentionally miss.
+    pub const VERSION: u32 = 12;
 }
 
 impl ScriptFactProvider for SvelteScriptProvider {
@@ -557,6 +626,28 @@ impl ScriptFactProvider for SvelteScriptProvider {
         }
     }
 
+    fn candidate_import_specifiers(&self, candidates: &FrameworkScriptCandidates) -> Vec<String> {
+        // Binding-less inline `import("…").Snippet` references name a module
+        // WITHOUT an import statement, so the session cannot see their
+        // specifiers on the file's import inventory — surface them here for
+        // the session to resolve exactly like statement specifiers. Pure
+        // candidate read; statement candidates ride the file's own imports.
+        let Some(typed) = candidates.payload.downcast_ref::<SvelteScriptCandidates>() else {
+            return Vec::new();
+        };
+        let mut specifiers = Vec::new();
+        for candidate in &typed.snippet_imports {
+            if matches!(
+                candidate.binding,
+                SvelteSnippetCandidateBinding::ImportTypeReference
+            ) && !specifiers.contains(&candidate.import_source)
+            {
+                specifiers.push(candidate.import_source.clone());
+            }
+        }
+        specifiers
+    }
+
     fn validate(&self, cx: ResolvedValidationCx<'_>) -> ScriptFactValidation {
         // Recover the typed candidates from the neutral envelope.
         let Some(candidates) = cx
@@ -577,17 +668,74 @@ impl ScriptFactProvider for SvelteScriptProvider {
             );
         }
 
-        // A snippet-candidate member is REAL only when its import source resolved
-        // to the `svelte` PACKAGE — tested via the session-computed TYPED
-        // [`ResolvedPackage`](super::ResolvedPackage) identity, NEVER a
-        // name/path substring: a `Snippet` from `./fake-svelte` is rejected even
-        // though its local binding name is `Snippet`.
-        let mut validated_snippet_members = Vec::new();
-        for candidate in &candidates.snippet_candidates {
-            if specifier_resolves_to_svelte(&cx, &candidate.import_source) {
-                validated_snippet_members.push(candidate.member_name.clone());
+        // A `Snippet` candidate becomes a framework identity seed only when
+        // its source resolved to the `svelte` package — the SAME structural
+        // provenance test for a statement binding and for a binding-less
+        // inline `import("svelte").Snippet` type reference. An unresolved
+        // package route stays a typed unresolved fact; a proven userland
+        // look-alike contributes nothing.
+        let mut snippet_imports = Vec::new();
+        for candidate in &candidates.snippet_imports {
+            let local_binding = candidate.binding.local_binding().map(str::to_string);
+            let target = cx
+                .resolved_import_targets
+                .iter()
+                .find(|target| target.specifier == candidate.import_source);
+            match target {
+                Some(target)
+                    if target
+                        .package
+                        .as_ref()
+                        .is_some_and(|package| package.name == SVELTE_PACKAGE) =>
+                {
+                    if let Some(canonical_id) = target.resolved_canonical.as_deref() {
+                        snippet_imports.push(SvelteSnippetImportFact::Resolved {
+                            local_binding,
+                            import_source: candidate.import_source.clone(),
+                            symbol: verter_type_expr::ResolvedSymbolIdentity {
+                                canonical_id: Arc::from(canonical_id),
+                                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                                symbol: Arc::from(candidate.imported_name.as_str()),
+                            },
+                        });
+                    } else {
+                        snippet_imports.push(SvelteSnippetImportFact::Unresolved {
+                            local_binding,
+                            import_source: candidate.import_source.clone(),
+                            reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+                        });
+                    }
+                }
+                Some(target) if target.resolved_canonical.is_some() || target.package.is_some() => {
+                }
+                _ => snippet_imports.push(SvelteSnippetImportFact::Unresolved {
+                    local_binding,
+                    import_source: candidate.import_source.clone(),
+                    reason: verter_type_expr::PropCallableRoleUnresolvedReason::MissingDependency,
+                }),
             }
         }
+
+        // The member-name projection is derived from the exact resolved import
+        // identities above. It is never an independent name/specifier authority.
+        let validated_snippet_members = candidates
+            .snippet_candidates
+            .iter()
+            .filter(|candidate| {
+                snippet_imports.iter().any(|fact| {
+                    matches!(
+                        fact,
+                        SvelteSnippetImportFact::Resolved {
+                            local_binding: Some(local_binding),
+                            symbol,
+                            ..
+                        } if local_binding == &candidate.local_binding
+                            && symbol.symbol.as_ref() == "Snippet"
+                    )
+                })
+            })
+            .map(|candidate| candidate.member_name.clone())
+            .collect::<Vec<_>>();
 
         // The legacy dispatcher contributes EMITS only when its
         // `createEventDispatcher` import resolved to the `svelte` package (the
@@ -639,6 +787,7 @@ impl ScriptFactProvider for SvelteScriptProvider {
                 .collect(),
         };
         let resolution = SvelteScriptResolutionFacts {
+            snippet_imports: snippet_imports.into(),
             validated_snippet_members: validated_snippet_members.into(),
             dispatcher_events,
             dispatcher_events_display: dispatcher_validated
@@ -656,6 +805,12 @@ impl ScriptFactProvider for SvelteScriptProvider {
             .snippet_candidates
             .iter()
             .map(|candidate| candidate.import_source.as_str())
+            .chain(
+                candidates
+                    .snippet_imports
+                    .iter()
+                    .map(|candidate| candidate.import_source.as_str()),
+            )
             .chain(candidates.dispatcher_import_source.as_deref())
             .any(|specifier| {
                 cx.resolved_import_targets
@@ -702,12 +857,9 @@ fn capture_svelte_candidates(
         template_uses_host_rune,
     )
     .is_runes();
-    // The local type names imported as the structural `Snippet` candidate,
-    // mapped to their import source. Built first so the props destructuring can
-    // pair annotated members to a candidate import. (The dispatcher-import
-    // tracking lives on the shared [`MacroOrdinalWalk`] — the yielded
-    // dispatcher arm carries its import source.)
-    let mut snippet_imports: Vec<(String, String)> = Vec::new();
+    // Statement-import bindings used only to associate authored props members
+    // with the resolved `Snippet` identities captured in `out.snippet_imports`.
+    let mut snippet_import_bindings: Vec<(String, String)> = Vec::new();
     // INSTANCE-region top-level `let`/`var` binding names — the PROP-kind locals.
     // A re-export specifier (`export { x as y }`) of one of these is a re-exported
     // PROP, NOT an instance EXPOSE member; built first so the specifier loop can
@@ -736,13 +888,14 @@ fn capture_svelte_candidates(
                 owner,
                 macro_index,
                 source,
-                &snippet_imports,
+                &snippet_import_bindings,
                 &mut out,
             );
         });
         match stmt {
             Statement::ImportDeclaration(import) => {
-                collect_snippet_imports(import, &mut snippet_imports);
+                collect_snippet_imports(import, &mut out.snippet_imports);
+                collect_snippet_import_bindings(import, &mut snippet_import_bindings);
             }
             Statement::ExportNamedDeclaration(export) => {
                 // A whole-statement type-only export (`export type { Foo }` /
@@ -872,6 +1025,9 @@ fn capture_svelte_candidates(
             _ => {}
         }
     }
+    // Binding-less inline `import("…").Snippet` type references are snippet
+    // candidates too (the statement loop above only sees `ImportDeclaration`s).
+    collect_snippet_import_type_references(program, &mut out.snippet_imports);
     out
 }
 
@@ -930,9 +1086,34 @@ fn push_module_export(
     });
 }
 
-/// Collect import specifiers that import a `Snippet`-candidate binding,
-/// recording `(local_binding, import_source)`.
+/// Collect exact named imports of Svelte's `Snippet` export.
 fn collect_snippet_imports(
+    import: &oxc_ast::ast::ImportDeclaration<'_>,
+    out: &mut Vec<SvelteSnippetImportCandidate>,
+) {
+    let source = import.source.value.as_str().to_string();
+    let Some(specifiers) = &import.specifiers else {
+        return;
+    };
+    for spec in specifiers {
+        if let ImportDeclarationSpecifier::ImportSpecifier(named) = spec {
+            let imported = named.imported.name();
+            if imported == "Snippet" {
+                out.push(SvelteSnippetImportCandidate {
+                    imported_name: imported.to_string(),
+                    binding: SvelteSnippetCandidateBinding::Statement {
+                        local_binding: named.local.name.as_str().to_string(),
+                    },
+                    import_source: source.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Collect statement-local bindings of Svelte's `Snippet` export for the
+/// syntax-only props-member association pass.
+fn collect_snippet_import_bindings(
     import: &oxc_ast::ast::ImportDeclaration<'_>,
     out: &mut Vec<(String, String)>,
 ) {
@@ -942,17 +1123,59 @@ fn collect_snippet_imports(
     };
     for spec in specifiers {
         if let ImportDeclarationSpecifier::ImportSpecifier(named) = spec {
-            // We record EVERY imported type binding as a snippet candidate
-            // (the local binding name + its source). The resolved-validation
-            // decides whether the SOURCE is the `svelte` package — the
-            // structural test. A bare name match ("Snippet") is NOT used as
-            // the classifier; the candidate is keyed on the import SOURCE.
-            let imported = named.imported.name();
-            if imported == "Snippet" {
+            if named.imported.name() == "Snippet" {
                 out.push((named.local.name.as_str().to_string(), source.clone()));
             }
         }
     }
+}
+
+/// Collect binding-less inline `import("…").Snippet` TYPE references from the
+/// whole parsed program — the import()-type twin of
+/// [`collect_snippet_imports`]. SYNTAX-ONLY (an OXC visitor walk; no import
+/// resolution): the resolved-validation half rejects a specifier that does not
+/// resolve to the `svelte` package, exactly as for statement candidates. One
+/// candidate per distinct specifier.
+fn collect_snippet_import_type_references(
+    program: &Program<'_>,
+    out: &mut Vec<SvelteSnippetImportCandidate>,
+) {
+    use oxc_ast_visit::Visit;
+
+    struct SnippetImportTypeCollector<'out> {
+        out: &'out mut Vec<SvelteSnippetImportCandidate>,
+    }
+
+    impl<'a> Visit<'a> for SnippetImportTypeCollector<'_> {
+        fn visit_ts_import_type(&mut self, it: &oxc_ast::ast::TSImportType<'a>) {
+            // `import("<specifier>").Snippet` — the qualifier is EXACTLY the
+            // single `Snippet` segment (a deeper namespace path is not the
+            // svelte export shape).
+            if let Some(oxc_ast::ast::TSImportTypeQualifier::Identifier(id)) = &it.qualifier {
+                if id.name == "Snippet" {
+                    let specifier = it.source.value.as_str();
+                    if !self.out.iter().any(|candidate| {
+                        matches!(
+                            candidate.binding,
+                            SvelteSnippetCandidateBinding::ImportTypeReference
+                        ) && candidate.import_source == specifier
+                    }) {
+                        self.out.push(SvelteSnippetImportCandidate {
+                            imported_name: "Snippet".to_string(),
+                            binding: SvelteSnippetCandidateBinding::ImportTypeReference,
+                            import_source: specifier.to_string(),
+                        });
+                    }
+                }
+            }
+            // Continue into nested types (an import-type argument can itself
+            // carry import()-type references).
+            oxc_ast_visit::walk::walk_ts_import_type(self, it);
+        }
+    }
+
+    let mut collector = SnippetImportTypeCollector { out };
+    collector.visit_program(program);
 }
 
 /// The names of every INSTANCE-region top-level `let`/`var` binding in the
@@ -1499,7 +1722,7 @@ fn push_default(
 /// Collect snippet-candidate members from a props TYPE-ANNOTATION object literal
 /// (`let {…}: { row: Snippet } = $props()`). A member whose value type is a
 /// reference to a `Snippet`-candidate import binding is recorded as
-/// `(local_binding, import_source, member_name)` — NOT validated here.
+/// `(imported_name, local_binding, import_source)` — NOT validated here.
 #[cfg(test)]
 #[path = "svelte_tests.rs"]
 mod tests;

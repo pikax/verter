@@ -76,6 +76,7 @@ mod tests {
 
     fn make_define_options(binding_name: Option<&str>) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineOptions,
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_based: false,
@@ -144,6 +145,7 @@ mod tests {
     fn define_props_not_flagged() {
         let script = ScriptAnalysisSnapshot {
             macros: vec![AnalyzedMacro {
+                edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_based: false,

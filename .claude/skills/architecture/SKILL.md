@@ -49,12 +49,17 @@ Bug or slowdown in one surface → fix in shared substrate so other consumers be
 
 ## CSS Analysis & Selector Matching (`crates/verter_semantic/src/analysis/`)
 
-Lightweight byte-level scanner (no external CSS parser dependency). Extracts selectors, classes, IDs, custom properties, and at-rules from `<style>` blocks. The scanner is dialect-aware (`CssScanDialect::{Css, Scss, Less}` via `build_scanned_style_analysis`): SCSS/Less get `//` line-comment awareness and SCSS `#{...}` interpolation fails closed (no partial class names, no structure); `&`-selectors keep literal class extraction but drop unsound structure; indented Sass/Stylus stay `css: None`. Each `AnalyzedCssClass` carries `selector_index` (exact class → comma-part selector join) and each `AnalyzedSelector` carries `rule_body_span` (brace-inclusive declaration block, for rule-description hover). The scanner also records `:deep()/:global()/:slotted()` (+ `::v-*` forms) as `special_pseudos` with exact spans; a class is GLOBAL when declared in a non-scoped, non-module block or inside `:global(...)` (`verter_lsp::css::global_classes` gates workspace-wide references/definition on that fact — scoped classes never cross files, and `<style module>` classes are FAIL-CLOSED across the css-native class legs: hashed-local, addressable only via the TS-owned `$style.*` surface, with `:global(...)` as the only opt-out). Svelte carriers reuse the same scanner (scoped-by-default) via `verter_session::parse::build_svelte_style_analyses`, and their markup class usage sites (`class="a b"` entries + `class:x` directives) are typed `MarkupClassToken` facts on `FileAnalysisSnapshot.markup_class_tokens`. Style `v-bind()` facts carry real expression spans plus OXC-derived `expr_roots`/`roots_complete` (the single owning style-usage fact consumed by `mark_bindings_used_in_style` and compile-input assembly).
+`verter_css_syntax` is the shared lossless token/event authority for CSS, SCSS, indented Sass, Less, and Stylus. `StyleSyntaxIrSink` and `LosslessCstSink` are peers over the same parser event stream. Semantic style analysis projects only complete, static selector nodes into selectors, classes, IDs, custom properties, and at-rules; interpolation, recovery, and evaluation-dependent selectors fail closed. Each `AnalyzedCssClass` carries `selector_index` (exact class → comma-part selector join) and each `AnalyzedSelector` carries `rule_body_span` (brace- or indentation-delimited body span). Vue's planner separately consumes trusted IR for authored-dialect `v-bind()` and post-preprocess plain-CSS module hashing/scoping; Svelte consumes the IR as a trust gate for its distinct plain-CSS matcher/scoper. Svelte's carrier/CSS parser remains the compatibility owner until exact Svelte 5.56.3 error-code, offset, and read-past-close parity is proven. Style `v-bind()` usage is discovered through the same dialect-aware planner IR, then OXC-derived `expr_roots`/`roots_complete` remain the liveness facts consumed by `mark_bindings_used_in_style` and compile-input assembly.
+
+`StyleSyntaxIr` retains positioned containment and balanced values without evaluating or compiling preprocessors. Imports, modules, plugins, guards, mixin/function arguments, and control expressions remain opaque-but-positioned.
+
+Stylesheet parser mode is deterministic by dialect and structural tokens. CSS always uses brace grammar. Sass and Stylus use the layout-capable grammar, which also recognizes explicit braced blocks. SCSS and Less use brace grammar whenever the lexer emits any plain `LeftBrace`; only a brace-free source with an actual deeper-indented line pair uses layout grammar. Closing-brace indentation and other incidental formatting never select the parser. Selector trust folds every component descendant and functional-pseudo selector list; class/ID collection descends those lists and gates each component independently, so complete literal class components may still publish from an otherwise evaluation-dependent selector such as `&.active` or `:global(.a .#{$x})`. A textually certain `:deep`/`:global`/`:slotted` kind publishes independently of argument trust, while every class inside its argument remains subject to the same per-component gate. Ambiguous optional-syntax statements remain locally typed and diagnosed without recovering intact ancestor rules. A declaration may own a retained `StyleBlock` (for example, an indented Sass nested-property namespace); the IR sink never discards such a block.
 
 **Module structure:**
 
 ```
-style.rs              # CSS scanner, structured selector parser, specificity computation
+style.rs              # Semantic style projection types and specificity computation
+style_syntax.rs       # Five-dialect syntax-to-semantic projection
 selector_match.rs     # Three-valued selector matching against template elements
 template.rs           # Template element analysis, dynamic class extraction, :style CSS var extraction
 ```
@@ -79,7 +84,7 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 
 **CSS Variable Analysis (three-block tracking):**
 
-- **Style**: `scan_declarations()` extracts `AnalyzedCustomProperty` (definitions with values/spans) and `AnalyzedVarUsage` (var() references). `extract_var_references()` handles nested var() fallbacks.
+- **Style**: the balanced component-value IR projects `AnalyzedCustomProperty` (definitions with values/spans) and `AnalyzedVarUsage` (var() references). `extract_var_references()` handles nested var() fallbacks without evaluating values.
 - **Template**: `extract_dynamic_style_vars()` extracts CSS vars from `:style="{ '--color': val }"`. `extract_static_style_vars()` extracts from `style="--color: red"`.
 - **Script**: `try_extract_css_var_manipulation()` detects `el.style.setProperty('--x', val)`, `getPropertyValue('--x')`, `removeProperty('--x')`.
 - **Cross-component**: `ProjectIndex.css_var_flow(name)` and `VerterHost.css_var_flow(name)` return `CssVarFlow` with all files defining/referencing/manipulating a variable.
@@ -91,7 +96,7 @@ template.rs           # Template element analysis, dynamic class extraction, :st
 3. Dynamic `:class` or component types → `MaybeMatches` (can't determine statically)
 4. `:not()` inverts, `:is()`/`:where()` takes best match across alternatives
 
-**Position encoding for CSS spans**: `CssAnalysis` spans (classes, IDs, selectors) are **SFC-absolute byte offsets**. CSS scanner produces content-relative offsets internally; `CssAnalysis::make_spans_absolute(content_offset)` is called at host level (after optional SCSS remap) to convert all spans to SFC-absolute. Consumers use spans directly without adding any offset. `StyleBlockAnalysis.content_offset` retained for documentation and slice operations.
+**Position encoding for CSS spans**: `CssAnalysis` spans (classes, IDs, selectors) are **SFC-absolute byte offsets**. `CssSource` is constructed with the style content origin, so syntax and projection spans are absolute from creation. Consumers use spans directly without adding any offset. `StyleBlockAnalysis.content_offset` is retained for documentation and slice operations.
 
 ## Analysis MCP Server (`verter_mcp`)
 
@@ -169,7 +174,7 @@ Primary output of `build_script_analysis()`. Produced by a single OXC parse + AS
 | `macros` | `Vec<AnalyzedMacro>` | Vue macro calls (defineProps, defineEmits, etc.) |
 | `macro_type_deps` | `Vec<MacroTypeDep>` | Cross-file type references used by macros, tiered by structural position (`usage: MacroTypeDepUsage` — `Surface` = argument root / intersection-union arms / extends heritage / alias chains, missing ⇒ error; `Member` = top-level member annotation, missing ⇒ warning + `null` degrade). References nested deeper are never collected (runtime codegen does not need them) |
 | `flags` | `AnalysisFlags` | Bitwise flags for O(1) queries |
-| `exported_functions` | `Vec<AnalyzedExportedFunction>` | Non-SFC exported functions (composable analysis) |
+| `exported_functions` | `Vec<AnalyzedExportedFunction>` | Non-SFC exported functions (composable analysis). Carries `name` / `is_default` / `params` / `is_async` / `composable` only. It carries NO return-type field: the declared return type's reactive-wrapper identity is a resolution decision answered at demand time from the lowered typed IR plus a package-backed route proof (`/type-resolution` → Reactive-wrapper demand), never from annotation text on this DTO |
 
 **ReactivityKind**: None | Ref | Computed | Reactive | MaybeRef | Mutable
 

@@ -1,4 +1,4 @@
-﻿//! Extraction of semantic facts from analysis snapshots.
+//! Extraction of semantic facts from analysis snapshots.
 //!
 //! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
@@ -475,6 +475,7 @@ mod tests {
 
     fn make_props_macro(props: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineProps,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -545,12 +546,14 @@ mod tests {
     #[test]
     fn extracts_events_from_define_emits() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
                     name: "update".to_string(),
                     span: Span::new(10, 20),
+                    call_signature_span: None,
                     payload_type: Some("[value: string]".to_string()),
                     description: None,
                     tags: Vec::new(),
@@ -560,6 +563,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "close".to_string(),
                     span: Span::new(30, 40),
+                    call_signature_span: None,
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),
@@ -589,6 +593,7 @@ mod tests {
     #[test]
     fn extracts_model_with_default_name() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: None,
             prop_fields: vec![make_prop("modelValue", false)],
@@ -605,6 +610,7 @@ mod tests {
     #[test]
     fn extracts_model_with_custom_name() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineModel,
             model_name: Some("checked".to_string()),
             ..make_props_macro(vec![])
@@ -619,8 +625,10 @@ mod tests {
     #[test]
     fn extracts_slots() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineSlots,
             slot_fields: vec![AnalyzedSlotField {
+                props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: true,
                 span: Span::new(10, 20),
@@ -652,6 +660,7 @@ mod tests {
     #[test]
     fn extracts_expose() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineExpose,
             expose_fields: vec![
                 AnalyzedExposeField {
@@ -684,6 +693,7 @@ mod tests {
     #[test]
     fn component_surface_sets_inherit_attrs() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineOptions,
             has_inherit_attrs_false: true,
             ..make_props_macro(vec![])
@@ -717,6 +727,7 @@ mod tests {
             make_prop("size", true),   // optional
         ]);
         let defaults_mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::WithDefaults,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_based: true,
@@ -759,12 +770,14 @@ mod tests {
     #[test]
     fn multiple_define_emits_merged() {
         let mac = AnalyzedMacro {
+            edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             emit_fields: vec![
                 AnalyzedEmitField {
                     name: "change".into(),
                     span: Span::new(10, 16),
+                    call_signature_span: None,
                     payload_type: Some("[val: string]".into()),
                     description: None,
                     tags: Vec::new(),
@@ -774,6 +787,7 @@ mod tests {
                 AnalyzedEmitField {
                     name: "submit".into(),
                     span: Span::new(20, 26),
+                    call_signature_span: None,
                     payload_type: None,
                     description: None,
                     tags: Vec::new(),
@@ -906,6 +920,7 @@ mod tests {
             callee_import_source: Some("vue".to_string()),
             vue_api: Some(VueApiClassification::Ref),
             async_component_source: None,
+            binds_whole_call_result: true,
         });
         snapshot.bindings = vec![binding];
 

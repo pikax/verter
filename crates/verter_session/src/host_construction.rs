@@ -245,6 +245,43 @@ impl VerterHost {
         // the host's provenance counters (`carrier_parses` / `sfc_parses`
         // are bumped on rayon workers where no capture-token TLS exists).
         let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let instance_id = next_host_instance_id();
+        let registered_source_authority = Arc::new(
+            verter_language::registered_source_authority::RegisteredSourceAuthority::new()
+                .expect("registered source authority"),
+        );
+        let carrier_grammar_authority = Arc::new(
+            verter_language::carrier_grammar::CarrierGrammarAuthority::new()
+                .expect("carrier grammar authority"),
+        );
+        use verter_language::carrier_grammar::{
+            CarrierGrammarConfig, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
+        };
+        carrier_grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::vue(),
+                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
+                CarrierParserGrammarVersion::new(1).expect("grammar version"),
+                CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
+                    .expect("default Vue grammar"),
+            )
+            .expect("register Vue grammar");
+        carrier_grammar_authority
+            .register_carrier_grammar(
+                verter_language::FileLanguage::svelte(),
+                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
+                CarrierParserGrammarVersion::new(1).expect("grammar version"),
+                CarrierGrammarConfig::Svelte,
+            )
+            .expect("register Svelte grammar");
+        let carrier_publication_store = Arc::new(
+            crate::carrier_publication_store::CarrierPublicationStore::with_provenance(
+                Arc::clone(&registered_source_authority),
+                Arc::clone(&carrier_grammar_authority),
+                Arc::clone(&provenance),
+            ),
+        );
+        let registered_envelope_ingest = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
 
         // The host's language classification authority. The capability
         // snapshot is empty: no capability producer exists in the
@@ -271,6 +308,11 @@ impl VerterHost {
                 config.clone(),
                 Arc::clone(&workspace_lock),
                 Arc::clone(&provenance),
+                Arc::clone(&registered_source_authority),
+                Arc::clone(&carrier_grammar_authority),
+                Arc::clone(&carrier_publication_store),
+                crate::carrier_publication_store::HostInstanceId::new(instance_id),
+                Arc::clone(&registered_envelope_ingest),
             ));
             let loader = Arc::new(WorkspaceSourceLoader {
                 workspace: Arc::clone(&workspace_lock),
@@ -379,8 +421,16 @@ impl VerterHost {
             }
         };
         Self {
-            instance_id: next_host_instance_id(),
+            instance_id,
             config,
+            registered_source_authority,
+            carrier_grammar_authority,
+            carrier_publication_store,
+            block_content_state: default_shared(crate::block_content::BlockContentState::default()),
+            block_content_admission_fence: parking_lot::Mutex::new(()),
+            block_content_correlation_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            block_content_admission_seam_hook: parking_lot::Mutex::new(None),
             language_classifier,
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
@@ -392,6 +442,7 @@ impl VerterHost {
             #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
+            registered_envelope_ingest,
             provenance,
             resolver: HostResolverState::new(routes_handle, imported_roots_handle),
             query_profile: parking_lot::Mutex::new(query_profile),
@@ -1000,9 +1051,8 @@ impl VerterHost {
     /// Reference to the profile-domain DB's underlying storage (D48 split).
     /// Stores [`crate::types::ProfileState`] keyed by canonical id; call
     /// sites use `host.compile_cache().entry(...)` / `.get(...)` / `.iter()`
-    /// etc. to access per-profile compile outputs (`compile_slots`,
-    /// `content_overrides`, `style_overrides`, `latest_diagnostics`,
-    /// `diagnostics_generation`).
+    /// etc. to access per-profile compile outputs (`compile_slots`),
+    /// `latest_diagnostics`, and `diagnostics_generation`.
     #[must_use]
     pub(crate) fn compile_cache(&self) -> &dashmap::DashMap<String, crate::types::ProfileState> {
         self.project_type_store.compile_cache().entries()
@@ -1019,6 +1069,51 @@ impl VerterHost {
         &self,
     ) -> &dashmap::DashMap<String, crate::types::DerivedRawState> {
         self.project_type_store.derived_raw_cache().entries()
+    }
+
+    /// Get or create one derived-state row while advancing the strict
+    /// self-root authority around a membership insertion. Mutating an existing
+    /// row does not move trackedness and therefore leaves the authority stable.
+    pub(crate) fn derived_raw_entry_or_default(
+        &self,
+        canonical: String,
+    ) -> dashmap::mapref::one::RefMut<'_, String, crate::types::DerivedRawState> {
+        use dashmap::mapref::entry::Entry;
+
+        match self.derived_raw_cache().entry(canonical) {
+            Entry::Occupied(entry) => entry.into_ref(),
+            Entry::Vacant(entry) => {
+                struct EndTransition<'a>(&'a dyn verter_workspace::WorkspaceAccess);
+                impl Drop for EndTransition<'_> {
+                    fn drop(&mut self) {
+                        self.0.end_strict_self_root_transition();
+                    }
+                }
+                let workspace = self.ws();
+                workspace.begin_strict_self_root_transition();
+                let _transition = EndTransition(workspace.as_ref());
+                entry.insert(crate::types::DerivedRawState::default())
+            }
+        }
+    }
+
+    pub(crate) fn remove_derived_raw_entry(
+        &self,
+        canonical: &str,
+    ) -> Option<(String, crate::types::DerivedRawState)> {
+        if !self.derived_raw_cache().contains_key(canonical) {
+            return None;
+        }
+        struct EndTransition<'a>(&'a dyn verter_workspace::WorkspaceAccess);
+        impl Drop for EndTransition<'_> {
+            fn drop(&mut self) {
+                self.0.end_strict_self_root_transition();
+            }
+        }
+        let workspace = self.ws();
+        workspace.begin_strict_self_root_transition();
+        let _transition = EndTransition(workspace.as_ref());
+        self.derived_raw_cache().remove(canonical)
     }
 
     /// Reference to the dependency-closure-domain DB's underlying storage
@@ -1041,7 +1136,7 @@ impl VerterHost {
     /// drop together).
     pub(crate) fn drop_all_per_canonical_compile_caches(&self, canonical: &str) {
         self.compile_cache().remove(canonical);
-        self.derived_raw_cache().remove(canonical);
+        let _ = self.remove_derived_raw_entry(canonical);
         self.dependency_cache().remove(canonical);
         // The content-addressed compile-output node lives on the
         // project-global store, not on the per-canonical ProfileState, so

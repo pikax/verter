@@ -7477,6 +7477,21 @@ const KNOWN_NON_DTO_OUTPUT_IDENTS: &[(&str, NonAuthorityCategory)] = &[
         "DeclarationId",
         NonAuthorityCategory::ExternalNonAuthority(&["verter_semantic::analysis::type_eval"]),
     ),
+    // Producer-owned semantic publication bundle: source/evidence/exactness/
+    // provenance over graph-domain facts. It derives `NoTypeExpr` and carries
+    // no materialized `verter_type_expr::TypeExpr`, so returning it across the
+    // framework-surface boundary is intentionally non-bearing.
+    (
+        "TypePublication",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
+    ),
+    // Typed callable-role classification result: a closed enum over symbolic
+    // identity, exactness, provenance, and unresolved reason. It derives
+    // `NoTypeExpr` and carries no materialized `TypeExpr`.
+    (
+        "PropCallableRole",
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_type_expr"]),
+    ),
     // Framework-surface WIRE response / error / audit-envelope types — proto /
     // audit DTOs carrying GRAPH nodes (a shallow projection), NOT the Rust
     // `verter_type_expr::TypeExpr` payload, so non-bearing for this closure. The
@@ -12510,6 +12525,13 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("typeinfo/raise.rs", "render_node_display_with_ctx"),
+    // The hover-boundary synthetic slot-binding deepen entry: raises the
+    // published source arm under the terminal demand, decides the carrier
+    // fallback in NODE DOMAIN (`node_is_synthetic_binding_carrier`, BEFORE
+    // materialising), then unwraps the sealed carrier ONCE for the caller.
+    // No decision touches the materialised `TypeExpr`; it takes no `TypeExpr`
+    // param, so the self-policing rail seeds nothing.
+    ("typeinfo/raise.rs", "deepen_synthetic_slot_binding"),
     ("vue_exec/mod.rs", "raise_member_value"),
     // The former `vue_exec/imported_elements.rs` terminal sinks
     // (`resolved_elements_from_surface`, `imported_emits_resolved_elements`,
@@ -12547,11 +12569,11 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // The Vue property-style emit terminal: iterates the surface's PUBLIC
     // members (a node-domain visibility fact), mints each member value ONCE
     // via the registered `raise_member_value` sink, and builds the
-    // `ResolvedEmitField` rows (the analysis field + the published payload
+    // complete `ResolvedEmitOccurrence` rows (the analysis field + published payload
     // SOURCE — an authored locator or a node-domain closed/use-site fact
     // projection) — structurally identical to `props_from_typeinfo_surface`.
     // No decision on any materialized value; no `TypeExpr` param.
-    ("vue_exec/normalize.rs", "property_style_emit_fields"),
+    ("vue_exec/normalize.rs", "property_style_emit_field"),
     // The Svelte callback-event payload-tuple terminal (the Svelte-cap twin of
     // the Vue `materialize_payload_tuple`): mints each node-domain callback param
     // ONCE through the sealed Svelte output cap into a labelled `TupleElement`.
@@ -12568,6 +12590,11 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // are node-domain (`CallableNodeView::validated_snippet_positional_params`)
     // in the non-terminal `svelte_snippet_slots_from_typeinfo_surface`.
     ("svelte_exec.rs", "materialize_snippet_slot_bindings"),
+    // The Svelte snippet-slot return terminal: mints the callable return
+    // `SemanticNodeId` ONCE through the sealed Svelte output cap. ZERO decide;
+    // the structured return and callable-arm selection are decided in the node
+    // domain before this sink, and this function takes no `TypeExpr` input.
+    ("svelte_exec.rs", "materialize_snippet_slot_return"),
     // The Vue slot-return terminal (the single-node twin of the Vue
     // `materialize_payload_tuple`): mints the slot's return `SemanticNodeId` ONCE
     // through the sealed output cap into the display return `TypeExpr`. ZERO

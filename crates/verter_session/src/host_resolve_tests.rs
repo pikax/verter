@@ -6,9 +6,9 @@ use verter_workspace::WorkspaceRead;
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 use crate::{
-    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileLanguage,
-    HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
-    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy,
+    CompileProfile, FileLanguage, HostConfig, HostDiagnostic, HostError, HostSeverity,
+    PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_compiler::compile::CompileTarget;
 use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
@@ -25,6 +25,20 @@ fn strict_host() -> VerterHost {
 }
 fn profile() -> CompileProfile {
     CompileProfile::default()
+}
+
+fn parsed_vue_fixture(source: &str) -> Arc<verter_parser::parser::types::ParsedSfc> {
+    let provenance = crate::types::MetaProvenance::default();
+    let artifact = crate::carrier_fixture_tests::publish_carrier_fixture(
+        "file:///host-resolve-fixture.vue",
+        source,
+        &verter_language::FileLanguage::vue(),
+        &provenance,
+    )
+    .expect("registered Vue fixture");
+    crate::typeinfo::adapters::vue::vue_parse(&artifact)
+        .expect("Vue carrier")
+        .clone()
 }
 fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
     let _ = host
@@ -50,6 +64,387 @@ fn upsert_non_sfc(host: &VerterHost, id: &str, source: &str) {
         .unwrap();
 }
 
+#[test]
+fn vue_public_projection_carries_structured_props_event_overloads_and_slots() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Contract.vue",
+        r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{
+  required: string
+  optional?: number
+}>(), { optional: 1 })
+defineEmits<{
+  save: [value: string]
+  save: [count?: number, ...string[]]
+  (event: 'confirm', value: string): boolean
+  (event: 'confirm', count: number): number
+}>()
+defineSlots<{
+  itemRow?(props: { item: string }): number
+}>()
+void props
+</script>
+<template><slot name="itemRow" item="x" /></template>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/Contract.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let required = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "required")
+        .expect("required prop");
+    assert!(!required.optional);
+    let optional = contract
+        .props
+        .iter()
+        .find(|prop| prop.name.as_ref() == "optional")
+        .expect("defaulted prop");
+    assert!(optional.optional && optional.has_default);
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "duplicate rows form overloads");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("value")
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("count")
+    );
+    assert!(save.overloads[1].parameters[0].optional);
+    assert_eq!(
+        save.overloads[1].parameters.len(),
+        2,
+        "{:?}",
+        save.overloads[1].parameters
+    );
+    assert_eq!(
+        save.overloads[1].parameters[1].name.as_deref(),
+        None,
+        "{:?}",
+        save.overloads[1].parameters
+    );
+    assert!(save.overloads[1].parameters[1].rest);
+    assert_eq!(save.derived_handler.overloads.len(), 2);
+
+    let confirm = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "confirm")
+        .expect("confirm event");
+    assert_eq!(confirm.overloads.len(), 2);
+    assert_eq!(
+        confirm.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        confirm.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(
+        confirm.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+    assert_eq!(
+        confirm.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "itemRow")
+        .expect("itemRow slot");
+    assert!(slot.optional);
+    assert_eq!(slot.input.bindings[0].name.as_ref(), "item");
+    assert_eq!(
+        slot.return_type
+            .as_ref()
+            .and_then(|ty| ty.publication.materialized_type()),
+        Some(&verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        ))
+    );
+
+    upsert_vue(
+        &host,
+        "/src/Contract.vue",
+        r#"<script setup lang="ts">
+defineProps<{ replacement: boolean }>()
+</script>"#,
+    );
+    let refreshed = host
+        .get_public_api_projection("/src/Contract.vue")
+        .expect("updated Vue projection succeeds")
+        .expect("updated Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(refreshed) = refreshed.contract
+    else {
+        panic!("updated Vue carrier remains supported");
+    };
+    assert_eq!(refreshed.props.len(), 1);
+    assert_eq!(refreshed.props[0].name.as_ref(), "replacement");
+    assert!(refreshed.events.is_empty() && refreshed.slots.is_empty());
+}
+
+// @ai-generated - Discriminates mixed duplicate emit occurrences in the
+// resolver's unified authored order.
+#[test]
+fn vue_public_projection_matches_mixed_duplicate_emit_returns_by_producer() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/MixedEmit.vue",
+        r#"<script setup lang="ts">
+defineEmits<{
+  save: [value: string]
+  (event: 'save', count: number): boolean
+}>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/MixedEmit.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "duplicate rows form overloads");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("value"),
+        "the property row remains first"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Void),
+        "the property row keeps its implicit void return"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("count"),
+        "the callable row remains second"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the callable return stays attached to its producer"
+    );
+    assert_eq!(
+        save.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the derived handler uses the same callable return"
+    );
+}
+
+// @ai-generated - Discriminates exact callable occurrences when a non-event
+// signature is skipped and a union event expands into adjacent name arms.
+#[test]
+fn vue_public_projection_preserves_skipped_and_union_callable_occurrences() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/SkippedCallableOrdinal.vue",
+        r#"<script setup lang="ts">
+defineEmits<{
+  (value: number): Date
+  (event: 'save' | 'cancel', unionPayload: string): number
+  (event: 'save', literalPayload: boolean): boolean
+}>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/SkippedCallableOrdinal.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(
+        save.overloads.len(),
+        2,
+        "the literal signature must merge with its normalized row instead of duplicating"
+    );
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("unionPayload"),
+        "the union occurrence remains first"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the union occurrence keeps its own return"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("literalPayload"),
+        "the literal occurrence remains a distinct overload"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the literal occurrence keeps its own return"
+    );
+
+    let cancel = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "cancel")
+        .expect("cancel event");
+    assert_eq!(cancel.overloads.len(), 1);
+    assert_eq!(
+        cancel.overloads[0].parameters[0].name.as_deref(),
+        Some("unionPayload")
+    );
+    assert_eq!(
+        cancel.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+}
+
+// @ai-generated - Discriminates heritage call-signature identities against
+// the resolved surface's base-before-own order.
+#[test]
+fn vue_public_projection_orders_inherited_callable_emits_base_before_own() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/InheritedCallableOrdinal.vue",
+        r#"<script setup lang="ts">
+interface BaseEmits {
+  (event: 'baseOnly', baseOnlyPayload: number): string
+  (event: 'save', basePayload: string): number
+}
+interface DerivedEmits extends BaseEmits {
+  (event: 'save', ownPayload: boolean): boolean
+}
+defineEmits<DerivedEmits>()
+</script>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/InheritedCallableOrdinal.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+
+    let base_only = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "baseOnly")
+        .expect("baseOnly event");
+    assert_eq!(
+        base_only.overloads.len(),
+        1,
+        "the inherited-only signature must not be duplicated"
+    );
+    assert_eq!(
+        base_only.overloads[0].parameters[0].name.as_deref(),
+        Some("baseOnlyPayload")
+    );
+    assert_eq!(
+        base_only.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+    );
+
+    let save = contract
+        .events
+        .iter()
+        .find(|event| event.name.as_ref() == "save")
+        .expect("save event");
+    assert_eq!(save.overloads.len(), 2, "base and own overloads survive");
+    assert_eq!(
+        save.overloads[0].parameters[0].name.as_deref(),
+        Some("basePayload"),
+        "the inherited occurrence leads the resolved surface"
+    );
+    assert_eq!(
+        save.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the inherited return remains attached to the inherited payload"
+    );
+    assert_eq!(
+        save.overloads[1].parameters[0].name.as_deref(),
+        Some("ownPayload"),
+        "the derived own signature follows its heritage"
+    );
+    assert_eq!(
+        save.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean),
+        "the derived return remains attached to the derived payload"
+    );
+    assert_eq!(
+        save.derived_handler.overloads[0].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+    );
+    assert_eq!(
+        save.derived_handler.overloads[1].return_type,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+    );
+}
+
+#[test]
+fn declaration_survives_typed_component_contract_output_failure() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/ContractOutputFailure.vue",
+        "<script setup lang=\"ts\">defineProps<{ value: string }>()</script>",
+    );
+    crate::test_only::component_meta_output::force_output_failure_for(
+        "/src/ContractOutputFailure.vue",
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/ContractOutputFailure.vue")
+        .expect("contract failure does not suppress declaration")
+        .expect("Vue declaration remains available");
+    assert!(projection.response.ts_labeled_code().contains("$props"));
+    let crate::framework::ComponentContractAvailability::Unsupported(unsupported) =
+        projection.contract
+    else {
+        panic!("output failure must not become supported-empty");
+    };
+    assert!(matches!(
+        unsupported.reason,
+        crate::framework::ComponentContractUnsupportedReason::OutputMaterializationFailed {
+            lane: crate::meta_resolve::ComponentMetaOutputLane::Prop,
+            index: 0,
+            inner_index: None,
+            failure: crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource,
+        }
+    ));
+}
 /// A completely EMPTY .vue file (0 bytes — e.g. motion-vue's playground
 /// Home.vue) is a valid empty component. The host must serve a Main virtual
 /// node exporting `defineComponent({ __name })` with an empty public surface
@@ -185,35 +580,22 @@ fn find_diag<'a>(diagnostics: &'a crate::DiagnosticsSnapshot, code: &str) -> &'a
 fn assert_missing_src_compile_error(
     host: &VerterHost,
     canonical_id: &str,
-    source: &str,
-    specifier: &str,
-    expected_tag: &str,
+    _source: &str,
+    _specifier: &str,
+    _expected_tag: &str,
 ) {
-    let diagnostics = compile_main_error(host, canonical_id);
-    let missing = find_diag(&diagnostics, "HOST_MISSING_EXTERNAL_SOURCE");
-
-    assert_eq!(missing.severity, HostSeverity::Error);
-    assert!(
-        missing.message.contains(specifier),
-        "missing external source message should mention {specifier}: {}",
-        missing.message
-    );
-    assert!(
-        !missing.message.contains("HOST_MISSING_MACRO_TYPE_DEP"),
-        "message should not mention macro type deps: {}",
-        missing.message
-    );
-
-    let start = source.find(expected_tag).unwrap() as u32;
-    let end = source[start as usize..]
-        .find('>')
-        .map(|offset| start + offset as u32 + 1)
-        .unwrap();
-    assert_eq!(
-        missing.span,
-        Some(Span::new(start, end)),
-        "missing external source span should point at the owning tag"
-    );
+    let error = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical_id.to_string()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: profile(),
+        })
+        .expect_err("external block content must fail closed");
+    assert!(matches!(
+        error,
+        HostError::BlockContentRefused(BlockContentRefusal::Unavailable { .. })
+    ));
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -276,7 +658,7 @@ fn missing_style_src_produces_compile_error_and_no_outputs() {
 }
 
 #[test]
-fn external_src_can_compile_via_owner_dependency_mapping() {
+fn external_src_owner_dependency_mapping_does_not_bypass_registered_vfs_identity() {
     let host = strict_host();
     let source =
         "<template src=\"@/partials/panel.html\"></template>\n<script setup>const n = 1</script>";
@@ -291,23 +673,23 @@ fn external_src_can_compile_via_owner_dependency_mapping() {
         }],
     );
 
-    let response = host
+    let error = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect("compile should succeed when the real external source is registered as a dep");
-
+        .expect_err("a dependency-map row is not a registered external VFS artifact");
     assert!(
-        !response.diagnostics.has_errors,
-        "resolved external src should not keep missing-source diagnostics"
-    );
-    assert!(
-        response.code.contains("render"),
-        "resolved compile should produce render code, got: {}",
-        response.code
+        matches!(
+            &error,
+            HostError::BlockContentRefused(BlockContentRefusal::Unavailable {
+                availability: crate::BlockContentAvailability::Missing,
+                ..
+            })
+        ),
+        "unexpected external-content refusal: {error:?}"
     );
 }
 
@@ -392,39 +774,25 @@ fn missing_template_src_retries_successfully_after_dependency_arrives() {
         "<template src=\"./resolved.html\"></template>\n<script setup>const n = 1</script>";
     upsert_vue(&host, "/src/Comp.vue", source);
 
-    let diagnostics = compile_main_error(&host, "/src/Comp.vue");
-    assert!(
-        diagnostics
-            .diagnostics
-            .iter()
-            .any(|diag| diag.code == "HOST_MISSING_EXTERNAL_SOURCE"),
-        "first compile should fail on the missing template source"
+    assert_missing_src_compile_error(
+        &host,
+        "/src/Comp.vue",
+        source,
+        "./resolved.html",
+        "<template",
     );
 
     upsert_non_sfc(&host, "/src/resolved.html", "<div>resolved</div>");
 
-    let response = host
+    let output = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect("compile should succeed once the external template source exists");
-
-    assert!(
-        !response.diagnostics.has_errors,
-        "resolved compile should not keep the old missing-source error"
-    );
-    assert!(
-        response.code.contains("render"),
-        "resolved compile should produce code, got: {}",
-        response.code
-    );
-    assert!(
-        !response.code.contains("missing external source"),
-        "resolved compile output must not contain the previous error text"
-    );
+        .expect("external content lowers after dependency registration");
+    assert!(output.code.contains("resolved"));
 }
 
 #[test]
@@ -1556,6 +1924,7 @@ fn testing_public_api_ignores_define_expose_narrowing() {
 }
 
 #[test]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_with_profile_uses_override_script_state() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>";
@@ -1566,12 +1935,9 @@ fn public_api_with_profile_uses_override_script_state() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/Comp.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("defineProps<{ overrideProp: number }>()"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "defineProps<{ overrideProp: number }>()",
+            )],
         })
         .expect("script override should succeed");
 
@@ -1601,6 +1967,7 @@ fn public_api_with_profile_uses_override_script_state() {
 /// `cached_tsc_extract` write in the Vue projector. The profile render then
 /// occupies the raw-derived cache slot before the raw projection control runs.
 #[test]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_profile_override_does_not_populate_raw_extract_cache() {
     let host = strict_host();
     upsert_vue(
@@ -1614,12 +1981,9 @@ fn public_api_profile_override_does_not_populate_raw_extract_cache() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/CacheOwner.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("defineProps<{ overrideProp: number }>()"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "defineProps<{ overrideProp: number }>()",
+            )],
         })
         .expect("script override should succeed");
 
@@ -1659,6 +2023,7 @@ fn public_api_profile_override_does_not_populate_raw_extract_cache() {
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_dep() {
     let host = strict_host();
     upsert_vue(
@@ -1677,12 +2042,9 @@ fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_de
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/Types.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("export type Props = string"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "export type Props = string",
+            )],
         })
         .expect("dependency script override should succeed");
 
@@ -3814,7 +4176,7 @@ fn cold_ensure_compiled_miss_does_not_read_store_view_in_cache_check() {
     // hashes match) confirm a candidate slot worth validating. A cold miss
     // (no `ProfileState` at all, or a present `ProfileState` with no slot for
     // this profile) falls through to recompile WITHOUT paying for a
-    // full-workspace store-view snapshot.
+    // store-view root capture.
     //
     // The COLD miss (`compile_cache().get() == None`) is the state where a
     // file's SOURCE is present in the scheduler but its `compile_cache`
@@ -3923,7 +4285,7 @@ fn session_get_virtual_file_profile_miss_does_not_read_store_view() {
     // `CompileOutputNodeFactValidatedSession::lookup` invokes ONLY after its
     // cheap slot-present + carrier + hash predicates pass, so this
     // profile-miss path falls through to recompile WITHOUT paying for a
-    // full-workspace store-view snapshot.
+    // store-view root capture.
     //
     // Discrimination via the same per-thread warm-validation counter used by
     // the `ensure_compiled` pair. A self-contained SFC (no cross-file deps)
@@ -4632,8 +4994,8 @@ const SETUP_MARKER = 2;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
-    let result = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
+    let parsed = parsed_vue_fixture(source);
+    let result = crate::host_resolve::extract_vue_script_content(source, &parsed);
     assert!(result.is_some(), "should extract script content from SFC");
     let content = result.unwrap();
     assert!(
@@ -4660,30 +5022,6 @@ const SETUP_MARKER = 2;
     );
 }
 
-#[test]
-fn extract_vue_script_content_without_parsed_sfc_matches_cached() {
-    let source = r#"<script lang="ts">
-const COMPANION = 1;
-</script>
-<script setup lang="ts">
-const SETUP = 2;
-</script>
-<template><div /></template>"#;
-
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed));
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None);
-    assert_eq!(
-        with_cache, without_cache,
-        "cached and non-cached paths must produce identical output"
-    );
-    // Also verify the non-cached path produces correct output on its own
-    let content = without_cache.unwrap();
-    assert!(content.contains("COMPANION"), "should contain COMPANION");
-    assert!(content.contains("SETUP"), "should contain SETUP");
-    assert!(!content.contains("<template>"), "must not contain template");
-}
-
 /// A JS comment containing `` `<style scoped>` `` must not truncate the
 /// setup block. reka-ui RadioGroupItem has such a comment; truncating drops
 /// every `defineProps` and leaves RadioGroup without a `value` prop.
@@ -4702,37 +5040,33 @@ const scopeId = 1
 .foo {}
 </style>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
+    let parsed = parsed_vue_fixture(source);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
 
-    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
-        assert!(
-            content.contains("defineProps"),
-            "{label}: setup must include defineProps, got:\n{content}"
-        );
-        assert!(
-            content.contains("scopeId"),
-            "{label}: setup must include code after the style-looking comment, got:\n{content}"
-        );
-        assert!(
-            content.contains("ItemProps"),
-            "{label}: companion interface must be retained, got:\n{content}"
-        );
-        // The real style block content is blanked (not a script span).
-        assert!(
-            !content.contains(".foo"),
-            "{label}: must not include real <style> block body as script, got:\n{content}"
-        );
-    }
+    assert!(
+        with_cache.contains("defineProps"),
+        "registered setup must include defineProps, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("scopeId"),
+        "registered setup must include code after the style-looking comment, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("ItemProps"),
+        "registered companion interface must be retained, got:\n{with_cache}"
+    );
+    // The real style block content is blanked (not a script span).
+    assert!(
+        !with_cache.contains(".foo"),
+        "registered extraction must not include real <style> block body as script, got:\n{with_cache}"
+    );
 }
 
 #[test]
-fn extract_vue_script_content_handles_script_end_literal_in_string() {
+fn extract_vue_script_content_handles_escaped_script_end_literal_in_string() {
     let source = r#"<script lang="ts">
-const html = "</script><div>kept</div>";
+const html = "<\/script><div>kept</div>";
 const BEFORE_CLOSE = true;
 </script>
 <script setup lang="ts">
@@ -4740,19 +5074,12 @@ const AFTER_CLOSE = 1;
 </script>
 <template><div /></template>"#;
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
-
-    assert_eq!(
-        with_cache, without_cache,
-        "cached and non-cached extraction must agree for script-end literals",
-    );
+    let parsed = parsed_vue_fixture(source);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
     assert!(
-        with_cache.contains(r#"const html = "</script><div>kept</div>";"#),
-        "script-end literal should be preserved, got: {with_cache}"
+        with_cache.contains(r#"const html = "<\/script><div>kept</div>";"#),
+        "escaped script-end literal should be preserved, got: {with_cache}"
     );
     assert!(
         with_cache.contains("const BEFORE_CLOSE = true;"),
@@ -6378,26 +6705,22 @@ const emit = defineEmits<A>()
 fn extract_vue_script_content_handles_adjacent_close_and_template() {
     let source = "<script lang=\"ts\">\nexport interface ItemProps { value?: string }\n</script><script setup lang=\"ts\">\nconst props = defineProps<ItemProps>()\n</script><template><div /></template>";
 
-    let parsed = verter_compiler::compile::parse_sfc(source, None, None);
-    let with_cache = crate::host_resolve::extract_vue_script_content(source, Some(&parsed))
-        .expect("cached extraction should succeed");
-    let without_cache = crate::host_resolve::extract_vue_script_content(source, None)
-        .expect("non-cached extraction should succeed");
+    let parsed = parsed_vue_fixture(source);
+    let with_cache = crate::host_resolve::extract_vue_script_content(source, &parsed)
+        .expect("registered extraction should succeed");
 
-    for (label, content) in [("cached", &with_cache), ("raw-scan", &without_cache)] {
-        assert!(
-            content.contains("defineProps"),
-            "{label}: setup must include defineProps with adjacent close tags, got:\n{content}"
-        );
-        assert!(
-            content.contains("ItemProps"),
-            "{label}: companion interface must survive adjacent close tags, got:\n{content}"
-        );
-        assert!(
-            !content.contains("<template>"),
-            "{label}: template markup must not leak into script content, got:\n{content}"
-        );
-    }
+    assert!(
+        with_cache.contains("defineProps"),
+        "registered setup must include defineProps with adjacent close tags, got:\n{with_cache}"
+    );
+    assert!(
+        with_cache.contains("ItemProps"),
+        "registered companion interface must survive adjacent close tags, got:\n{with_cache}"
+    );
+    assert!(
+        !with_cache.contains("<template>"),
+        "registered template markup must not leak into script content, got:\n{with_cache}"
+    );
 }
 
 // ── Attribute fallthrough on the parent-facing props type ────────────
@@ -6716,9 +7039,14 @@ fn an_unnameable_root_component_zeroes_its_whole_arm() {
         condition_text: None,
         props: vec![FallthroughPropEntry {
             name: "label".to_string(),
-            type_source: verter_type_expr::facts::SourcePosition::unannotated(),
+            callable_role: verter_type_expr::PropCallableRole::default(),
+            publication: crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::unannotated(),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                None,
+                None,
+            ),
             type_source_scope: None,
-            raw_type: None,
             sources: vec![InheritedSource::Component {
                 canonical_id: "/src/Child.vue".to_string(),
             }],
@@ -7260,5 +7588,162 @@ fn a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason() {
         ),
         "control: the NAMED spelling of the same import resolves and widens, so \
          the namespace result above is about the namespace shape only:\n{control}"
+    );
+}
+
+// @ai-generated - Single-knob proof that mandatory-contract composition is
+// projection-entry-scoped: the response-only render never reaches an output
+// build; only `get_public_api_projection` composes (and pays) the contract.
+#[test]
+fn response_only_public_api_render_composes_no_contract() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/ResponseOnly.vue",
+        r#"<script setup lang="ts">
+defineProps<{ label: string }>()
+</script>
+<template><button>{{ label }}</button></template>"#,
+    );
+
+    // Arm ONE output-build failure for the target canonical (consumed by the
+    // next `build_component_meta_output` for it).
+    crate::test_only::component_meta_output::force_output_failure_for("/src/ResponseOnly.vue");
+
+    // The response-only render must succeed WITHOUT reaching an output build:
+    // the armed failure survives it. (Pre-move discrimination: a response body
+    // still composing the contract consumes the arm here, and the projection
+    // below then composes a SUPPORTED contract.)
+    let response = host
+        .get_public_api("/src/ResponseOnly.vue")
+        .expect("response-only render succeeds with the failure armed")
+        .expect("Vue carrier renders a response");
+    assert!(
+        !response.ts_labeled_code().is_empty(),
+        "the declaration response renders normally"
+    );
+
+    // The projection entry is the ONE composition point: it consumes the arm
+    // and degrades to the typed Unsupported availability — never a gated or
+    // absent response.
+    let projection = host
+        .get_public_api_projection("/src/ResponseOnly.vue")
+        .expect("projection entry succeeds — composition never gates the response")
+        .expect("Vue carrier projects");
+    assert!(
+        !projection.response.ts_labeled_code().is_empty(),
+        "the projection's declaration response renders despite the contract failure"
+    );
+    match projection.contract {
+        crate::framework::ComponentContractAvailability::Unsupported(unsupported) => {
+            assert!(
+                matches!(
+                    unsupported.reason,
+                    crate::framework::ComponentContractUnsupportedReason::OutputMaterializationFailed { .. }
+                ),
+                "the projection composes the contract and consumes the armed output failure, got: {:?}",
+                unsupported.reason
+            );
+        }
+        crate::framework::ComponentContractAvailability::Supported(_) => panic!(
+            "the armed output failure must be consumed by the PROJECTION's composition — a \
+             supported contract means a response-only render composed (and discarded) it first"
+        ),
+    }
+}
+
+// @ai-generated - The hover-boundary demand entry to the synthetic-binding
+// deepen route: a live published carrier deepens to its authored member type;
+// a stale carrier fails closed to `None` (the caller keeps the refusal).
+#[test]
+fn deepen_synthetic_slot_binding_deepens_live_carrier_and_fails_closed_on_stale() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/SlotCarrier.vue",
+        r#"<script setup lang="ts">
+defineSlots<{ header(props: { title: string; count: number }): any }>()
+</script>
+<template><slot name="header" title="hdr" :count="1" /></template>"#,
+    );
+
+    let projection = host
+        .get_public_api_projection("/src/SlotCarrier.vue")
+        .expect("Vue declaration projection succeeds")
+        .expect("Vue carrier projects");
+    let crate::framework::ComponentContractAvailability::Supported(contract) = projection.contract
+    else {
+        panic!("Vue carrier must publish a supported contract");
+    };
+    let slot = contract
+        .slots
+        .iter()
+        .find(|slot| slot.name.as_ref() == "header")
+        .expect("header slot row");
+    let title = slot
+        .input
+        .bindings
+        .iter()
+        .find(|binding| binding.name.as_ref() == "title")
+        .expect("title binding row");
+    // Publication stays shallow-by-default: the published binding type IS the
+    // synthetic carrier (typed-IR variant match, never text).
+    let Some(verter_type_expr::TypeExpr::SyntheticSlotBinding(key)) =
+        title.ty.publication.materialized_type()
+    else {
+        panic!(
+            "the concrete-inline slot binding publishes the shallow synthetic carrier, got: {:?}",
+            title.ty.publication.materialized_type()
+        );
+    };
+
+    // Terminal demand at the hover boundary: the carrier deepens through the
+    // one sanctioned route to the authored member type.
+    let deepened = host
+        .deepen_synthetic_slot_binding("/src/SlotCarrier.vue", key)
+        .expect("a live same-generation carrier deepens");
+    assert!(
+        !matches!(
+            deepened,
+            verter_type_expr::TypeExpr::SyntheticSlotBinding(_)
+        ),
+        "the deepened view must not be the shallow carrier again"
+    );
+    assert_eq!(
+        deepened,
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the deepened `title` binding is its authored `string`"
+    );
+
+    // The deepen's cache identity is the CONTENT-FREE `SyntheticBindingId`
+    // (the `value_node` ordinal is value-side provenance, never a key): a
+    // same-identity carrier with a bogus ordinal still collapses onto the
+    // warm fact-validated entry (the designed collapse the explicit-deepen
+    // proof suite pins).
+    let same_identity_bogus_ordinal = std::sync::Arc::new(verter_type_expr::SyntheticCarrierKey {
+        value_node: u64::MAX,
+        ..(**key).clone()
+    });
+    assert_eq!(
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &same_identity_bogus_ordinal),
+        Some(verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )),
+        "the content-free identity serves the warm deepened entry regardless of the ordinal"
+    );
+
+    // FAIL-CLOSED negative: a COLD identity (no warm entry) whose seed node
+    // does not exist returns `None` — never a fabricated shape. (`u64::MAX`
+    // is not a live arena ordinal; the same-generation seed gate refuses it,
+    // and the raise arm falls back to the shallow carrier — the refusal.)
+    let stale = std::sync::Arc::new(verter_type_expr::SyntheticCarrierKey {
+        binding_name: std::sync::Arc::from("neverPublishedBinding"),
+        value_node: u64::MAX,
+        ..(**key).clone()
+    });
+    assert_eq!(
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &stale),
+        None,
+        "a stale/unresolvable carrier fails closed — the caller keeps the refusal"
     );
 }

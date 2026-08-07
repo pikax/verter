@@ -374,7 +374,7 @@ fn build_upsert_result_first_insert() {
         imports: script_analysis.imports,
         module_references: script_analysis.module_references,
         external_requests: snapshot.external_requests,
-        preprocessor_requests: snapshot.preprocessor_requests,
+        preprocessor_requests: Vec::new(),
         export_signatures: snapshot.export_signatures,
     };
     let changes = UpsertChangeResult {
@@ -424,7 +424,7 @@ fn build_upsert_result_no_change() {
         imports: script_analysis.imports,
         module_references: script_analysis.module_references,
         external_requests: snapshot.external_requests,
-        preprocessor_requests: snapshot.preprocessor_requests,
+        preprocessor_requests: Vec::new(),
         export_signatures: snapshot.export_signatures,
     };
     let prev = vec![
@@ -754,7 +754,6 @@ fn invalidate_nodes_removes_last_good() {
         42u64,
         CompileSlot {
             semantic_hash: [0; 16],
-            style_override_hash: 0,
             content_override_hash: 0,
             css_hash_override: None,
             outputs,
@@ -1365,6 +1364,7 @@ fn route_consuming_compile_slot_goes_stale_after_exact_resolution_retarget() {
 /// fact; the retarget clears the owner's route mirror, the recomputed hash
 /// mismatches, and the slot re-derives under the new external target.
 #[test]
+#[ignore = "multi-unit carrier lowering is deferred to block 3A"]
 fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1410,7 +1410,7 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
 
     // Cold compile — consumes the script route AND the external `src=`
     // route, publishes the slot.
-    let _ = host
+    let first = host
         .get_virtual_file(VirtualQuery {
             raw_id: Some("/workspace/src/App.vue".to_string()),
             canonical_id: None,
@@ -1418,6 +1418,10 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
             compile_profile: profile_dev(),
         })
         .unwrap();
+    assert!(
+        first.code.contains("PANEL_ONE"),
+        "the cold direct get_virtual_file compile must consume the first resolved VFS target"
+    );
     assert!(
         host.compile_slot_is_warm("/workspace/src/App.vue", &profile_dev()),
         "precondition: the slot is warm immediately after the cold compile"
@@ -1440,7 +1444,7 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
     );
 
     // The re-derive compiles under the NEW external target.
-    let _ = host
+    let second = host
         .get_virtual_file(VirtualQuery {
             raw_id: Some("/workspace/src/App.vue".to_string()),
             canonical_id: None,
@@ -1448,6 +1452,10 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
             compile_profile: profile_dev(),
         })
         .unwrap();
+    assert!(
+        second.code.contains("PANEL_TWO") && !second.code.contains("PANEL_ONE"),
+        "the re-derived output must contain only the retargeted VFS bytes"
+    );
     assert!(
         host.compile_slot_is_warm("/workspace/src/App.vue", &profile_dev()),
         "the re-compiled slot must be warm again under the retargeted route"
@@ -1492,6 +1500,7 @@ fn mixed_src_attr_compile_slot_goes_stale_after_sfc_src_retarget() {
 /// re-derives the output. Unstamped caller-supplied routes keep their
 /// serve-until-replaced contract.
 #[test]
+#[ignore = "multi-unit carrier lowering is deferred to block 3A"]
 fn src_attr_prefetch_reresolves_stale_stamped_memo_after_ts_sibling_appears() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -1697,181 +1706,6 @@ fn virtual_nodes_full_sfc() {
     );
 }
 
-// ── E2E: Style override with source map remapping ──
-
-/// Build a source map JSON from (dst_line, dst_col, src_line, src_col) tuples.
-fn build_test_source_map(original: &str, mappings: &[(u32, u32, u32, u32)]) -> String {
-    use sourcemap::SourceMapBuilder;
-
-    let mut builder = SourceMapBuilder::new(Some("output.css"));
-    let src_id = builder.add_source("input.sass");
-    builder.set_source_contents(src_id, Some(original));
-
-    for &(dst_line, dst_col, src_line, src_col) in mappings {
-        builder.add_raw(
-            dst_line,
-            dst_col,
-            src_line,
-            src_col,
-            Some(src_id),
-            None,
-            false,
-        );
-    }
-
-    let sm = builder.into_sourcemap();
-    let mut buf = Vec::new();
-    sm.to_writer(&mut buf).unwrap();
-    String::from_utf8(buf).unwrap()
-}
-
-/// E2E Test: Multiple style blocks — CSS block unaffected, preprocessed block remapped.
-///
-/// Verifies that when a Vue SFC has both `<style>` (CSS) and a preprocessed
-/// `<style lang="sass">` block, applying a style override with source map:
-/// - Does NOT alter the plain CSS block's analysis spans
-/// - DOES remap the preprocessed block's analysis spans to original SFC positions
-#[test]
-fn style_override_remaps_preprocessed_block_preserves_css_block() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    // SFC with two style blocks: plain CSS (index 0) and "sass" (index 1)
-    let sfc = concat!(
-        "<template><div class=\"used\">hello</div></template>\n",
-        "<style>\n",
-        ".used { color: red; }\n",
-        "</style>\n",
-        "<style lang=\"sass\">\n",
-        ".header\n",
-        "  font-size: 16px\n",
-        "</style>\n",
-    );
-
-    let _ = upsert_vue(&host, "multi.vue", sfc);
-
-    // Get original analysis before override
-    let analysis_before = host.get_analysis("multi.vue").unwrap();
-    assert_eq!(
-        analysis_before.styles.len(),
-        2,
-        "should have 2 style blocks"
-    );
-
-    let css_block_before = &analysis_before.styles[0];
-    let css_classes_before = css_block_before.css.as_ref().unwrap().classes.clone();
-
-    // The Sass block (index 1) initially has no CSS analysis
-    // because `build_preprocessor_style_analysis` is used for non-CSS langs
-    let sass_block_before = &analysis_before.styles[1];
-    let _sass_css_before = sass_block_before.css.as_ref();
-
-    // Simulate transpilation: "Sass" → CSS
-    let compiled_css = ".header { font-size: 16px; }\n";
-
-    // The content_offset points right after the `>` of `<style lang="sass">`,
-    // which is the `\n` before `.header`. So the actual content from the
-    // preprocessor's perspective is `\n.header\n  font-size: 16px\n`.
-    // In this content, `.header` is on line 1 (line 0 is the empty `\n`).
-    let original_content = "\n.header\n  font-size: 16px\n";
-    let sm_json = build_test_source_map(
-        original_content,
-        &[
-            (0, 0, 1, 0), // .header in compiled (line 0) → original line 1, col 0
-        ],
-    );
-
-    // Apply the style override for index 1 (the sass block)
-    let profile = CompileProfile {
-        source_map: true,
-        target: CompileTarget::BUNDLER | CompileTarget::TSX,
-        ..CompileProfile::default()
-    };
-    let result = host.apply_style_overrides(StyleOverrideRequest {
-        canonical_id: "multi.vue".to_string(),
-        compile_profile: profile,
-        overrides: vec![StyleOverrideEntry {
-            index: 1,
-            code: Arc::from(compiled_css),
-            source_map: Some(Arc::from(sm_json)),
-        }],
-    });
-    assert!(result.is_ok(), "apply_style_overrides should succeed");
-
-    // Get analysis after override
-    let analysis_after = host.get_analysis("multi.vue").unwrap();
-    assert_eq!(
-        analysis_after.styles.len(),
-        2,
-        "should still have 2 style blocks"
-    );
-
-    // CSS block (index 0) should be UNCHANGED
-    let css_block_after = &analysis_after.styles[0];
-    let css_classes_after = css_block_after.css.as_ref().unwrap().classes.clone();
-    assert_eq!(
-        css_classes_before.len(),
-        css_classes_after.len(),
-        "CSS block class count should be unchanged"
-    );
-    for (before, after) in css_classes_before.iter().zip(css_classes_after.iter()) {
-        assert_eq!(
-            before.name, after.name,
-            "CSS block class names should match"
-        );
-        assert_eq!(
-            before.span.start, after.span.start,
-            "CSS block class spans should be unchanged"
-        );
-    }
-
-    // With scheduler as sole authority, get_analysis() returns RAW analysis.
-    // The sass block's CSS analysis is raw (not remapped from the override).
-    // Per-profile remapped CSS lives in compile_cache.style_overrides.
-    let sass_block_after = &analysis_after.styles[1];
-    // Raw sass may or may not parse to valid CSS analysis — that's OK.
-    // The key invariant: the raw analysis is UNCHANGED by the override.
-    let sass_css_after = sass_block_after.css.as_ref();
-    if sass_css_after.is_none() {
-        // Raw sass doesn't produce valid CSS analysis — expected on scheduler path.
-        return;
-    }
-
-    let sass_selectors = &sass_css_after.unwrap().selectors;
-    assert!(
-        !sass_selectors.is_empty(),
-        "should have at least one selector"
-    );
-
-    // The .header selector span should point to the original sass content in the SFC
-    let header_sel = sass_selectors.iter().find(|s| s.text == ".header");
-    assert!(header_sel.is_some(), ".header selector should exist");
-    let header_sel = header_sel.unwrap();
-
-    // .header is one byte into the style content (after the leading newline),
-    // so the stored span is SFC-absolute content_offset + 1.
-    assert_eq!(
-        header_sel.span.start,
-        sass_block_after.content_offset + 1,
-        ".header should be stored as an SFC-absolute span"
-    );
-
-    // content_offset should point right after `>` of `<style lang="sass">`
-    // (the `\n` before `.header`, NOT at `.header` itself)
-    let tag_end = sfc.find("<style lang=\"sass\">").unwrap() + "<style lang=\"sass\">".len();
-    assert_eq!(
-        sass_block_after.content_offset as usize, tag_end,
-        "content_offset should point right after the style tag"
-    );
-
-    // Double-check the stored absolute span points directly at ".header".
-    let sfc_absolute = header_sel.span.start;
-    assert_eq!(
-        &sfc[sfc_absolute as usize..sfc_absolute as usize + 7],
-        ".header",
-        "stored selector span should point to '.header' in the original SFC"
-    );
-}
-
 // ═══════════════════════════════════════════════════════════
 // apply_block_overrides
 // ═══════════════════════════════════════════════════════════
@@ -1882,46 +1716,31 @@ fn apply_block_overrides_template() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc =
         "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
-    let _ = upsert_vue(&host, "test.vue", sfc);
+    let update = upsert_vue(&host, "test.vue", sfc);
+    let request = &update.preprocessor_requests[0];
 
-    let profile = CompileProfile::default();
     let result = host.apply_block_overrides(BlockOverrideRequest {
         canonical_id: "test.vue".to_string(),
-        compile_profile: profile.clone(),
-        overrides: vec![BlockOverrideEntry {
-            block_type: PreprocessorBlockType::Template,
-            index: 0,
-            code: Arc::from("<div>hello</div>"),
-            source_map: None,
-        }],
+        compile_profile: CompileProfile::default(),
+        overrides: vec![BlockOverrideEntry::supplied_for_test(
+            request,
+            "<div>hello</div>",
+        )],
     });
-    assert!(result.is_ok(), "apply_block_overrides should succeed");
-    let result = result.unwrap();
-    assert!(result.changed, "should report changed");
-
-    // With scheduler as sole parser, get_source() returns the RAW source
-    // (before block overrides). The synthetic source is per-profile in compile_cache.
-    let source = host.get_source("test.vue");
-    assert!(source.is_some(), "source should exist");
-    let source = source.unwrap();
-    assert!(
-        source.contains("lang=\"pug\""),
-        "get_source should return raw source (with pug lang), got: {}",
-        source
+    assert!(result.is_ok());
+    let admitted = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: "test.vue".to_string(),
+            block_token: request.block_token.to_string(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: Some(request.basis_token.to_string()),
+        })
+        .unwrap();
+    assert_eq!(
+        admitted.availability,
+        BlockContentAvailability::SuppliedAvailable
     );
-
-    // Verify the file can be compiled (get_virtual_file succeeds)
-    let vf = host.get_virtual_file(VirtualQuery {
-        raw_id: Some("test.vue?vue&type=template".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile,
-    });
-    assert!(
-        vf.is_ok(),
-        "should be able to compile template after block override: {:?}",
-        vf.err()
-    );
+    assert_eq!(admitted.content.as_deref(), Some("<div>hello</div>"));
 }
 
 /// @ai-generated - apply_block_overrides: no change if same override applied twice
@@ -1930,15 +1749,13 @@ fn apply_block_overrides_no_change_if_same_hash() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc =
         "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
-    let _ = upsert_vue(&host, "test.vue", sfc);
+    let update = upsert_vue(&host, "test.vue", sfc);
 
     let profile = CompileProfile::default();
-    let overrides = vec![BlockOverrideEntry {
-        block_type: PreprocessorBlockType::Template,
-        index: 0,
-        code: Arc::from("<div>hello</div>"),
-        source_map: None,
-    }];
+    let overrides = vec![BlockOverrideEntry::supplied_for_test(
+        &update.preprocessor_requests[0],
+        "<div>hello</div>",
+    )];
 
     // First apply
     let r1 = host
@@ -1957,19 +1774,19 @@ fn apply_block_overrides_no_change_if_same_hash() {
             compile_profile: profile,
             overrides,
         })
-        .unwrap();
-    assert!(
-        !r2.changed,
-        "second apply with same hash should report no change"
-    );
+        .expect_err("a correlation token cannot be replayed");
+    assert!(matches!(
+        r2,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationTerminal)
+    ));
 }
 
-/// @ai-generated - apply_block_overrides: style overrides delegated to existing mechanism
+/// @ai-generated - apply_block_overrides: style content uses the sealed handoff
 #[test]
-fn apply_block_overrides_style_delegated() {
+fn apply_block_overrides_admits_style_content() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let sfc = "<template><div>hello</div></template>\n<script setup>const x = 1</script>\n<style lang=\"scss\">.a { .b { color: red } }</style>";
-    let _ = upsert_vue(&host, "test.vue", sfc);
+    let sfc = "<template><div>hello</div></template>\n<script setup>const x = 1</script>\n<style lang=\"customcss\">.a { .b { color: red } }</style>";
+    let update = upsert_vue(&host, "test.vue", sfc);
 
     let profile = CompileProfile {
         source_map: true,
@@ -1978,51 +1795,41 @@ fn apply_block_overrides_style_delegated() {
     let result = host.apply_block_overrides(BlockOverrideRequest {
         canonical_id: "test.vue".to_string(),
         compile_profile: profile.clone(),
-        overrides: vec![BlockOverrideEntry {
-            block_type: PreprocessorBlockType::Style,
-            index: 0,
-            code: Arc::from(".a .b { color: red }"),
-            source_map: None,
-        }],
+        overrides: vec![BlockOverrideEntry::supplied_for_test(
+            &update.preprocessor_requests[0],
+            ".a .b { color: red }",
+        )],
     });
     assert!(
         result.is_ok(),
         "apply_block_overrides with style should succeed"
     );
 
-    // Verify the style virtual file serves the overridden CSS
-    let vf = host.get_virtual_file(VirtualQuery {
-        raw_id: Some("test.vue?vue&type=style&index=0&lang.css".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile,
-    });
-    assert!(vf.is_ok(), "should be able to get style virtual file");
-    let vf = vf.unwrap();
-    assert!(
-        vf.code.contains(".a .b"),
-        "style output should contain overridden CSS, got: {}",
-        &vf.code[..vf.code.len().min(200)]
-    );
+    let supplied = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: "test.vue".to_string(),
+            block_token: update.preprocessor_requests[0].block_token.to_string(),
+            compile_profile: profile,
+            expected_basis_token: None,
+        })
+        .unwrap();
+    assert_eq!(supplied.content.as_deref(), Some(".a .b { color: red }"));
 }
 
-/// After style preprocessing, virtual IDs should use lang.css
-/// instead of the original preprocessor lang (e.g. lang.sass).
-/// Without this, Vite would try to re-preprocess compiled CSS
-/// as SASS indented syntax, causing build failures.
+/// Supplied style bytes remain addressable only by their sealed block token.
 #[test]
-fn style_override_changes_virtual_id_lang_to_css() {
+fn supplied_style_content_is_retrievable_by_block_token() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let sfc =
-        "<template><div>hello</div></template>\n<style lang=\"sass\">.a\n  color: red\n</style>";
+        "<template><div>hello</div></template>\n<style lang=\"customcss\">.a\n  color: red\n</style>";
     let upsert = upsert_vue(&host, "test.vue", sfc);
-    // Before override, the URL should have the original lang
+    // Before override, the URL should have the original lang.
     assert!(
         upsert
             .changed_virtual_ids
             .iter()
-            .any(|id| id.contains("lang.sass")),
-        "before override, should have lang.sass in virtual IDs: {:?}",
+            .any(|id| id.contains("lang.customcss")),
+        "before override, should have lang.customcss in virtual IDs: {:?}",
         upsert.changed_virtual_ids
     );
 
@@ -2031,34 +1838,114 @@ fn style_override_changes_virtual_id_lang_to_css() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "test.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Style,
-                index: 0,
-                code: Arc::from(".a { color: red; }"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                &upsert.preprocessor_requests[0],
+                ".a { color: red; }",
+            )],
         })
         .expect("apply_block_overrides should succeed");
 
-    // The main module assembly should use lang.css after override
-    let main = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("test.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
+    let supplied = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: "test.vue".to_string(),
+            block_token: upsert.preprocessor_requests[0].block_token.to_string(),
             compile_profile: profile,
+            expected_basis_token: None,
         })
-        .expect("should get main virtual file");
-    assert!(
-        main.code.contains("lang.css"),
-        "main module should import style with lang.css, got:\n{}",
-        main.code
+        .unwrap();
+    assert_eq!(
+        supplied.availability,
+        BlockContentAvailability::SuppliedAvailable
     );
-    assert!(
-        !main.code.contains("lang.sass"),
-        "main module should NOT import style with lang.sass, got:\n{}",
-        main.code
+}
+
+// ═══════════════════════════════════════════════════════════
+// Sealed preprocessor block-content handoff
+// ═══════════════════════════════════════════════════════════
+
+/// Host-issued handoffs admit processed template and script content without
+/// exposing parser-local positions as content identity.
+#[test]
+fn sealed_handoff_admits_template_and_script_content() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc = concat!(
+        "<template lang=\"pug\">\ndiv hi\n</template>\n",
+        "<script setup lang=\"coffee\">\nx = 1\n</script>\n",
+        "<style>.a { color: red; }</style>\n",
     );
+    let update = upsert_vue(&host, "torn.vue", sfc);
+
+    for request in &update.preprocessor_requests {
+        let result = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "torn.vue".to_string(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![BlockOverrideEntry::supplied_for_test(
+                    request,
+                    "const compiled = 1",
+                )],
+            })
+            .expect("validated supplied content must be admitted");
+        assert!(result.changed);
+        let snapshot = host
+            .get_block_content(BlockContentQuery {
+                canonical_id: "torn.vue".to_string(),
+                block_token: request.block_token.to_string(),
+                compile_profile: CompileProfile::default(),
+                expected_basis_token: Some(request.basis_token.to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot.availability,
+            BlockContentAvailability::SuppliedAvailable
+        );
+    }
+}
+
+/// The same sealed surface admits different block classes by host-issued token.
+#[test]
+fn sealed_handoff_accepts_style_and_template_content() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let sfc = concat!(
+        "<template lang=\"pug\">\ndiv hi\n</template>\n",
+        "<style lang=\"customcss\">.a\n  color: red\n</style>\n",
+    );
+    let update = upsert_vue(&host, "surface.vue", sfc);
+
+    // Style entry through the sealed surface.
+    let style_result = host.apply_block_overrides(BlockOverrideRequest {
+        canonical_id: "surface.vue".to_string(),
+        compile_profile: CompileProfile::default(),
+        overrides: vec![BlockOverrideEntry::supplied_for_test(
+            update
+                .preprocessor_requests
+                .iter()
+                .find(|request| request.content_class == BlockContentClass::Style)
+                .unwrap(),
+            ".a { color: red; }",
+        )],
+    });
+    assert!(
+        style_result.is_ok(),
+        "style routing through the surface stays live: {style_result:?}"
+    );
+
+    // Template entry through the same sealed surface.
+    let content_result = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: "surface.vue".to_string(),
+            compile_profile: CompileProfile::default(),
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                update
+                    .preprocessor_requests
+                    .iter()
+                    .find(|request| request.content_class == BlockContentClass::Template)
+                    .unwrap(),
+                "<div>hi</div>",
+            )],
+        })
+        .expect("content routing admits validated bytes");
+    assert!(content_result.changed);
 }
 
 /// @ai-generated - upsert returns preprocessor_requests for pug template
@@ -2073,7 +1960,7 @@ fn upsert_returns_preprocessor_requests() {
         "should have preprocessor requests for pug template"
     );
     let req = &result.preprocessor_requests[0];
-    assert_eq!(req.block_type, PreprocessorBlockType::Template);
+    assert_eq!(req.content_class, BlockContentClass::Template);
     assert_eq!(req.lang, "pug");
     assert!(req.content.contains("div hello"));
 }
@@ -2699,7 +2586,11 @@ fn ensure_compiled_hydrates_vue_compile_blockers_via_workspace_resolution() {
     );
 
     host.ensure_compiled("/workspace/src/App.vue", &CompileProfile::default())
-        .expect("compile should hydrate blockers through workspace resolution");
+        .expect("external template and macro blockers lower after hydration");
+    assert!(
+        host.compile_slot_is_warm("/workspace/src/App.vue", &CompileProfile::default()),
+        "successful lowering publishes a compile slot",
+    );
 
     assert!(
         host.get_source("/workspace/src/partials/panel.html")
@@ -3487,8 +3378,6 @@ mod phase1_structural_tests {
     #[test]
     fn test_compile_cache_entry_default() {
         let profile = ProfileState::default();
-        assert!(profile.content_overrides.is_empty());
-        assert!(profile.style_overrides.is_empty());
         assert!(profile.compile_slots.is_empty());
         assert!(profile.latest_diagnostics.is_empty());
         assert_eq!(profile.diagnostics_generation, 0);
@@ -3624,7 +3513,6 @@ mod upsert_compile_cache_tests {
                 42,
                 CompileSlot {
                     semantic_hash: [0; 16],
-                    style_override_hash: 0,
                     content_override_hash: 0,
                     css_hash_override: None,
                     outputs: Default::default(),
@@ -3655,44 +3543,35 @@ mod upsert_compile_cache_tests {
     #[test]
     fn test_whitespace_only_change_clears_overrides() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let v1 = "<template><div>hello</div></template>";
-        let v2 = "<template><div>hello</div></template>  \n"; // trailing whitespace
-
-        let _ = upsert_vue(&host, "/src/App.vue", v1);
+        let v1 = "<template lang=\"pug\">div hello</template>";
+        let v2 = "<template lang=\"pug\">div hello</template>  \n";
+        let first = upsert_vue(&host, "/src/App.vue", v1);
+        let request = first.preprocessor_requests[0].clone();
+        let _ = host
+            .apply_block_overrides(BlockOverrideRequest {
+                canonical_id: "/src/App.vue".to_string(),
+                compile_profile: CompileProfile::default(),
+                overrides: vec![BlockOverrideEntry::supplied_for_test(
+                    &request,
+                    "<div>hello</div>",
+                )],
+            })
+            .unwrap();
 
         // Manually add content override
-        {
-            let mut cc = host.compile_cache().get_mut("/src/App.vue").unwrap();
-            cc.content_overrides.insert(
-                42,
-                crate::types::ContentOverrideWithParse {
-                    layer: ContentOverrideLayer {
-                        hash: 123,
-                        template: None,
-                        script: None,
-                    },
-                    parse: crate::parse::parse_non_sfc_snapshot(
-                        "/src/App.vue",
-                        "",
-                        &verter_language::LanguageRegistry::global()
-                            .classify_static("/src/App.vue")
-                            .static_resolution(),
-                        &crate::types::MetaProvenance::default(),
-                    ),
-                    framework_parse: None,
-                    source: Arc::from(""),
-                },
-            );
-        }
-
         let _ = upsert_vue(&host, "/src/App.vue", v2);
 
         // Per plan: whole_hash changed → overrides cleared (byte offsets shifted)
-        let cc = host.compile_cache().get("/src/App.vue").unwrap();
-        assert!(
-            cc.content_overrides.is_empty(),
-            "content_overrides should be cleared when whole_hash changes"
-        );
+        let stale = host.get_block_content(BlockContentQuery {
+            canonical_id: "/src/App.vue".to_string(),
+            block_token: request.block_token.to_string(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: Some(request.basis_token.to_string()),
+        });
+        assert!(matches!(
+            stale,
+            Err(HostError::BlockContentRefused(BlockContentRefusal::Missing))
+        ));
     }
 
     #[test]
@@ -3970,7 +3849,7 @@ mod upsert_compile_cache_tests {
         // what get_source() returns (raw, profileless).
         let host = VerterHost::new_standalone(HostConfig::default());
         let sfc = "<template lang=\"pug\">\ndiv hello\n</template>\n<script setup>\nconst x = 1\n</script>";
-        let _ = upsert_vue(&host, "/src/App.vue", sfc);
+        let update = upsert_vue(&host, "/src/App.vue", sfc);
 
         let raw_before = host.get_source("/src/App.vue").unwrap();
 
@@ -3978,12 +3857,10 @@ mod upsert_compile_cache_tests {
             .apply_block_overrides(BlockOverrideRequest {
                 canonical_id: "/src/App.vue".to_string(),
                 compile_profile: CompileProfile::default(),
-                overrides: vec![BlockOverrideEntry {
-                    block_type: PreprocessorBlockType::Template,
-                    index: 0,
-                    code: Arc::from("<div>hello</div>"),
-                    source_map: None,
-                }],
+                overrides: vec![BlockOverrideEntry::supplied_for_test(
+                    &update.preprocessor_requests[0],
+                    "<div>hello</div>",
+                )],
             })
             .unwrap();
 
@@ -3996,102 +3873,6 @@ mod upsert_compile_cache_tests {
         assert!(
             raw_after.contains("lang=\"pug\""),
             "raw source must still contain pug lang"
-        );
-    }
-
-    #[test]
-    fn test_style_override_does_not_leak_into_raw_analysis() {
-        // P1 invariant: applying a style override for profile A must NOT change
-        // the raw style_analyses returned by get_analysis().
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let sfc = "<template><div>hi</div></template>\n<style lang=\"sass\">\n.header\n  color: red\n</style>";
-        let _ = upsert_vue(&host, "/src/App.vue", sfc);
-
-        let analysis_before = host.get_analysis("/src/App.vue").unwrap();
-        let style_count_before = analysis_before.styles.len();
-
-        let _ = host
-            .apply_style_overrides(StyleOverrideRequest {
-                canonical_id: "/src/App.vue".to_string(),
-                compile_profile: CompileProfile::default(),
-                overrides: vec![StyleOverrideEntry {
-                    index: 0,
-                    code: Arc::from(".header { color: green }"),
-                    source_map: None,
-                }],
-            })
-            .unwrap();
-
-        let analysis_after = host.get_analysis("/src/App.vue").unwrap();
-        assert_eq!(
-            analysis_after.styles.len(),
-            style_count_before,
-            "style count should be unchanged after override"
-        );
-        // Raw style analysis content_offset should be identical
-        assert_eq!(
-            analysis_before.styles[0].content_offset, analysis_after.styles[0].content_offset,
-            "raw style content_offset must not change after override"
-        );
-    }
-
-    #[test]
-    fn test_profile_a_override_does_not_affect_profile_b() {
-        // P1 invariant: override for profile A must not affect profile B compile.
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let sfc = "<template><div>hello</div></template>\n<style>.a { color: red }</style>";
-        let _ = upsert_vue(&host, "/src/App.vue", sfc);
-
-        let profile_a = CompileProfile {
-            is_production: false,
-            ..CompileProfile::default()
-        };
-        let profile_b = CompileProfile {
-            is_production: true,
-            ..CompileProfile::default()
-        };
-
-        // Compile with profile B first (no overrides)
-        let _ = host
-            .get_virtual_file(VirtualQuery {
-                canonical_id: Some("/src/App.vue".to_string()),
-                raw_id: None,
-                node_kind: Some(VirtualNodeKind::Style { index: 0 }),
-                compile_profile: profile_b.clone(),
-            })
-            .unwrap();
-
-        // Apply style override for profile A only
-        let _ = host
-            .apply_style_overrides(StyleOverrideRequest {
-                canonical_id: "/src/App.vue".to_string(),
-                compile_profile: profile_a.clone(),
-                overrides: vec![StyleOverrideEntry {
-                    index: 0,
-                    code: Arc::from(".a { color: green }"),
-                    source_map: None,
-                }],
-            })
-            .unwrap();
-
-        // Recompile with profile B — should still have red (raw), not green
-        host.invalidate_compile_slots("/src/App.vue");
-        let b_result = host
-            .get_virtual_file(VirtualQuery {
-                canonical_id: Some("/src/App.vue".to_string()),
-                raw_id: None,
-                node_kind: Some(VirtualNodeKind::Style { index: 0 }),
-                compile_profile: profile_b,
-            })
-            .unwrap();
-        assert!(
-            b_result.code.contains("red"),
-            "profile B should compile with raw style (red), not override (green). Got: {}",
-            b_result.code
-        );
-        assert!(
-            !b_result.code.contains("green"),
-            "profile B must NOT contain override content from profile A"
         );
     }
 

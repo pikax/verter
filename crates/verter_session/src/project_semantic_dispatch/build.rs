@@ -20,10 +20,10 @@ use super::{
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
-    BranchSelection, DepSignature, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
-    OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode, PropertyKey,
-    QueryError, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
+    BranchSelection, DepSignature, IndexKey, LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta,
+    PathSegment, PrimitiveKind, ProjectionMode, PropertyKey, QueryError, QueryResult,
+    ReductionDemand, ResolveDeclKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SurfaceEntry, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
 /// The effective prepared VALUE-decl identity resolved by
@@ -881,30 +881,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         )
                     })
                     .collect();
-            let surface = crate::semantic_query::surface_view! {
-                members: Arc::from(Vec::new().into_boxed_slice()),
-                call_signatures: if is_class {
-                    Arc::from(Vec::new().into_boxed_slice())
-                } else {
-                    Arc::from(signature_nodes.clone().into_boxed_slice())
-                },
-                construct_signatures: if is_class {
-                    // A class's value signatures ARE its construct
-                    // signatures — normalise their kind to `Construct`.
-                    Arc::from(
-                        signature_nodes
-                            .into_iter()
-                            .map(|sig| self.construct_kind_twin(sig))
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    )
-                } else {
-                    Arc::from(Vec::new().into_boxed_slice())
-                },
-                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                keyspace: None,
-                has_index_signature: false,
+            let entries = if is_class {
+                // A class's value signatures ARE its construct signatures —
+                // normalise their kind to `Construct`.
+                signature_nodes
+                    .into_iter()
+                    .map(|sig| SurfaceEntry::ConstructSignature(self.construct_kind_twin(sig)))
+                    .collect()
+            } else {
+                signature_nodes
+                    .into_iter()
+                    .map(SurfaceEntry::CallSignature)
+                    .collect()
             };
+            let surface = crate::semantic_query::SurfaceView::from_entries(entries, None, false);
             self.graph()
                 .intern_node_with_scope(SemanticNodeData::Object(surface), scope.clone())
         } else if let Some(members) = prepared.enum_members.as_ref() {
@@ -1098,14 +1088,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(crate::semantic_query::surface_view! {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-                keyspace: None,
-                has_index_signature: false,
-            }),
+            SemanticNodeData::Object(SurfaceView::from_members(members, None)),
             dep_scope,
         )
     }
@@ -1246,7 +1229,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the same fail-closed miss as an absent source (a `Synthesized`
         // skeleton always raises; only a bare authored/projected source can
         // miss here).
-        let result = raised?.node();
+        let result = raised.at_optional_boundary()?.node();
 
         // Origin edge + dep signature, mirroring `build_instantiate`'s shell. The
         // instance object is synthesized from the `.vue`'s macro type arguments,
@@ -1371,14 +1354,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Constructor-like value type: an Object carrying exactly that one
         // construct signature — the same shape `typeof <class>` produces, so
         // `InstanceType<typeof Foo>` extracts the construct return generically.
-        let view = crate::semantic_query::surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(vec![ctor_fn].into_boxed_slice()),
-            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        };
+        let view =
+            SurfaceView::from_entries(vec![SurfaceEntry::ConstructSignature(ctor_fn)], None, false);
         self.graph()
             .intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
     }
@@ -1798,16 +1775,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // A lone instantiated signature IS the group node — no
                 // synthetic surface wrapper for the single-candidate case.
                 ([lone], []) | ([], [lone]) => *lone,
-                _ => self.graph().intern_node(SemanticNodeData::Object(
-                    crate::semantic_query::surface_view! {
-                        members: Arc::from(Vec::new().into_boxed_slice()),
-                        call_signatures: Arc::from(instantiated_calls.into_boxed_slice()),
-                        construct_signatures: Arc::from(instantiated_constructs.into_boxed_slice()),
-                        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-                        keyspace: None,
-                        has_index_signature: false,
-                    },
-                )),
+                _ => self
+                    .graph()
+                    .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                        instantiated_calls
+                            .into_iter()
+                            .map(SurfaceEntry::CallSignature)
+                            .chain(
+                                instantiated_constructs
+                                    .into_iter()
+                                    .map(SurfaceEntry::ConstructSignature),
+                            )
+                            .collect(),
+                        None,
+                        false,
+                    ))),
             }
         };
 
@@ -2326,16 +2308,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         let has_index_signature = !index_signatures.is_empty();
-        self.graph().intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::from(call_signatures.into_boxed_slice()),
-                construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
-                index_signatures: Arc::from(index_signatures.into_boxed_slice()),
-                keyspace: None,
+        let mut remaining_members: indexmap::IndexMap<
+            crate::semantic_query::AuthoredPropertyKey,
+            SurfaceMember,
+        > = members
+            .into_iter()
+            .map(|member| (member.key.clone(), member))
+            .collect();
+        let mut seen_calls = Vec::new();
+        let mut seen_indexes = Vec::new();
+        let mut emitted_constructs = false;
+        let mut entries = Vec::new();
+        for entry in own_view.entries.iter().chain(base_view.entries.iter()) {
+            match entry {
+                SurfaceEntry::Member(member) => {
+                    if let Some(member) = remaining_members.shift_remove(&member.key) {
+                        entries.push(SurfaceEntry::Member(member));
+                    }
+                }
+                SurfaceEntry::CallSignature(signature)
+                    if call_signatures
+                        .iter()
+                        .any(|candidate| same_node_data(*candidate, *signature))
+                        && !seen_calls
+                            .iter()
+                            .any(|seen| same_node_data(*seen, *signature)) =>
+                {
+                    seen_calls.push(*signature);
+                    entries.push(SurfaceEntry::CallSignature(*signature));
+                }
+                SurfaceEntry::ConstructSignature(_) if !emitted_constructs => {
+                    emitted_constructs = true;
+                    entries.extend(
+                        construct_signatures
+                            .iter()
+                            .copied()
+                            .map(SurfaceEntry::ConstructSignature),
+                    );
+                }
+                SurfaceEntry::IndexSignature(signature)
+                    if index_signatures.contains(signature)
+                        && !seen_indexes.contains(signature) =>
+                {
+                    seen_indexes.push(signature.clone());
+                    entries.push(SurfaceEntry::IndexSignature(signature.clone()));
+                }
+                _ => {}
+            }
+        }
+        entries.extend(remaining_members.into_values().map(SurfaceEntry::Member));
+        self.graph()
+            .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                None,
                 has_index_signature,
-            },
-        ))
+            )))
     }
 
     /// Generic instantiation.
@@ -3195,6 +3222,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
             resolve_rel,
             overlay_discriminator,
         );
+
+        // Fact rail, part 1 — the augmenter-set shape fact (invalidates on
+        // augmenter add/remove/reorder and on any augmenter's
+        // `parse_stable_hash` move). Observed onto the active tracer so it
+        // enters this build's `ReadSetSignature.facts`.
+        //
+        // Observed HERE, immediately after the index read and BEFORE every
+        // early return, because the NEGATIVE outcomes are reads too and their
+        // results are cacheable:
+        //   - empty set: "no augmenter targets this module" is a read of the
+        //     index whose answer changes the moment an augmenter appears;
+        //   - non-empty set, no contributor for this declaration: the set is
+        //     keyed by target MODULE, not by declaration, so an existing
+        //     augmenter GAINING this declaration moves the set fingerprint
+        //     (it folds each augmenter's `parse_stable_hash`).
+        // A cacheable "no augmentation" surface published without this fact
+        // has nothing keyed on the augmenter set and serves stale once either
+        // of those happens.
+        //
+        // The fingerprint is stable across the rest of this function: the
+        // stale-key self-heal below re-publishes under the IDENTICAL
+        // fingerprint by construction, so observing before it is equivalent to
+        // observing after it.
+        //
+        // The shape fact's `canonical_id` is attribution only —
+        // `ModuleAugmentationIndexShape` validation keys entirely on the typed
+        // `FactKey` (target kind + specifier/canonical) and `expected_hash`,
+        // never on this field.
+        let shape_attribution = match &target {
+            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
+            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
+            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
+            AugmentationTargetKind::GlobalAugmentation => String::new(),
+        };
+        crate::resolver_core::resolver_context::observe_fan_out(
+            crate::resolver_core::FactVersionRef::RouteSurface(
+                crate::resolver_core::RouteSurfaceFactRef {
+                    canonical_id: shape_attribution,
+                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+                        &target,
+                    ),
+                    lane: verter_semantic::facts::FactLane::Semantic,
+                    expected_hash: augmenter_set.fingerprint,
+                },
+            ),
+        );
+
         if augmenter_set.entries.is_empty() {
             return None;
         }
@@ -3465,31 +3539,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return None;
         }
 
-        // Fact rail: the augmenter-set shape fact (invalidates
-        // on augmenter add/remove/reorder) + each augmenter's whole-hash
-        // (invalidates on augmenter content edit). Observed onto the active
-        // tracer so they enter this build's `ReadSetSignature.facts`. The shape
-        // fact's `canonical_id` is attribution only — `ModuleAugmentationIndexShape`
-        // validation keys entirely on the typed `FactKey` (target kind +
-        // specifier/canonical) and `expected_hash`, never on this field.
-        let shape_attribution = match &target {
-            AugmentationTargetKind::ResolvedRelativeCanonical(canon) => canon.as_ref().to_owned(),
-            AugmentationTargetKind::ExternalSpecifier(spec) => spec.as_ref().to_owned(),
-            AugmentationTargetKind::WildcardAmbient(pat) => pat.as_ref().to_owned(),
-            AugmentationTargetKind::GlobalAugmentation => String::new(),
-        };
-        crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
-                    canonical_id: shape_attribution,
-                    key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
-                        &target,
-                    ),
-                    lane: verter_semantic::facts::FactLane::Semantic,
-                    expected_hash: augmenter_set.fingerprint,
-                },
-            ),
-        );
+        // Fact rail, part 2 — each contributing augmenter's whole-hash
+        // (invalidates on augmenter content edit). The augmenter-set shape
+        // fact that pairs with these was observed above, before the early
+        // returns, so the negative outcomes carry it too.
+        //
         // Parent transitive contributor rule, emitted from the ONE carrier in
         // ONE step per contributor: the content-version fact
         // (`FileWholeHash`) AND the typed SOURCE-ENV observation
@@ -4304,15 +4358,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         added.sort_unstable_by(|left, right| left.key.as_known().cmp(&right.key.as_known()));
         members.extend(added);
+        let mut members = members.into_iter();
+        let mut entries: Vec<SurfaceEntry> = surface
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SurfaceEntry::Member(_) => SurfaceEntry::Member(
+                    members.next().expect("derived member index matches stream"),
+                ),
+                other => other.clone(),
+            })
+            .collect();
+        entries.extend(members.map(SurfaceEntry::Member));
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Object(crate::semantic_query::surface_view! {
-                members: Arc::from(members.into_boxed_slice()),
-                call_signatures: Arc::clone(&surface.call_signatures),
-                construct_signatures: Arc::clone(&surface.construct_signatures),
-                index_signatures: Arc::clone(&surface.index_signatures),
-                keyspace: surface.keyspace,
-                has_index_signature: surface.has_known_index_signature(),
-            }),
+            SemanticNodeData::Object(SurfaceView::from_entries(
+                entries,
+                surface.keyspace,
+                surface.has_known_index_signature(),
+            )),
             scope.clone(),
         )
     }
@@ -5005,18 +5068,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                         })
                         .collect();
-                    let result_surface = crate::semantic_query::surface_view! {
-                        members: Arc::from(members.into_boxed_slice()),
-                        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        construct_signatures: Arc::from(
-                            Vec::<SemanticNodeId>::new().into_boxed_slice(),
-                        ),
-                        index_signatures: Arc::from(
-                            Vec::<IndexSignature>::new().into_boxed_slice(),
-                        ),
-                        keyspace: None,
-                        has_index_signature: false,
-                    };
+                    let result_surface = SurfaceView::from_members(members, None);
                     let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                     record_utility_edges(result);
                     return (QueryResult::Value(result), fence, false);
@@ -5051,16 +5103,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     })
                     .cloned()
                     .collect();
-                let result_surface = crate::semantic_query::surface_view! {
-                    members: Arc::from(picked.into_boxed_slice()),
-                    call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    construct_signatures: Arc::from(
-                        Vec::<SemanticNodeId>::new().into_boxed_slice(),
-                    ),
-                    index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-                    keyspace: None,
-                    has_index_signature: false,
-                };
+                let result_surface = SurfaceView::from_members(picked, None);
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
@@ -5120,17 +5163,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // public-only). The non-public members stay recorded on the
                 // source surface for the keep-all `native_props` carrier; only
                 // this derivation is gated.
-                let kept: Vec<SurfaceMember> = surface
-                    .positive_members()
-                    .iter()
-                    .filter(|m| m.visibility.is_public())
-                    .filter(|m| {
-                        m.key
-                            .cloned_known()
-                            .is_none_or(|key| !omit_set.contains(&key))
-                    })
-                    .cloned()
-                    .collect();
                 // `Omit<T, K>` over a property surface leaves call/construct
                 // signatures intact (TS mapped-type semantics touch only named
                 // properties). For a Vue EMIT interface the events are call
@@ -5147,14 +5179,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &surface.construct_signatures,
                     &omitted_event_names,
                 );
-                let result_surface = crate::semantic_query::surface_view! {
-                    members: Arc::from(kept.into_boxed_slice()),
-                    call_signatures: kept_call_signatures,
-                    construct_signatures: kept_construct_signatures,
-                    index_signatures: Arc::clone(&surface.index_signatures),
-                    keyspace: surface.keyspace,
-                    has_index_signature: surface.has_known_index_signature(),
-                };
+                let entries = surface
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        SurfaceEntry::Member(member)
+                            if member.visibility.is_public()
+                                && member
+                                    .key
+                                    .cloned_known()
+                                    .is_none_or(|key| !omit_set.contains(&key)) =>
+                        {
+                            Some(entry.clone())
+                        }
+                        SurfaceEntry::CallSignature(signature)
+                            if kept_call_signatures.contains(signature) =>
+                        {
+                            Some(entry.clone())
+                        }
+                        SurfaceEntry::ConstructSignature(signature)
+                            if kept_construct_signatures.contains(signature) =>
+                        {
+                            Some(entry.clone())
+                        }
+                        SurfaceEntry::IndexSignature(_) => Some(entry.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let result_surface = SurfaceView::from_entries(
+                    entries,
+                    surface.keyspace,
+                    surface.has_known_index_signature(),
+                );
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
                 (QueryResult::Value(result), fence, false)
@@ -7700,14 +7756,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return deferred_output;
         }
 
-        let view = crate::semantic_query::surface_view! {
-            members: Arc::from(produced.into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: Some(mapper.key_space),
-            has_index_signature: false,
-        };
+        let view = SurfaceView::from_members(produced, Some(mapper.key_space));
         let node = graph.intern_node(SemanticNodeData::Object(view));
 
         // 3. Emit origin edges.

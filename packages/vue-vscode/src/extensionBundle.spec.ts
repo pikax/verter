@@ -21,7 +21,10 @@ import { describe, expect, it } from "vitest";
 import { productionBundleConfig } from "../esbuild.config.mjs";
 
 describe("extension bundle composition", () => {
-  it("bundles no TypeScript compiler into the packed extension", async () => {
+  // A full production esbuild pass over the extension graph legitimately
+  // exceeds the 5s framework default on a loaded parallel test run; the
+  // assertions below, not the duration, are the discriminators.
+  it("bundles no TypeScript compiler into the packed extension", { timeout: 60_000 }, async () => {
     const result = await esbuild.build({
       ...productionBundleConfig({ production: true, sourcemap: false }),
       write: false,

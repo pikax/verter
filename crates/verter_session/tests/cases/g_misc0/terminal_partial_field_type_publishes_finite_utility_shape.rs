@@ -70,7 +70,7 @@ fn terminal_partial_field_type_publishes_finite_utility_shape() {
     let field_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,
         "/Editor.vue",
-        field.r#type.present().expect("present source"),
+        field.authority.source().expect("present source"),
     )
     .unwrap_or_else(|| panic!("`editorOptions`'s published source must demand-materialize"));
     let TypeExpr::Object(object) = &field_ty else {

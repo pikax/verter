@@ -25,7 +25,7 @@
 
 use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
-use verter_type_expr::TypeExpr;
+use verter_type_expr::{PublicationResult, TypeExpr};
 
 use crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap;
 
@@ -48,6 +48,8 @@ pub struct ComponentMetaOutput {
     resolution: Option<ComponentMetaResolutionOutput>,
     /// The materialized positional type lanes.
     types: MaterializedComponentMetaTypes,
+    /// Public contract projected at the same terminal sink and view.
+    contract: crate::framework::ComponentContractAvailability,
 }
 
 impl ComponentMetaOutput {
@@ -59,11 +61,13 @@ impl ComponentMetaOutput {
         analysis: ComponentMetaAnalysis,
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
+        contract: crate::framework::ComponentContractAvailability,
     ) -> Self {
         Self {
             analysis,
             resolution,
             types,
+            contract,
         }
     }
 
@@ -77,6 +81,23 @@ impl ComponentMetaOutput {
         MaterializedComponentMetaTypes,
     ) {
         (self.analysis, self.resolution, self.types)
+    }
+
+    /// Consume the envelope while preserving its public contract.
+    pub fn into_parts_with_contract(
+        self,
+    ) -> (
+        ComponentMetaAnalysis,
+        Option<ComponentMetaResolutionOutput>,
+        MaterializedComponentMetaTypes,
+        crate::framework::ComponentContractAvailability,
+    ) {
+        (self.analysis, self.resolution, self.types, self.contract)
+    }
+
+    /// Borrow the public contract availability.
+    pub fn contract(&self) -> &crate::framework::ComponentContractAvailability {
+        &self.contract
     }
 }
 
@@ -94,8 +115,108 @@ pub struct MaterializedComponentMetaTypes {
     lanes: MaterializedComponentMetaTypeLanes,
 }
 
+/// Output-only display text branded by the terminal sink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalTypeDisplay {
+    text: Option<String>,
+}
+
+impl TerminalTypeDisplay {
+    pub(crate) fn from_text(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        text: Option<String>,
+    ) -> Self {
+        Self { text }
+    }
+
+    /// Consume the DTO and return its optional display text.
+    pub fn into_text(self) -> Option<String> {
+        self.text
+    }
+
+    /// Borrow the optional display text.
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+}
+
+/// Structured publication outcome plus its optional materialized success and
+/// separately-branded terminal display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaterializedTypePublication {
+    publication: PublicationResult,
+    materialized_type: Option<TypeExpr>,
+    terminal_display: TerminalTypeDisplay,
+    diagnostics: std::sync::Arc<[verter_type_expr::ResolutionDiagnostic]>,
+}
+
+impl MaterializedTypePublication {
+    pub(crate) fn from_parts(
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        publication: PublicationResult,
+        materialized_type: Option<TypeExpr>,
+        terminal_display: TerminalTypeDisplay,
+        diagnostics: std::sync::Arc<[verter_type_expr::ResolutionDiagnostic]>,
+    ) -> Self {
+        Self {
+            publication,
+            materialized_type,
+            terminal_display,
+            diagnostics,
+        }
+    }
+
+    /// Test-only fixture constructor for downstream converter tests. This is
+    /// compile-absent from production builds.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn for_test(
+        publication: PublicationResult,
+        materialized_type: Option<TypeExpr>,
+        terminal_display: Option<String>,
+    ) -> Self {
+        Self {
+            publication,
+            materialized_type,
+            terminal_display: TerminalTypeDisplay {
+                text: terminal_display,
+            },
+            diagnostics: std::sync::Arc::from([]),
+        }
+    }
+
+    /// Consume the lane DTO.
+    pub fn into_parts(self) -> (PublicationResult, Option<TypeExpr>, TerminalTypeDisplay) {
+        (
+            self.publication,
+            self.materialized_type,
+            self.terminal_display,
+        )
+    }
+
+    /// Borrow the structured publication decision.
+    pub fn publication(&self) -> &PublicationResult {
+        &self.publication
+    }
+
+    /// Borrow the materialized type when publication succeeded.
+    pub fn materialized_type(&self) -> Option<&TypeExpr> {
+        self.materialized_type.as_ref()
+    }
+
+    /// Borrow the terminal display projection.
+    pub fn terminal_display(&self) -> &TerminalTypeDisplay {
+        &self.terminal_display
+    }
+
+    /// Borrow producer-owned typed resolution diagnostics.
+    pub fn diagnostics(&self) -> &[verter_type_expr::ResolutionDiagnostic] {
+        &self.diagnostics
+    }
+}
+
 impl MaterializedComponentMetaTypes {
-    /// Assemble all 11 lanes. Requires the terminal output sink's
+    /// Assemble all output lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
     pub(crate) fn from_lanes(
         _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
@@ -104,28 +225,33 @@ impl MaterializedComponentMetaTypes {
         Self { lanes }
     }
 
-    /// Destructive transfer of the 11 positional lanes, each order-aligned
-    /// 1:1 with the analysis vectors the envelope was materialized from.
+    /// Destructive transfer of the output lanes.
     pub fn into_lanes(self) -> MaterializedComponentMetaTypeLanes {
         self.lanes
+    }
+
+    /// Borrow the positional lanes inside the terminal sink.
+    pub(crate) fn lanes(&self) -> &MaterializedComponentMetaTypeLanes {
+        &self.lanes
     }
 }
 
 /// The open positional lane bundle a wire converter reads after the
 /// DESTRUCTIVE transfer ([`MaterializedComponentMetaTypes::into_lanes`]).
-/// Every vector is order-aligned 1:1 with its analysis counterpart;
-/// nested lanes mirror the analysis' nested topology (per-slot bindings,
-/// per-branch fallthrough rows).
+/// Event occurrences remain atomic; other nested lanes mirror the analysis'
+/// nested topology (per-slot bindings, per-branch fallthrough rows).
 #[derive(Debug, Default)]
 pub struct MaterializedComponentMetaTypeLanes {
     /// `props[i].type` — aligned with `ComponentMetaAnalysis::props`.
-    pub props: Vec<TypeExpr>,
-    /// `events[i].payload` — aligned with `ComponentMetaAnalysis::events`
-    /// (duplicate event names preserved positionally).
-    pub event_payloads: Vec<TypeExpr>,
+    pub props: Vec<MaterializedTypePublication>,
+    /// Complete `{ event, payload, return }` occurrence rows.
+    pub events: Vec<MaterializedEventOccurrence>,
     /// `slots[i].bindings[j].type` — outer aligned with
     /// `ComponentMetaAnalysis::slots`, inner with `slots[i].bindings`.
-    pub slot_bindings: Vec<Vec<TypeExpr>>,
+    pub slot_bindings: Vec<Vec<MaterializedTypePublication>>,
+    /// `slots[i].return` — aligned with `ComponentMetaAnalysis::slots`;
+    /// `None` means the slot has no meaningful typed return position.
+    pub slot_returns: Vec<Option<MaterializedTypePublication>>,
     /// `models[i].type` — aligned with `ComponentMetaAnalysis::models`.
     pub models: Vec<TypeExpr>,
     /// `exposed[i].type` — aligned with `ComponentMetaAnalysis::exposed`.
@@ -139,18 +265,30 @@ pub struct MaterializedComponentMetaTypeLanes {
     pub type_registry_entries: Vec<TypeExpr>,
     /// `acceptedProps[i].type` — aligned with
     /// `ComponentMetaAnalysis::accepted_props`.
-    pub accepted_props: Vec<TypeExpr>,
+    pub accepted_props: Vec<MaterializedTypePublication>,
     /// `acceptedEvents[i].payload` — aligned with
     /// `ComponentMetaAnalysis::accepted_events`.
     pub accepted_event_payloads: Vec<TypeExpr>,
     /// `fallthroughSurface.branches[i].props[j].type` — outer aligned with
     /// the branch vector, inner with each branch's `props`; empty when the
     /// surface is `None`.
-    pub fallthrough_props: Vec<Vec<TypeExpr>>,
+    pub fallthrough_props: Vec<Vec<MaterializedTypePublication>>,
     /// `fallthroughSurface.branches[i].events[j].payload` — outer aligned
     /// with the branch vector, inner with each branch's `events`; empty when
     /// the surface is `None`.
     pub fallthrough_event_payloads: Vec<Vec<TypeExpr>>,
+}
+
+/// One atomic materialized event occurrence.
+#[derive(Debug, Clone)]
+pub struct MaterializedEventOccurrence {
+    /// Complete occurrence-derived semantic event row.
+    pub event: verter_semantic::analysis::component_meta::EventAnalysis,
+    /// Materialized payload publication owned by this occurrence.
+    pub payload: MaterializedTypePublication,
+    /// Materialized callable return, or implicit `void` for property/runtime
+    /// occurrences.
+    pub r#return: Option<MaterializedTypePublication>,
 }
 
 /// Narrowed output-only resolution sidecar: only what a wire converter needs
@@ -227,8 +365,12 @@ pub enum ComponentMetaOutputLane {
     Prop,
     /// The `events[].payload` lane.
     EventPayload,
+    /// The optional `events[].return` lane.
+    EventReturn,
     /// The `slots[].bindings[].type` lane.
     SlotBinding,
+    /// The optional `slots[].return` lane.
+    SlotReturn,
     /// The `models[].type` lane.
     Model,
     /// The `exposed[].type` lane.
@@ -253,7 +395,9 @@ impl ComponentMetaOutputLane {
         match self {
             ComponentMetaOutputLane::Prop => "props[].type",
             ComponentMetaOutputLane::EventPayload => "events[].payload",
+            ComponentMetaOutputLane::EventReturn => "events[].return",
             ComponentMetaOutputLane::SlotBinding => "slots[].bindings[].type",
+            ComponentMetaOutputLane::SlotReturn => "slots[].return",
             ComponentMetaOutputLane::Model => "models[].type",
             ComponentMetaOutputLane::Exposed => "exposed[].type",
             ComponentMetaOutputLane::PublicInstanceMember => "publicInstance.members[].type",

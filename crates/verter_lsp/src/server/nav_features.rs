@@ -14,7 +14,7 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::sfc_scanner::scan_sfc_blocks_for_document;
+use crate::documents::carrier_structure::project_carrier_blocks_for_document;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, classify_expression_context_with_trigger,
@@ -90,15 +90,13 @@ async fn enrich_v_bind_completion_details(
             if !server.provider_context_still_valid(uri, &ctx) {
                 break;
             }
-            // First informative line of the quickinfo (skip code fences).
-            if let Some(line) = info
-                .contents
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with("```"))
-            {
+            // The provider's structured `(kind) display_signature` line,
+            // rendered through the SAME shared boundary formatter the
+            // producers use. Missing signature ⇒ no detail (fail closed —
+            // never scraped out of the rendered `contents` blob).
+            if let Some(line) = info.kind_labeled_signature() {
                 if let Some(item) = items.get_mut(idx) {
-                    item.detail = Some(line.to_string());
+                    item.detail = Some(line);
                 }
             }
         }
@@ -171,7 +169,11 @@ pub(super) async fn handle_hover(
         .then(|| {
             let doc = server.documents.get(uri)?;
             let analysis = server.documents.get_analysis(uri);
-            let blocks = scan_sfc_blocks_for_document(&doc);
+            let blocks = project_carrier_blocks_for_document(&doc);
+            let structure = doc
+                .feature_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.structure().clone());
             let native = hover_at_position(
                 position,
                 &doc.source,
@@ -179,6 +181,7 @@ pub(super) async fn handle_hover(
                 analysis.as_ref(),
                 &doc.line_index,
                 ssr_context,
+                structure.as_ref(),
             );
             // D6 Svelte: directive-KEYWORD doc hovers are verter-owned — the
             // provider can never describe the `use:`/`transition:` keyword through
@@ -510,7 +513,7 @@ impl CompletionSourceContext {
 #[derive(Clone)]
 struct CompletionDocumentIdentity {
     version: i32,
-    source: std::sync::Arc<str>,
+    document_revision: crate::documents::DocumentRevisionId,
 }
 
 fn completion_document_identity(
@@ -522,7 +525,7 @@ fn completion_document_identity(
         .get(uri)
         .map(|document| CompletionDocumentIdentity {
             version: document.version,
-            source: std::sync::Arc::clone(&document.source),
+            document_revision: document.document_revision,
         })
 }
 
@@ -532,7 +535,7 @@ fn completion_document_identity_matches(
 ) -> bool {
     match (before, after) {
         (Some(before), Some(after)) => {
-            before.version == after.version && std::sync::Arc::ptr_eq(&before.source, &after.source)
+            before.version == after.version && before.document_revision == after.document_revision
         }
         (None, None) => true,
         _ => false,
@@ -699,16 +702,37 @@ async fn handle_completion_attempt(
         source: std::sync::Arc<str>,
         line_index: crate::documents::line_index::LineIndex,
         analysis: Option<verter_session::FileAnalysisSnapshot>,
-        blocks: Vec<crate::documents::sfc_scanner::SfcBlock>,
+        blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
+        structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
     }
     let native_snapshot = (|| {
         let doc = server.documents.get(uri)?;
+        let (blocks, structure) = if let Some(snapshot) = doc.feature_snapshot.as_ref() {
+            (
+                project_carrier_blocks_for_document(&doc),
+                Some(snapshot.structure().clone()),
+            )
+        } else {
+            server
+                .documents
+                .host()
+                .registered_file_structure_snapshot(&doc.canonical_id)
+                .filter(|(structure, _)| structure.source().bytes() == doc.source.as_ref())
+                .map(|(structure, _)| {
+                    (
+                        crate::documents::carrier_structure::project_carrier_blocks(&structure),
+                        Some(structure),
+                    )
+                })
+                .unwrap_or_default()
+        };
         Some(NativeCompletionSnapshot {
             source: doc.source.clone(),
-            line_index: doc.line_index.clone(),
+            line_index: doc.line_index.as_ref().clone(),
             analysis: server.documents.get_analysis(uri),
-            blocks: scan_sfc_blocks_for_document(&doc),
+            blocks,
+            structure,
             canonical_id: crate::documents::uri_to_canonical_id(uri),
         })
     })();
@@ -846,6 +870,7 @@ async fn handle_completion_attempt(
             },
             Some(uri.as_str()),
             completion_ssr_context,
+            native.structure.as_ref(),
         )
     });
 
@@ -917,6 +942,7 @@ async fn handle_completion_attempt(
             &native.blocks,
             native.analysis.as_ref(),
             CarrierTemplateLanguage::from_uri(uri.as_str()),
+            native.structure.as_ref(),
         );
         let source_ctx = match &context {
             CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {

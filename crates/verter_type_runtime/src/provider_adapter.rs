@@ -120,7 +120,17 @@ impl TypeProviderAdapter {
                 .get_hover(&location.path, location.start)
                 .await
                 .map_err(|e| BackendError::BackendReported(e.message))?;
-            if let Some(hover) = hover.filter(|item| !item.contents.trim().is_empty()) {
+            // Admission gates on the STRUCTURED display signature: a hover
+            // with a non-empty rendered blob but no signature must not be
+            // admitted as `Exact` type data.
+            let signature = hover.and_then(|item| {
+                item.display_signature
+                    .as_ref()
+                    .map(|signature| signature.as_display_str())
+                    .filter(|display| !display.trim().is_empty())
+                    .map(str::to_string)
+            });
+            if let Some(display) = signature {
                 crate::type_runtime_trace_event!(
                     "runtime_query_type_data_definition_hover",
                     format!(
@@ -129,12 +139,12 @@ impl TypeProviderAdapter {
                         path,
                         location.path,
                         location.start,
-                        hover.contents.len(),
-                        trace_preview(&hover.contents, 120),
+                        display.len(),
+                        trace_preview(&display, 120),
                     ),
                 );
                 return Ok(BackendTypeData {
-                    type_text: Some(hover.contents),
+                    type_text: Some(display),
                     members: vec![],
                     documentation: None,
                     completeness: BackendTypeCompleteness::Exact,
@@ -376,20 +386,24 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                                 .await
                                 .map_err(|e| BackendError::BackendReported(e.message))?;
 
-                            match hover {
-                                Some(info) => {
+                            match hover.and_then(|info| {
+                                info.display_signature
+                                    .as_ref()
+                                    .map(|signature| signature.as_display_str().to_string())
+                            }) {
+                                Some(display) => {
                                     crate::type_runtime_trace_event!(
                                         "runtime_query_type_data_hover",
                                         format!(
                                             "backend={} path={} has_hover=true text_len={} preview={}",
                                             self.backend_label,
                                             path,
-                                            info.contents.len(),
-                                            trace_preview(&info.contents, 120),
+                                            display.len(),
+                                            trace_preview(&display, 120),
                                         ),
                                     );
                                     Ok(BackendTypeData {
-                                        type_text: Some(info.contents),
+                                        type_text: Some(display),
                                         members: vec![],
                                         documentation: None,
                                         completeness: BackendTypeCompleteness::Exact,
@@ -421,21 +435,25 @@ impl GeneratedQueryBackend for TypeProviderAdapter {
                                 .await
                                 .map_err(|e| BackendError::BackendReported(e.message))?;
 
+                            let documentation = hover.and_then(|h| h.documentation);
                             crate::type_runtime_trace_event!(
                                 "runtime_query_type_data_hover",
                                 format!(
-                                    "backend={} path={} has_hover={} documentation_len={}",
+                                    "backend={} path={} has_documentation={} documentation_len={}",
                                     self.backend_label,
                                     path,
-                                    hover.is_some(),
-                                    hover.as_ref().map(|item| item.contents.len()).unwrap_or(0),
+                                    documentation.is_some(),
+                                    documentation
+                                        .as_ref()
+                                        .map(|docs| docs.len())
+                                        .unwrap_or(0),
                                 ),
                             );
 
                             Ok(BackendTypeData {
                                 type_text: None,
                                 members: vec![],
-                                documentation: hover.map(|h| h.contents),
+                                documentation,
                                 completeness: BackendTypeCompleteness::Exact,
                             })
                         }
@@ -537,6 +555,14 @@ mod tests {
     use crate::protocol::*;
     use crate::traits::{ProviderFuture, TypeProvider};
     use std::sync::Mutex as StdMutex;
+
+    /// Test-side mint through a genuine provider impl (the witness route).
+    fn test_display_signature(value: &str) -> DisplaySignature {
+        DisplaySignature::from_provider_wire(
+            MockTypeProvider::default().provider_wire_witness(),
+            value,
+        )
+    }
 
     struct MockTypeProvider {
         hover: Option<HoverInfo>,
@@ -964,8 +990,10 @@ mod tests {
                     contents:
                         "(property) 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]"
                             .to_string(),
-                    range_start: None,
-                    range_end: None,
+                    display_signature: Some(test_display_signature(
+                        "(property) 'update:modelValue': [value: (T extends 'single' ? string : string[]) | undefined]",
+                    )),
+                    ..Default::default()
                 }),
             )])),
             ..Default::default()

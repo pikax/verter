@@ -8,6 +8,7 @@
 
 use verter_span::Span;
 
+use super::template_ast::SvelteAwaitInline;
 use super::tokenizer_scan::nonempty_span;
 
 /// Split an `{#each ...}` head into `(list_expr, item, index, key)`. The
@@ -40,18 +41,51 @@ pub(super) fn parse_each_head(
 pub(super) fn parse_await_head(
     head_rest_start: usize,
     head_rest: &str,
-) -> (Option<Span>, Option<Span>, Option<Span>) {
+) -> (Option<Span>, SvelteAwaitInline) {
     if let Some(idx) = find_top_level_keyword(head_rest, "then") {
         let promise = nonempty_span(head_rest_start, &head_rest[..idx]);
         let binding = nonempty_span(head_rest_start + idx + 4, &head_rest[idx + 4..]);
-        return (promise, binding, None);
+        let marker_span = Span::new(
+            (head_rest_start + idx) as u32,
+            (head_rest_start + idx + 4) as u32,
+        );
+        let head_span = Span::new(
+            marker_span.start,
+            (head_rest_start + head_rest.trim_end().len()) as u32,
+        );
+        return (
+            promise,
+            SvelteAwaitInline::Then {
+                marker_span,
+                head_span,
+                binding,
+            },
+        );
     }
     if let Some(idx) = find_top_level_keyword(head_rest, "catch") {
         let promise = nonempty_span(head_rest_start, &head_rest[..idx]);
         let binding = nonempty_span(head_rest_start + idx + 5, &head_rest[idx + 5..]);
-        return (promise, None, binding);
+        let marker_span = Span::new(
+            (head_rest_start + idx) as u32,
+            (head_rest_start + idx + 5) as u32,
+        );
+        let head_span = Span::new(
+            marker_span.start,
+            (head_rest_start + head_rest.trim_end().len()) as u32,
+        );
+        return (
+            promise,
+            SvelteAwaitInline::Catch {
+                marker_span,
+                head_span,
+                binding,
+            },
+        );
     }
-    (nonempty_span(head_rest_start, head_rest), None, None)
+    (
+        nonempty_span(head_rest_start, head_rest),
+        SvelteAwaitInline::None,
+    )
 }
 
 /// Split a `{#snippet name(params)}` head into `(name_span, name_text, params)`.

@@ -60,7 +60,8 @@ fn demand_prop_type(
     crate::test_only::semantic_source_probe::demand_type_expr(
         project.host(),
         owner,
-        prop.type_source
+        prop.publication
+            .source_position()
             .present()
             .unwrap_or_else(|| panic!("prop `{}` must publish a typed source", prop.name)),
     )

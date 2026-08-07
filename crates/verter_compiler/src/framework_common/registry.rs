@@ -205,4 +205,38 @@ mod tests {
             "an unregistered adapter has no carrier compiler"
         );
     }
+
+    #[test]
+    fn every_live_carrier_row_and_editor_override_has_one_compiler() {
+        use verter_language::{LanguageRegistry, StaticClassification};
+
+        let languages = LanguageRegistry::built_in();
+        let compilers = CarrierCompilerRegistry::built_in();
+        for extension in languages.carrier_extensions() {
+            let language = match languages.classify_static(&format!("fixture.{extension}")) {
+                StaticClassification::Resolved(language) => language,
+                other => panic!("carrier extension {extension} did not resolve: {other:?}"),
+            };
+            let adapter = language.adapter_id().expect("carrier adapter");
+            let carrier = language.carrier_language_id().expect("carrier language");
+            assert!(
+                compilers
+                    .compiler_for_carrier_language(adapter, carrier)
+                    .is_some(),
+                "missing compiler for live carrier row {extension}"
+            );
+            let editor_override = languages
+                .carrier_for_editor_language_id(carrier.as_str())
+                .expect("live editor-language override");
+            assert_eq!(editor_override, language);
+            assert!(compilers
+                .compiler_for_carrier_language(
+                    editor_override.adapter_id().expect("override adapter"),
+                    editor_override
+                        .carrier_language_id()
+                        .expect("override carrier language"),
+                )
+                .is_some());
+        }
+    }
 }

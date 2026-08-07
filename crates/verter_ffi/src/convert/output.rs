@@ -8,8 +8,8 @@ use crate::types::*;
 
 use super::offset::maybe_utf16_offset;
 use super::string_helpers::{
-    host_block_type_to_string, host_module_reference_analyzability_to_string,
-    host_module_reference_semantics_to_string, host_module_reference_syntax_to_string,
+    host_module_reference_analyzability_to_string, host_module_reference_semantics_to_string,
+    host_module_reference_syntax_to_string,
 };
 
 /// Preserve the host's closed public-API failure identity at JS boundaries.
@@ -71,10 +71,39 @@ pub fn host_public_api_result_to_ffi(
 
 pub fn host_preprocessor_request_to_ffi(req: &host::PreprocessorRequest) -> FfiPreprocessorRequest {
     FfiPreprocessorRequest {
-        block_type: host_block_type_to_string(req.block_type),
-        index: req.index as u32,
+        content_class: match req.content_class {
+            host::BlockContentClass::Template => "template",
+            host::BlockContentClass::Script => "script",
+            host::BlockContentClass::Style => "style",
+            host::BlockContentClass::Custom => "custom",
+        }
+        .to_string(),
         lang: req.lang.clone(),
         content: req.content.clone(),
+        availability: match req.availability {
+            host::BlockContentAvailability::NativeAvailable => "nativeAvailable",
+            host::BlockContentAvailability::ProcessedContentRequired => "processedContentRequired",
+            host::BlockContentAvailability::SuppliedAvailable => "suppliedAvailable",
+            host::BlockContentAvailability::Missing => "missing",
+            host::BlockContentAvailability::Conflict => "conflict",
+            host::BlockContentAvailability::Stale => "stale",
+        }
+        .to_string(),
+        correlation_token: req.captured_echo.request.correlation_token.to_string(),
+        block_token: req.captured_echo.request.block_token.to_string(),
+        owner_revision: req.captured_echo.request.owner_revision.to_string(),
+        artifact_token: req.captured_echo.request.artifact_token.to_string(),
+        expected_language: req.captured_echo.request.expected_language.clone(),
+        prior_basis_token: req
+            .captured_echo
+            .request
+            .prior_basis_token
+            .as_ref()
+            .map(ToString::to_string),
+        basis_token: req.captured_echo.basis_token.to_string(),
+        source_space_token: req.source_space_token.to_string(),
+        content_hash: req.content_hash.to_string(),
+        custom_type: req.custom_type.clone(),
     }
 }
 pub(super) fn host_module_reference_to_ffi(
@@ -196,9 +225,12 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
                     host::ExternalBlockKind::Style => "style".to_string(),
                     host::ExternalBlockKind::Custom => "custom".to_string(),
                 },
-                index: req.index as u32,
                 specifier: req.specifier,
                 resolved_canonical_id: req.resolved_canonical_id,
+                block_token: req.block_token,
+                owner_revision: req.owner_revision,
+                artifact_token: req.artifact_token,
+                carrier_source_space_token: req.carrier_source_space_token,
             })
             .collect(),
         import_specifiers: input
@@ -249,8 +281,6 @@ pub fn host_virtual_file_to_ffi(
         meta: FfiVirtualMeta {
             scope_id: input.meta.scope_id,
             block_type: input.meta.block_type,
-            style_index: input.meta.style_index.map(|i| i as u32),
-            custom_index: input.meta.custom_index.map(|i| i as u32),
         },
         cache_hit: input.cache_hit,
         requested_mode: input.requested_mode.to_string(),

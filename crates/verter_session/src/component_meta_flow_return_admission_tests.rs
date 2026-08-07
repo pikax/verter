@@ -150,8 +150,9 @@ fn return_type_of_local_function_member_projects_widened_number() {
     let b_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/workspace/src/MyType.vue",
-        b.type_source
-            .present()
+        b.publication
+            .result()
+            .selected_source()
             .expect("b prop must publish a typed source"),
     )
     .unwrap_or_else(|| panic!("b prop's published source must shell-materialize"));
@@ -273,8 +274,9 @@ pub(crate) fn no_flow_slot_in_published_type_surface() {
     let b_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/workspace/src/MyType.vue",
-        b.type_source
-            .present()
+        b.publication
+            .result()
+            .selected_source()
             .expect("b prop must publish a typed source"),
     )
     .unwrap_or_else(|| panic!("b prop's published source must shell-materialize"));
@@ -351,8 +353,9 @@ fn return_type_member_of_generic_callee_publishes_the_utility_policy() {
     let m_type = crate::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/workspace/src/MyGeneric.vue",
-        m.type_source
-            .present()
+        m.publication
+            .result()
+            .selected_source()
             .expect("m prop must publish a typed source"),
     )
     .unwrap_or_else(|| panic!("m prop's published source must shell-materialize"));

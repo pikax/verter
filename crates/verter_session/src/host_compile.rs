@@ -159,8 +159,8 @@ pub struct CompileBatchEntry {
 /// without `source_map` a production build would lose its source maps.
 /// Optional fields keep the same "absent = `CompileProfile` default"
 /// semantics as the FFI profile conversion, so the render profile also
-/// HASHES identically to the profile the caller stored request-time block /
-/// style overrides under (`apply_block_overrides`). Fields NOT here are
+/// HASHES identically to the profile under which the caller admitted supplied
+/// block content through `apply_block_overrides`. Fields NOT here are
 /// handled elsewhere: `component_id` is per-input, the compile target is
 /// fixed (runtime render — no TSX), and the TSX-only knobs
 /// (`embed_ambient_types` / `conditional_root_narrowing` / `strict_slots`)
@@ -287,9 +287,9 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 /// keeps the `CompileProfile` default (`Some("vue")`). This is
 /// hash-load-bearing: the resulting profile must produce the SAME
 /// `compile_profile_hash` as the `CompileProfile` built from the same JS
-/// `HostCompileProfile`, because request-time block / style overrides
-/// (`apply_block_overrides`) are stored under that hash and the render
-/// lane consumes them through it.
+/// `HostCompileProfile`, because supplied block content admitted through
+/// `apply_block_overrides` is stored under that hash and the render lane
+/// consumes it through the same profile.
 fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
     let mut profile = CompileProfile {
         filename: rp.filename.clone(),

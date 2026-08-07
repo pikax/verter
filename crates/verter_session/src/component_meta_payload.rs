@@ -291,7 +291,7 @@ pub struct ComponentMetaSurface {
     pub accepted_surface_completeness_bytes: Vec<u8>,
     pub macro_expansion_diagnostics_bytes: Vec<Vec<u8>>,
     pub vue_api_calls_bytes: Vec<Vec<u8>>,
-    pub sfc_blocks_bytes: Option<Vec<u8>>,
+    pub ordered_sfc_structure_bytes: Option<Vec<u8>>,
     pub imports_bytes: Vec<Vec<u8>>,
     pub bindings_bytes: Vec<Vec<u8>>,
     pub styles_bytes: Vec<Vec<u8>>,
@@ -369,13 +369,38 @@ impl ComponentMetaSurface {
             accepted_surface_completeness: 0,
             macro_expansion_diagnostics: Vec::new(),
             vue_api_calls: Vec::new(),
-            sfc_blocks: None,
+            ordered_sfc_structure: self
+                .ordered_sfc_structure_bytes
+                .as_deref()
+                .and_then(|bytes| proto::OrderedSfcStructure::decode(bytes).ok()),
             imports: Vec::new(),
             bindings: Vec::new(),
             styles: Vec::new(),
             components: Vec::new(),
             template_refs: Vec::new(),
             public_instance: None,
+            surface_schema_version: 8,
+            component_public_contract: Some(proto::ComponentContractAvailability {
+                availability: Some(
+                    proto::component_contract_availability::Availability::Unsupported(
+                        proto::ComponentContractUnsupported {
+                            adapter_id: 0,
+                            reason:
+                                proto::ComponentContractUnsupportedReason::ComponentMetaUnavailable
+                                    as i32,
+                            output_lane: 0,
+                            index: 0,
+                            inner_index: 0,
+                            has_inner_index: false,
+                            output_failure: 0,
+                            publication_surface: None,
+                            publication_failure: 0,
+                            publication_provenance: 0,
+                            diagnostics: Vec::new(),
+                        },
+                    ),
+                ),
+            }),
             props: self.props.iter().map(NamedTypeHandle::to_proto).collect(),
             events: self.events.iter().map(NamedTypeHandle::to_proto).collect(),
             slots: self.slots.iter().map(NamedTypeHandle::to_proto).collect(),
@@ -825,7 +850,11 @@ pub fn assemble_surface_from_analysis(
         accepted_surface_completeness_bytes: Vec::new(),
         macro_expansion_diagnostics_bytes: Vec::new(),
         vue_api_calls_bytes: Vec::new(),
-        sfc_blocks_bytes: None,
+        ordered_sfc_structure_bytes: analysis.ordered_sfc_structure.as_ref().map(|structure| {
+            prost::Message::encode_to_vec(
+                &verter_protocol::component_meta::semantic_ordered_structure_to_proto(structure),
+            )
+        }),
         imports_bytes: Vec::new(),
         bindings_bytes: Vec::new(),
         styles_bytes: Vec::new(),
@@ -1111,19 +1140,35 @@ mod tests {
     /// Discriminating test (D100): selective surface envelope round-trips.
     #[test]
     fn selective_api_proto_round_trip_byte_equal() {
+        use prost::Message;
+        let ordered = proto::OrderedSfcStructure {
+            schema_version: 1,
+            artifact_token: "sealed-artifact".to_string(),
+            blocks: Vec::new(),
+            markup_nodes: Vec::new(),
+        };
         let surface = ComponentMetaSurface {
             file_path: "round.vue".to_string(),
             options_api: true,
+            ordered_sfc_structure_bytes: Some(ordered.encode_to_vec()),
             props: vec![named("p1", "round.vue"), named("p2", "round.vue")],
             ..Default::default()
         };
         let bytes = surface.to_proto_bytes();
-        use prost::Message;
         let decoded = proto::ComponentMetaSurface::decode(bytes.as_slice()).expect("decode");
         assert_eq!(decoded.file_path, "round.vue");
         assert!(decoded.options_api);
         assert_eq!(decoded.props.len(), 2);
         assert_eq!(decoded.props[0].name, "p1");
         assert_eq!(decoded.props[1].name, "p2");
+        assert_eq!(
+            decoded
+                .ordered_sfc_structure
+                .as_ref()
+                .map(|structure| structure.artifact_token.as_str()),
+            Some("sealed-artifact")
+        );
+        assert!(decoded.component_public_contract.is_some());
+        assert_eq!(decoded.surface_schema_version, 8);
     }
 }

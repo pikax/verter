@@ -871,8 +871,10 @@ pub(crate) fn produce_binder_identity_facts(
         }
         (facts, all_pinned)
     };
-    let ((facts, all_pinned), finalise) =
-        crate::fact_signature_helpers::install_fact_tracer(host, cold_body);
+    let ((facts, all_pinned), finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        cold_body,
+    );
     let facts = Arc::new(facts);
     // A fenced serve, an unrecoverable observed-version fact registry,
     // or a non-cacheable / overflowed read set never enters the shared
@@ -894,7 +896,8 @@ pub(crate) fn produce_binder_identity_facts(
             }))
         }
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
-        | crate::resolver_core::FactReadSetFinalise::Overflow => {
+        | crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
             Some(Arc::new(BinderIdentityFactsEntry {
                 facts,
                 read_set_signature: ReadSetSignature::overflow(),
@@ -1005,10 +1008,10 @@ pub(crate) mod tests {
 
         // An outer traced computation that WARM-HITS the store must
         // carry the binder facts in its own finalized read-set.
-        let (hit, finalise) =
-            crate::fact_signature_helpers::install_fact_tracer(host.as_ref(), || {
-                super::produce_binder_identity_facts(host.as_ref(), "/w/b.ts")
-            });
+        let (hit, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+            || super::produce_binder_identity_facts(host.as_ref(), "/w/b.ts"),
+        );
         let hit = hit.expect("warm produce must succeed");
         assert!(
             std::sync::Arc::ptr_eq(&cold, &hit),

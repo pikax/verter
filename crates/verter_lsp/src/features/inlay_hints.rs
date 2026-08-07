@@ -6,8 +6,8 @@
 //!
 //! These hints are merged with TSGO type hints (when available) in `server.rs`.
 
+use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
-use crate::documents::sfc_scanner::SfcBlock;
 use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
 use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 use verter_semantic::analysis::types::{
@@ -23,7 +23,7 @@ use verter_session::FileAnalysisSnapshot;
 /// - `useTemplateRef()` calls showing matched template refs
 pub fn verter_inlay_hints(
     source: &str,
-    _blocks: &[SfcBlock],
+    _blocks: &[CarrierBlockView],
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
 ) -> Vec<InlayHint> {
@@ -306,15 +306,15 @@ mod tests {
         }
     }
 
-    fn script_block(content_start: u32) -> SfcBlock {
-        SfcBlock {
-            tag_name: "script".to_string(),
-            open_tag_start: 0,
-            open_tag_end: content_start,
-            close_tag_start: content_start + 200,
-            close_tag_end: content_start + 210,
-            attrs_raw: " setup lang=\"ts\"".to_string(),
-        }
+    fn script_block(content_start: u32) -> CarrierBlockView {
+        let mut block = crate::documents::carrier_structure::test_carrier_blocks(
+            "<script setup lang=\"ts\">\n</script>",
+        )
+        .remove(0);
+        block.open_tag_end = content_start;
+        block.close_tag_start = content_start + 200;
+        block.close_tag_end = content_start + 210;
+        block
     }
 
     #[test]

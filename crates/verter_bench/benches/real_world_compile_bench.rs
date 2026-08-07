@@ -4,8 +4,24 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use verter_compiler::compile::{
-    compile, CodegenOptions, VerterCompileOptions, VueMacroSemanticInput,
+    CodegenOptions, VerterCompileOptions, VerterCompileResult, VueMacroSemanticInput,
 };
+use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+
+fn compile(
+    source: &str,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    _allocator: &Allocator,
+) -> VerterCompileResult {
+    StandaloneCompiler.compile_source(
+        &StandaloneSourceBytes::copied_from(source),
+        options,
+        verter_options,
+        macro_semantics,
+    )
+}
 
 /// A loaded Vue file ready for benchmarking.
 struct VueFile {

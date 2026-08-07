@@ -26,7 +26,7 @@ pub(super) fn collect_snippet_candidate_members(
                 if let Some((_, source)) =
                     snippet_imports.iter().find(|(name, _)| name == type_name)
                 {
-                    out.snippet_candidates.push(SvelteSnippetImportCandidate {
+                    out.snippet_candidates.push(SvelteSnippetMemberCandidate {
                         local_binding: type_name.to_string(),
                         import_source: source.clone(),
                         member_name,
@@ -66,14 +66,13 @@ pub(super) fn collect_snippet_candidate_members_from_lowered(
         let Some(member_name) = property.key.as_string() else {
             continue;
         };
-        out.snippet_candidates.push(SvelteSnippetImportCandidate {
+        out.snippet_candidates.push(SvelteSnippetMemberCandidate {
             local_binding: name.as_ref().to_string(),
             import_source: source.clone(),
             member_name: member_name.to_string(),
         });
     }
 }
-
 /// The content-free anchor of a svelte macro payload: the component's
 /// `default` value symbol under the analyzer's local-file convention (the
 /// empty producing canonical = the component's own file). Mirrors the Vue
@@ -278,6 +277,23 @@ pub(super) fn stable_candidate_hash(candidates: &SvelteScriptCandidates) -> [u8;
             binding.name.hash(&mut hasher);
         }
         call.has_rest.hash(&mut hasher);
+    }
+    for c in &candidates.snippet_imports {
+        c.imported_name.hash(&mut hasher);
+        // The binding FORM discriminates the slot (a statement binding and a
+        // binding-less import()-type reference are distinct captured shapes),
+        // and a statement's local binding stays part of the shape.
+        match &c.binding {
+            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::Statement {
+                local_binding,
+            } => {
+                1u8.hash(&mut hasher);
+                local_binding.hash(&mut hasher);
+            }
+            crate::analysis::framework_facts::svelte::SvelteSnippetCandidateBinding::ImportTypeReference => {
+                2u8.hash(&mut hasher);
+            }
+        }
     }
     for c in &candidates.snippet_candidates {
         c.local_binding.hash(&mut hasher);

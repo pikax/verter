@@ -8,6 +8,7 @@ import type {
   PublicApiProjectionError,
   PublicApiModeOutcome,
   PublicApiResponse,
+  OrderedSfcStructure,
 } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
@@ -222,6 +223,7 @@ interface HostBinding {
     compileProfile?: HostCompileProfile;
   }): HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
+  getDocumentStructure?(canonicalId: string): OrderedSfcStructure | null;
   getAnalysis(canonicalOrAlias: string): FileAnalysis | null;
   getIde(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
   getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostPublicApiResult;
@@ -683,6 +685,7 @@ function compileVueRenderAssembly(
     aliases: [],
     compileProfile: profile,
   });
+  file.structure = wasmHost!.getDocumentStructure?.(file.filename) ?? null;
 
   if (knownFiles) {
     syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);
@@ -761,6 +764,9 @@ function compileVueRenderAssembly(
   const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
   file.compiled.js = mergeRenderIntoComponent(assembledJs);
   file.compiled.css = styleChunks.join("\n");
+  const templateSection = file.structure?.blocks.find(
+    (block) => block.kind === "section" && block.section.role.kind === "templateHost",
+  );
   // Combine script + template source maps into a single map covering file.compiled.js.
   // This handles all offsets: SFC prefix lines, host import prepend, mergeRenderIntoComponent.
   file.compiled.verterSourceMap = combineSourceMaps({
@@ -769,6 +775,8 @@ function compileVueRenderAssembly(
     templateMap: templateSourceMap,
     templateCode,
     vueSource: file.code,
+    templateStartUtf8:
+      templateSection?.kind === "section" ? templateSection.section.openingRange.start : null,
     finalJs: file.compiled.js,
   });
   file.compiled.errors = formatDiagnostics(allDiagnostics);
@@ -900,6 +908,7 @@ function compileGenericFrameworkSurfaces(
     aliases: [],
     compileProfile: profile,
   });
+  file.structure = wasmHost!.getDocumentStructure?.(file.filename) ?? null;
 
   if (knownFiles) {
     syncKnownModuleReferenceDependencies(file.filename, upsertResult.moduleReferences, knownFiles);

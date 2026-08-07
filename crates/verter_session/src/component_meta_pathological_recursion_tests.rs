@@ -396,7 +396,8 @@ fn pathological_extract_through_typeof() {
         &host,
         "/A.vue",
         kind_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("the `kind` prop must publish a typed source"),
     )
@@ -670,7 +671,8 @@ fn pathological_nested_slot_definitions() {
         &host,
         "/A.vue",
         l1_binding
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("the L1 binding must publish a typed source"),
     )
@@ -786,7 +788,7 @@ fn pathological_self_referential_slot_payload() {
     // `join().expect`). We additionally check the resolved type
     // string does not surface a literal "stack-overflow" or other
     // crash signature, which is implicit.
-    let dbg = format!("{:?}", rec_binding.type_source);
+    let dbg = format!("{:?}", rec_binding.publication.source_position());
     let _ = dbg; // termination is the contract; structural shape is
                  // implementation-dependent and may change.
 }
@@ -885,7 +887,7 @@ fn pathological_typeof_substitution_cycle() {
     // signature (which would never appear unless the recursion guard
     // failed catastrophically). Termination is the contract;
     // structural shape is implementation-dependent.
-    let dbg = format!("{:?}", value_prop.type_source);
+    let dbg = format!("{:?}", value_prop.publication.source_position());
     assert!(
         !dbg.contains("stack-overflow"),
         "typeof-substitution cycle's resolved type must NOT surface stack-overflow signature; got {dbg}"
@@ -1066,7 +1068,8 @@ fn pathological_context_different_reentry_active_stack() {
             &host,
             "/ctx.vue",
             root_prop
-                .type_source
+                .publication
+                .source_position()
                 .present()
                 .expect("the `root` prop must publish a typed source"),
         )

@@ -7,7 +7,7 @@ use tower_lsp_server::ls_types::*;
 use verter_session::{HostConfig, VerterHost};
 use verter_span::{LspPosition, TsPosition};
 
-use crate::documents::sfc_scanner::scan_sfc_blocks;
+use crate::documents::carrier_structure::test_carrier_blocks;
 use crate::documents::DocumentRegistry;
 use crate::features::completion::completions_at_position;
 use crate::features::cursor_context::{
@@ -97,7 +97,7 @@ const count = ref(0)
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Hover on "count" in script
     let position = position_of(source, "count = ref");
@@ -108,6 +108,7 @@ const count = ref(0)
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     assert!(hover.is_some(), "Should get hover info for 'count' binding");
@@ -134,7 +135,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Hover on "msg" in template
     let template_msg = source.rfind("msg").unwrap(); // last occurrence (in template)
@@ -155,6 +156,7 @@ const msg = 'hello'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
     assert!(
         hover.is_some(),
@@ -179,7 +181,7 @@ const message = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Position at "c" inside mustache — should suggest bindings
     let offset = source.find("{{ c }}").expect("needle not found") + 3; // inside mustache, on "c"
@@ -199,6 +201,7 @@ const message = 'hello'
         None,
         None,
         false,
+        None,
     );
 
     assert!(items.is_some(), "Should get completion items in template");
@@ -227,7 +230,7 @@ const count = ref(0)
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Position inside script should also return completions
     let position = position_of(source, "ref(0)");
@@ -241,6 +244,7 @@ const count = ref(0)
         None,
         None,
         false,
+        None,
     );
 
     // Script completions should include imports and bindings
@@ -262,7 +266,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Go-to-definition on "msg" in template should find the binding declaration in script
     let position = position_of(source, "msg }}</div>");
@@ -272,6 +276,7 @@ const msg = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
         None,
     );
@@ -292,7 +297,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Click on "msg" in template
     let position = position_of(source, "msg }}</div>");
@@ -302,6 +307,7 @@ const msg = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
         None,
     );
@@ -348,7 +354,7 @@ const title = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let position = position_of(source, "title }}</h1>");
     let def = definition_at_position(
@@ -357,6 +363,7 @@ const title = 'hello'
         &blocks,
         analysis.as_ref(),
         &doc.line_index,
+        None,
         None,
         None,
     );
@@ -420,7 +427,7 @@ console.log(count)
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     // Find references for "count"
     let position = position_of(source, "count = ");
@@ -431,6 +438,7 @@ console.log(count)
         analysis.as_ref(),
         &doc.line_index,
         true, // include declaration
+        None,
     );
 
     assert!(refs.is_some(), "Should find references for 'count'");
@@ -454,7 +462,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let position = position_of(source, "msg = ");
     let target = classify_rename_target(
@@ -482,7 +490,7 @@ const msg = 'hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let position = position_of(source, "msg = ");
     let edit = classify_rename_target(
@@ -623,7 +631,7 @@ button { color: red; }
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let symbols = build_document_symbols(&blocks, analysis.as_ref(), &doc.line_index);
     assert!(
@@ -659,7 +667,7 @@ div { color: red; }
 "#;
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let analysis = registry.get_analysis(&uri);
     let ranges = build_folding_ranges(&blocks, analysis.as_ref(), &doc.line_index);
@@ -686,7 +694,7 @@ console.log(msg)
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let position = position_of(source, "msg = ");
     let highlights = highlights_at_position(
@@ -3519,7 +3527,7 @@ const count = 42
 
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let verter_result = hover_at_position(
         &position,
@@ -3528,6 +3536,7 @@ const count = 42
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     // Verter-only hover should exist but NOT contain TSGO type info
@@ -3573,8 +3582,10 @@ const count = 42
         tsx_offset,
         Some(HoverInfo {
             contents: "const count: 42".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature(
+                "const count: 42",
+            )),
+            ..Default::default()
         }),
     );
 
@@ -3626,7 +3637,7 @@ const count = 42
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let position = position_of(source, "{{ count }}");
     let position = Position {
@@ -3641,6 +3652,7 @@ const count = 42
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     );
 
     // Positive: verter hover exists and has content
@@ -4979,10 +4991,11 @@ const pageTitle: string = 'Hello'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5043,10 +5056,11 @@ const x = 1
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5061,6 +5075,95 @@ const x = 1
     assert!(
         !has_slots_action,
         "should not offer defineSlots action without slot elements"
+    );
+}
+
+/// A7-03 through the REAL registry: `DocumentRegistry::get_analysis` falls back
+/// to the host without gating on the document's version or content
+/// (`documents/analysis.rs`, the `AnalysisScope::BUILD` branch), and that
+/// fallback is the path taken after every edit until async re-publish. An
+/// analysis obtained for one revision must produce no edit against another.
+///
+/// Pre-change, the same pairing sliced `&doc.source[mac.span]` with the older
+/// revision's span and either panicked or produced a misplaced edit.
+#[test]
+fn code_action_returns_nothing_for_stale_host_fallback_analysis() {
+    let v1 = r#"<script setup lang="ts">
+defineSlots<{
+    header(props: {}): any
+}>()
+</script>
+
+<template>
+  <slot name="header" />
+  <slot name="footer" />
+</template>
+"#;
+    let (registry, uri) = open_vue_file(v1);
+
+    // Control: the host-served analysis for the CURRENT buffer DOES serve the
+    // "add footer" action — so the negative below is a rejection, not a
+    // never-offered no-op.
+    let doc = document_snapshot(&registry, &uri);
+    let analysis_v1 = registry
+        .get_analysis(&uri)
+        .expect("host fallback serves an analysis");
+    let blocks = test_carrier_blocks(&doc.source);
+    let control = crate::features::macro_actions::macro_code_actions(
+        &doc.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        Some(&analysis_v1),
+        &blocks,
+        &doc.line_index,
+        None,
+    );
+    let control_titles: Vec<String> = control
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+            _ => "command".to_string(),
+        })
+        .collect();
+    assert!(
+        control_titles.iter().any(|t| t.contains("footer")),
+        "control: a host-served analysis paired with its own bytes serves the \
+         action; titles: {control_titles:?}"
+    );
+
+    // Now edit the document. `analysis_v1` is the snapshot a request that
+    // raced the re-publish would hold.
+    let v2 = r#"<script setup lang="ts">
+defineSlots<{}>()
+</script>
+
+<template>
+  <slot name="footer" />
+</template>
+"#;
+    registry.did_change(&uri, 2, v2);
+    let doc_v2 = document_snapshot(&registry, &uri);
+    assert_eq!(&*doc_v2.source, v2, "the document must hold the new bytes");
+    let blocks_v2 = test_carrier_blocks(&doc_v2.source);
+
+    let actions = crate::features::macro_actions::macro_code_actions(
+        &doc_v2.source,
+        verter_session::AnalysisSourceRevision::of_source(&doc_v2.source),
+        Some(&analysis_v1),
+        &blocks_v2,
+        &doc_v2.line_index,
+        None,
+    );
+    let titles: Vec<String> = actions
+        .iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+            _ => "command".to_string(),
+        })
+        .collect();
+    assert!(
+        actions.is_empty(),
+        "an analysis from another revision must produce no edit and no panic; \
+         titles: {titles:?}"
     );
 }
 
@@ -5092,7 +5195,7 @@ fn integration_hover_on_slot_tag_name() {
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "slot name");
     let text = hover_text(hover_at_position(
@@ -5102,6 +5205,7 @@ fn integration_hover_on_slot_tag_name() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5129,7 +5233,7 @@ fn integration_hover_on_slot_name_attr_value() {
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "reference");
     let text = hover_text(hover_at_position(
@@ -5139,6 +5243,7 @@ fn integration_hover_on_slot_name_attr_value() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5162,7 +5267,7 @@ fn integration_hover_on_default_slot_outlet() {
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "slot />");
     let text = hover_text(hover_at_position(
@@ -5172,6 +5277,7 @@ fn integration_hover_on_default_slot_outlet() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5196,7 +5302,7 @@ import MyComp from './MyComp.vue'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "#header");
     let text = hover_text(hover_at_position(
@@ -5206,6 +5312,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5234,7 +5341,7 @@ import MyComp from './MyComp.vue'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "v-slot:footer");
     let text = hover_text(hover_at_position(
@@ -5244,6 +5351,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5268,7 +5376,7 @@ import MyComp from './MyComp.vue'
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "v-slot=");
     let text = hover_text(hover_at_position(
@@ -5278,6 +5386,7 @@ import MyComp from './MyComp.vue'
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     ));
 
     assert!(
@@ -5354,7 +5463,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
     let (registry, uri) = open_vue_file(source);
     let doc = document_snapshot(&registry, &uri);
     let analysis = registry.get_analysis(&uri);
-    let blocks = scan_sfc_blocks(&doc.source);
+    let blocks = test_carrier_blocks(&doc.source);
 
     let pos = position_of(source, "slot name");
     let verter_hover = hover_at_position(
@@ -5364,6 +5473,7 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         analysis.as_ref(),
         &doc.line_index,
         false,
+        None,
     )
     .map(|r| r.hover);
     assert!(
@@ -5389,8 +5499,8 @@ async fn integration_hover_slot_merge_preserves_verter_info() {
         tsx_offset,
         Some(HoverInfo {
             contents: "() any".to_string(),
-            range_start: None,
-            range_end: None,
+            display_signature: Some(crate::type_provider::mock::test_display_signature("() any")),
+            ..Default::default()
         }),
     );
 
@@ -5730,7 +5840,7 @@ fn document_drop_edit_accepts_svelte_carrier() {
     use crate::features::document_drop_edit::document_drop_edit;
 
     let source = "<template>\n  <div></div>\n</template>\n<script setup>\n</script>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let target_uri: Uri = "file:///project/src/App.vue".parse().unwrap();
     let drop_pos = Position {
@@ -5787,7 +5897,7 @@ fn definition_retries_default_export_for_svelte_carrier() {
     use crate::documents::line_index::LineIndex;
 
     let source = "<script setup>\nimport Child from './Child.svelte'\n</script>\n<template><Child /></template>\n";
-    let blocks = scan_sfc_blocks(source);
+    let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
     let (registry, uri) = open_vue_file(source);
     let analysis = registry.get_analysis(&uri).expect("analysis");
@@ -5837,6 +5947,7 @@ fn definition_retries_default_export_for_svelte_carrier() {
         &line_index,
         Some(&resolve_path),
         Some(&resolve_export_location),
+        None,
     );
 
     let result = result.expect("definition must resolve the .svelte default export via retry");

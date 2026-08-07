@@ -21,6 +21,7 @@ pub(super) fn lower_block(
         SvelteBlockKind::Await {
             then_binding,
             catch_binding,
+            ..
         } => Some(lower_await_block(
             ctx,
             block,
@@ -36,6 +37,10 @@ pub(super) fn lower_block(
         } => Some(lower_snippet_block(
             ctx, block, *name, name_text, *params, scope,
         )),
+        // An unrecognised `{#keyword}` block lowers exactly as the former
+        // untyped fallback did: an expression-less key block over its body
+        // (behaviour-preserving; official rejects it at parse).
+        SvelteBlockKind::Unknown { .. } => Some(lower_key_block(ctx, block, scope)),
     }
 }
 

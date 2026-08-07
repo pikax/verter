@@ -311,8 +311,9 @@ fn parent_generic_field_must_take_slow_path() {
         .find(|p| p.name == "value")
         .expect("value prop must surface");
     let value_source = value_field
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("value prop must publish a typed source");
     let value_ty = verter_session::test_only::semantic_source_probe::demand_type_expr(
         &host,

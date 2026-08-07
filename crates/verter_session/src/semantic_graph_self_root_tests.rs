@@ -42,8 +42,11 @@ use std::sync::Arc;
 
 use verter_semantic::facts::{FactKey, FactLane};
 
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, ResolverContext};
+use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt};
+use crate::resolver_core::{
+    FactReadSetFinalise, FactVersionRef, ResolverContext, StoreView, StoreViewCompatToken,
+    FACT_SIGNATURE_CAP,
+};
 use crate::semantic_query::{
     DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
@@ -57,6 +60,69 @@ use crate::{HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
+}
+
+pub(crate) struct StrictWorldTestView {
+    pub(crate) world: verter_workspace::StrictSelfRootWorld,
+    pub(crate) rejected_root: Option<Arc<str>>,
+}
+
+impl Default for StrictWorldTestView {
+    fn default() -> Self {
+        Self {
+            world: verter_workspace::StrictSelfRootWorld {
+                authority_id: 1,
+                authority_generation: 7,
+                source_epoch: 11,
+                artifact_epoch: 13,
+                population: verter_workspace::ViewPopulation::Base,
+            },
+            rejected_root: None,
+        }
+    }
+}
+
+impl StoreView for StrictWorldTestView {
+    fn compat_token(&self) -> StoreViewCompatToken {
+        StoreViewCompatToken {
+            epoch: 1,
+            session: None,
+            validity_fingerprint: 1,
+        }
+    }
+
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        match fact {
+            FactVersionRef::StrictSelfRootWorld(world) => *world == self.world,
+            _ => true,
+        }
+    }
+
+    fn validates_self_root_whole_hash(&self, canonical_id: &str, _hash: &[u8; 16]) -> bool {
+        self.rejected_root.as_deref() != Some(canonical_id)
+    }
+
+    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        Some(self.world)
+    }
+
+    fn strict_self_root_is_witnessable(&self, _canonical_id: &str) -> bool {
+        true
+    }
+}
+
+pub(crate) fn exact_cap_terminal_witness_facts() -> Vec<FactVersionRef> {
+    (0..FACT_SIGNATURE_CAP)
+        .map(|generation| {
+            FactVersionRef::StrictSelfRootWorld(verter_workspace::StrictSelfRootWorld {
+                authority_id: 1,
+                authority_generation: generation as u64,
+                source_epoch: 1,
+                artifact_epoch: 1,
+                population: verter_workspace::ViewPopulation::Base,
+            })
+        })
+        .collect()
 }
 
 /// Upsert through the production [`VerterHost::upsert`] path. The
@@ -351,10 +417,11 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
 #[test]
 fn read_set_signature_prepends_observed_self_roots() {
     let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
-    let carrier = semantic_graph_read_set_signature(&observed, &[])
-        .expect("a single observed self-root builds a carrier");
+    let carrier =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
+            .expect("a single observed self-root builds a carrier");
     assert!(
-        carrier.facts.iter().any(|f| matches!(
+        carrier.0.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, hash }
                 if canonical_id == "/w/a.ts" && *hash == [0x11; 16]
@@ -371,9 +438,9 @@ fn read_set_signature_rejects_conflicting_self_root_hashes() {
         (Arc::from("/w/a.ts"), [0x11; 16]),
         (Arc::from("/w/a.ts"), [0x22; 16]),
     ];
-    let result = semantic_graph_read_set_signature(&observed, &[]);
+    let result = semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[]);
     assert!(
-        result.is_none(),
+        result.is_err(),
         "two observed self-roots for the same canonical with conflicting hashes is a torn \
          observation — the producer MUST return None so the entry is non-cacheable",
     );
@@ -389,9 +456,10 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x99; 16],
     }];
-    let result = semantic_graph_read_set_signature(&observed, &traced);
+    let result =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced);
     assert!(
-        result.is_none(),
+        result.is_err(),
         "a traced FileWholeHash for a self-root canonical that disagrees with the observed \
          self-root hash is a torn read — the producer MUST return None",
     );
@@ -409,16 +477,18 @@ fn read_set_signature_merges_traced_cross_file_facts() {
         lane: FactLane::Semantic,
         expected_hash: [0x44; 16],
     })];
-    let carrier = semantic_graph_read_set_signature(&observed, &traced).expect("carrier builds");
+    let carrier =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .expect("carrier builds");
     assert!(
-        carrier.facts.iter().any(|f| matches!(
+        carrier.0.iter().any(|f| matches!(
             f,
             FactVersionRef::Parse(p) if p.canonical_id == "/w/dep.ts"
         )),
         "a traced cross-file Parse fact must be merged into the carrier's facts rail",
     );
     assert!(
-        carrier.facts.iter().any(|f| matches!(
+        carrier.0.iter().any(|f| matches!(
             f,
             FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id == "/w/a.ts"
         )),
@@ -432,14 +502,151 @@ fn read_set_signature_merges_traced_cross_file_facts() {
 fn read_set_signature_keeps_traced_project_generation_fact() {
     let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::ProjectGeneration { generation: 7 }];
-    let carrier = semantic_graph_read_set_signature(&observed, &traced).expect("carrier builds");
+    let carrier =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .expect("carrier builds");
     assert!(
-        carrier.facts.iter().any(
+        carrier.0.iter().any(
             |f| matches!(f, FactVersionRef::ProjectGeneration { generation } if *generation == 7)
         ),
         "a traced ProjectGeneration fact must be merged into the carrier's facts rail so a \
          project-shape change invalidates the entry",
     );
+}
+
+/// A structural carrier with more self-roots than the fact-signature cap must
+/// remain admissible without retaining one precise fact per root.
+#[test]
+fn oversized_self_root_set_builds_a_bounded_carrier() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_SIGNATURE_CAP)
+        .map(|index| {
+            (
+                Arc::from(format!("/w/root-{index}.ts")),
+                [(index % 251) as u8; 16],
+            )
+        })
+        .collect();
+
+    let carrier =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
+            .expect("cardinality alone must not make a self-rooted carrier uncacheable");
+
+    assert!(
+        carrier.0.len() <= FACT_SIGNATURE_CAP,
+        "the completed structural carrier must stay within the signature cap; got {} facts",
+        carrier.0.len(),
+    );
+    assert!(
+        carrier.1.is_empty(),
+        "the precise root list must compact too"
+    );
+    assert!(
+        carrier
+            .0
+            .iter()
+            .any(|fact| matches!(fact, FactVersionRef::StrictSelfRootWorld(_))),
+        "the bounded carrier must retain a strict-world witness",
+    );
+}
+
+#[test]
+fn oversized_self_root_compaction_strictly_checks_every_root() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_SIGNATURE_CAP)
+        .map(|index| {
+            (
+                Arc::from(format!("/w/root-{index}.ts")),
+                [(index % 251) as u8; 16],
+            )
+        })
+        .collect();
+    let view = StrictWorldTestView {
+        rejected_root: Some(Arc::from("/w/root-0.ts")),
+        ..StrictWorldTestView::default()
+    };
+
+    assert_eq!(
+        semantic_graph_read_set_signature(&view, &observed, &[]).unwrap_err(),
+        crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+        "one rejecting root must prevent a strict-world witness even when every later root validates",
+    );
+}
+
+#[test]
+fn strict_world_witness_discriminates_without_a_precise_root_list() {
+    let view = StrictWorldTestView::default();
+    let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::StrictSelfRootWorld(
+        view.world,
+    )]));
+
+    assert!(carrier.has_view_discriminating_self_root(&[]));
+    assert!(view.validates_fact_signature(&carrier.facts));
+
+    let other = StrictWorldTestView {
+        world: verter_workspace::StrictSelfRootWorld {
+            population: verter_workspace::ViewPopulation::SessionOverlay(
+                verter_workspace::SessionOverlayFingerprint::new(99).unwrap(),
+            ),
+            ..view.world
+        },
+        ..StrictWorldTestView::default()
+    };
+    assert!(
+        !other.validates_fact_signature(&carrier.facts),
+        "a different effective population must reject the witness",
+    );
+}
+
+#[test]
+fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
+    let content_aggregate =
+        ReadSetSignature::new(Arc::from(vec![FactVersionRef::DomainGeneration(
+            verter_workspace::DomainGenerationFact {
+                domain: verter_workspace::CompactionDomain::Content,
+                population: verter_workspace::AggregatePopulation::View(
+                    verter_workspace::ViewPopulation::Base,
+                ),
+                stamp: verter_workspace::AggregateStamp::Generation(1),
+            },
+        )]));
+    assert!(
+        !content_aggregate.has_view_discriminating_self_root(&[]),
+        "a generic Content aggregate is not a strict self-root witness",
+    );
+}
+
+/// The cap applies to the completed carrier, not merely the tracer output: a
+/// signature finalized exactly at the cap cannot silently grow when a
+/// structural self-root is prepended afterward.
+#[test]
+fn post_finalise_self_root_merge_cannot_publish_above_the_cap() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/root.ts"), [0x11; 16])];
+    let traced: Vec<FactVersionRef> = (0..FACT_SIGNATURE_CAP)
+        .map(|generation| FactVersionRef::ProjectGeneration {
+            generation: generation as u64,
+        })
+        .collect();
+
+    assert!(
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .is_err(),
+        "a completed carrier above the cap must be refused when no terminal compaction can bound it",
+    );
+}
+
+#[test]
+fn completed_structural_carrier_at_the_exact_cap_is_admitted() {
+    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/root.ts"), [0x11; 16])];
+    let traced: Vec<FactVersionRef> = (0..FACT_SIGNATURE_CAP - 1)
+        .map(|generation| FactVersionRef::ProjectGeneration {
+            generation: generation as u64,
+        })
+        .collect();
+
+    let (facts, roots) =
+        semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
+            .expect("an exact-cap completed carrier remains admissible");
+    assert_eq!(facts.len(), FACT_SIGNATURE_CAP);
+    assert_eq!(roots.as_ref(), &[Arc::<str>::from("/w/root.ts")]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,22 +1378,28 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // The cold-owner publish path must bubble the freshly-built carrier
     // (whose facts rail leads with the self-root `FileWholeHash` for `c`)
     // into this outer tracer.
-    let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        let dispatch = host.semantic_dispatch();
-        let r = dispatch.execute_type_node(key.clone());
-        assert!(
-            matches!(r, crate::semantic_query::QueryResult::Value(_)),
-            "the cold ResolveDecl dispatch must resolve to a Value"
-        );
-    });
+    let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || {
+            let dispatch = host.semantic_dispatch();
+            let r = dispatch.execute_type_node(key.clone());
+            assert!(
+                matches!(r, crate::semantic_query::QueryResult::Value(_)),
+                "the cold ResolveDecl dispatch must resolve to a Value"
+            );
+        },
+    );
 
     let cold_facts = match cold_finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("cold ResolveDecl unexpectedly consumed a non-cacheable read")
         }
-        FactReadSetFinalise::Overflow => {
-            panic!("outer tracer overflowed — a single ResolveDecl cold build cannot overflow")
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!(
+                "outer tracer refused — a single ResolveDecl cold build neither overflows nor \
+                    races a domain mutation"
+            )
         }
     };
     assert!(
@@ -1207,16 +1420,21 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // warm-hit-child coverage MUST equal the cold-built-child coverage:
     // a parent's dep set is path-independent regardless of whether the
     // child was cold or warm.
-    let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-        let dispatch = host.semantic_dispatch();
-        let _ = dispatch.execute_type_node(key.clone());
-    });
+    let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        || {
+            let dispatch = host.semantic_dispatch();
+            let _ = dispatch.execute_type_node(key.clone());
+        },
+    );
     let warm_facts = match warm_finalise {
         FactReadSetFinalise::Ok(sig) => sig,
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("warm ResolveDecl unexpectedly consumed a non-cacheable read")
         }
-        FactReadSetFinalise::Overflow => panic!("warm outer tracer overflowed — setup error"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("warm outer tracer refused — setup error")
+        }
     };
     assert!(
         warm_facts.iter().any(|f| matches!(
@@ -2673,4 +2891,3 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         }
     }
 }
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;

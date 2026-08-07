@@ -423,9 +423,12 @@ pub struct NapiDiagnosticsSnapshot {
 pub struct NapiExternalSourceRequest {
     pub ownerCanonicalId: String,
     pub blockKind: String,
-    pub index: u32,
     pub specifier: String,
     pub resolvedCanonicalId: String,
+    pub blockToken: String,
+    pub ownerRevision: String,
+    pub artifactToken: String,
+    pub carrierSourceSpaceToken: String,
 }
 
 #[napi(object)]
@@ -437,26 +440,41 @@ pub struct NapiScriptImportInfo {
 
 #[napi(object)]
 pub struct NapiPreprocessorRequest {
-    /// Block type: "template", "script", "style", or "custom".
-    pub blockType: String,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: u32,
+    pub contentClass: String,
     /// The `lang` attribute value (e.g., "pug", "coffee", "scss").
     pub lang: String,
     /// Raw content of the block that needs preprocessing.
     pub content: String,
+    pub availability: String,
+    pub correlationToken: String,
+    pub blockToken: String,
+    pub ownerRevision: String,
+    pub artifactToken: String,
+    pub expectedLanguage: String,
+    pub priorBasisToken: Option<String>,
+    pub basisToken: String,
+    pub sourceSpaceToken: String,
+    pub contentHash: String,
+    pub customType: Option<String>,
 }
 
 #[napi(object)]
 pub struct NapiBlockOverrideEntry {
-    /// Block type: "template", "script", "style", or "custom".
-    pub blockType: String,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: u32,
+    pub correlationToken: String,
+    pub blockToken: String,
+    pub ownerRevision: String,
+    pub artifactToken: String,
+    pub expectedLanguage: String,
+    pub priorBasisToken: Option<String>,
+    pub basisToken: String,
+    pub sourceSpaceToken: String,
     /// Preprocessed code as UTF-8 bytes.
     pub code: Buffer,
+    pub codeHash: String,
     /// Source map from the preprocessor, if available.
     pub sourceMap: Option<String>,
+    pub sourceMapHash: Option<String>,
+    pub suppliedProvenance: Option<String>,
 }
 
 #[napi(object)]
@@ -531,8 +549,6 @@ pub struct NapiResolvedId {
 pub struct NapiVirtualMeta {
     pub scopeId: Option<String>,
     pub blockType: Option<String>,
-    pub styleIndex: Option<u32>,
-    pub customIndex: Option<u32>,
 }
 
 #[napi(object)]
@@ -846,8 +862,6 @@ pub struct NapiHostMetrics {
     pub virtualLoads: f64,
     /// Total `resolve()` calls.
     pub resolves: f64,
-    /// Total style override calls (legacy, reserved for metrics compatibility).
-    pub styleOverrideCalls: f64,
     /// Cumulative parse/hash time across all upserts (microseconds).
     pub sliceHashTimeUsTotal: f64,
     /// Average parse/hash time per upsert (microseconds).
@@ -1112,9 +1126,12 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
             .map(|req| NapiExternalSourceRequest {
                 ownerCanonicalId: req.owner_canonical_id,
                 blockKind: host_block_kind_to_str(&req.block_kind).to_string(),
-                index: req.index as u32,
                 specifier: req.specifier,
                 resolvedCanonicalId: req.resolved_canonical_id,
+                blockToken: req.block_token,
+                ownerRevision: req.owner_revision,
+                artifactToken: req.artifact_token,
+                carrierSourceSpaceToken: req.carrier_source_space_token,
             })
             .collect(),
         importSpecifiers: input
@@ -1135,15 +1152,40 @@ fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> N
             .preprocessor_requests
             .iter()
             .map(|req| NapiPreprocessorRequest {
-                blockType: match req.block_type {
-                    host::PreprocessorBlockType::Template => "template".to_string(),
-                    host::PreprocessorBlockType::Script => "script".to_string(),
-                    host::PreprocessorBlockType::Style => "style".to_string(),
-                    host::PreprocessorBlockType::Custom => "custom".to_string(),
+                contentClass: match req.content_class {
+                    host::BlockContentClass::Template => "template".to_string(),
+                    host::BlockContentClass::Script => "script".to_string(),
+                    host::BlockContentClass::Style => "style".to_string(),
+                    host::BlockContentClass::Custom => "custom".to_string(),
                 },
-                index: req.index as u32,
                 lang: req.lang.clone(),
                 content: req.content.clone(),
+                availability: match req.availability {
+                    host::BlockContentAvailability::NativeAvailable => "nativeAvailable",
+                    host::BlockContentAvailability::ProcessedContentRequired => {
+                        "processedContentRequired"
+                    }
+                    host::BlockContentAvailability::SuppliedAvailable => "suppliedAvailable",
+                    host::BlockContentAvailability::Missing => "missing",
+                    host::BlockContentAvailability::Conflict => "conflict",
+                    host::BlockContentAvailability::Stale => "stale",
+                }
+                .to_string(),
+                correlationToken: req.captured_echo.request.correlation_token.to_string(),
+                blockToken: req.captured_echo.request.block_token.to_string(),
+                ownerRevision: req.captured_echo.request.owner_revision.to_string(),
+                artifactToken: req.captured_echo.request.artifact_token.to_string(),
+                expectedLanguage: req.captured_echo.request.expected_language.clone(),
+                priorBasisToken: req
+                    .captured_echo
+                    .request
+                    .prior_basis_token
+                    .as_ref()
+                    .map(ToString::to_string),
+                basisToken: req.captured_echo.basis_token.to_string(),
+                sourceSpaceToken: req.source_space_token.to_string(),
+                contentHash: req.content_hash.to_string(),
+                customType: req.custom_type.clone(),
             })
             .collect(),
         exportSignatures: input
@@ -1174,8 +1216,6 @@ fn host_virtual_file_to_napi(
         meta: NapiVirtualMeta {
             scopeId: input.meta.scope_id,
             blockType: input.meta.block_type,
-            styleIndex: input.meta.style_index.map(|i| i as u32),
-            customIndex: input.meta.custom_index.map(|i| i as u32),
         },
         cacheHit: input.cache_hit,
         requestedMode: input.requested_mode.to_string(),
@@ -1581,10 +1621,10 @@ impl NapiVerterHost {
     /// of Pug, CoffeeScript, SCSS, or custom block preprocessors) and
     /// recompiles affected virtual nodes.
     ///
-    /// This is the unified API that handles template, script, style, AND
-    /// custom block preprocessing. Style overrides are delegated to the
-    /// existing style pipeline; template/script overrides build a synthetic
-    /// SFC with preprocessed content and stripped `lang` attributes.
+    /// This is the unified API for template, script, style, and custom-block
+    /// preprocessing. Every result echoes the sealed identity and source stamps
+    /// from its corresponding preprocessor request; the host admits bytes only
+    /// after validating those stamps and the code/map hashes.
     ///
     /// Returns the same changeset structure as [`upsert`](Self::upsert).
     #[napi(js_name = "applyBlockOverrides")]
@@ -1598,10 +1638,19 @@ impl NapiVerterHost {
             .into_iter()
             .map(|e| {
                 Ok(FfiBlockOverrideEntry {
-                    block_type: e.blockType,
-                    index: e.index,
+                    correlation_token: e.correlationToken,
+                    block_token: e.blockToken,
+                    owner_revision: e.ownerRevision,
+                    artifact_token: e.artifactToken,
+                    expected_language: e.expectedLanguage,
+                    prior_basis_token: e.priorBasisToken,
+                    basis_token: e.basisToken,
+                    source_space_token: e.sourceSpaceToken,
                     code: buffer_to_string(e.code)?,
+                    code_hash: e.codeHash,
                     source_map: e.sourceMap,
+                    source_map_hash: e.sourceMapHash,
+                    supplied_provenance: e.suppliedProvenance,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1717,6 +1766,25 @@ impl NapiVerterHost {
             })
             .transpose()
         })?
+    }
+
+    /// Returns the registered content-free carrier structure as JSON.
+    #[napi(js_name = "getDocumentStructure")]
+    pub fn get_document_structure(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .registered_file_structure(&canonical_or_alias)
+                .map(|structure| {
+                    let projected = registered_structure_to_ffi(&structure);
+                    serde_json::to_string(&projected).map_err(|error| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("structure serialization error: {error}"),
+                        )
+                    })
+                })
+                .transpose()
+        }))?
     }
 
     /// Evaluate type annotations for a file's component metadata using the
@@ -2042,7 +2110,6 @@ impl NapiVerterHost {
                 compileCacheHitRate: m.compile_cache_hit_rate,
                 virtualLoads: m.virtual_loads as f64,
                 resolves: m.resolves as f64,
-                styleOverrideCalls: m.style_override_calls as f64,
                 sliceHashTimeUsTotal: m.slice_hash_time_us_total as f64,
                 avgSliceHashTimeUs: m.avg_slice_hash_time_us,
                 compileTimeUsTotal: m.compile_time_us_total as f64,
@@ -2062,6 +2129,20 @@ impl NapiVerterHost {
     ///
     /// - `canonical_or_alias` — the file to lint.
     /// - `config` — optional JSON string with lint config. Pass `None` for defaults.
+    /// Ordered SFC block facts projected from the registered carrier
+    /// inventory — the sole geometry source for block-structure lint rules
+    /// and block-anchored code-action edits. Empty when the file has no
+    /// registered structure (fail closed).
+    fn registered_block_facts(
+        &self,
+        canonical_or_alias: &str,
+    ) -> Vec<verter_diagnostics::SfcBlockFact> {
+        self.inner
+            .registered_file_structure_snapshot(canonical_or_alias)
+            .map(|(structure, _)| verter_diagnostics::project_block_facts(structure.inventory()))
+            .unwrap_or_default()
+    }
+
     #[napi]
     pub fn lint(
         &self,
@@ -2082,11 +2163,13 @@ impl NapiVerterHost {
             Some(snapshot) => {
                 let linter = Linter::new(lint_config);
                 let script = build_script_snapshot(&snapshot);
+                let blocks = self.registered_block_facts(&canonical_or_alias);
                 linter
                     .lint(
                         Some(&script),
                         snapshot.template.as_deref(),
                         &snapshot.styles,
+                        &blocks,
                     )
                     .into_diagnostics()
             }
@@ -2141,11 +2224,13 @@ impl NapiVerterHost {
                 let byte_offset = utf16_to_byte_offset(source, offset);
                 let script = build_script_snapshot(&snapshot);
                 let linter = Linter::default();
+                let blocks = self.registered_block_facts(&canonical_or_alias);
                 let diag_set = linter.lint_with_source(
                     Some(&script),
                     snapshot.template.as_deref(),
                     &snapshot.styles,
                     Some(source),
+                    &blocks,
                 );
 
                 let engine = ActionEngine::default();
@@ -2156,6 +2241,7 @@ impl NapiVerterHost {
                     template: snapshot.template.as_deref(),
                     script: Some(&script),
                     styles: &snapshot.styles,
+                    blocks: &blocks,
                 };
 
                 let mut actions = Vec::new();

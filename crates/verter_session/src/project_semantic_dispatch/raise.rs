@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use crate::semantic_query::SurfaceView;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::TypeExpr;
 
@@ -1869,14 +1870,37 @@ fn rebuild_object(
     if !changed {
         return Some(node);
     }
-    let new_view = crate::semantic_query::surface_view! {
-        members: new_members,
-        call_signatures: new_calls,
-        construct_signatures: new_constructs,
-        index_signatures: view.index_signatures.clone(),
-        keyspace: view.keyspace,
-        has_index_signature: view.has_known_index_signature(),
-    };
+    let mut members = new_members.iter().cloned();
+    let mut calls = new_calls.iter().copied();
+    let mut constructs = new_constructs.iter().copied();
+    let entries = view
+        .entries
+        .iter()
+        .map(|entry| match entry {
+            crate::semantic_query::SurfaceEntry::Member(_) => {
+                crate::semantic_query::SurfaceEntry::Member(
+                    members.next().expect("derived member index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::CallSignature(_) => {
+                crate::semantic_query::SurfaceEntry::CallSignature(
+                    calls.next().expect("derived call index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::ConstructSignature(_) => {
+                crate::semantic_query::SurfaceEntry::ConstructSignature(
+                    constructs
+                        .next()
+                        .expect("derived construct index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                crate::semantic_query::SurfaceEntry::IndexSignature(signature.clone())
+            }
+        })
+        .collect();
+    let new_view =
+        SurfaceView::from_entries(entries, view.keyspace, view.has_known_index_signature());
     Some(
         dispatch
             .graph()
@@ -5255,16 +5279,15 @@ mod tests {
         );
 
         // CLOSED: a finite object surface domain.
-        let closed_object = graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        let closed_object =
+            graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from(Vec::new().into_boxed_slice()),
                 call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-            },
-        ));
+            }));
         assert!(
             !super::utility_enumeration_domain_is_open_or_unknown(
                 &dispatch,
@@ -5341,16 +5364,15 @@ mod tests {
         let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
         // CONCRETE object, OPEN type-param key.
-        let concrete_object = graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        let concrete_object =
+            graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from(Vec::new().into_boxed_slice()),
                 call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-            },
-        ));
+            }));
         let open_key = graph.intern_node(SemanticNodeData::TypeParam {
             decl: DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -5456,16 +5478,15 @@ mod tests {
         };
         let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
-        let concrete_object = graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        let concrete_object =
+            graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from(Vec::new().into_boxed_slice()),
                 call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 index_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-            },
-        ));
+            }));
         let concrete_key =
             graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
         // The mapper's OWN binder `K` (bound) vs the open OUTER `T`.

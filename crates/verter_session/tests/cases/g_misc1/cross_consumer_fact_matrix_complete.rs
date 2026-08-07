@@ -1,7 +1,7 @@
 //! Cross-consumer × fact-kind matrix completeness arch guard.
 //!
 //! This test enforces that every (consumer, fact-kind) cell on the
-//! 9 × 5 cross-consumer matrix has a discriminating slice file under
+//! 9 × 4 cross-consumer matrix has a discriminating slice file under
 //! `crates/verter_session/tests/fact_matrix/`. Adding a new
 //! cache-bearing consumer to the substrate WITHOUT extending the
 //! matrix would let a fact-kind regression land silently for that
@@ -26,8 +26,43 @@
 //!
 //! Discrimination: each REQUIRED_CONSUMERS entry whose slice file
 //! does NOT exist on disk causes this test to FAIL. A regression
-//! that adds a new cache-bearing consumer without filing its 5
+//! that adds a new cache-bearing consumer without filing its
 //! per-fact-kind slices is caught here.
+//!
+//! # The column set is a REPRESENTATIVE SUBSET, and only shrinks with the registry
+//!
+//! `REQUIRED_FACT_KINDS` is NOT the list of fact kinds that exist, and
+//! must not be read as one. `FactKey` currently has 15 live variants;
+//! this grid covers 4. `MemberShape`, `MacroSurface`, `TemplateRoot`,
+//! `Export`, `ExportAlias`, `SyntacticExportSet`, `LocalDecl`,
+//! `SyntacticReexportRef`, `ModuleAugmentation`, `ResolvedImportClause`
+//! and `ResolvedReexportBinding` are all live with NO column here. The
+//! grid is a chosen cross-section, not a completeness proof over the
+//! registry — a variant's absence from this list says nothing about
+//! whether it is covered elsewhere.
+//!
+//! What the list DOES promise is one-directional: a column may only be
+//! removed when its fact kind is gone. Adding a variant to `FactKey`
+//! does not automatically owe a column (this is a subset); removing a
+//! column always owes the registry check below.
+//!
+//! This cuts both ways, and the second direction is the load-bearing
+//! one. Widening is obvious. NARROWING is the dangerous direction, so
+//! it is admissible only when the fact kind itself is GONE from the
+//! registry — never to accommodate a consumer that is inconvenient to
+//! cover, and never by filing slices that cannot fail differently from
+//! slices already present. A cell whose test duplicates its sibling
+//! satisfies the grid while discriminating nothing: it makes the guard
+//! LOOK complete and is strictly worse than an honestly smaller grid.
+//! If a column is dropped, the reason belongs in the same change.
+//!
+//! The `route_surface` column was retired for exactly that reason: it
+//! named the `EffectiveExportSet` fact, whose surface was deleted after
+//! it was verified dead (its sole insert was `#[cfg(test)]` with zero
+//! callers, and the production validator's lookup was operationally
+//! always absent). `RouteSurface` is now a ONE-ARM domain whose only
+//! fact is `ModuleAugmentationIndexShape` — which has its own column,
+//! so the surviving arm keeps full per-consumer coverage.
 
 use std::path::Path;
 
@@ -45,11 +80,13 @@ const REQUIRED_CONSUMERS: &[&str] = &[
     "slot_binding_graph",
 ];
 
+/// The fact kinds that EXIST. See the module doc: this list tracks the
+/// live registry, so the grid's width follows the domain. A kind may be
+/// removed here ONLY once the fact itself is gone from the registry.
 const REQUIRED_FACT_KINDS: &[&str] = &[
     "member_presence",
     "member",
     "import_ref",
-    "route_surface",
     "module_augmentation_index_shape",
 ];
 
@@ -90,7 +127,7 @@ fn cross_consumer_matrix_completeness() {
 
 #[test]
 fn cross_consumer_matrix_grid_size_matches_expected() {
-    // Negative invariant: the grid is exactly 9 \u{00d7} 5 = 45 cells.
+    // Negative invariant: the grid is exactly 9 \u{00d7} 4 = 36 cells.
     // A regression that silently drops a consumer (e.g. removing
     // `slot_binding_graph` from REQUIRED_CONSUMERS to "make the test
     // pass" when a slice goes missing) would shrink the grid; this
@@ -108,16 +145,18 @@ fn cross_consumer_matrix_grid_size_matches_expected() {
     );
     assert_eq!(
         REQUIRED_FACT_KINDS.len(),
-        5,
-        "REQUIRED_FACT_KINDS must list the 5 fact-kinds \
-         (member_presence, member, import_ref, route_surface, \
-         module_augmentation_index_shape)."
+        4,
+        "REQUIRED_FACT_KINDS must list the 4 LIVE fact-kinds \
+         (member_presence, member, import_ref, \
+         module_augmentation_index_shape). This count follows the \
+         registry: shrink it ONLY in the change that removes the fact \
+         kind itself, never to accommodate an uncovered consumer."
     );
     let cells = REQUIRED_CONSUMERS.len() * REQUIRED_FACT_KINDS.len();
     assert_eq!(
-        cells, 45,
-        "cross-consumer matrix size must be 9\u{00d7}5 = 45; \
+        cells, 36,
+        "cross-consumer matrix size must be 9\u{00d7}4 = 36; \
          observed {cells}. A regression that drops a consumer OR a \
-         fact-kind reduces the grid size below this floor."
+         LIVE fact-kind reduces the grid below this floor."
     );
 }

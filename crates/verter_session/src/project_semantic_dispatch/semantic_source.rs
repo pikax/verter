@@ -30,13 +30,120 @@ use rustc_hash::FxHashSet;
 use verter_type_expr::facts::{ClosedTypeFact, ProjectedTypeFact, SemanticTypeSource};
 use verter_type_expr::locators::{AuthoredAnchor, AuthoredBodyLocator, MacroPayloadPosition};
 
+use super::query_error_disposition::{query_error_disposition, QueryErrorDisposition};
 use super::ProjectSemanticDispatch;
 #[cfg(test)]
 use crate::locator_identity::{SessionDemandIdentity, SessionDemandRoute};
 use crate::semantic_query::{
-    HotTypeRef, NodeScopeId, PathSegment, ProjectionReductionContext, QueryResult,
+    HotTypeRef, NodeScopeId, PathSegment, ProjectionReductionContext, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
+
+/// The typed result of raising a [`SemanticTypeSource`] to a graph handle.
+///
+/// Replaces the ambiguous `Option<HotTypeRef>` the raise rail used to return,
+/// where a single `None` meant BOTH "this source has no live graph
+/// representation" and "a typed query failure was silently discarded". The two
+/// are now distinct, and only [`Absent`](Self::Absent) may become absence —
+/// and only at a boundary that explicitly owns optional absence.
+#[derive(Debug, Clone)]
+pub(crate) enum SourceRaiseOutcome {
+    /// The source raised to a live graph handle. This includes the two
+    /// legitimately publishable control carriers (a recursive reference and a
+    /// declaration placeholder), which raise AS carriers rather than
+    /// vanishing.
+    Raised(HotTypeRef),
+    /// The source has no live graph representation under the current view —
+    /// an unknown file, a memo deref miss, an unrouted payload position, or a
+    /// [`QueryErrorDisposition::OptionalAbsence`] read. The ONLY semantically
+    /// optional non-result.
+    Absent,
+    /// A typed query failure the raise refuses to erase: a control sentinel
+    /// (with its participant chain intact), an unsupported surface, a typed
+    /// partial, or a genuine failure.
+    Failed(QueryError),
+}
+
+impl SourceRaiseOutcome {
+    /// Route a raise-boundary dispatch read through the single disposition
+    /// authority.
+    ///
+    /// A produced node raises. An error routes by disposition: an
+    /// optional-absence read is [`Absent`](Self::Absent); the two publishable
+    /// control carriers are interned and raised through `carrier`; everything
+    /// else is [`Failed`](Self::Failed) with its payload intact.
+    pub(in crate::project_semantic_dispatch) fn from_read(
+        read: QueryResult<SemanticNodeId>,
+        carrier: impl FnOnce(&QueryError) -> Option<SemanticNodeId>,
+    ) -> Self {
+        match read {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => {
+                Self::Raised(HotTypeRef::new(node))
+            }
+            QueryResult::Error(err) => Self::from_error(err, carrier),
+        }
+    }
+
+    /// [`Self::from_read`]'s error half, for boundaries that already hold the
+    /// typed error.
+    fn from_error(
+        err: QueryError,
+        carrier: impl FnOnce(&QueryError) -> Option<SemanticNodeId>,
+    ) -> Self {
+        match query_error_disposition(&err) {
+            QueryErrorDisposition::OptionalAbsence => Self::Absent,
+            QueryErrorDisposition::RecursionCarrier | QueryErrorDisposition::ExpandableDecl => {
+                match carrier(&err) {
+                    Some(node) => Self::Raised(HotTypeRef::new(node)),
+                    // The carrier could not be interned (no scope to intern
+                    // under). The typed error still travels — it never
+                    // degrades to absence.
+                    None => Self::Failed(err),
+                }
+            }
+            QueryErrorDisposition::ControlCarrier
+            | QueryErrorDisposition::UnsupportedSurface
+            | QueryErrorDisposition::Partial
+            | QueryErrorDisposition::Failure => Self::Failed(err),
+        }
+    }
+
+    /// The raised handle, or `None` at a boundary that EXPLICITLY owns
+    /// optional absence — one that answers a typed failure exactly as it
+    /// answers a genuine absence (keeping the published source shallow,
+    /// verbatim, never a fabricated stand-in).
+    ///
+    /// Every call site of this method is such a boundary; a site that can act
+    /// on the failure matches [`Failed`](Self::Failed) instead.
+    #[must_use]
+    pub(crate) fn at_optional_boundary(self) -> Option<HotTypeRef> {
+        match self {
+            Self::Raised(hot) => Some(hot),
+            Self::Absent | Self::Failed(_) => None,
+        }
+    }
+
+    /// The raised handle, if any — without deciding what a non-raise means.
+    #[must_use]
+    pub(crate) fn raised(&self) -> Option<&HotTypeRef> {
+        match self {
+            Self::Raised(hot) => Some(hot),
+            Self::Absent | Self::Failed(_) => None,
+        }
+    }
+}
+
+impl From<Option<HotTypeRef>> for SourceRaiseOutcome {
+    /// Lift a raise arm whose only non-result is genuine absence (no dispatch
+    /// read, so no typed error can exist): an unrouted payload position, an
+    /// absent mirror row, an unknown file.
+    fn from(value: Option<HotTypeRef>) -> Self {
+        match value {
+            Some(hot) => Self::Raised(hot),
+            None => Self::Absent,
+        }
+    }
+}
 
 /// Raise context for [`ProjectSemanticDispatch::raise_semantic_type_source_to_hot`]:
 /// the consuming scope's canonical id (the file whose name resolution an
@@ -88,6 +195,13 @@ pub(crate) enum StrictSourceRaiseFailure {
     /// composed shell interns the typed miss directly WITHOUT a deref, so
     /// it is never checked — the schema `Option` is the absence proof.
     UnknownMaterializing(Arc<[crate::meta_resolve::InteriorSourceStep]>),
+    /// The ROOT raise produced a typed [`QueryError`] whose disposition is
+    /// NOT optional absence — a control sentinel, an unsupported surface, a
+    /// typed partial, or a genuine failure. Carried verbatim (an `AliasCycle`
+    /// keeps its participant chain) instead of collapsing into the caller's
+    /// unraisable-source arm, which is indistinguishable from a genuine
+    /// absence.
+    QueryFailure(QueryError),
 }
 
 impl InteriorFailureSink {
@@ -174,10 +288,16 @@ impl SourceRaiseContext<'_> {
 
 impl ProjectSemanticDispatch<'_> {
     /// Raise a lower-crate [`SemanticTypeSource`] to a transient semantic-graph
-    /// handle through the one shared engine. `None` = the source has no
-    /// live graph representation under the current view (unknown file, memo
-    /// deref miss, unrouted payload position) — the caller keeps the source
-    /// shallow and never fabricates a stand-in node.
+    /// handle through the one shared engine.
+    ///
+    /// Returns the typed [`SourceRaiseOutcome`]:
+    /// [`Absent`](SourceRaiseOutcome::Absent) is the source having no live
+    /// graph representation under the current view (unknown file, memo deref
+    /// miss, unrouted payload position, or an optional-absence read);
+    /// [`Failed`](SourceRaiseOutcome::Failed) carries a typed query failure
+    /// verbatim. The caller keeps the source shallow and never fabricates a
+    /// stand-in node in either case, but a boundary that can act on the
+    /// failure is no longer denied the chance.
     ///
     /// The match is EXHAUSTIVE over every `SemanticTypeSource` arm and every
     /// nested fact arm — a new source arm fails compilation here until it is
@@ -186,47 +306,43 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         source: &SemanticTypeSource,
         ctx: SourceRaiseContext<'_>,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         match source {
             SemanticTypeSource::Authored(locator) => {
                 let locator = absolutize_locator(locator, ctx.scope_canonical_id);
-                let hot = self.raise_authored_locator_to_hot(&locator, ctx.context);
-                ctx.check_raised_unknown_materializing(self, hot.as_ref());
-                hot
+                let outcome = self.raise_authored_locator_to_hot(&locator, ctx.context);
+                ctx.check_raised_unknown_materializing(self, outcome.raised());
+                outcome
             }
             SemanticTypeSource::Projected(fact) => match fact {
                 ProjectedTypeFact::Member(member) => {
-                    let hot = self.raise_body_slot(&member.ty, ctx.scope_canonical_id);
-                    ctx.check_raised_unknown_materializing(self, hot.as_ref());
-                    hot
+                    let outcome = self.raise_body_slot(&member.ty, ctx.scope_canonical_id);
+                    ctx.check_raised_unknown_materializing(self, outcome.raised());
+                    outcome
                 }
                 ProjectedTypeFact::IndexSignature(signature) => {
-                    let hot = self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id);
-                    ctx.check_raised_unknown_materializing(self, hot.as_ref());
-                    hot
+                    let outcome =
+                        self.raise_body_slot(&signature.value_type, ctx.scope_canonical_id);
+                    ctx.check_raised_unknown_materializing(self, outcome.raised());
+                    outcome
                 }
-                ProjectedTypeFact::CallSignature(signature) => {
-                    Some(self.compose_function_fact_node(signature, &ctx, false))
-                }
-                ProjectedTypeFact::ConstructSignature(signature) => {
-                    Some(self.compose_function_fact_node(signature, &ctx, true))
-                }
+                ProjectedTypeFact::CallSignature(signature) => SourceRaiseOutcome::Raised(
+                    self.compose_function_fact_node(signature, &ctx, false),
+                ),
+                ProjectedTypeFact::ConstructSignature(signature) => SourceRaiseOutcome::Raised(
+                    self.compose_function_fact_node(signature, &ctx, true),
+                ),
                 ProjectedTypeFact::Surface(surface) => {
-                    Some(self.compose_projected_surface_node(surface, &ctx))
+                    SourceRaiseOutcome::Raised(self.compose_projected_surface_node(surface, &ctx))
                 }
                 ProjectedTypeFact::MemberPath { base, path } => {
                     self.raise_projected_member_path(base, path, &ctx)
                 }
-                ProjectedTypeFact::CallableParams {
+                ProjectedTypeFact::CallableOccurrence {
                     base,
-                    signature_ordinal,
-                    first_param,
-                } => self.raise_projected_callable_params(
-                    base,
-                    *signature_ordinal,
-                    *first_param,
-                    &ctx,
-                ),
+                    occurrence,
+                    projection,
+                } => self.raise_projected_callable_occurrence(base, occurrence, *projection, &ctx),
                 ProjectedTypeFact::IndexPosition {
                     base,
                     signature_ordinal,
@@ -234,10 +350,10 @@ impl ProjectSemanticDispatch<'_> {
                 } => self.raise_projected_index_position(base, *signature_ordinal, *position, &ctx),
             },
             SemanticTypeSource::Synthesized(shape) => {
-                Some(self.raise_synthesized_shape(shape, &ctx))
+                SourceRaiseOutcome::Raised(self.raise_synthesized_shape(shape, &ctx))
             }
             SemanticTypeSource::Closed(fact) => match fact {
-                ClosedTypeFact::Leaf(leaf) => self.raise_leaf_fact(leaf, &ctx),
+                ClosedTypeFact::Leaf(leaf) => self.raise_leaf_fact(leaf, &ctx).into(),
                 // A closed leaf-union composes directly: each leaf lowers
                 // through the shared in-scope lowerer and the ordered union
                 // node is interned as data (a decided result — no
@@ -258,22 +374,28 @@ impl ProjectSemanticDispatch<'_> {
                             )
                         })
                         .collect();
-                    Some(HotTypeRef::new(self.graph().intern_node_with_scope(
-                        SemanticNodeData::Union(Arc::from(members.into_boxed_slice())),
-                        scope,
-                    )))
+                    SourceRaiseOutcome::Raised(HotTypeRef::new(
+                        self.graph().intern_node_with_scope(
+                            SemanticNodeData::Union(Arc::from(members.into_boxed_slice())),
+                            scope,
+                        ),
+                    ))
                 }
-                ClosedTypeFact::Object(object) => Some(self.compose_object_fact_node(object, &ctx)),
-                ClosedTypeFact::Function(signature) => {
-                    Some(self.compose_function_fact_node(signature, &ctx, false))
+                ClosedTypeFact::Object(object) => {
+                    SourceRaiseOutcome::Raised(self.compose_object_fact_node(object, &ctx))
                 }
-                ClosedTypeFact::Tuple(tuple) => Some(self.compose_tuple_fact_node(tuple, &ctx)),
+                ClosedTypeFact::Function(signature) => SourceRaiseOutcome::Raised(
+                    self.compose_function_fact_node(signature, &ctx, false),
+                ),
+                ClosedTypeFact::Tuple(tuple) => {
+                    SourceRaiseOutcome::Raised(self.compose_tuple_fact_node(tuple, &ctx))
+                }
                 ClosedTypeFact::IndexedAccess(access) => {
-                    Some(self.compose_indexed_access_fact_node(access, &ctx))
+                    SourceRaiseOutcome::Raised(self.compose_indexed_access_fact_node(access, &ctx))
                 }
             },
             SemanticTypeSource::SyntheticSlotBinding(key) => {
-                Some(self.raise_synthetic_binding_source_to_hot(key, &ctx))
+                SourceRaiseOutcome::Raised(self.raise_synthetic_binding_source_to_hot(key, &ctx))
             }
         }
     }
@@ -298,8 +420,11 @@ impl ProjectSemanticDispatch<'_> {
     /// `Unknown` — the two are distinguished by the SCHEMA (present locator
     /// vs absent option), never a heuristic.
     ///
-    /// `Ok(None)` remains the ROOT-level "no live graph representation"
-    /// non-result (the caller's fail-closed unraisable-source arm).
+    /// A ROOT-level typed query failure is the third fail-closed class:
+    /// [`StrictSourceRaiseFailure::QueryFailure`] carries the `QueryError`
+    /// verbatim instead of collapsing it into the caller's unraisable-source
+    /// arm. `Ok(None)` is reserved for genuine ROOT-level absence — the only
+    /// semantically optional non-result.
     pub(crate) fn raise_semantic_type_source_to_hot_strict(
         &self,
         source: &SemanticTypeSource,
@@ -308,7 +433,7 @@ impl ProjectSemanticDispatch<'_> {
         context: ProjectionReductionContext,
     ) -> Result<Option<HotTypeRef>, StrictSourceRaiseFailure> {
         let sink = InteriorFailureSink::default();
-        let hot = self.raise_semantic_type_source_to_hot(
+        let outcome = self.raise_semantic_type_source_to_hot(
             source,
             SourceRaiseContext {
                 scope_canonical_id,
@@ -317,9 +442,15 @@ impl ProjectSemanticDispatch<'_> {
                 interior_failures: Some(&sink),
             },
         );
-        match sink.take_failure() {
-            Some(failure) => Err(failure),
-            None => Ok(hot),
+        // An INTERIOR failure wins: it names the exact nested position, which
+        // a root-level typed error cannot.
+        if let Some(failure) = sink.take_failure() {
+            return Err(failure);
+        }
+        match outcome {
+            SourceRaiseOutcome::Raised(hot) => Ok(Some(hot)),
+            SourceRaiseOutcome::Absent => Ok(None),
+            SourceRaiseOutcome::Failed(err) => Err(StrictSourceRaiseFailure::QueryFailure(err)),
         }
     }
 
@@ -352,21 +483,24 @@ impl ProjectSemanticDispatch<'_> {
     /// authored position derefs through the first-class
     /// `SemanticQueryKey::LowerLocator` memoized query via
     /// [`ProjectSemanticDispatch::lower_locator`]. A deref-unrouted position
-    /// (the object-argument payload, which no producer mints today) is an
-    /// honest `None` — never a fabricated body.
+    /// (the object-argument payload, which no producer mints today) is honest
+    /// [`Absent`](SourceRaiseOutcome::Absent) — never a fabricated body; a
+    /// typed deref failure is [`Failed`](SourceRaiseOutcome::Failed).
     pub(crate) fn raise_authored_locator_to_hot(
         &self,
         locator: &AuthoredBodyLocator,
         context: ProjectionReductionContext,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         if let AuthoredBodyLocator::MacroPayload(payload) = locator {
             match payload.payload {
                 MacroPayloadPosition::TypeArgument => {
-                    if let Some(handle) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
-                        self.ctx,
-                        payload.anchor.canonical_id.as_ref(),
-                        payload.macro_index as usize,
-                    ) {
+                    if let Some(product) =
+                        crate::structural_carrier_producer::macro_type_arg_hot_ref(
+                            self.ctx,
+                            payload.anchor.canonical_id.as_ref(),
+                            payload.macro_index as usize,
+                        )
+                    {
                         // Terminal-demand mode split (mirroring the per-FIELD
                         // arm below): `Expanded` / `Identity` complete the
                         // carrier-head resolution through the one dispatch.
@@ -375,11 +509,11 @@ impl ProjectSemanticDispatch<'_> {
                             crate::semantic_query::ProjectionMode::Expanded
                                 | crate::semantic_query::ProjectionMode::Identity
                         ) {
-                            return Some(HotTypeRef::new(
-                                self.resolve_hot_handle_with_context(handle, context),
+                            return SourceRaiseOutcome::Raised(HotTypeRef::new(
+                                self.resolve_hot_handle_with_context(product.hot, context),
                             ));
                         }
-                        return Some(handle);
+                        return SourceRaiseOutcome::Raised(product.hot);
                     }
                     // Framework script-fact macros are not analyzer-macro
                     // mirror rows. Fall through to the retained-AST locator
@@ -406,17 +540,44 @@ impl ProjectSemanticDispatch<'_> {
                         if let Some(hot) =
                             self.raise_macro_field_payload_to_hot(payload, field_index, context)
                         {
-                            return Some(hot);
+                            return SourceRaiseOutcome::Raised(hot);
                         }
                     }
                 }
                 MacroPayloadPosition::ObjectArgument | MacroPayloadPosition::TypeAnnotation => {}
             }
         }
-        match self.lower_locator(locator.clone()) {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => Some(HotTypeRef::new(node)),
-            QueryResult::Error(_) => None,
-        }
+        let anchor = locator_anchor(locator);
+        SourceRaiseOutcome::from_read(self.lower_locator(locator.clone()), |err| {
+            self.intern_control_carrier(err, anchor.canonical_id.as_ref(), anchor.owner)
+        })
+    }
+
+    /// Intern one of the two legitimately publishable `Opaque` control
+    /// carriers — a recursive reference or a declaration placeholder — under
+    /// the raising file's scope, so the raise hands back a real carrier node
+    /// instead of erasing the read into absence. Every other `QueryError`
+    /// disposition travels as a typed failure and never reaches here.
+    pub(in crate::project_semantic_dispatch) fn intern_control_carrier(
+        &self,
+        err: &QueryError,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Option<SemanticNodeId> {
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(canonical_id)
+            .map(|state| state.whole_hash)
+            .unwrap_or_default();
+        Some(self.graph().intern_node_with_scope(
+            SemanticNodeData::Opaque(err.clone()),
+            NodeScopeId::File {
+                canonical_id: Arc::from(canonical_id),
+                owner,
+                whole_hash,
+                local_scope: None,
+            },
+        ))
     }
 
     /// Raise one per-FIELD macro payload (`MacroPayloadPosition::Field`) by
@@ -460,7 +621,7 @@ impl ProjectSemanticDispatch<'_> {
                 _ => return None,
             }
         };
-        let base = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let product = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             canonical,
             payload.macro_index as usize,
@@ -470,7 +631,7 @@ impl ProjectSemanticDispatch<'_> {
         ))
         .collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
-            base: base.node(),
+            base: product.hot.node(),
             path,
             context,
         });
@@ -533,28 +694,39 @@ impl ProjectSemanticDispatch<'_> {
         base: &AuthoredBodyLocator,
         path: &Arc<[verter_type_expr::facts::FactPropertyKey]>,
         ctx: &SourceRaiseContext<'_>,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
         if let AuthoredBodyLocator::MacroPayload(payload) = &locator {
             if payload.payload == MacroPayloadPosition::TypeArgument && !path.is_empty() {
-                let surface = self.replay_vue_macro_type_argument_surface(payload)?;
-                let member = surface
+                let Some(surface) = self.replay_vue_macro_type_argument_surface(payload) else {
+                    return SourceRaiseOutcome::Absent;
+                };
+                let Some(member) = surface
                     .surface
                     .members
                     .iter()
-                    .find(|member| member.key.cloned_known().as_ref() == Some(&path[0]))?;
+                    .find(|member| member.key.cloned_known().as_ref() == Some(&path[0]))
+                else {
+                    return SourceRaiseOutcome::Absent;
+                };
                 return self.raise_projected_path_from_node(member.value, &path[1..], ctx);
             }
         }
         // The base stays MODE-NEUTRAL (carrier/shell): the caller's terminal
         // demand applies to the PATH projection below, exactly as in the
         // per-FIELD replay.
-        let base_hot = self.raise_authored_locator_to_hot(
+        let base_raise = self.raise_authored_locator_to_hot(
             &locator,
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
-        )?;
+        );
+        let base_hot = match base_raise {
+            SourceRaiseOutcome::Raised(hot) => hot,
+            // The base itself is unraisable — propagate its verdict verbatim
+            // rather than flattening a typed base failure into a path miss.
+            other => return other,
+        };
         self.raise_projected_path_from_node(base_hot.node(), path, ctx)
     }
 
@@ -563,14 +735,14 @@ impl ProjectSemanticDispatch<'_> {
         base: SemanticNodeId,
         path: &[verter_type_expr::facts::FactPropertyKey],
         ctx: &SourceRaiseContext<'_>,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         if path.is_empty() {
-            if super::raise::node_is_unknown_materializing_failure(self, base) {
-                return None;
+            if let Some(err) = self.opaque_failure_carrier_error(base) {
+                return SourceRaiseOutcome::Failed(err);
             }
             let hot = HotTypeRef::new(base);
             ctx.check_raised_unknown_materializing(self, Some(&hot));
-            return Some(hot);
+            return SourceRaiseOutcome::Raised(hot);
         }
         let segments: Arc<[PathSegment]> = path.iter().cloned().map(PathSegment::Member).collect();
         let read = self.execute_read(SemanticQueryKey::ProjectPath {
@@ -583,49 +755,143 @@ impl ProjectSemanticDispatch<'_> {
             // FAIL-CLOSED: a projection can "succeed" onto an interned
             // failure carrier (the walker's `Opaque(Miss)` for an undeclared
             // member). That is a projection miss, not a resolved member —
-            // never a node whose publication silently reads `Unknown`.
+            // never a node whose publication silently reads `Unknown`. The
+            // carrier's OWN typed error decides: an optional-absence carrier
+            // is absence, anything else travels as a typed failure.
             QueryResult::Value(node) | QueryResult::Recursive(node)
-                if super::raise::node_is_unknown_materializing_failure(self, node) =>
+                if self.opaque_failure_carrier_error(node).is_some() =>
             {
-                None
+                match self.opaque_failure_carrier_error(node) {
+                    Some(err) => SourceRaiseOutcome::Failed(err),
+                    None => SourceRaiseOutcome::Absent,
+                }
             }
             QueryResult::Value(node) | QueryResult::Recursive(node) => {
                 let hot = HotTypeRef::new(node);
                 // Strict-path conservative interior fail-close on the
                 // projected node (the root check above is root-only).
                 ctx.check_raised_unknown_materializing(self, Some(&hot));
-                Some(hot)
+                SourceRaiseOutcome::Raised(hot)
             }
-            QueryResult::Error(_) => None,
+            QueryResult::Error(err) => {
+                let scope_canonical = ctx.scope_canonical_id;
+                let scope_owner = ctx.scope_owner;
+                SourceRaiseOutcome::from_error(err, |err| {
+                    self.intern_control_carrier(err, scope_canonical, scope_owner)
+                })
+            }
         }
     }
 
-    /// Raise a projected CALLABLE-PARAMS fact
-    /// ([`ProjectedTypeFact::CallableParams`]) by replaying the publication
-    /// surface's own producing route: the BASE macro type argument re-projects
-    /// to the SAME one-level macro surface the normalization read
-    /// (`resolve_vue_macro_surface_with_ctx` — the one existing surface entry,
-    /// so projection context, provenance, and heritage substitution are
-    /// IDENTICAL by construction, and its `ProjectPath` queries hit the shared
-    /// memo), the call signature at `signature_ordinal` is selected in the
-    /// NODE domain (the surface's declaration-order sequence, the exact
-    /// pre-expansion order the producer stamped), the callable realizes
-    /// through the SAME shared [`CallableNodeView`] policy the emit
-    /// normalization used (`published(Navigate)`), and a TRANSIENT tuple node
-    /// is synthesized from the realized signature's RAW parameters from
-    /// `first_param` on — label / optionality / rest / ORDER preserved, each
-    /// element carrying the parameter's own (possibly substituted) value
-    /// node, so nesting, composites, imported references, and generic
-    /// substitutions ride through shallow-by-default. Every step routes
-    /// through the one shared dispatch (`macro_type_arg_hot_ref`,
-    /// `ProjectPath`, `ResolveDecl`/`Instantiate` via the structural-fact
-    /// demand primitive) — never a second resolver, never an output-local
-    /// walker.
+    /// The typed error of an interned `Opaque` FAILURE carrier at `node`.
+    ///
+    /// `None` when `node` is not an `Opaque` carrier at all, or when it is one
+    /// of the two legitimately publishable carriers (a recursive reference,
+    /// a declaration placeholder) — those are real published shapes, not
+    /// failures. This is the node-domain reader that lets a raise boundary
+    /// answer with the carrier's OWN disposition instead of a blanket `None`.
+    fn opaque_failure_carrier_error(&self, node: SemanticNodeId) -> Option<QueryError> {
+        let data = super::node_data_for(self.ctx, node)?;
+        let SemanticNodeData::Opaque(err) = data.as_ref() else {
+            return None;
+        };
+        query_error_disposition(err)
+            .is_unknown_materializing()
+            .then(|| err.clone())
+    }
+
+    /// Replay a callable member route and select its combined return node using
+    /// the same callable-arm policy as framework slot normalization.
+    fn raise_projected_callable_occurrence(
+        &self,
+        base: &AuthoredBodyLocator,
+        occurrence: &verter_type_expr::facts::CallableOccurrenceHandle,
+        projection: verter_type_expr::facts::CallableOccurrenceProjection,
+        ctx: &SourceRaiseContext<'_>,
+    ) -> SourceRaiseOutcome {
+        let context =
+            ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
+        let callable = if occurrence.is_root() {
+            let locator = absolutize_locator(base, ctx.scope_canonical_id);
+            let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
+                return SourceRaiseOutcome::Absent;
+            };
+            let Some(surface) = self.replay_vue_macro_type_argument_surface(payload) else {
+                return SourceRaiseOutcome::Absent;
+            };
+            let Some(signature) = surface
+                .surface
+                .call_signatures
+                .iter()
+                .find(|signature| occurrence.matches_subject(signature.node.0))
+            else {
+                return SourceRaiseOutcome::Absent;
+            };
+            signature.node
+        } else {
+            let occurrence_path: Arc<[verter_type_expr::facts::FactPropertyKey]> = occurrence
+                .path()
+                .iter()
+                .map(|segment| verter_type_expr::facts::FactPropertyKey::from(segment.clone()))
+                .collect();
+            let callable = match self.raise_projected_member_path(base, &occurrence_path, ctx) {
+                SourceRaiseOutcome::Raised(hot) => hot.node(),
+                other => return other,
+            };
+            if !occurrence.matches_subject(callable.0) {
+                return SourceRaiseOutcome::Absent;
+            }
+            callable
+        };
+        if let verter_type_expr::facts::CallableOccurrenceProjection::Parameters { first_param } =
+            projection
+        {
+            return self
+                .raise_projected_callable_params(callable, first_param, ctx)
+                .into();
+        }
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
+        let return_node = if occurrence.is_root() {
+            match view.signature(context).and_then(|sig| sig.return_type()) {
+                Some(node) => node,
+                None => return SourceRaiseOutcome::Absent,
+            }
+        } else {
+            let Some(realized_root) = view.realized_callable_root(context) else {
+                return SourceRaiseOutcome::Absent;
+            };
+            let combine = match super::node_data_for(self.ctx, realized_root).as_deref() {
+                Some(SemanticNodeData::Union(_)) => {
+                    crate::meta_resolve::callable_view::ArmCombineNode::Union
+                }
+                _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+            };
+            match view
+                .slot_param_and_return_by_arm(combine, context)
+                .and_then(|arm| arm.return_type)
+            {
+                Some(node) => node,
+                None => return SourceRaiseOutcome::Absent,
+            }
+        };
+        if let Some(err) = self.opaque_failure_carrier_error(return_node) {
+            return SourceRaiseOutcome::Failed(err);
+        }
+        let hot = HotTypeRef::new(return_node);
+        ctx.check_raised_unknown_materializing(self, Some(&hot));
+        SourceRaiseOutcome::Raised(hot)
+    }
+
+    /// Raise the parameter projection of an exact callable occurrence.
+    /// Occurrence selection has already replayed the authored base and matched
+    /// the resolver-minted instantiated subject. This step synthesizes the
+    /// transient payload tuple from `first_param` onward while preserving
+    /// labels, optionality, rest, order, nesting, and substitutions.
     ///
     /// FAIL-CLOSED, never a fabricated tuple: a non-macro / non-type-argument
-    /// base, an unresolvable surface, an out-of-bounds `signature_ordinal`, a
-    /// non-callable ordinal, or a `first_param` past the parameter list is an
-    /// honest `None` (bounds drift never synthesizes an empty tuple); a
+    /// base, an unresolvable occurrence, or a `first_param` past the parameter
+    /// list is an honest `None` (bounds drift never synthesizes an empty
+    /// tuple); a
     /// payload parameter whose root stays an UNRESOLVED residual reference
     /// carrier (`BareRef` / `ImportType` the shared demand primitive could
     /// not resolve) or resolves to an unknown-materializing failure carrier
@@ -637,33 +903,13 @@ impl ProjectSemanticDispatch<'_> {
     /// [`CallableNodeView`]: crate::meta_resolve::callable_view::CallableNodeView
     fn raise_projected_callable_params(
         &self,
-        base: &AuthoredBodyLocator,
-        signature_ordinal: u32,
+        callable: SemanticNodeId,
         first_param: u32,
         ctx: &SourceRaiseContext<'_>,
     ) -> Option<HotTypeRef> {
-        let locator = absolutize_locator(base, ctx.scope_canonical_id);
-        // The only producer-minted base position is the macro TYPE-ARGUMENT
-        // (the emit normalization replays off the macro's stamped type
-        // argument); any other base has no surface-projection route here.
-        let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
-            return None;
-        };
-        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
-        // Deterministic NODE-domain signature selection: the ordinal indexes
-        // the surface's declaration-order call-signature sequence (the exact
-        // pre-expansion sequence the producer stamped). Bounds drift is an
-        // honest miss.
-        let sig = surface
-            .surface
-            .call_signatures
-            .get(signature_ordinal as usize)?;
-        // SAME callable-realization policy as the emit normalization
-        // (`emits_from_typeinfo_surface`): `published(Navigate)` realizes an
-        // aliased / generic callable to its `Function` node.
         let realize_context =
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
-        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, sig.node);
+        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
         let signature = view.signature(realize_context)?;
         let params = signature.raw_params();
         // `first_param` past the parameter list is bounds drift — fail
@@ -805,38 +1051,43 @@ impl ProjectSemanticDispatch<'_> {
         signature_ordinal: u32,
         position: verter_type_expr::facts::IndexSignaturePosition,
         ctx: &SourceRaiseContext<'_>,
-    ) -> Option<HotTypeRef> {
+    ) -> SourceRaiseOutcome {
         let locator = absolutize_locator(base, ctx.scope_canonical_id);
         // The only producer-minted base position is the macro TYPE-ARGUMENT
         // (the index normalization replays off the macro's stamped type
         // argument); any other base has no surface-projection route here.
         let AuthoredBodyLocator::MacroPayload(payload) = &locator else {
-            return None;
+            return SourceRaiseOutcome::Absent;
         };
-        let surface = self.replay_vue_macro_type_argument_surface(payload)?;
+        let Some(surface) = self.replay_vue_macro_type_argument_surface(payload) else {
+            return SourceRaiseOutcome::Absent;
+        };
         // Deterministic NODE-domain signature selection: the ordinal indexes
         // the surface's declaration-order index-signature sequence. Bounds
         // drift is an honest miss.
-        let sig = surface
+        let Some(sig) = surface
             .surface
             .index_signatures
-            .get(signature_ordinal as usize)?;
+            .get(signature_ordinal as usize)
+        else {
+            return SourceRaiseOutcome::Absent;
+        };
         let node = match position {
             verter_type_expr::facts::IndexSignaturePosition::Key => sig.key_type,
             verter_type_expr::facts::IndexSignaturePosition::Value => sig.value_type,
         };
         // FAIL-CLOSED: a position node interned as an unknown-materializing
-        // failure carrier is a miss, never a body whose publication silently
-        // reads `Unknown`.
-        if super::raise::node_is_unknown_materializing_failure(self, node) {
-            return None;
+        // failure carrier is never a body whose publication silently reads
+        // `Unknown` — its own typed error travels instead.
+        if let Some(err) = self.opaque_failure_carrier_error(node) {
+            return SourceRaiseOutcome::Failed(err);
         }
         let hot = HotTypeRef::new(node);
         // Strict-path conservative interior fail-close on the selected
         // position node (nested structure can carry interned miss carriers
         // the root check above does not reach).
         ctx.check_raised_unknown_materializing(self, Some(&hot));
-        Some(hot)
+        SourceRaiseOutcome::Raised(hot)
     }
 
     /// Raise a first-class synthetic slot-binding source
@@ -880,6 +1131,17 @@ impl ProjectSemanticDispatch<'_> {
             scope,
         );
         HotTypeRef::new(node)
+    }
+
+    /// Node-domain fact: whether `node` is the terminal shallow
+    /// [`SemanticNodeData::SyntheticBinding`] carrier — the raise arm's honest
+    /// degraded fallback when a terminal-demand deepen cannot complete
+    /// ([`Self::raise_synthetic_binding_source_to_hot`]). Consumers decide on
+    /// THIS node-domain fact, never on a reverse-materialized `TypeExpr`.
+    pub(crate) fn node_is_synthetic_binding_carrier(&self, node: SemanticNodeId) -> bool {
+        self.graph()
+            .node_data(node)
+            .is_some_and(|data| matches!(data.as_ref(), SemanticNodeData::SyntheticBinding { .. }))
     }
 
     /// Terminal-demand explicit deepen for a synthetic slot-binding carrier —
@@ -1029,7 +1291,9 @@ impl ProjectSemanticDispatch<'_> {
         match demand.route {
             // The hot-mirror route IS the base handle: the demand names the
             // macro payload itself.
-            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => Some(base),
+            SessionDemandRoute::MacroHotMirror if demand.member_role_path.is_empty() => {
+                Some(base.hot)
+            }
             // A member-role path projects off the base through the one
             // dispatch — both routes converge on the same `ProjectPath`
             // projection when a path is present.
@@ -1044,10 +1308,10 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 if path.is_empty() {
-                    return Some(base);
+                    return Some(base.hot);
                 }
                 let read = self.execute_read(SemanticQueryKey::ProjectPath {
-                    base: base.node(),
+                    base: base.hot.node(),
                     path,
                     context,
                 });
@@ -1063,6 +1327,19 @@ impl ProjectSemanticDispatch<'_> {
                 }
             }
         }
+    }
+}
+
+/// The declaring anchor of any authored locator. The four locator arms all
+/// carry one; this is the single reader so a new arm fails compilation here.
+pub(in crate::project_semantic_dispatch) fn locator_anchor(
+    locator: &AuthoredBodyLocator,
+) -> &AuthoredAnchor {
+    match locator {
+        AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+        AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+        AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+        AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
     }
 }
 
@@ -1195,15 +1472,17 @@ pub(crate) fn demand_semantic_source_type_expr_with_ctx(
         ),
         _ => context,
     };
-    let hot = dispatch.raise_semantic_type_source_to_hot(
-        source,
-        SourceRaiseContext {
-            scope_canonical_id: owner_canonical,
-            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            context: raise_context,
-            interior_failures: None,
-        },
-    )?;
+    let hot = dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            SourceRaiseContext {
+                scope_canonical_id: owner_canonical,
+                scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                context: raise_context,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()?;
     let carrier = dispatch.raise_and_reduce_observation(hot.node(), context, owner_canonical);
     Some(carrier.type_expr_for_test().clone())
 }
@@ -1254,15 +1533,17 @@ fn shallow_semantic_source_carrier(
     let context = ProjectionReductionContext::structural_transit_with_mode(
         crate::semantic_query::ProjectionMode::Navigate,
     );
-    let hot = dispatch.raise_semantic_type_source_to_hot(
-        source,
-        SourceRaiseContext {
-            scope_canonical_id: owner_canonical,
-            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            context,
-            interior_failures: None,
-        },
-    )?;
+    let hot = dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            SourceRaiseContext {
+                scope_canonical_id: owner_canonical,
+                scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                context,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()?;
     let sealed = dispatch.output_shell_raise_sealed(hot.node())?;
     Some(
         super::output_materialization::MaterializedOutputTypeExpr::from_parts(
@@ -1321,15 +1602,17 @@ fn demand_semantic_source_carrier(
         ),
         _ => context,
     };
-    let hot = dispatch.raise_semantic_type_source_to_hot(
-        source,
-        SourceRaiseContext {
-            scope_canonical_id: owner_canonical,
-            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            context: raise_context,
-            interior_failures: None,
-        },
-    )?;
+    let hot = dispatch
+        .raise_semantic_type_source_to_hot(
+            source,
+            SourceRaiseContext {
+                scope_canonical_id: owner_canonical,
+                scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                context: raise_context,
+                interior_failures: None,
+            },
+        )
+        .at_optional_boundary()?;
     Some(dispatch.raise_and_reduce_observation(hot.node(), context, owner_canonical))
 }
 

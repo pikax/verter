@@ -52,7 +52,7 @@ fn prop_type_repr(
         .iter()
         .find(|p| p.name.as_str() == name)
         .map(|p| {
-            let source = p.type_source.present().unwrap_or_else(|| {
+            let source = p.publication.result().selected_source().unwrap_or_else(|| {
                 panic!(
                     "prop `{name}` must publish a typed source \
                      (a missing source is the cross-package give-up)"

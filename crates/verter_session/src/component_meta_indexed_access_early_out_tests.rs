@@ -185,7 +185,8 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
         &host,
         "/workspace/src/Button.vue",
         ui_prop
-            .type_source
+            .publication
+            .source_position()
             .present()
             .expect("the `ui` prop must publish a typed source"),
     )

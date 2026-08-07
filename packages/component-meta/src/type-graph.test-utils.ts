@@ -80,7 +80,7 @@ export interface TestExpansionMeta {
 export interface TestPropMeta {
   name: string;
   type: TestTypeExpr;
-  rawType?: string;
+  terminalDisplay?: string;
   required?: boolean;
   hasDefault?: boolean;
   typeExpansion?: TestExpansionMeta;
@@ -89,7 +89,7 @@ export interface TestPropMeta {
 export interface TestSlotBindingMeta {
   name: string;
   type: TestTypeExpr;
-  rawType?: string;
+  terminalDisplay?: string;
   typeExpansion?: TestExpansionMeta;
 }
 
@@ -109,7 +109,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 9;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -321,7 +321,8 @@ export function buildTestComponentMetaProtoPayload(
     props: props.map((prop) => ({
       nameId: builder.stringId(prop.name),
       typeNodeId: builder.nodeId(prop.type),
-      rawTypeId: builder.stringId(prop.rawType),
+      publication: publishedResolvedConcrete(),
+      terminalDisplay: { textId: builder.stringId(prop.terminalDisplay) },
       required: Boolean(prop.required),
       hasDefault: Boolean(prop.hasDefault),
       typeExpansion: expansionMeta(prop.typeExpansion, builder),
@@ -334,7 +335,8 @@ export function buildTestComponentMetaProtoPayload(
       bindings: (slot.bindings ?? []).map((binding) => ({
         nameId: builder.stringId(binding.name),
         typeNodeId: builder.nodeId(binding.type),
-        rawTypeId: builder.stringId(binding.rawType),
+        publication: publishedResolvedConcrete(),
+        terminalDisplay: { textId: builder.stringId(binding.terminalDisplay) },
         typeExpansion: expansionMeta(binding.typeExpansion, builder),
       })),
       isRequired: Boolean(slot.isRequired),
@@ -373,6 +375,22 @@ export function buildTestComponentMetaProtoPayload(
       reason: NO_FALLTHROUGH_REASON_NO_TEMPLATE,
       branches: [],
     },
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "test-artifact-token",
+      blocks: [],
+      markupNodes: [],
+    },
+    componentPublicContract: {
+      availability: {
+        case: "unsupported" as const,
+        value: {
+          adapterId: builder.stringId("vue"),
+          reason: 1,
+          diagnostics: [],
+        },
+      },
+    },
   };
 
   return {
@@ -389,6 +407,16 @@ export function buildTestComponentMetaProtoPayload(
 export function encodeTestComponentMetaPayload(input: TestComponentMetaPayload): Buffer {
   const payload = create(ComponentMetaPayloadSchema, buildTestComponentMetaProtoPayload(input));
   return Buffer.from(toBinary(ComponentMetaPayloadSchema, payload));
+}
+
+function publishedResolvedConcrete(): Record<string, number> {
+  return {
+    kind: 3,
+    provenance: 1,
+    semanticAuthority: 1,
+    exactness: 1,
+    reason: 1,
+  };
 }
 
 function expansionMeta(

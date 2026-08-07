@@ -373,10 +373,10 @@ defineProps<Props>()
     assert_eq!(deps.owner_value_deps, ["seed"]);
     assert_eq!(deps.retained_value_carrier_deps, ["Base"]);
 
-    let hot =
+    let product =
         crate::structural_carrier_producer::macro_type_arg_hot_ref(&host, canonical, macro_index)
             .expect("macro payload carrier must be present");
-    let data = crate::project_semantic_dispatch::node_data_for(&host, hot.node())
+    let data = crate::project_semantic_dispatch::node_data_for(&host, product.hot.node())
         .expect("macro payload carrier node must be interned");
     let (name, scope) = data
         .bare_ref_head()
@@ -394,7 +394,7 @@ defineProps<Props>()
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let resolved = dispatch.resolve_carrier_subject_node(
-            hot.node(),
+            product.hot.node(),
             crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 crate::semantic_query::ProjectionMode::Navigate,
             ),
@@ -743,7 +743,8 @@ defineProps<Payload>()
         // cacheable (declaration-local failure only).
         let expect_cacheable = file.contains("NestedUnsafe");
         assert_eq!(
-            output.facts_cacheable, expect_cacheable,
+            output.facts_cacheable(),
+            expect_cacheable,
             "the loss channel must refuse admission exactly when degradation is lost, file={file}"
         );
     }
@@ -797,7 +798,7 @@ defineProps<Payload>()
         "the precise budget class must NOT be masked by SEMANTIC_QUERY_FAULT, got {reasons:?}"
     );
     assert!(
-        !output.facts_cacheable,
+        !output.facts_cacheable(),
         "budget exhaustion must refuse TypeInfo fact-footprint admission"
     );
 }
@@ -853,7 +854,7 @@ defineModel<string>('selected')
     assert_eq!(model.name, "selected");
     assert_eq!(model.value_type.as_str(), "string");
     assert!(output.completeness.is_partial());
-    assert!(!output.facts_cacheable);
+    assert!(!output.facts_cacheable());
 }
 
 #[test]
@@ -998,6 +999,7 @@ defineProps<{
     );
 
     let output = produce(&host, "/src/Props.vue", VueMacroCodegenDemand::Runtime);
+    let facts_cacheable = output.facts_cacheable();
     let runtime = output
         .runtime
         .expect("runtime demand must produce a bundle");
@@ -1017,7 +1019,7 @@ defineProps<{
             .any(|id| id == "/src/Props.vue"),
         "the per-call fact footprint must retain the owner canonical"
     );
-    assert!(output.facts_cacheable);
+    assert!(facts_cacheable);
     assert_eq!(
         output.completeness,
         crate::semantic_query::ResultCompleteness::Complete

@@ -887,6 +887,7 @@ fn signature_fact(has_authored_return: bool) -> FunctionSignature {
         } else {
             verter_type_expr::facts::FunctionReturnSource::Absent
         },
+        return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
         spans_origin: FunctionSpansOrigin::AliasBody {
             anchor: DeclContributorAnchor {

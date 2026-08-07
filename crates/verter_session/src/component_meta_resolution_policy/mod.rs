@@ -48,16 +48,16 @@ use crate::VerterHost;
 
 mod core;
 mod cycle_guard;
-mod raw_restoration;
-mod slot_preservation;
+mod type_publication;
 
-use self::core::{rewrite_source_in_place, PolicyCtx, PolicyRegistry};
-use self::raw_restoration::restore_props_suffix_from_raw;
-use self::slot_preservation::slot_binding_should_preserve_symbolic_raw_type;
+use self::core::{rewrite_source_position, PolicyCtx, PolicyRegistry};
+use self::type_publication::{
+    imported_indexed_publication_policy, macro_compound_publication_policy,
+};
 
 /// Type-role-bearing Vue SFC macro kinds whose type arguments classify
 /// the referenced type as "macro-participating" (kept symbolic per
-/// Rules 2 / 4 + raw-restoration).
+/// Rules 2 / 4 + publication selection).
 ///
 /// `DefineExpose` and `DefineOptions` are deliberately excluded — they
 /// do not confer a role-classification under the §3.4 contract.
@@ -88,7 +88,7 @@ const TYPE_ROLE_MACRO_KINDS: &[AnalyzedMacroKind] = &[
 /// consumes them, NOT because their identifier name ends in `"Props"`
 /// or similar. Tests with no snapshot may pass `None` — the classifier
 /// set is then empty (no references are classified as macro-participating,
-/// so Rules 2 / 4 + the raw-restoration helpers never fire); production
+/// so Rules 2 / 4 + the authored-publication selectors never fire); production
 /// callsites always supply the snapshot via the resolved-state.
 ///
 /// The pass is host-bounded: source raises route through the shared
@@ -154,111 +154,56 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
 
     let mut changed = false;
 
-    for prop in analysis.props.iter_mut() {
-        // Pre-step: restore macro-participating references the evaluator may
-        // have eagerly resolved away — the authored annotation source is the
-        // canonical form for macro-participating imports. Runs before the
-        // rule walk.
-        if restore_props_suffix_from_raw(
-            &mut prop.type_source,
-            prop.raw_type_source.as_ref(),
-            &mut ctx,
-        ) {
-            changed = true;
+    for prop in &mut analysis.props {
+        if let Some(policy) = macro_compound_publication_policy(&prop.publication, &mut ctx) {
+            let before = prop.publication.result().clone();
+            prop.publication.select_with(&policy);
+            changed |= prop.publication.result() != &before;
         }
-        if rewrite_source_in_place(&mut prop.type_source, &mut ctx) {
+    }
+    for event in &mut analysis.events {
+        let next = rewrite_source_position(&event.payload, &mut ctx);
+        if next != event.payload {
+            event.payload = next;
             changed = true;
         }
     }
-    for event in analysis.events.iter_mut() {
-        if rewrite_source_in_place(&mut event.payload, &mut ctx) {
-            changed = true;
-        }
-    }
-    for slot in analysis.slots.iter_mut() {
-        for binding in slot.bindings.iter_mut() {
-            // When the binding's authored annotation is an `IndexedAccess`
-            // whose deref chain transits through an imported declaration,
-            // force the symbolic authored source back onto the published
-            // source and skip the rule walk. The eager evaluator may have
-            // widened the indexed access through an open `[k: string]: any`
-            // index signature; the consumer is better served by the
-            // navigable `AppProps['avatar']` member-path contract.
-            if slot_binding_should_preserve_symbolic_raw_type(
-                binding.raw_type_source.as_ref(),
-                &mut ctx,
-            ) {
-                // The guard already confirmed the authored annotation is an
-                // `IndexedAccess` whose root resolves through an imported
-                // declaration; restore that exact source onto the public
-                // surface (it's necessarily `Some` here).
-                if let Some(restored) = binding.raw_type_source.as_ref() {
-                    if binding.type_source.present() != Some(restored) {
-                        binding.type_source =
-                            verter_type_expr::facts::SourcePosition::Present(restored.clone());
-                        changed = true;
-                    }
-                }
-                continue;
-            }
-            if restore_props_suffix_from_raw(
-                &mut binding.type_source,
-                binding.raw_type_source.as_ref(),
-                &mut ctx,
-            ) {
-                changed = true;
-            }
-            // The graph publisher's shallow named-reference carrier
-            // (`Closed(Leaf(Ref))`) is the RATIFIED published shape for a
-            // named binding value (`message: MessageBase<T>` stays the
-            // re-resolvable `Ref` — shallow-by-default); the rule walk must
-            // not re-expand it into the located declaration body. The
-            // arg-preserving authored USE-SITE carrier (`Authored(DeclBody)`
-            // — the declaring decl's member-value slot for an
-            // argument-bearing binding value) is equally final: the rule
-            // walk could only keep the instantiation carrier (Rule 3
-            // declines argument-bearing heads), so raising it per row is
-            // pure fan-out.
-            let publisher_shallow_ref = matches!(
-                binding.type_source.present(),
-                Some(verter_type_expr::facts::SemanticTypeSource::Closed(
-                    verter_type_expr::facts::ClosedTypeFact::Leaf(
-                        verter_type_expr::facts::LeafTypeFact::Ref(_)
-                    )
-                )) | Some(verter_type_expr::facts::SemanticTypeSource::Authored(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(_)
-                ))
-            );
-            if !publisher_shallow_ref && rewrite_source_in_place(&mut binding.type_source, &mut ctx)
-            {
-                changed = true;
+    for slot in &mut analysis.slots {
+        for binding in &mut slot.bindings {
+            let policy = imported_indexed_publication_policy(&binding.publication, &mut ctx)
+                .or_else(|| macro_compound_publication_policy(&binding.publication, &mut ctx));
+            if let Some(policy) = policy {
+                let before = binding.publication.result().clone();
+                binding.publication.select_with(&policy);
+                changed |= binding.publication.result() != &before;
             }
         }
     }
-    for model in analysis.models.iter_mut() {
-        if rewrite_source_in_place(&mut model.type_source, &mut ctx) {
+    for model in &mut analysis.models {
+        let next = rewrite_source_position(&model.type_source, &mut ctx);
+        if next != model.type_source {
+            model.type_source = next;
             changed = true;
         }
     }
-    for exposed in analysis.exposed.iter_mut() {
-        if rewrite_source_in_place(&mut exposed.type_source, &mut ctx) {
+    for exposed in &mut analysis.exposed {
+        let next = rewrite_source_position(&exposed.type_source, &mut ctx);
+        if next != exposed.type_source {
+            exposed.type_source = next;
             changed = true;
         }
     }
-    for accepted in analysis.accepted_props.iter_mut() {
-        if restore_props_suffix_from_raw(
-            &mut accepted.type_source,
-            accepted.raw_type_source.as_ref(),
-            &mut ctx,
-        ) {
-            changed = true;
-        }
-        if rewrite_source_in_place(&mut accepted.type_source, &mut ctx) {
-            changed = true;
+    for accepted in &mut analysis.accepted_props {
+        if let Some(policy) = macro_compound_publication_policy(&accepted.publication, &mut ctx) {
+            let before = accepted.publication.result().clone();
+            accepted.publication.select_with(&policy);
+            changed |= accepted.publication.result() != &before;
         }
     }
-    for accepted in analysis.accepted_events.iter_mut() {
-        if rewrite_source_in_place(&mut accepted.payload, &mut ctx) {
+    for accepted in &mut analysis.accepted_events {
+        let next = rewrite_source_position(&accepted.payload, &mut ctx);
+        if next != accepted.payload {
+            accepted.payload = next;
             changed = true;
         }
     }
@@ -341,17 +286,21 @@ fn build_policy_macro_role_identities(
         // through the shared dispatch, walked over the structural skeleton
         // (no descent into function inner types or IndexedAccess).
         if let Some(locator) = mac.parsed_type_argument.as_ref() {
-            let payload = dispatch.raise_semantic_type_source_to_hot(
-                &verter_type_expr::facts::SemanticTypeSource::Authored(
-                    verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone()),
-                ),
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
-                    scope_owner: mac.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            );
+            let payload = dispatch
+                .raise_semantic_type_source_to_hot(
+                    &verter_type_expr::facts::SemanticTypeSource::Authored(
+                        verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
+                            locator.clone(),
+                        ),
+                    ),
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        scope_owner: mac.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary();
             if let Some(hot) = payload {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
                     record_name(name, mac.owner, &mut identities, &mut visited_names);
@@ -370,17 +319,19 @@ fn build_policy_macro_role_identities(
                 &mut identities,
                 &mut visited_names,
             );
-            let shape_hot = dispatch.raise_semantic_type_source_to_hot(
-                &verter_type_expr::facts::SemanticTypeSource::Synthesized(
-                    resolved_local.shape.clone(),
-                ),
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                    scope_canonical_id: owner_canonical,
-                    scope_owner: mac.owner,
-                    context: transit_ctx,
-                    interior_failures: None,
-                },
-            );
+            let shape_hot = dispatch
+                .raise_semantic_type_source_to_hot(
+                    &verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                        resolved_local.shape.clone(),
+                    ),
+                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: owner_canonical,
+                        scope_owner: mac.owner,
+                        context: transit_ctx,
+                        interior_failures: None,
+                    },
+                )
+                .at_optional_boundary();
             if let Some(hot) = shape_hot {
                 harvest_role_bearing_refs_node(ctx, hot.node(), |name| {
                     record_name(name, mac.owner, &mut identities, &mut visited_names);
@@ -420,15 +371,18 @@ fn build_policy_macro_role_identities(
                 },
             ),
         );
-        let Some(hot) = dispatch.raise_semantic_type_source_to_hot(
-            &body_source,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id: owner_canonical,
-                scope_owner: identity.owner,
-                context: transit_ctx,
-                interior_failures: None,
-            },
-        ) else {
+        let Some(hot) = dispatch
+            .raise_semantic_type_source_to_hot(
+                &body_source,
+                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    scope_canonical_id: owner_canonical,
+                    scope_owner: identity.owner,
+                    context: transit_ctx,
+                    interior_failures: None,
+                },
+            )
+            .at_optional_boundary()
+        else {
             continue;
         };
         let mut newly_recorded: Vec<String> = Vec::new();

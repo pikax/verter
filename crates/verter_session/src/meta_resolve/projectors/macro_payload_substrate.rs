@@ -535,16 +535,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 return Some(conditional_node);
             }
             let merged = merge_emit_branch_members(&t, &f);
-            let view = crate::semantic_query::surface_view! {
-                members: Arc::from(merged.into_boxed_slice()),
-                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                index_signatures: Arc::from(
-                    Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
-                ),
-                keyspace: None,
-                has_index_signature: false,
-            };
+            let view = crate::semantic_query::SurfaceView::from_members(merged, None);
             Some(
                 dispatch
                     .ctx

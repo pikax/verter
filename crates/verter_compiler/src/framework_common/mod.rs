@@ -20,9 +20,16 @@
 
 pub mod carrier_compiler;
 pub mod ctx;
+pub(crate) mod generated_chunk;
 pub mod generated_identifier;
+#[doc(hidden)]
+pub mod registered_carrier_projection;
+mod registered_projector_seal;
 pub mod registry;
 pub mod vue_bridge;
+
+#[cfg(test)]
+mod registered_carrier_projection_tests;
 
 /// Reusable framework IDE sourcemap end-to-end assertion helpers, shared
 /// by every carrier vertical's `#[cfg(test)]` sourcemap suite.
@@ -31,10 +38,13 @@ pub mod sourcemap_e2e_helpers;
 
 pub use carrier_compiler::{
     CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity, RuntimeMainModule, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, TemplateFacts,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
 };
 pub use ctx::CarrierCompilerCtx;
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
+#[doc(hidden)]
+pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;

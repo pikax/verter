@@ -847,7 +847,7 @@ pub(super) fn fact_footprint(finalise: FactReadSetFinalise) -> (Vec<String>, boo
     let (facts, cacheable) = match finalise {
         FactReadSetFinalise::Ok(facts) => (Some(facts), true),
         FactReadSetFinalise::NonCacheable(facts) => (Some(facts), false),
-        FactReadSetFinalise::Overflow => (None, false),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => (None, false),
     };
     let mut canonicals = BTreeSet::new();
     if let Some(facts) = facts {

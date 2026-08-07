@@ -30,6 +30,7 @@ fn slot_with_payload(
     payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
 ) -> verter_semantic::analysis::AnalyzedSlotField {
     verter_semantic::analysis::AnalyzedSlotField {
+        props_anchor: Default::default(),
         name: "default".to_string(),
         is_required: true,
         bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
@@ -119,6 +120,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the closed Function fact must raise through the bridge");
     let data = crate::project_semantic_dispatch::node_data_for(&host, raised.node());
     assert!(
@@ -183,20 +185,20 @@ fn reduce_published_field_types_leaf_projects_the_resolved_source() {
         .expect("prop `b` published");
 
     assert_eq!(
-        prop_a.type_source,
+        prop_a.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
         )),
         "prop `a` must publish the complete closed `string` leaf fact; got {:?}",
-        prop_a.type_source,
+        prop_a.publication.source_position(),
     );
     assert_eq!(
-        prop_b.type_source,
+        prop_b.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::Number))
         )),
         "prop `b` must publish the complete closed `number` leaf fact; got {:?}",
-        prop_b.type_source,
+        prop_b.publication.source_position(),
     );
 }
 
@@ -259,12 +261,12 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         .find(|p| p.name == "label")
         .expect("imported `label` must surface in published props");
     assert_eq!(
-        label.type_source,
+        label.publication.source_position(),
         verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
             ClosedTypeFact::Leaf(LeafTypeFact::Primitive(PrimitiveName::String))
         )),
         "imported `label` must publish the closed `string` leaf fact; got {:?}",
-        label.type_source,
+        label.publication.source_position(),
     );
 
     // `variant` is a literal union — no complete closed fact exists for it,
@@ -276,8 +278,9 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         .find(|p| p.name == "variant")
         .expect("imported `variant` must surface in published props");
     let source = variant
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("imported `variant` must carry a typed source");
     assert!(
         !matches!(
@@ -300,6 +303,7 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
                 interior_failures: None,
             },
         )
+        .at_optional_boundary()
         .expect("the variant source must raise through the bridge");
     let resolved = dispatch.resolve_hot_handle_with_context(
         raised,

@@ -31,6 +31,7 @@ verter_workspace = { path = "../verter_workspace" }
 # already depends on parser/workspace/span; verter_language depends on none of
 # them).
 verter_language = { path = "../verter_language" }
+verter_css_syntax = { path = "../verter_css_syntax" }
 verter_no_typeexpr = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }

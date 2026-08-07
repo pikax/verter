@@ -177,7 +177,7 @@ describe("compat_projection_round_trips_through_existing_mappers", () => {
         {
           name: "label",
           type: { kind: "primitive", name: "string" },
-          rawType: "string",
+          terminalDisplay: "string",
           required: true,
           hasDefault: false,
         },

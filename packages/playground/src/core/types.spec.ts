@@ -3,6 +3,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { File } from "./types";
+import type { OrderedSfcStructure } from "./types";
 
 describe("File", () => {
   describe("constructor", () => {
@@ -87,48 +88,77 @@ describe("File", () => {
       expect(new File("Component.tsx").isTS).toBe(true);
     });
 
-    it('returns true for .vue with lang="ts" (double quotes)', () => {
+    const withScriptDialect = (filename: string, code: string, dialect: string | null): File => {
+      const file = new File(filename, code);
+      file.structure = {
+        schemaVersion: 1,
+        artifactToken: "test",
+        blocks:
+          dialect === null
+            ? []
+            : [
+                {
+                  kind: "section",
+                  markupRootTokens: [],
+                  section: {
+                    blockToken: "b0",
+                    role: { kind: "script", role: "setup", dialect },
+                    openingRange: { sourceSpaceToken: "s", start: 0, end: 14 },
+                    contentRange: { sourceSpaceToken: "s", start: 14, end: 20 },
+                    fullRange: { sourceSpaceToken: "s", start: 0, end: 29 },
+                    attributeInsertionAnchor: { sourceSpaceToken: "s", start: 13, end: 13 },
+                  },
+                },
+              ],
+        markupNodes: [],
+      };
+      return file;
+    };
+
+    it("returns true for .vue whose stamped script dialect is TypeScript", () => {
+      const file = withScriptDialect(
+        "App.vue",
+        '<script setup lang="ts">\n</script>',
+        "TypeScript",
+      );
+      expect(file.isTS).toBe(true);
+    });
+
+    it("returns true for .vue whose stamped script dialect is Tsx", () => {
+      const file = withScriptDialect("App.vue", '<script setup lang="tsx">\n</script>', "Tsx");
+      expect(file.isTS).toBe(true);
+    });
+
+    it("returns false for .vue whose stamped script dialect is JavaScript", () => {
+      const file = withScriptDialect("App.vue", "<script setup>\n</script>", "JavaScript");
+      expect(file.isTS).toBe(false);
+    });
+
+    it("returns false for .vue without a stamped script block", () => {
+      const file = withScriptDialect("App.vue", "<template><div></div></template>", null);
+      expect(file.isTS).toBe(false);
+    });
+
+    it("returns false for a carrier before any structure is stamped (fail closed)", () => {
       const file = new File("App.vue", '<script setup lang="ts">\n</script>');
-      expect(file.isTS).toBe(true);
-    });
-
-    it("returns true for .vue with lang='ts' (single quotes)", () => {
-      const file = new File("App.vue", "<script setup lang='ts'>\n</script>");
-      expect(file.isTS).toBe(true);
-    });
-
-    it('returns true for .vue with lang="tsx"', () => {
-      const file = new File("App.vue", '<script setup lang="tsx">\n</script>');
-      expect(file.isTS).toBe(true);
-    });
-
-    it("returns false for .vue without lang attribute", () => {
-      const file = new File("App.vue", "<script setup>\n</script>");
       expect(file.isTS).toBe(false);
     });
 
-    it('returns false for .vue with lang="js"', () => {
-      const file = new File("App.vue", '<script setup lang="js">\n</script>');
-      expect(file.isTS).toBe(false);
-    });
-
-    it("returns false for .vue without script tag", () => {
-      const file = new File("App.vue", "<template><div></div></template>");
-      expect(file.isTS).toBe(false);
-    });
-
-    it('returns true for .vue with script (no setup) and lang="ts"', () => {
-      const file = new File("App.vue", '<script lang="ts">\nexport default {}\n</script>');
+    it("returns true for .svelte whose stamped script dialect is TypeScript", () => {
+      const file = withScriptDialect(
+        "App.svelte",
+        '<script lang="ts">\nlet count = $state(0)\n</script>',
+        "TypeScript",
+      );
       expect(file.isTS).toBe(true);
     });
 
-    it('returns true for .svelte with lang="ts" (manifest carrier)', () => {
-      const file = new File("App.svelte", '<script lang="ts">\nlet count = $state(0)\n</script>');
-      expect(file.isTS).toBe(true);
-    });
-
-    it("returns false for .svelte without a lang attribute", () => {
-      const file = new File("App.svelte", "<script>\nlet count = 0\n</script>");
+    it("returns false for .svelte whose stamped script dialect is JavaScript", () => {
+      const file = withScriptDialect(
+        "App.svelte",
+        "<script>\nlet count = 0\n</script>",
+        "JavaScript",
+      );
       expect(file.isTS).toBe(false);
     });
 
@@ -149,5 +179,41 @@ describe("File", () => {
       expect(file.compiled.js).toBe("compiled js");
       expect(file.compiled.errors).toEqual(["error1"]);
     });
+  });
+});
+
+describe("isTS structure projection (scanner replacement)", () => {
+  const scriptStructure = (dialect: string): OrderedSfcStructure => ({
+    schemaVersion: 1,
+    artifactToken: "test",
+    blocks: [
+      {
+        kind: "section",
+        markupRootTokens: [],
+        section: {
+          blockToken: "b0",
+          role: { kind: "script", role: "setup", dialect },
+          openingRange: { sourceSpaceToken: "s", start: 0, end: 14 },
+          contentRange: { sourceSpaceToken: "s", start: 14, end: 20 },
+          fullRange: { sourceSpaceToken: "s", start: 0, end: 29 },
+          attributeInsertionAnchor: { sourceSpaceToken: "s", start: 13, end: 13 },
+        },
+      },
+    ],
+    markupNodes: [],
+  });
+
+  it("a decoy '<script lang=\"ts\">' literal inside a JS carrier is not TypeScript", () => {
+    // The stamped structure records a JavaScript script dialect; the string
+    // literal inside the code must not re-derive the dialect from raw source.
+    const file = new File("App.vue", "<script setup>\nconst s = '<script lang=\"ts\">'\n</script>");
+    file.structure = scriptStructure("JavaScript");
+    expect(file.isTS).toBe(false);
+  });
+
+  it("the stamped TypeScript dialect makes a carrier TS regardless of authoring quirks", () => {
+    const file = new File("App.vue", "<script setup lang=ts>\n</script>");
+    file.structure = scriptStructure("TypeScript");
+    expect(file.isTS).toBe(true);
   });
 });

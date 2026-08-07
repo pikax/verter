@@ -404,7 +404,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> FunctionReturnNode {
         match source {
             verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
-                match self.raise_body_slot(locator.slot(), scope_canonical_id) {
+                match self
+                    .raise_body_slot(locator.slot(), scope_canonical_id)
+                    .at_optional_boundary()
+                {
                     Some(hot) => FunctionReturnNode::Declared(hot),
                     None => FunctionReturnNode::DeclaredMiss,
                 }

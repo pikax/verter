@@ -62,7 +62,7 @@ pub(crate) use self::component_meta_extract::{
     extract_component_meta_from_resolved, extract_component_meta_from_resolved_with_facts,
     populate_public_instance_sidecar, ComponentMetaExtractOutcome,
 };
-// Test-only re-export — `populate_sfc_blocks_sidecar` is exercised by
+// Test-only re-export — `populate_ordered_sfc_structure` is exercised by
 // `meta_tests.rs` via the `crate::host_manage::*` path. Gated `#[cfg(test)]`
 // so the non-test build surface stays minimal.
 #[cfg(test)]

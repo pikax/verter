@@ -219,8 +219,9 @@ export function registerLspProviders(
 
         const source = model.getValue();
         const offset = model.getOffsetAt(position);
-        const isInScript = isOffsetInScriptBlock(source, offset);
-        const isInTemplate = !isInScript && isOffsetInTemplateBlock(source, offset);
+        const structure = file?.structure ?? null;
+        const isInScript = isOffsetInScriptBlock(structure, source, offset);
+        const isInTemplate = !isInScript && isOffsetInTemplateBlock(structure, source, offset);
 
         // Detect member access: cursor right after `.` → only TS member completions
         const lineContent = model.getLineContent(position.lineNumber);
@@ -233,6 +234,7 @@ export function registerLspProviders(
           const openFilenames = Object.keys(store.files as Record<string, unknown>);
           const templateCompletions = collectTemplateCompletions({
             source,
+            structure,
             offset,
             activeFilename: store.activeFilename,
             openFilenames,
@@ -248,6 +250,7 @@ export function registerLspProviders(
 
           const interpolationCompletions = collectTemplateInterpolationCompletions({
             source,
+            structure,
             offset,
             activeFilename: store.activeFilename,
             openFilenames,
@@ -509,7 +512,7 @@ export function registerLspProviders(
         const analysis = file?.compiled.analysis;
         if (!file || !analysis) return { lenses: [], dispose() {} };
 
-        const lenses = computeCodeLenses(file.code, analysis);
+        const lenses = computeCodeLenses(file.code, analysis, file.structure);
         const monacoLenses: monaco.languages.CodeLens[] = lenses.map((lens) => ({
           range: new monaco.Range(lens.line, 1, lens.line, 1),
           command: {

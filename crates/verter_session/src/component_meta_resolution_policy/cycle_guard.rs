@@ -831,7 +831,7 @@ mod tests {
             merge_role: MergeRoleStamp::NEUTRAL,
         };
         let object = graph.intern_node_with_scope(
-            SemanticNodeData::Object(crate::semantic_query::surface_view! {
+            SemanticNodeData::Object(crate::test_surface_view! {
                 members: Arc::from([member("a"), member("b")]),
                 call_signatures: Arc::from([]),
                 construct_signatures: Arc::from([]),

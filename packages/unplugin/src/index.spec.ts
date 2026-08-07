@@ -349,7 +349,7 @@ $border: #555;
     expect(transformed).toBeDefined();
     expect(transformed.code).toContain("[data-v-");
     expect(transformed.code).toContain(".second");
-    expect(transformed.code).toContain("blue");
+    expect(transformed.code).toContain("color: #00f;");
     expect(transformed.code).not.toContain(".first");
   });
 
@@ -775,20 +775,18 @@ describe("disk fallback without workspace", () => {
     } as any) as any;
   }
 
-  it("transform loads external src blocks from disk when no workspace is initialized", async () => {
+  it("types an external non-native style as processed-content-required", async () => {
     const plugin = createPlugin();
     const filename = join(tempDir, "ExternalStyle.vue").replace(/\\/g, "/");
     writeFileSync(join(tempDir, "external.css"), ".from-disk { color: red; }\n");
 
-    const result = await plugin.transform(
-      `<template><div class="from-disk">ok</div></template>
-<style src="./external.css"></style>`,
-      filename,
-    );
-
-    expect(result).toBeDefined();
-    expect(result.code).toContain("type=style&index=0");
-    expect(result.code).not.toContain("<style src=");
+    await expect(
+      plugin.transform(
+        `<template><div class="from-disk">ok</div></template>
+<style src="./external.css" lang="postcss"></style>`,
+        filename,
+      ),
+    ).rejects.toThrow(/block content is unavailable: ProcessedContentRequired/);
   });
 });
 
@@ -846,6 +844,69 @@ import(branch)
     expect(resolveSpy).toHaveBeenCalledWith("./types", filename, { skipSelf: true });
     expect(resolveSpy).toHaveBeenCalledWith("./a", filename, { skipSelf: true });
     expect(resolveSpy).toHaveBeenCalledWith("./b", filename, { skipSelf: true });
+  });
+
+  // @ai-generated - Proves external processed-content requests are refreshed
+  // after the bundler-resolved bytes enter the host VFS.
+  it("refreshes external custom-block requests with bundler-resolved bytes", async () => {
+    const filename = join(tempDir, "ExternalRoute.vue").replace(/\\/g, "/");
+    const fallbackPath = join(tempDir, "route.source").replace(/\\/g, "/");
+    const bundlerResolved = join(tempDir, "generated", "route.source").replace(/\\/g, "/");
+    mkdirSync(join(tempDir, "generated"), { recursive: true });
+    writeFileSync(fallbackPath, "fallback-marker\n");
+    writeFileSync(bundlerResolved, "bundler-marker\n");
+
+    const preprocessRoute = vi.fn(async (request: { content: string }) => ({
+      code: `export default ${JSON.stringify(request.content.trim())}`,
+    }));
+    const plugin = unpluginFactory({ customBlocks: { route: preprocessRoute as any } }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+    const source = `<template><div>ok</div></template>
+<route src="./route.source" lang="yaml"></route>`;
+    const resolve = vi.fn(async (specifier: string) =>
+      specifier === "./route.source" ? { id: bundlerResolved } : null,
+    );
+    const host = loadHost();
+    const upsertSpy = vi.spyOn(host, "upsert");
+    const applySpy = vi.spyOn(host, "applyBlockOverrides").mockReturnValue(undefined as never);
+    vi.spyOn(host, "compileMany").mockReturnValue([
+      { code: "export default {}", errors: [], diagnostics: [] },
+    ] as never);
+
+    const transformed = await plugin.transform.call({ resolve, warn: vi.fn() }, source, filename);
+
+    expect(transformed).toBeDefined();
+    expect(resolve).toHaveBeenCalledWith("./route.source", filename, { skipSelf: true });
+    expect(preprocessRoute).toHaveBeenCalledTimes(1);
+    expect(preprocessRoute.mock.calls[0]?.[0].content).toBe("bundler-marker\n");
+    const ownerCallIndexes = upsertSpy.mock.calls.flatMap(([request], index) =>
+      request?.inputId === filename && request?.source === source ? [index] : [],
+    );
+    expect(ownerCallIndexes).toHaveLength(2);
+    const initialResult = upsertSpy.mock.results[ownerCallIndexes[0]].value;
+    const hostCanonical = initialResult.externalSourceRequests[0].resolvedCanonicalId;
+    expect(hostCanonical).not.toBe(bundlerResolved);
+    expect(
+      upsertSpy.mock.calls.some(
+        ([request]) =>
+          request?.inputId === hostCanonical &&
+          request?.source === "bundler-marker\n" &&
+          request?.fileKind === "non_sfc",
+      ),
+    ).toBe(true);
+    const refreshedResult = upsertSpy.mock.results[ownerCallIndexes[1]].value;
+    const refreshedRequest = refreshedResult.preprocessorRequests[0];
+    const appliedOverride = applySpy.mock.calls[0]?.[0].overrides[0];
+    expect(appliedOverride).toMatchObject({
+      correlationToken: refreshedRequest.correlationToken,
+      blockToken: refreshedRequest.blockToken,
+      ownerRevision: refreshedRequest.ownerRevision,
+      artifactToken: refreshedRequest.artifactToken,
+      basisToken: refreshedRequest.basisToken,
+      sourceSpaceToken: refreshedRequest.sourceSpaceToken,
+    });
   });
 
   it("transform does not delegate unknown dynamic references", async () => {
@@ -1194,21 +1255,17 @@ describe("preCompile", () => {
   });
 
   // @ai-generated - External src resolution during preCompile
-  it("resolves external style src during preCompile", async () => {
-    const vueSfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n<style src="./style.css" scoped></style>\n`;
+  it("fails closed for external non-native style pending supplied bytes", async () => {
+    const vueSfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n<style src="./style.css" lang="postcss" scoped></style>\n`;
     const css = `.box { color: red; }\n`;
 
     writeFileSync(join(tempDir, "App.vue"), vueSfc);
     writeFileSync(join(tempDir, "style.css"), css);
 
     const plugin = createPreCompilePlugin();
-    // Should not throw — external src is resolved during buildStart
-    await plugin.buildStart();
-
-    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
-    const result = await plugin.transform(vueSfc, filename);
-    expect(result).toBeDefined();
-    expect(result.code).toBeDefined();
+    await expect(plugin.buildStart()).rejects.toThrow(
+      /block content is unavailable: ProcessedContentRequired/,
+    );
   });
 
   // @ai-generated - node_modules exclusion: files in node_modules are not pre-compiled

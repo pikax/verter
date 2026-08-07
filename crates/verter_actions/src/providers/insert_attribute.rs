@@ -125,6 +125,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = InsertAttribute.fixes_for_diagnostic(&diag, &ctx);
@@ -184,6 +185,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = InsertAttribute.fixes_for_diagnostic(&diag, &ctx);
@@ -239,6 +241,7 @@ mod tests {
             template: None,
             script: None,
             styles: &[],
+            blocks: &[],
         };
 
         let actions = InsertAttribute.fixes_for_diagnostic(&diag, &ctx);

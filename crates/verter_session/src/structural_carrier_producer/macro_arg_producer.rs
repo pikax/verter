@@ -1129,6 +1129,18 @@ fn build_script_setup_seed_frames(
     Vec::from([frame])
 }
 
+/// One lazy macro hot-mirror read: the structural graph handle plus
+/// graph-free authored reference heads keyed by analyzed prop-field index.
+///
+/// The sidecar is route evidence only. It never participates in semantic node
+/// or query identity.
+#[derive(Debug, Clone)]
+pub(crate) struct MacroHotProduct {
+    pub(crate) hot: HotTypeRef,
+    pub(crate) prop_reference_heads:
+        Arc<[Option<verter_type_expr::facts::AuthoredReferenceHeadFact>]>,
+}
+
 /// Lazy, singleflight storage for one file's macro type-argument handles.
 #[derive(Default)]
 pub(crate) struct MacroHotMirror {
@@ -1137,7 +1149,7 @@ pub(crate) struct MacroHotMirror {
 
 #[derive(Default)]
 struct MacroSlot {
-    committed: OnceLock<Option<HotTypeRef>>,
+    committed: OnceLock<Option<Arc<MacroHotProduct>>>,
     build_lock: parking_lot::Mutex<()>,
 }
 
@@ -1167,8 +1179,8 @@ impl MacroHotMirror {
 struct MacroMirrorSlot<'a>(&'a MacroSlot);
 
 impl<'a> MacroMirrorSlot<'a> {
-    fn committed(self) -> Option<Option<HotTypeRef>> {
-        self.0.committed.get().copied()
+    fn committed(self) -> Option<Option<Arc<MacroHotProduct>>> {
+        self.0.committed.get().cloned()
     }
 
     fn lock_build(self) -> MacroMirrorBuildGuard<'a> {
@@ -1186,7 +1198,7 @@ struct MacroMirrorBuildGuard<'a> {
 }
 
 impl MacroMirrorBuildGuard<'_> {
-    fn commit(self, result: Option<HotTypeRef>) {
+    fn commit(self, result: Option<Arc<MacroHotProduct>>) {
         let _ = self.slot.committed.set(result);
     }
 }
@@ -1214,18 +1226,28 @@ impl Clone for MacroHotMirror {
 }
 
 /// Resolve (lowering once on first demand) the mode-NEUTRAL
-/// [`HotTypeRef`] for the macro at `macro_index` in `owner_canonical`.
+/// [`MacroHotProduct`] for the macro at `macro_index` in `owner_canonical`.
 ///
 /// This is the SOLE production entry that lowers a macro
-/// `parsed_type_argument` into a semantic-graph handle. Returns `None` when
-/// the owner file is not loaded, the macro index is out of range, the macro
-/// carries no `parsed_type_argument`, or the type argument has no faithful
-/// unresolved structural representation (a stable negative cell).
+/// `parsed_type_argument` into a semantic-graph handle and projects its
+/// graph-free prop-reference-head sidecar from the same typed-IR borrow.
+/// Returns `None` when the owner file is not loaded, the macro index is out of
+/// range, the macro carries no `parsed_type_argument`, or the type argument
+/// has no faithful unresolved structural representation (a stable negative
+/// cell).
 pub(crate) fn macro_type_arg_hot_ref(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
     macro_index: usize,
-) -> Option<HotTypeRef> {
+) -> Option<MacroHotProduct> {
+    macro_hot_product(ctx, owner_canonical, macro_index).map(|product| product.as_ref().clone())
+}
+
+fn macro_hot_product(
+    ctx: &dyn ResolverContext,
+    owner_canonical: &str,
+    macro_index: usize,
+) -> Option<Arc<MacroHotProduct>> {
     let serve = ctx.ensure_indexed_ready_serve(owner_canonical)?;
     let indexed = serve.indexed;
 
@@ -1284,7 +1306,7 @@ pub(crate) fn macro_type_arg_hot_ref(
             // First-writer commit under the build lock: `set` cannot race a
             // second committer (all commits take this lock), so it succeeds and
             // `result` IS the committed value.
-            build_guard.commit(result);
+            build_guard.commit(result.clone());
             result
         }
         MacroHotRefOutcome::LeaseMiss => {
@@ -1305,7 +1327,7 @@ pub(crate) fn macro_type_arg_hot_ref(
 /// admission commits `Ready` but leaves the slot VACANT on `LeaseMiss` (a
 /// later live-lease demand retries), never persisting a transient negative.
 enum MacroHotRefOutcome {
-    Ready(Option<HotTypeRef>),
+    Ready(Option<Arc<MacroHotProduct>>),
     LeaseMiss,
 }
 
@@ -1361,6 +1383,15 @@ fn build_macro_hot_ref(
         crate::decl_body_memo::DemandOutcome::LeaseMiss => return MacroHotRefOutcome::LeaseMiss,
     };
     let parsed_arg = parsed_arg.as_ref();
+    let prop_reference_heads = mac
+        .prop_fields
+        .iter()
+        .map(|field| {
+            let payload = field.payload.as_ref()?;
+            let ty = inline_macro_object_property_type(parsed_arg, field.name.as_str())?;
+            Some(verter_semantic::analysis::macro_payload_reference_head_fact(ty, payload))
+        })
+        .collect::<Vec<_>>();
 
     let graph = ctx.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
@@ -1393,7 +1424,37 @@ fn build_macro_hot_ref(
         .with_infer_source(&infer_source);
 
     // A lowering failure is a genuine (cacheable) absence — commit `Ready(None)`.
-    MacroHotRefOutcome::Ready(lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx).ok())
+    MacroHotRefOutcome::Ready(
+        lower_type_expr_structural(graph, parsed_arg, scope, &lower_ctx)
+            .ok()
+            .map(|hot| {
+                Arc::new(MacroHotProduct {
+                    hot,
+                    prop_reference_heads: Arc::from(prop_reference_heads),
+                })
+            }),
+    )
+}
+
+/// Find a direct named property in the hydrated inline macro object. This is
+/// intentionally a tiny graph-free projection over the already-borrowed typed
+/// IR: it neither resolves aliases nor walks another declaration body.
+fn inline_macro_object_property_type<'a>(
+    mut parsed_arg: &'a TypeExpr,
+    field_name: &str,
+) -> Option<&'a TypeExpr> {
+    while let TypeExpr::Parenthesized(inner) = parsed_arg {
+        parsed_arg = inner.as_ref();
+    }
+    let TypeExpr::Object(object) = parsed_arg else {
+        return None;
+    };
+    object.properties.iter().find_map(|member| match member {
+        ObjectMember::Property(property) if property.key.as_string() == Some(field_name) => {
+            Some(&property.ty)
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]

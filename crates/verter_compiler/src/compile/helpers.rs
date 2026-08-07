@@ -47,6 +47,8 @@ pub(super) fn empty_sfc_script_block(
         source_map: String::new(),
         setup: false,
         attrs: Vec::new(),
+        generated_template_hole: None,
+        runtime_imports: vec!["_defineComponent"],
     })
 }
 

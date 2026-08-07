@@ -520,6 +520,7 @@ fn await_then_catch_parses() {
     let SvelteBlockKind::Await {
         then_binding,
         catch_binding,
+        ..
     } = &block.kind
     else {
         panic!("expected await block");

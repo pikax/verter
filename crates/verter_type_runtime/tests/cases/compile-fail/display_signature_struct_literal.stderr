@@ -1,0 +1,16 @@
+error[E0603]: tuple struct constructor `DisplaySignature` is private
+ --> tests/cases/compile-fail/display_signature_struct_literal.rs:7:50
+  |
+7 |     let _forged = verter_type_runtime::protocol::DisplaySignature("forged".to_string());
+  |                                                  ^^^^^^^^^^^^^^^^ private tuple struct constructor
+  |
+ ::: src/protocol.rs
+  |
+  | pub struct DisplaySignature(String);
+  |                             ------ a constructor is private if any of the fields is private
+  |
+note: the tuple struct constructor `DisplaySignature` is defined here
+ --> src/protocol.rs
+  |
+  | pub struct DisplaySignature(String);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,17 @@
+error[E0603]: function `compile` is private
+ --> tests/cases/compile-fail/scanners_replacement_raw_parser_public.rs:7:31
+  |
+7 | use verter_compiler::compile::compile;
+  |                               ^^^^^^^ private function
+  |
+note: the function `compile` is defined here
+ --> $WORKSPACE/crates/verter_compiler/src/compile/mod.rs
+  |
+  | / pub(crate) fn compile(
+  | |     input: &str,
+  | |     options: &CodegenOptions,
+  | |     verter_options: &VerterCompileOptions,
+  | |     macro_semantics: &VueMacroSemanticInput,
+  | |     allocator: &Allocator,
+  | | ) -> VerterCompileResult {
+  | |________________________^

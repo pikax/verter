@@ -31,8 +31,7 @@ Block 1.8 (substrate-validation / fact-tracer fan-out discriminator):
 - `compile_tier` — `CompileSlot.fact_dep_signature`
 - `component_meta` — `ComponentMetaResultEntry.read_set_signature`
 - `fallthrough` — `CachedFallthroughEntry.fact_versions`
-- `route_surface` — `BarrelRouteSurface.fact_dep_signature` /
-  `EffectiveExportSetEntry.fact_dep_signature`
+- `route_surface` — `BarrelRouteSurface.fact_dep_signature`
 - `slot_binding_graph` — request fact-tracer fan-out via the
   helper (`emit_slot_binding_graph_dispatch_facts`)
 

@@ -57,9 +57,14 @@ fn component(canonical_id: &str, component_name: &str) -> ResolvedRootStep {
 fn component_sourced_prop(name: &str, child_canonical_id: &str) -> FallthroughPropEntry {
     FallthroughPropEntry {
         name: name.to_string(),
-        type_source: SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::default(),
+        publication: crate::test_only::type_publication_fixture(
+            SourcePosition::unannotated(),
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            None,
+            None,
+        ),
         type_source_scope: None,
-        raw_type: None,
         sources: vec![InheritedSource::Component {
             canonical_id: child_canonical_id.to_string(),
         }],
@@ -72,9 +77,14 @@ fn component_sourced_prop(name: &str, child_canonical_id: &str) -> FallthroughPr
 fn native_sourced_prop(name: &str, tag: &str) -> FallthroughPropEntry {
     FallthroughPropEntry {
         name: name.to_string(),
-        type_source: SourcePosition::unannotated(),
+        callable_role: verter_type_expr::PropCallableRole::Other,
+        publication: crate::test_only::type_publication_fixture(
+            SourcePosition::unannotated(),
+            verter_type_expr::ResolutionExactness::ExactConcrete,
+            None,
+            None,
+        ),
         type_source_scope: None,
-        raw_type: None,
         sources: vec![InheritedSource::NativeTag {
             tag: tag.to_string(),
         }],

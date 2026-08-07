@@ -28,10 +28,12 @@ mod app_config_proof_member;
 mod app_config_proof_member_presence;
 #[path = "fact_matrix/app_config_proof_module_augmentation_index_shape.rs"]
 mod app_config_proof_module_augmentation_index_shape;
-#[path = "fact_matrix/app_config_proof_route_surface.rs"]
-mod app_config_proof_route_surface;
+#[path = "fact_matrix/app_config_proof_observes_no_route_facts.rs"]
+mod app_config_proof_observes_no_route_facts;
 
 // ── materialize_structure × * ───────────────────────────────────────
+#[path = "fact_matrix/materialize_structure_barrel_route.rs"]
+mod materialize_structure_barrel_route;
 #[path = "fact_matrix/materialize_structure_import_ref.rs"]
 mod materialize_structure_import_ref;
 #[path = "fact_matrix/materialize_structure_member.rs"]
@@ -40,10 +42,10 @@ mod materialize_structure_member;
 mod materialize_structure_member_presence;
 #[path = "fact_matrix/materialize_structure_module_augmentation_index_shape.rs"]
 mod materialize_structure_module_augmentation_index_shape;
-#[path = "fact_matrix/materialize_structure_route_surface.rs"]
-mod materialize_structure_route_surface;
 
 // ── memo_entry × * ───────────────────────────────────────────────────
+#[path = "fact_matrix/memo_entry_barrel_route_dispatch.rs"]
+mod memo_entry_barrel_route_dispatch;
 #[path = "fact_matrix/memo_entry_import_ref.rs"]
 mod memo_entry_import_ref;
 #[path = "fact_matrix/memo_entry_member.rs"]
@@ -52,10 +54,10 @@ mod memo_entry_member;
 mod memo_entry_member_presence;
 #[path = "fact_matrix/memo_entry_module_augmentation_index_shape.rs"]
 mod memo_entry_module_augmentation_index_shape;
-#[path = "fact_matrix/memo_entry_route_surface.rs"]
-mod memo_entry_route_surface;
 
 // ── owner_import_surface × * ─────────────────────────────────────────
+#[path = "fact_matrix/owner_import_surface_barrel_route.rs"]
+mod owner_import_surface_barrel_route;
 #[path = "fact_matrix/owner_import_surface_import_ref.rs"]
 mod owner_import_surface_import_ref;
 #[path = "fact_matrix/owner_import_surface_member.rs"]
@@ -64,8 +66,6 @@ mod owner_import_surface_member;
 mod owner_import_surface_member_presence;
 #[path = "fact_matrix/owner_import_surface_module_augmentation_index_shape.rs"]
 mod owner_import_surface_module_augmentation_index_shape;
-#[path = "fact_matrix/owner_import_surface_route_surface.rs"]
-mod owner_import_surface_route_surface;
 
 // ── compile_tier × * ─────────────────────────────────────────────────
 #[path = "fact_matrix/compile_tier_import_ref.rs"]
@@ -76,8 +76,6 @@ mod compile_tier_member;
 mod compile_tier_member_presence;
 #[path = "fact_matrix/compile_tier_module_augmentation_index_shape.rs"]
 mod compile_tier_module_augmentation_index_shape;
-#[path = "fact_matrix/compile_tier_route_surface.rs"]
-mod compile_tier_route_surface;
 
 // ── component_meta × * ───────────────────────────────────────────────
 #[path = "fact_matrix/component_meta_import_ref.rs"]
@@ -88,8 +86,6 @@ mod component_meta_member;
 mod component_meta_member_presence;
 #[path = "fact_matrix/component_meta_module_augmentation_index_shape.rs"]
 mod component_meta_module_augmentation_index_shape;
-#[path = "fact_matrix/component_meta_route_surface.rs"]
-mod component_meta_route_surface;
 
 // ── fallthrough × * ──────────────────────────────────────────────────
 #[path = "fact_matrix/fallthrough_import_ref.rs"]
@@ -100,8 +96,6 @@ mod fallthrough_member;
 mod fallthrough_member_presence;
 #[path = "fact_matrix/fallthrough_module_augmentation_index_shape.rs"]
 mod fallthrough_module_augmentation_index_shape;
-#[path = "fact_matrix/fallthrough_route_surface.rs"]
-mod fallthrough_route_surface;
 
 // ── route_surface × * ────────────────────────────────────────────────
 #[path = "fact_matrix/route_surface_import_ref.rs"]
@@ -112,8 +106,6 @@ mod route_surface_member;
 mod route_surface_member_presence;
 #[path = "fact_matrix/route_surface_module_augmentation_index_shape.rs"]
 mod route_surface_module_augmentation_index_shape;
-#[path = "fact_matrix/route_surface_route_surface.rs"]
-mod route_surface_route_surface;
 
 // ── slot_binding_graph × * ───────────────────────────────────────────
 #[path = "fact_matrix/slot_binding_graph_import_ref.rs"]
@@ -124,5 +116,3 @@ mod slot_binding_graph_member;
 mod slot_binding_graph_member_presence;
 #[path = "fact_matrix/slot_binding_graph_module_augmentation_index_shape.rs"]
 mod slot_binding_graph_module_augmentation_index_shape;
-#[path = "fact_matrix/slot_binding_graph_route_surface.rs"]
-mod slot_binding_graph_route_surface;

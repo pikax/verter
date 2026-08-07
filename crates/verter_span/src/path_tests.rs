@@ -852,14 +852,245 @@ fn verbatim_refusal_names_the_reason_and_is_none_when_simplification_succeeds() 
         r"\\?\Volume{0}\x",
         r"\\?\D:\ws\NUL\x.js",
         r"/usr/lib/x.js",
+        // The SAME rows in the forward-slash spelling an upstream separator
+        // normalizer produces. A spelling-specific gate answered `None` for
+        // every one of them, which is how the known-fatal `//?/D:\…` value
+        // reached node with the refusal inert.
+        "//?/D:/ws/x.js",
+        "//?/D:",
+        "//?/UNC/srv",
+        "//?/UNC/srv/share/x",
+        "//?/Volume{0}/x",
+        "//?/D:/ws/NUL/x.js",
     ] {
         let changed = matches!(simplify_verbatim_path_str(input), Cow::Owned(_));
         let refused = verbatim_refusal(input).is_some();
         assert!(!(changed && refused), "{input}: simplified AND refused");
         assert_eq!(
             refused,
-            input.starts_with(r"\\?\") && !changed,
+            is_verbatim_spelling(input) && !changed,
             "{input}: refusal must be exactly 'verbatim and not simplified'"
+        );
+    }
+}
+
+// ── The verbatim prefix is recognized in EVERY separator spelling ────────────
+//
+// `\\?\` is the only spelling Win32 itself emits, but a value can pass through a
+// separator normalizer on its way to the exec boundary: the test harness's own
+// `.replace('\\', "/")`, or TypeScript's `normalizeSlashes` (`typescript.js:8852`),
+// which rewrites a verbatim `\\?\D:\ext` to `//?/D:/ext` before every plugin
+// probe. A spelling-SPECIFIC gate classifies that as "not verbatim at all", so
+// neither the refusal nor the simplifier fires and the known-fatal value is
+// handed to node, which dies with `EISDIR: lstat 'D:'` before tsserver starts.
+//
+// Detection is therefore spelling-agnostic. A `/`-spelled prefix additionally
+// PROVES the whole string was separator-normalized — Win32 never emits one — so
+// its `/` are separators that used to be backslashes, not the literal filename
+// characters they are under a true `\\?\` path. This is also what
+// `canonicalize_path` has always assumed: it strips a leading `//?/` on every
+// host, so before this the two functions in this one module disagreed about
+// what `//?/` means.
+
+/// The verbatim prefix, in any separator spelling: `<sep><sep>?<sep>`. Mirrors
+/// the classifier's own grammar so the invariant loops above can state "is this
+/// input verbatim" without hard-coding one spelling.
+fn is_verbatim_spelling(input: &str) -> bool {
+    let b = input.as_bytes();
+    b.len() >= 4
+        && matches!(b[0], b'\\' | b'/')
+        && matches!(b[1], b'\\' | b'/')
+        && b[2] == b'?'
+        && matches!(b[3], b'\\' | b'/')
+}
+
+#[test]
+fn a_forward_slashed_verbatim_disk_prefix_is_stripped_like_its_backslash_twin() {
+    assert_eq!(
+        simplify_verbatim_path_str("//?/D:/dev/app/node_modules/typescript/lib/tsserver.js"),
+        "D:/dev/app/node_modules/typescript/lib/tsserver.js"
+    );
+    // NEGATIVE: the exact argv[1] the pre-fix harness handed node. The prefix
+    // that kills `resolveMainPath` is gone and the drive survived with it (the
+    // `EISDIR: lstat 'D:'` shape is a lost drive).
+    let out = simplify_verbatim_path_str("//?/D:/dev/app/tsserver.js");
+    assert!(
+        !out.starts_with("//?"),
+        "no verbatim prefix survives: {out}"
+    );
+    assert!(out.starts_with("D:/"), "the drive root survives: {out}");
+    // Separators are NOT canonicalized at this boundary (that is
+    // `canonicalize_path`'s job): the body keeps the spelling it arrived in.
+    assert!(!out.contains('\\'), "no separator rewriting: {out}");
+}
+
+#[test]
+fn a_forward_slashed_verbatim_unc_prefix_becomes_a_plain_unc_path() {
+    assert_eq!(
+        simplify_verbatim_path_str("//?/UNC/build01/share/ws/tsserver.js"),
+        "//build01/share/ws/tsserver.js"
+    );
+    // NEGATIVE: the naive 4-byte strip leaves a RELATIVE path beginning with a
+    // literal `UNC` directory — the same silent corruption the backslash twin
+    // guards against.
+    assert_ne!(
+        simplify_verbatim_path_str("//?/UNC/build01/share/ws/tsserver.js"),
+        "UNC/build01/share/ws/tsserver.js"
+    );
+}
+
+#[test]
+fn every_mixed_separator_spelling_of_the_prefix_is_classified_as_verbatim() {
+    // A partial normalizer (or a hand-assembled string) can mix the four
+    // separator positions in any combination. NONE of them may read as "not
+    // verbatim": a value the gate does not see is a value the gate cannot
+    // refuse. `//?/` is the spelling observed in the wild; the rest are the
+    // remaining grammar and are covered so no future rewrite can narrow the
+    // prefix back to a single spelling and still pass.
+    for prefix in [r"\\?\", "//?/", r"\\?/", r"//?\", r"/\?\", r"\/?/", r"\/?\"] {
+        let disk = format!(r"{prefix}D:\ws\tsserver.js");
+        assert!(
+            classified_as_verbatim(&disk),
+            "{disk} must be seen by the gate"
+        );
+        // Every spelling of a bare drive is DRIVE-RELATIVE, and every spelling
+        // of a server-only UNC body names no share — the reasons are
+        // spelling-independent facts about the body, not about the prefix.
+        assert_eq!(
+            verbatim_refusal(&format!("{prefix}D:")),
+            Some(crate::path::VerbatimRefusal::DriveRelative),
+            "{prefix}D: is drive-relative in every spelling"
+        );
+        assert_eq!(
+            verbatim_refusal(&format!(r"{prefix}UNC\srv")),
+            Some(crate::path::VerbatimRefusal::IncompleteUnc),
+            "{prefix}UNC\\srv names no share in every spelling"
+        );
+        assert_eq!(
+            verbatim_refusal(&format!(r"{prefix}Volume{{0}}\x")),
+            Some(crate::path::VerbatimRefusal::DeviceNamespace),
+            "the device namespace has no Win32 spelling, in every prefix spelling"
+        );
+    }
+    // NEGATIVE: the grammar is exactly `<sep><sep>?<sep>` — near-misses stay
+    // ordinary paths, so an ordinary POSIX or UNC path is never captured.
+    for ordinary in [
+        "//server/share/x.js",
+        "/usr/lib/x.js",
+        r"D:\ws\x.js",
+        "//?x/D:/ws",
+        "/?/D:/ws",
+        "//??/D:/ws",
+    ] {
+        assert!(
+            !classified_as_verbatim(ordinary),
+            "{ordinary} is not an extended-length path"
+        );
+        assert_eq!(
+            simplify_verbatim_path_str(ordinary),
+            ordinary,
+            "{ordinary} must be returned untouched"
+        );
+    }
+}
+
+/// Whether the gate SAW the value: a verbatim path is either simplified or
+/// refused, and "neither" is exactly the silent-inert state this hardening
+/// removes.
+fn classified_as_verbatim(input: &str) -> bool {
+    matches!(simplify_verbatim_path_str(input), Cow::Owned(_)) || verbatim_refusal(input).is_some()
+}
+
+#[test]
+fn a_forward_slashed_body_refuses_for_the_same_body_reasons_as_its_twin() {
+    use crate::path::VerbatimRefusal;
+
+    // Every refusal the backslash spelling reports, the forward-slash spelling
+    // reports identically — the reason is a property of the BODY.
+    assert!(matches!(
+        verbatim_refusal("//?/D:/ws/NUL/x.js"),
+        Some(VerbatimRefusal::Component { .. })
+    ));
+    assert!(matches!(
+        verbatim_refusal(&format!("//?/D:/{}/x", "d".repeat(300))),
+        Some(VerbatimRefusal::TooLong { .. })
+    ));
+    for refused in [
+        "//?/D:/ws/odd./x.js",
+        "//?/D:/ws/odd /x.js",
+        "//?/D:/ws/../x.js",
+        "//?/D:/ws/com1.js",
+        "//?/D:/ws//x.js",
+    ] {
+        assert_eq!(
+            simplify_verbatim_path_str(refused),
+            refused,
+            "{refused} must be left verbatim, never rewritten to a different target"
+        );
+        assert!(
+            verbatim_refusal(refused).is_some(),
+            "{refused} must REPORT why it was left alone"
+        );
+    }
+}
+
+#[test]
+fn a_true_backslash_verbatim_path_still_refuses_a_literal_forward_slash() {
+    use crate::path::VerbatimRefusal;
+
+    // The load-bearing NEGATIVE of this hardening. Under a REAL `\\?\` prefix
+    // `/` is an ordinary filename character, so `a/b` is ONE component and
+    // dropping the prefix would split it into two — a different target. Making
+    // detection spelling-agnostic must not turn that refusal into a rewrite.
+    assert_eq!(
+        verbatim_refusal(r"\\?\D:\ws\a/b\tsserver.js"),
+        Some(VerbatimRefusal::LiteralForwardSlash)
+    );
+    assert_eq!(
+        simplify_verbatim_path_str(r"\\?\D:\ws\a/b\tsserver.js"),
+        r"\\?\D:\ws\a/b\tsserver.js"
+    );
+    // Whereas the `/`-SPELLED prefix proves an upstream normalizer already
+    // rewrote every separator, so those same slashes ARE separators and the
+    // path simplifies. The two spellings must not be conflated in this
+    // direction either.
+    assert_eq!(
+        verbatim_refusal("//?/D:/ws/a/b/tsserver.js"),
+        None,
+        "a `/`-spelled prefix means `/` is a separator, not a filename character"
+    );
+    assert_eq!(
+        simplify_verbatim_path_str("//?/D:/ws/a/b/tsserver.js"),
+        "D:/ws/a/b/tsserver.js"
+    );
+}
+
+#[test]
+fn forward_slashed_simplification_is_idempotent_and_agrees_across_both_apis() {
+    for (input, must_change) in [
+        ("//?/D:/ws/tsserver.js", true),
+        ("//?/UNC/srv/share/tsserver.js", true),
+        // Device-namespace: refused, so the fixed point is the input itself.
+        ("//?/Volume{0}/ws/tsserver.js", false),
+        (r"\\?/D:\ws\tsserver.js", true),
+    ] {
+        let once = simplify_verbatim_path_str(input).into_owned();
+        // Without this, an all-refusing classifier makes every row a trivial
+        // fixed point and the test characterizes nothing.
+        assert_eq!(
+            once != input,
+            must_change,
+            "{input}: expected simplification={must_change}, got {once}"
+        );
+        assert_eq!(
+            simplify_verbatim_path_str(&once),
+            once,
+            "{input} must be a fixed point after one pass"
+        );
+        assert_eq!(
+            simplify_verbatim_path(std::path::Path::new(input)),
+            std::path::Path::new(&once),
+            "the Path API must agree with the str API for {input}"
         );
     }
 }

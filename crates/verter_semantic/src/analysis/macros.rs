@@ -9,7 +9,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::analysis::types::{
     AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
-    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroTypeDepUsage,
+    AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroAnchor,
+    MacroAnchorUnsupported, MacroEditAnchors, MacroTypeDepUsage, MemberListAnchor,
     ResolvedLocalType, TypeResolutionSource,
 };
 
@@ -2036,6 +2037,7 @@ fn resolve_local_define_emits(
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
         if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
+            let mut emit_state = ();
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
@@ -2043,7 +2045,8 @@ fn resolve_local_define_emits(
                 source,
                 comments,
                 &mut visited,
-                &extract_emit_fields_from_members,
+                &mut emit_state,
+                &extract_emit_fields_from_members_at,
             ) {
                 mac.emit_fields = fields;
             }
@@ -2071,6 +2074,7 @@ fn resolve_local_define_slots(
     } else if mac.type_references.len() == 1 {
         let type_ref = &mac.type_references[0];
         if let Some((declaration_registry, decl)) = registry.resolve(type_ref.as_str()) {
+            let mut state = ();
             if let Some(fields) = resolve_interface_decl_generic(
                 type_ref,
                 decl,
@@ -2078,7 +2082,10 @@ fn resolve_local_define_slots(
                 source,
                 comments,
                 &mut visited,
-                &extract_slot_fields_from_members,
+                &mut state,
+                &|members, source, comments, _state| {
+                    extract_slot_fields_from_members(members, source, comments)
+                },
             ) {
                 mac.slot_fields = fields;
             }
@@ -2220,23 +2227,48 @@ fn resolve_interface_decl(
 }
 
 // ── Generic local type resolution for emit/slot fields ──
-// Single resolver shared by emits and slots. Differences are only in the
-// member extraction function (what fields to extract from TSSignature members).
+// Single resolver shared by emits and slots. The field policy keeps their
+// distinct interface ordering semantics inside this shared traversal.
 
 /// Trait for extracting a dedup key from a resolved field.
-trait NamedField {
+trait NamedField: Sized {
     fn field_name(&self) -> &str;
+
+    /// Reconcile interface-body precedence with any producer coordinate space.
+    fn order_interface_fields(own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self>;
 }
 
 impl NamedField for AnalyzedEmitField {
     fn field_name(&self) -> &str {
         &self.name
     }
+
+    fn order_interface_fields(mut own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self> {
+        own_fields.extend(heritage_fields);
+        own_fields
+    }
 }
 
 impl NamedField for AnalyzedSlotField {
     fn field_name(&self) -> &str {
         &self.name
+    }
+
+    fn order_interface_fields(mut own_fields: Vec<Self>, heritage_fields: Vec<Self>) -> Vec<Self> {
+        own_fields.extend(heritage_fields);
+        own_fields
+    }
+}
+
+fn append_unique_named_fields<T: NamedField>(
+    target: &mut Vec<T>,
+    seen_names: &mut FxHashSet<String>,
+    fields: impl IntoIterator<Item = T>,
+) {
+    for field in fields {
+        if seen_names.insert(field.field_name().to_string()) {
+            target.push(field);
+        }
     }
 }
 
@@ -2246,18 +2278,22 @@ impl NamedField for AnalyzedSlotField {
 /// Termination behavior: does not emit partial/guessed fields, does not fall back
 /// to host resolution. Leaves the branch empty for unresolvable types.
 #[allow(clippy::type_complexity)]
-fn resolve_type_to_fields<T: NamedField + Clone>(
+fn resolve_type_to_fields<T: NamedField + Clone, S>(
     ts_type: &TSType<'_>,
     registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
-    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+    state: &mut S,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment], &mut S) -> Vec<T>,
 ) -> Option<Vec<T>> {
     match ts_type {
-        TSType::TSTypeLiteral(literal) => {
-            Some(extract_from_members(&literal.members, source, comments))
-        }
+        TSType::TSTypeLiteral(literal) => Some(extract_from_members(
+            &literal.members,
+            source,
+            comments,
+            state,
+        )),
         TSType::TSTypeReference(ref_type) => {
             let name = type_name_to_string(&ref_type.type_name);
             if visited.contains(&name) {
@@ -2278,12 +2314,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                 Some((declaration_registry, LocalTypeDecl::Interface { body, extends })) => {
                     let mut all_fields = Vec::new();
                     let mut seen_names = FxHashSet::default();
-                    let own_fields = extract_from_members(&body.body, source, comments);
-                    for field in own_fields {
-                        if seen_names.insert(field.field_name().to_string()) {
-                            all_fields.push(field);
-                        }
-                    }
+                    let mut heritage_fields = Vec::new();
                     for heritage in *extends {
                         let Some(parent_name) = heritage_name(&heritage.expression) else {
                             continue;
@@ -2300,16 +2331,19 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                             source,
                             comments,
                             visited,
+                            state,
                             extract_from_members,
                         ) else {
                             continue;
                         };
-                        for field in parent_fields {
-                            if seen_names.insert(field.field_name().to_string()) {
-                                all_fields.push(field);
-                            }
-                        }
+                        heritage_fields.extend(parent_fields);
                     }
+                    let own_fields = extract_from_members(&body.body, source, comments, state);
+                    append_unique_named_fields(
+                        &mut all_fields,
+                        &mut seen_names,
+                        T::order_interface_fields(own_fields, heritage_fields),
+                    );
                     Some(all_fields)
                 }
                 Some((declaration_registry, LocalTypeDecl::Alias(aliased_type))) => {
@@ -2319,6 +2353,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                         source,
                         comments,
                         visited,
+                        state,
                         extract_from_members,
                     )
                 }
@@ -2337,6 +2372,7 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
                     source,
                     comments,
                     visited,
+                    state,
                     extract_from_members,
                 ) {
                     for field in fields {
@@ -2353,15 +2389,16 @@ fn resolve_type_to_fields<T: NamedField + Clone>(
 }
 
 /// Generic interface declaration resolver. Shared by emit/slot resolution.
-#[allow(clippy::type_complexity)]
-fn resolve_interface_decl_generic<T: NamedField + Clone>(
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn resolve_interface_decl_generic<T: NamedField + Clone, S>(
     name: &str,
     decl: &LocalTypeDecl<'_>,
     registry: LocalTypeRegistryView<'_, '_>,
     source: &str,
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
-    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment]) -> Vec<T>,
+    state: &mut S,
+    extract_from_members: &dyn Fn(&[TSSignature<'_>], &str, &[Comment], &mut S) -> Vec<T>,
 ) -> Option<Vec<T>> {
     if visited.contains(name) {
         return Some(Vec::new());
@@ -2371,12 +2408,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
         LocalTypeDecl::Interface { body, extends } => {
             let mut fields = Vec::new();
             let mut seen_names = FxHashSet::default();
-            let own_fields = extract_from_members(&body.body, source, comments);
-            for field in own_fields {
-                if seen_names.insert(field.field_name().to_string()) {
-                    fields.push(field);
-                }
-            }
+            let mut heritage_fields = Vec::new();
             for heritage in *extends {
                 let Some(parent_name) = heritage_name(&heritage.expression) else {
                     continue;
@@ -2391,16 +2423,19 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
                     source,
                     comments,
                     visited,
+                    state,
                     extract_from_members,
                 ) else {
                     continue;
                 };
-                for field in parent_fields {
-                    if seen_names.insert(field.field_name().to_string()) {
-                        fields.push(field);
-                    }
-                }
+                heritage_fields.extend(parent_fields);
             }
+            let own_fields = extract_from_members(&body.body, source, comments, state);
+            append_unique_named_fields(
+                &mut fields,
+                &mut seen_names,
+                T::order_interface_fields(own_fields, heritage_fields),
+            );
             Some(fields)
         }
         LocalTypeDecl::Alias(aliased_type) => resolve_type_to_fields(
@@ -2409,6 +2444,7 @@ fn resolve_interface_decl_generic<T: NamedField + Clone>(
             source,
             comments,
             visited,
+            state,
             extract_from_members,
         ),
         LocalTypeDecl::Class => None,
@@ -2425,13 +2461,15 @@ fn resolve_type_to_emit_fields(
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
 ) -> Option<Vec<AnalyzedEmitField>> {
+    let mut emit_state = ();
     resolve_type_to_fields(
         ts_type,
         registry,
         source,
         comments,
         visited,
-        &extract_emit_fields_from_members,
+        &mut emit_state,
+        &extract_emit_fields_from_members_at,
     )
 }
 
@@ -2443,13 +2481,17 @@ fn resolve_type_to_slot_fields(
     comments: &[Comment],
     visited: &mut FxHashSet<String>,
 ) -> Option<Vec<AnalyzedSlotField>> {
+    let mut state = ();
     resolve_type_to_fields(
         ts_type,
         registry,
         source,
         comments,
         visited,
-        &extract_slot_fields_from_members,
+        &mut state,
+        &|members, source, comments, _state| {
+            extract_slot_fields_from_members(members, source, comments)
+        },
     )
 }
 
@@ -2653,6 +2695,14 @@ fn try_extract_macro(
                 Vec::new()
             };
 
+            // Edit anchors: one shared derivation for every macro kind, minted
+            // in place from the OXC nodes already in scope here. A pure `match`
+            // — no traversal, no locator deref, no resolution.
+            let edit_anchors = MacroEditAnchors {
+                type_literal: type_argument_member_list_anchor(call),
+                runtime_array: runtime_argument_array_anchor(call),
+            };
+
             Some(AnalyzedMacro {
                 kind,
                 owner,
@@ -2670,6 +2720,7 @@ fn try_extract_macro(
                 resolved_local_types: Vec::new(),
                 parsed_type_argument,
                 parsed_type_argument_scope,
+                edit_anchors,
                 span: call.span.into(),
             })
         }
@@ -3187,25 +3238,36 @@ fn extract_emit_fields_from_type(
     comments: &[Comment],
     source: &str,
 ) -> Vec<AnalyzedEmitField> {
+    extract_emit_fields_from_type_at(ts_type, comments, source)
+}
+
+fn extract_emit_fields_from_type_at(
+    ts_type: &TSType<'_>,
+    comments: &[Comment],
+    source: &str,
+) -> Vec<AnalyzedEmitField> {
     match ts_type {
         TSType::TSTypeLiteral(literal) => {
-            extract_emit_fields_from_members(&literal.members, source, comments)
+            extract_emit_fields_from_members_at(&literal.members, source, comments, &mut ())
         }
         TSType::TSTypeReference(_) => Vec::new(),
-        TSType::TSIntersectionType(intersection) => intersection
-            .types
-            .iter()
-            .flat_map(|t| extract_emit_fields_from_type(t, comments, source))
-            .collect(),
+        TSType::TSIntersectionType(intersection) => {
+            let mut fields = Vec::new();
+            for ty in &intersection.types {
+                fields.extend(extract_emit_fields_from_type_at(ty, comments, source));
+            }
+            fields
+        }
         _ => Vec::new(),
     }
 }
 
 /// Extract emit fields from TSSignature members (shared between TSTypeLiteral and interface bodies).
-fn extract_emit_fields_from_members(
+fn extract_emit_fields_from_members_at(
     members: &[TSSignature<'_>],
     source: &str,
     comments: &[Comment],
+    _state: &mut (),
 ) -> Vec<AnalyzedEmitField> {
     members
         .iter()
@@ -3237,6 +3299,7 @@ fn extract_emit_fields_from_members(
                 key_name.map(|name| AnalyzedEmitField {
                     name,
                     span: prop.key.span().into(),
+                    call_signature_span: None,
                     payload_type,
                     description,
                     tags,
@@ -3279,6 +3342,7 @@ fn extract_emit_fields_from_members(
                         return Some(AnalyzedEmitField {
                             name: s.value.to_string(),
                             span: s.span.into(),
+                            call_signature_span: Some(call_sig.span().into()),
                             payload_type,
                             description,
                             tags,
@@ -3310,6 +3374,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     key_name.map(|name| AnalyzedEmitField {
                         name,
                         span: p.key.span().into(),
+                        call_signature_span: None,
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
@@ -3329,6 +3394,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
                         span: lit.span.into(),
+                        call_signature_span: None,
                         payload_type: None,
                         description: None,
                         tags: Vec::new(),
@@ -3518,11 +3584,14 @@ fn extract_slot_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let bindings = prop
+                let (bindings, props_anchor) = prop
                     .type_annotation
                     .as_ref()
                     .map(|ta| extract_slot_bindings_from_fn_type(&ta.type_annotation, source))
-                    .unwrap_or_default();
+                    .unwrap_or((
+                        Vec::new(),
+                        MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+                    ));
                 let (return_type, has_authored_return) = prop
                     .type_annotation
                     .as_ref()
@@ -3536,6 +3605,7 @@ fn extract_slot_fields_from_members(
                     is_required: !prop.optional,
                     span: prop.key.span().into(),
                     bindings,
+                    props_anchor,
                     return_type,
                     description,
                     tags,
@@ -3549,7 +3619,8 @@ fn extract_slot_fields_from_members(
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
                     _ => None,
                 };
-                let bindings = extract_slot_bindings_from_params(&method.params, source);
+                let (bindings, props_anchor) =
+                    extract_slot_bindings_from_params(&method.params, source);
                 let (return_type, has_authored_return) = match method.return_type.as_ref() {
                     Some(rt) => {
                         let start = rt.type_annotation.span().start as usize;
@@ -3572,6 +3643,7 @@ fn extract_slot_fields_from_members(
                     is_required: !method.optional,
                     span: method.key.span().into(),
                     bindings,
+                    props_anchor,
                     return_type,
                     description,
                     tags,
@@ -3612,34 +3684,116 @@ fn extract_slot_return_from_fn(ts_type: &TSType<'_>, source: &str) -> (Option<St
 fn extract_slot_bindings_from_fn_type(
     ts_type: &TSType<'_>,
     source: &str,
-) -> Vec<AnalyzedSlotFieldBinding> {
+) -> (Vec<AnalyzedSlotFieldBinding>, MacroAnchor) {
     if let TSType::TSFunctionType(fn_type) = ts_type {
         extract_slot_bindings_from_params(&fn_type.params, source)
     } else {
-        Vec::new()
+        (
+            Vec::new(),
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+        )
     }
 }
 
-/// Extract slot binding names and types from a function's first parameter type annotation.
+/// Extract slot binding names and types from a function's first parameter type
+/// annotation, plus that parameter's props-object member-list anchor.
 ///
 /// Given `(props: { item: string, index: number })`, extracts:
 /// `[{name: "item", type_annotation: Some("string")}, {name: "index", type_annotation: Some("number")}]`
 fn extract_slot_bindings_from_params(
     params: &FormalParameters<'_>,
     source: &str,
-) -> Vec<AnalyzedSlotFieldBinding> {
+) -> (Vec<AnalyzedSlotFieldBinding>, MacroAnchor) {
+    let no_member_list = MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
     let Some(first_param) = params.items.first() else {
-        return Vec::new();
+        return (Vec::new(), no_member_list);
     };
     let Some(ref ta) = first_param.type_annotation else {
-        return Vec::new();
+        return (Vec::new(), no_member_list);
     };
+    let anchor = object_member_list_anchor(&ta.type_annotation);
     let bindings = extract_slot_bindings_from_type_literal(&ta.type_annotation, source);
     if !bindings.is_empty() {
-        return bindings;
+        return (bindings, anchor);
     }
     // Fall back to recovering bindings from a `Pick<Object, Keys>` AST shape.
-    extract_slot_bindings_from_pick_ast(&ta.type_annotation, source)
+    // That surface has no appendable member list, so the anchor stays the
+    // typed `NoMemberList` this helper already computed.
+    (
+        extract_slot_bindings_from_pick_ast(&ta.type_annotation, source),
+        anchor,
+    )
+}
+
+/// Mint a member-list anchor from a live OXC node whose span ENDS with the
+/// list's single closing delimiter (`}` for an object type / object literal,
+/// `]` for an array literal).
+fn closing_delimiter_anchor(span: oxc_span::Span, is_empty: bool) -> MacroAnchor {
+    if span.end <= span.start {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
+    }
+    MacroAnchor::Available(MemberListAnchor::new(span.end - 1, is_empty))
+}
+
+/// The appendable member-list anchor of an object TYPE at this position.
+///
+/// Every other shape — a `Pick<Object, Keys>` reference, a mapped type, a
+/// union — carries no single appendable member list and is an honest typed
+/// miss, never a guessed offset.
+fn object_member_list_anchor(ts_type: &TSType<'_>) -> MacroAnchor {
+    match ts_type {
+        TSType::TSTypeLiteral(literal) => {
+            closing_delimiter_anchor(literal.span, literal.members.is_empty())
+        }
+        _ => MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+    }
+}
+
+/// The macro call's TYPE-ARGUMENT member-list anchor.
+///
+/// One shared derivation for every macro kind — `defineProps`, `defineEmits`,
+/// `defineSlots` alike. A pure `match` on the OXC node already in scope at the
+/// single `AnalyzedMacro` construction site: no traversal, no resolution.
+fn type_argument_member_list_anchor(call: &CallExpression<'_>) -> MacroAnchor {
+    let Some(ref type_args) = call.type_arguments else {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NotTypeBased);
+    };
+    let Some(first) = type_args.params.first() else {
+        return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoTypeArgument);
+    };
+    match first {
+        TSType::TSTypeLiteral(literal) => {
+            closing_delimiter_anchor(literal.span, literal.members.is_empty())
+        }
+        // The member list lives in another declaration, not at this position.
+        TSType::TSTypeReference(_) => {
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::NamedTypeArgument)
+        }
+        // A merged member list has no single closing delimiter.
+        TSType::TSIntersectionType(_) => {
+            MacroAnchor::Unsupported(MacroAnchorUnsupported::IntersectionTypeArgument)
+        }
+        _ => MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
+    }
+}
+
+/// The macro call's runtime ARRAY-argument element-list anchor
+/// (`defineEmits(['a'])`).
+///
+/// A runtime OBJECT argument (`defineEmits({ a: null })`) has no array element
+/// list: appending an array entry there would emit invalid code, so it is an
+/// honest typed miss.
+fn runtime_argument_array_anchor(call: &CallExpression<'_>) -> MacroAnchor {
+    let no_member_list = MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
+    if call.type_arguments.is_some() {
+        return no_member_list;
+    }
+    match call.arguments.first().and_then(|arg| arg.as_expression()) {
+        Some(Expression::ArrayExpression(arr)) => {
+            closing_delimiter_anchor(arr.span, arr.elements.is_empty())
+        }
+        _ => no_member_list,
+    }
 }
 
 /// Extract binding names and types from a `TSTypeLiteral` (object type).

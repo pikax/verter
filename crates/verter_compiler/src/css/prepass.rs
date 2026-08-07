@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 
+pub use super::types::generate_var_name;
 use super::types::VBindVar;
 
 /// Marker attribute used to represent `:deep()` after pre-pass.
@@ -237,23 +238,6 @@ fn transform_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, 
     };
 
     Some((replacement, full_end, v_bind_var))
-}
-
-/// Generate CSS variable name from scope ID and expression.
-/// Sanitizes the expression for use as a CSS variable name.
-///
-/// Matches Vue's upstream behavior: replaces non-word characters (except hyphens)
-/// with `_`. Word characters are ASCII `[a-zA-Z0-9_]`.
-pub fn generate_var_name(scope_id: &str, expr: &str) -> String {
-    let mut sanitized = String::with_capacity(expr.len());
-    for c in expr.chars() {
-        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-            sanitized.push(c);
-        } else {
-            sanitized.push('_');
-        }
-    }
-    format!("--{}-{}", scope_id, sanitized)
 }
 
 /// Transform `:deep(.inner)` or `::v-deep(.inner)` → `[__v_deep__] .inner`.

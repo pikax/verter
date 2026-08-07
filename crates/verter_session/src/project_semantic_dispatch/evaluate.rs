@@ -1089,13 +1089,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     .expect("active evaluator frame")
                                     .context
                                     .into_structural_transit_with_mode(ProjectionMode::Navigate);
-                                let (resolved, observed) = self
+                                let (resolved, observed, carrier_completeness) = self
                                     .resolve_carrier_subject_node_capturing_suppress(
                                         current, context,
                                     );
                                 let frame = frames.last_mut().expect("active evaluator frame");
+                                frame.completeness = frame.completeness.merge(carrier_completeness);
                                 frame.completeness = frame.completeness.or_partial_if(
-                                    observed.result_is_partial,
+                                    observed.result_is_partial
+                                        && !carrier_completeness.is_partial(),
                                     observed.partial_reasons,
                                 );
                                 frame.cache_suppress |= observed.cache_suppress;

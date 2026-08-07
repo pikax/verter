@@ -84,9 +84,12 @@ fn accumulate_carrier_deps_descends_carrier_args() {
         let decl_ref = graph.intern_node(SemanticNodeData::DeclRef { identity: dep_id });
         let carrier = carrier_wrapping(&graph, decl_ref, kind);
 
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(&host, || {
-            super::accumulate_lowered_node_carrier_deps(ctx, carrier, "/owner.vue");
-        });
+        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            || {
+                super::accumulate_lowered_node_carrier_deps(ctx, carrier, "/owner.vue");
+            },
+        );
         let facts = match finalise {
             crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
             other => panic!("carrier dependency tracing must be cacheable: {other:?}"),

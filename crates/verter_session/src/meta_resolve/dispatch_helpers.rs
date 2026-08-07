@@ -737,12 +737,14 @@ pub(crate) fn arg_preserving_member_use_site_slot(
     // equal interned argument nodes. One memoized Navigate-transit raise of
     // one member annotation (never a body expansion, never an Instantiate
     // execution).
-    let raised = dispatch.raise_authored_locator_to_hot(
-        &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
-        ),
-    )?;
+    let raised = dispatch
+        .raise_authored_locator_to_hot(
+            &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+        )
+        .at_optional_boundary()?;
     let authored = resolved_instantiation_head(dispatch, raised.node())?;
     (authored == observed).then_some(slot)
 }

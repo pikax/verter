@@ -16,6 +16,19 @@
 import { describe, it, expect, vi } from "vitest";
 import { ComponentMetaSession } from "./project.js";
 
+function resolvedTypeRow(display: string) {
+  return {
+    publication: {
+      kind: "published",
+      semanticAuthority: "resolved",
+      exactness: "exactConcrete",
+      reason: { kind: "resolvedExactConcrete" },
+      provenance: { kind: "resolved", value: "semanticEvaluator" },
+    } as const,
+    terminalDisplay: { text: display },
+  };
+}
+
 function nativeMetaPayload(filePath: string, propName: string) {
   return {
     filePath,
@@ -24,7 +37,7 @@ function nativeMetaPayload(filePath: string, propName: string) {
       {
         name: propName,
         type: { kind: "primitive", name: "string" },
-        rawType: "string",
+        ...resolvedTypeRow("string"),
         required: true,
         hasDefault: false,
       },
@@ -55,6 +68,12 @@ function nativeMetaPayload(filePath: string, propName: string) {
     acceptedSurfaceCompleteness: "exact",
     rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
     fallthroughSurface: { kind: "none", reason: "noTemplate" },
+    orderedSfcStructure: {
+      schemaVersion: 1,
+      artifactToken: "a".repeat(43),
+      blocks: [],
+      markupNodes: [],
+    },
   };
 }
 

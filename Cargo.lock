@@ -1091,8 +1091,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2506,7 +2508,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3917,6 +3919,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "verter_compiler",
+ "verter_css_syntax",
  "verter_diagnostics",
  "verter_parser",
  "verter_semantic",
@@ -3963,6 +3966,7 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "verter_audit",
+ "verter_css_syntax",
  "verter_ecma",
  "verter_language",
  "verter_macro_dto",
@@ -3975,6 +3979,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_css_syntax"
+version = "0.0.1-beta.3"
+dependencies = [
+ "memchr",
+ "rustc-hash 2.1.2",
+ "smallvec",
+ "verter_span",
+]
+
+[[package]]
 name = "verter_diagnostics"
 version = "0.0.1-beta.3"
 dependencies = [
@@ -3982,6 +3996,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "verter_language",
  "verter_semantic",
  "verter_span",
  "verter_type_expr",
@@ -4022,6 +4037,7 @@ dependencies = [
  "verter_actions",
  "verter_compiler",
  "verter_diagnostics",
+ "verter_language",
  "verter_macro_dto",
  "verter_protocol",
  "verter_semantic",
@@ -4034,6 +4050,9 @@ dependencies = [
 name = "verter_language"
 version = "0.0.1-beta.3"
 dependencies = [
+ "getrandom 0.2.17",
+ "serde",
+ "trybuild",
  "verter_span",
 ]
 
@@ -4071,6 +4090,7 @@ dependencies = [
  "verter_compiler",
  "verter_diagnostics",
  "verter_ffi",
+ "verter_language",
  "verter_lsp",
  "verter_macro_dto",
  "verter_parser",
@@ -4247,6 +4267,7 @@ dependencies = [
  "static_assertions",
  "syn 2.0.117",
  "tempfile",
+ "verter_language",
  "verter_no_typeexpr",
  "verter_semantic",
  "verter_span",
@@ -4302,6 +4323,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "static_assertions",
+ "verter_css_syntax",
  "verter_language",
  "verter_no_typeexpr",
  "verter_parser",
@@ -4493,6 +4515,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "trybuild",
  "verter_language",
  "verter_span",
  "verter_tsgo_api",

@@ -1080,13 +1080,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> (
         SemanticNodeId,
         crate::project_semantic_dispatch::BuildLocalTaint,
+        crate::semantic_query::ResultCompleteness,
     ) {
-        let host = self.ctx.host_for_fact_tracer_install();
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let observation =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, || {
-            self.resolve_carrier_subject_node_inner(node, context)
-        });
+        let (resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
+            || self.resolve_carrier_subject_node_inner(node, context),
+        );
         // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
         // non-cacheability AND its overflow into `observed.cache_suppress`, and
         // ONLY THEN re-fold the merged observation into the enclosing frame.
@@ -1099,18 +1101,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             observed.cache_suppress = true;
         }
+        // A `matches!` is NOT exhaustive, so a new refusal variant
+        // compiles clean here while silently skipping the suppression.
+        // Both size and stability refusals yield no fact list this
+        // carrier can be rooted on, so both suppress.
         if matches!(
             finalise,
             crate::resolver_core::FactReadSetFinalise::Overflow
+                | crate::resolver_core::FactReadSetFinalise::MutationUnstable
         ) {
             observed.cache_suppress = true;
         }
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+        crate::request_context::fold_result_completeness(completeness);
         self.fold_into_top_build_local_taint_with(
             observed.result_is_partial,
             observed.cache_suppress,
             observed.partial_reasons,
         );
-        (resolved, observed)
+        (resolved, observed, completeness)
     }
 
     /// Carrier-subject head-resolution body (see

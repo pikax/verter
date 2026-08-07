@@ -5,14 +5,14 @@
 //! validation cannot work if the validator reads a stale artifact as
 //! 'current.'
 //!
-//! `current_derived_fact_hash(Route)` / the owner's import-route witness
-//! are the Route / ImportRoute fact-validation oracles. Pre-fix they
+//! `current_derived_fact_hash(Route)` and the owner's path-precise import
+//! witness are the route-validation authorities. Pre-fix the Route oracle
 //! read `FileArtifactStore::get_any` — which returns ANY cached
 //! `IndexedReady` for a canonical regardless of content hash. Once
 //! eager `evict_canonical` is retired a stale `IndexedReady`
 //! can linger past a content change, and the oracle would surface its
-//! stale `route_hash` / `import_route_hash` as the "current" derived
-//! fact — confirming a stale dependent cache entry as valid.
+//! stale `route_hash` as the "current" derived fact — confirming a stale
+//! dependent cache entry as valid.
 //!
 //! Post-fix the oracle reads `current_content_pinned_indexed`, which
 //! resolves the canonical's authoritative current content hash from
@@ -23,12 +23,12 @@
 //!
 //! Discriminating fixture: a real `IndexedReady` is materialised, then
 //! a synthetic STALE `IndexedReady` (doctored `whole_hash` +
-//! `route_hash` + `import_route_hash`) is planted into
+//! `route_hash`) is planted into
 //! `FileArtifactStore` while the scheduler's authoritative content
 //! hash stays at the real value — the lingering-stale store-entry
-//! scenario. The test then asserts the pinned read and the two derived
-//! fact oracles all reject the stale artifact. A pre-fix `get_any`
-//! tree returns the planted stale hashes and the assertions FAIL.
+//! scenario. The test then asserts the pinned read and Route oracle reject
+//! the stale artifact. A pre-fix `get_any` tree returns the planted stale
+//! hash and the assertions FAIL.
 use std::sync::Arc;
 
 use crate::resolver_core::DerivedFactKind;
@@ -422,20 +422,17 @@ fn indexed_for_current_content_pins_overlay_artifact_through_session_context() {
     );
 }
 
-/// `HostStoreView::build` route-fact provenance — a STALE `IndexedReady`
-/// retained for a canonical MUST NOT publish its stale `Route` derived
-/// hash, and MUST NOT suppress the `Route` fact derived from the
-/// canonical's CURRENT-content shallow surface.
+/// Root-backed store-view route-fact provenance: a STALE `IndexedReady`
+/// retained for a canonical MUST NOT answer the `Route` point lookup or
+/// suppress the fact derived from the canonical's CURRENT-content shallow
+/// surface.
 ///
-/// `HostStoreView::build` snapshots `FileArtifactStore::snapshot_all()`,
-/// which returns every retained `IndexedReady` regardless of content
-/// hash. A stale older-content `IndexedReady` planted for a canonical
-/// must never end up as the canonical's `Route` derived fact: the
-/// content-pinned `ensure_indexed_ready` read gates on the scheduler's
-/// current whole hash, MISSES the stale candidate, and re-materialises
-/// the CURRENT artifact — whose route surface the view then publishes,
-/// agreeing with `current_derived_fact_hash(Route)` (the production
-/// route-fact oracle, which is content-pinned).
+/// `HostStoreView::build` captures immutable roots in O(1); it does not scan
+/// artifacts. A stale older-content `IndexedReady` planted for a canonical
+/// must never answer the canonical's `Route` lookup: the content-pinned
+/// `ensure_indexed_ready` read gates on the scheduler's current whole hash,
+/// MISSES the stale candidate, and re-materialises the CURRENT artifact before
+/// the view captures its artifact root.
 ///
 /// Discriminating fixture: `probe.ts` is materialised (real
 /// `IndexedReady` at the real content hash), then a synthetic STALE
@@ -522,17 +519,16 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
          the planted stale candidate instead",
     );
 
-    // Build the production `HostStoreView`.
+    // Capture the production root-backed `HostStoreView`.
     let view = host.resolver_store_view_read().into_owned_view();
     let view_route_hash = view.derived_hash(probe, crate::resolver_core::DerivedFactKind::Route);
 
-    // Discriminating assertion: the view's `Route` derived hash must be
-    // the CURRENT route surface (from the re-materialised current
-    // `IndexedReady`), NOT the planted stale artifact's surface.
+    // Discriminating assertion: the view's point lookup must return the
+    // CURRENT route surface, not the planted stale artifact's surface.
     assert_eq!(
         view_route_hash,
         Some(current_route_surface),
-        "HostStoreView::build MUST publish the CURRENT route surface for the canonical \
+        "HostStoreView's captured roots MUST answer the CURRENT route surface for the canonical \
          — the content-pinned `ensure_indexed_ready` read rejected the planted stale \
          candidate and re-materialised the current artifact. A permissive read \
          regression keeps the stale artifact, so the view's Route hash would be the \
@@ -541,7 +537,7 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     assert_ne!(
         view_route_hash,
         Some(stale_route_surface),
-        "HostStoreView::build MUST NOT publish the STALE `IndexedReady`'s route surface \
+        "HostStoreView's captured roots MUST NOT answer the STALE `IndexedReady`'s route surface \
          as the canonical's `Route` derived fact",
     );
     // The view's Route fact must agree with the production route-fact
@@ -551,7 +547,7 @@ fn host_store_view_route_fact_ignores_stale_indexed_after_current_rematerializat
     assert_eq!(
         view_route_hash,
         host.current_derived_fact_hash(probe, crate::resolver_core::DerivedFactKind::Route),
-        "HostStoreView::build's `Route` derived hash MUST agree with \
+        "HostStoreView's root-backed `Route` lookup MUST agree with \
          `current_derived_fact_hash(Route)` — the producer and the validator must observe \
          one route surface for the canonical",
     );

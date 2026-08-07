@@ -10,7 +10,57 @@ import {
   computeCodeLenses,
   getDecorationStyles,
 } from "./decorations";
-import type { FileAnalysis, AnalysisBinding } from "../core/types";
+import type {
+  FileAnalysis,
+  AnalysisBinding,
+  OrderedSfcStructure,
+  StructureBlock,
+} from "../core/types";
+
+/** Structure ranges are UTF-8 BYTE offsets (production wire contract). */
+function toBytes(source: string, utf16Offset: number): number {
+  return new TextEncoder().encode(source.slice(0, utf16Offset)).length;
+}
+
+function structureFor(source: string): OrderedSfcStructure {
+  const blocks: StructureBlock[] = [];
+  const re = /<(template|script|style)\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source))) {
+    const name = match[1].toLowerCase();
+    const start = match.index + match[0].length;
+    const close = source.indexOf(`</${name}>`, start);
+    const end = close < 0 ? source.length : close;
+    const range = (a: number, b: number) => ({
+      sourceSpaceToken: "test",
+      start: toBytes(source, a),
+      end: toBytes(source, b),
+    });
+    blocks.push({
+      kind: "section",
+      markupRootTokens: [],
+      section: {
+        blockToken: `${name}-${blocks.length}`,
+        role:
+          name === "template"
+            ? { kind: "templateHost" }
+            : name === "script"
+              ? { kind: "script", role: "instance", dialect: "typescript" }
+              : {
+                  kind: "style",
+                  dialect: "css",
+                  scoped: match[0].includes("scoped"),
+                  module: "none",
+                },
+        openingRange: range(match.index, start),
+        contentRange: range(start, end),
+        fullRange: range(match.index, close < 0 ? source.length : close + name.length + 3),
+        attributeInsertionAnchor: range(start - 1, start - 1),
+      },
+    });
+  }
+  return { schemaVersion: 1, artifactToken: "test", blocks, markupNodes: [] };
+}
 
 function makeAnalysis(overrides: Partial<FileAnalysis> = {}): FileAnalysis {
   return {
@@ -295,7 +345,7 @@ describe("computeCodeLenses", () => {
         },
       ],
     });
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     // Should have at least a script lens and a template lens
     expect(lenses.length).toBeGreaterThanOrEqual(2);
     const scriptLens = lenses.find((l) => l.title.includes("binding"));
@@ -314,6 +364,9 @@ describe("computeCodeLenses", () => {
           scoped: true,
           isModule: false,
           moduleName: null,
+          // The sealed token of the third structure block (script, template,
+          // style) — the sole association key.
+          blockToken: "style-2",
           vBinds: [],
           specialPseudos: [],
           flags: 0,
@@ -328,7 +381,7 @@ describe("computeCodeLenses", () => {
         },
       ],
     });
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     const styleLens = lenses.find((l) => l.title.includes("scoped"));
     expect(styleLens).toBeTruthy();
   });
@@ -336,8 +389,78 @@ describe("computeCodeLenses", () => {
   it("returns empty array for source with no blocks", () => {
     const source = "// just a comment";
     const analysis = makeAnalysis();
-    const lenses = computeCodeLenses(source, analysis);
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
     expect(lenses).toEqual([]);
+  });
+
+  it("token-maps style analyses onto structure blocks, never by ordinal", () => {
+    const source =
+      "<style>\n.first { color: red; }\n</style>\n<style scoped>\n.second { color: blue; }\n.third { color: green; }\n</style>";
+    const structure = structureFor(source); // block tokens: style-0, style-1
+    // The analyses arrive REVERSED relative to structure order; only the
+    // opaque block token carries the association.
+    const styleEntry = (blockToken: string, scoped: boolean, classNames: string[]) => ({
+      lang: "css",
+      scoped,
+      isModule: false,
+      moduleName: null,
+      blockToken,
+      vBinds: [],
+      specialPseudos: [],
+      flags: 0,
+      css: {
+        selectors: [],
+        classes: classNames.map((name) => ({ name, start: 0, end: 4 })),
+        ids: [],
+        customProperties: [],
+        atRules: [],
+        ruleCount: classNames.length,
+      },
+    });
+    const analysis = makeAnalysis({
+      styles: [
+        styleEntry("style-1", true, ["second", "third"]),
+        styleEntry("style-0", false, ["first"]),
+      ],
+    });
+
+    const lenses = computeCodeLenses(source, analysis, structure);
+    const styleLenses = lenses.filter((lens) => /class|rule|scoped/.test(lens.title));
+    expect(styleLenses.length).toBe(2);
+    // Structure order is preserved; content is joined by token, not index.
+    expect(styleLenses[0].title).toContain("1 class");
+    expect(styleLenses[0].title).not.toContain("scoped");
+    expect(styleLenses[1].title).toContain("2 classes");
+    expect(styleLenses[1].title).toContain("scoped");
+  });
+
+  it("treats a missing token match as typed unavailable, never ordinal fallback", () => {
+    const source = "<style>\n.a { color: red; }\n</style>";
+    const analysis = makeAnalysis({
+      styles: [
+        {
+          lang: "css",
+          scoped: true,
+          isModule: false,
+          moduleName: null,
+          // A stale artifact's token: no structure block carries it.
+          blockToken: "stale-artifact-style-token",
+          vBinds: [],
+          specialPseudos: [],
+          flags: 0,
+          css: {
+            selectors: [],
+            classes: [{ name: "a", start: 0, end: 2 }],
+            ids: [],
+            customProperties: [],
+            atRules: [],
+            ruleCount: 1,
+          },
+        },
+      ],
+    });
+    const lenses = computeCodeLenses(source, analysis, structureFor(source));
+    expect(lenses.find((lens) => /class|rule|scoped/.test(lens.title))).toBeUndefined();
   });
 });
 
@@ -352,5 +475,20 @@ describe("getDecorationStyles", () => {
     expect(css).toContain(".verter-class");
     expect(css).toContain(".verter-css-used");
     expect(css).toContain(".verter-css-unused");
+  });
+});
+
+describe("computeCodeLenses UTF-8/UTF-16 conversion (B-48)", () => {
+  it("computes lens lines from byte offsets converted to UTF-16 (astral + CRLF)", () => {
+    const source =
+      "<script setup>\r\n// \u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\r\nconst a = 1\r\n</script>\r\n<template>\r\n<div/>\r\n</template>";
+
+    const lenses = computeCodeLenses(source, makeAnalysis(), structureFor(source));
+
+    // The template block opens on line 5 (1-based). An unconverted BYTE
+    // offset walks past the newline after `<template>` and mis-reports the
+    // line.
+    expect(lenses.some((lens) => lens.title === "template" && lens.line === 5)).toBe(true);
+    expect(lenses.some((lens) => lens.title === "template" && lens.line !== 5)).toBe(false);
   });
 });

@@ -3785,9 +3785,13 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 // `parse_fact_ref(`, `self_root_fact`, and `shallow_file_state` inside
 // this body.
 pub(crate) fn semantic_graph_read_set_signature(
+    view: &dyn crate::resolver_core::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
     traced_facts: &[crate::resolver_core::FactVersionRef],
-) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use crate::resolver_core::FactVersionRef;
 
     // Collapse the observed self-roots into a per-canonical hash map;
@@ -3796,7 +3800,9 @@ pub(crate) fn semantic_graph_read_set_signature(
         rustc_hash::FxHashMap::default();
     for (canonical, observed_hash) in observed_self_roots {
         match self_root_hashes.get(canonical) {
-            Some(existing) if existing != observed_hash => return None,
+            Some(existing) if existing != observed_hash => {
+                return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict)
+            }
             _ => {
                 self_root_hashes.insert(Arc::clone(canonical), *observed_hash);
             }
@@ -3825,7 +3831,7 @@ pub(crate) fn semantic_graph_read_set_signature(
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
             if let Some(observed_hash) = self_root_hashes.get(canonical_id.as_str()) {
                 if hash != observed_hash {
-                    return None;
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
                 // Already emitted as a self-root above — do not
                 // duplicate.
@@ -3835,9 +3841,12 @@ pub(crate) fn semantic_graph_read_set_signature(
         facts.push(fact.clone());
     }
 
-    Some(crate::fact_signature_helpers::ReadSetSignature::new(
-        Arc::from(facts),
-    ))
+    let self_root_canonicals: Vec<Arc<str>> = self_root_hashes.into_keys().collect();
+    crate::fact_signature_helpers::bound_completed_structural_carrier(
+        view,
+        facts,
+        self_root_canonicals,
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────

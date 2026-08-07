@@ -436,19 +436,23 @@ pub(crate) fn run_fallthrough_request<H>(
 where
     H: FallthroughRequestHost,
 {
-    let tracer_host = host.cacheability_context().host_for_fact_tracer_install();
-    crate::fact_signature_helpers::with_cacheability_scope(tracer_host, |probe| {
-        run_fallthrough_request_in_scope(
-            host,
-            singleflight,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            fixed_store_view,
-            probe,
-            max_attempts,
-        )
-    })
+    crate::fact_signature_helpers::with_cacheability_scope(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(
+            host.cacheability_context(),
+        ),
+        |probe| {
+            run_fallthrough_request_in_scope(
+                host,
+                singleflight,
+                canonical_id,
+                prop_type_overrides,
+                visiting,
+                fixed_store_view,
+                probe,
+                max_attempts,
+            )
+        },
+    )
     .0
 }
 

@@ -870,14 +870,18 @@ fn materialize_subject_origin_self_root(
 /// traced `ProjectGeneration` is kept, every other traced fact is kept
 /// verbatim.
 ///
-/// Returns `None` — the caller routes the value through `ReturnOnly`
-/// — when a traced `FileWholeHash` disagrees with an observed
-/// self-root hash (torn read).
+/// Returns a typed refusal when a traced `FileWholeHash` disagrees with an
+/// observed self-root hash, strict-world provenance cannot be established,
+/// or the completed carrier remains above the cap.
 fn merge_traced_facts_into_materialize_carrier(
+    view: &dyn crate::resolver_core::StoreView,
     producer_facts: &[crate::resolver_core::FactVersionRef],
     self_root_canonicals: &[Arc<str>],
     traced_facts: &[crate::resolver_core::FactVersionRef],
-) -> Option<Arc<[crate::resolver_core::FactVersionRef]>> {
+) -> Result<
+    crate::fact_signature_helpers::StructuralCarrierReadSet,
+    crate::cache_runtime::NonAdmissionReason,
+> {
     use crate::resolver_core::FactVersionRef;
 
     // The observed self-root hashes are the producer carrier's leading
@@ -922,7 +926,7 @@ fn merge_traced_facts_into_materialize_carrier(
         if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
             if let Some(observed) = self_root_hashes.get(canonical_id.as_str()) {
                 if hash != observed {
-                    return None;
+                    return Err(crate::cache_runtime::NonAdmissionReason::SelfRootConflict);
                 }
                 // Already emitted as a self-root — do not duplicate.
                 continue;
@@ -930,7 +934,11 @@ fn merge_traced_facts_into_materialize_carrier(
         }
         facts.push(fact.clone());
     }
-    Some(Arc::from(facts))
+    crate::fact_signature_helpers::bound_completed_structural_carrier(
+        view,
+        facts,
+        self_root_canonicals.to_vec(),
+    )
 }
 
 /// Five-phase materialiser entry. Maintains
@@ -1615,7 +1623,10 @@ where
     // re-publish gates below; single-threaded by construction
     // (the singleflight winner's thread).
     let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let (admission, finalise) = crate::fact_signature_helpers::install_fact_tracer(host, compute);
+    let (admission, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        compute,
+    );
     provenance
         .materialize_structure_fact_tracer_installs
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1700,21 +1711,27 @@ where
                     // torn read (traced self-root hash
                     // disagrees with the observed one) routes
                     // the value through `ReturnOnly`.
-                    match merge_traced_facts_into_materialize_carrier(
-                        &entry.read_set_signature.facts,
-                        &entry.self_root_canonicals,
-                        &fact_dep_signature,
-                    ) {
-                        Some(merged) => {
+                    let completed =
+                        crate::fact_signature_helpers::with_effective_store_view(ctx, |view| {
+                            merge_traced_facts_into_materialize_carrier(
+                                view,
+                                &entry.read_set_signature.facts,
+                                &entry.self_root_canonicals,
+                                &fact_dep_signature,
+                            )
+                        });
+                    match completed {
+                        Ok((merged, self_root_canonicals)) => {
                             // Re-build the fact carrier with the
                             // merged traced facts. The entry's
                             // `dispatch_dep_signature` is the
                             // dispatch-return rail — untouched.
                             entry.read_set_signature =
                                 crate::fact_signature_helpers::ReadSetSignature::new(merged);
+                            entry.self_root_canonicals = self_root_canonicals;
                             crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry)
                         }
-                        None => {
+                        Err(reason) => {
                             // The traced self-root facts torn
                             // against the observed self-roots
                             // — the value is valid but the
@@ -1724,7 +1741,7 @@ where
                             // `SelfRootConflict` reason.
                             crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                                 value: self_root_conflict_return_only(entry.outcome),
-                                reason: crate::cache_runtime::NonAdmissionReason::SelfRootConflict,
+                                reason,
                             }
                         }
                     }
@@ -1735,10 +1752,21 @@ where
         crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
             unreachable!("non-cacheable finalise returned above before cache admission")
         }
-        crate::resolver_core::FactReadSetFinalise::Overflow => {
-            provenance
-                .materialize_structure_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        refusal @ (crate::resolver_core::FactReadSetFinalise::Overflow
+        | crate::resolver_core::FactReadSetFinalise::MutationUnstable) => {
+            // Both refuse admission identically; only the ATTRIBUTION
+            // differs. A stability refusal is not a size refusal, so it
+            // neither inflates the overflow counter nor reports
+            // `SignatureOverflow`.
+            let unstable = matches!(
+                refusal,
+                crate::resolver_core::FactReadSetFinalise::MutationUnstable
+            );
+            if !unstable {
+                provenance
+                    .materialize_structure_overflow_refusals
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             // Tracer overflowed — the materialised outcome is
             // valid but cannot be admitted safely. Convert a
             // Cacheable outcome to ReturnOnly: the winner
@@ -1762,6 +1790,8 @@ where
                         );
                     let reason = if result_is_partial {
                         crate::cache_runtime::NonAdmissionReason::PartialResult
+                    } else if unstable {
+                        crate::cache_runtime::NonAdmissionReason::MutationUnstable
                     } else {
                         crate::cache_runtime::NonAdmissionReason::SignatureOverflow
                     };
@@ -1983,14 +2013,43 @@ fn materialize_object_surface(
         return MaterializeOutcome::Value(key.base);
     }
 
-    let new_surface = crate::semantic_query::surface_view! {
-        members: Arc::from(new_members.into_boxed_slice()),
-        call_signatures: Arc::from(new_call_signatures.into_boxed_slice()),
-        construct_signatures: Arc::from(new_construct_signatures.into_boxed_slice()),
-        index_signatures: Arc::from(new_index_signatures.into_boxed_slice()),
-        keyspace: new_keyspace,
-        has_index_signature: surface.has_known_index_signature(),
-    };
+    let mut members = new_members.into_iter();
+    let mut calls = new_call_signatures.into_iter();
+    let mut constructs = new_construct_signatures.into_iter();
+    let mut indexes = new_index_signatures.into_iter();
+    let entries = surface
+        .entries
+        .iter()
+        .map(|entry| match entry {
+            crate::semantic_query::SurfaceEntry::Member(_) => {
+                crate::semantic_query::SurfaceEntry::Member(
+                    members.next().expect("derived member index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::CallSignature(_) => {
+                crate::semantic_query::SurfaceEntry::CallSignature(
+                    calls.next().expect("derived call index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::ConstructSignature(_) => {
+                crate::semantic_query::SurfaceEntry::ConstructSignature(
+                    constructs
+                        .next()
+                        .expect("derived construct index matches stream"),
+                )
+            }
+            crate::semantic_query::SurfaceEntry::IndexSignature(_) => {
+                crate::semantic_query::SurfaceEntry::IndexSignature(
+                    indexes.next().expect("derived index matches stream"),
+                )
+            }
+        })
+        .collect();
+    let new_surface = crate::semantic_query::SurfaceView::from_entries(
+        entries,
+        new_keyspace,
+        surface.has_known_index_signature(),
+    );
     let new_id = graph.intern_preserving_scope(key.base, SemanticNodeData::Object(new_surface));
     MaterializeOutcome::Value(new_id)
 }
@@ -2115,6 +2174,97 @@ mod tests {
             )]
             .into_boxed_slice(),
         )
+    }
+
+    #[test]
+    fn materialize_terminal_merge_enforces_the_completed_carrier_cap() {
+        let view = crate::semantic_graph_self_root_tests::StrictWorldTestView::default();
+        let root = Arc::<str>::from("/w/materialize-root.ts");
+        let producer = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: root.to_string(),
+            hash: [0x22; 16],
+        }];
+        let roots = vec![Arc::clone(&root)];
+        let at_cap_after_merge: Vec<crate::resolver_core::FactVersionRef> = (0
+            ..crate::resolver_core::FACT_SIGNATURE_CAP - 1)
+            .map(
+                |generation| crate::resolver_core::FactVersionRef::ProjectGeneration {
+                    generation: generation as u64,
+                },
+            )
+            .collect();
+        let (facts, retained_roots) = merge_traced_facts_into_materialize_carrier(
+            &view,
+            &producer,
+            &roots,
+            &at_cap_after_merge,
+        )
+        .expect("the exact-cap completed carrier remains admissible");
+        assert_eq!(facts.len(), crate::resolver_core::FACT_SIGNATURE_CAP);
+        assert_eq!(retained_roots.as_ref(), roots.as_slice());
+
+        let mut above_cap_after_merge = at_cap_after_merge;
+        above_cap_after_merge.push(crate::resolver_core::FactVersionRef::ProjectGeneration {
+            generation: crate::resolver_core::FACT_SIGNATURE_CAP as u64,
+        });
+        assert_eq!(
+            merge_traced_facts_into_materialize_carrier(
+                &view,
+                &producer,
+                &roots,
+                &above_cap_after_merge,
+            )
+            .unwrap_err(),
+            crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+        );
+    }
+
+    #[test]
+    fn materialize_publication_refuses_a_post_finalise_over_cap_carrier() {
+        let canonical = "/w/materialize-publish.ts";
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from("export type Root = string;\n"),
+                file_language: crate::types::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert root");
+        let whole_hash = host
+            .ensure_indexed_ready(canonical)
+            .expect("materialize root is indexed")
+            .whole_hash;
+        let traced = crate::semantic_graph_self_root_tests::exact_cap_terminal_witness_facts();
+        let root_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            canonical_id: canonical.to_string(),
+            hash: whole_hash,
+        };
+        let generation = host.project_type_store().current_project_generation();
+
+        let admission = trace_materialize_compute(&host, || {
+            crate::fact_signature_helpers::observe_fact_signature(&traced);
+            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                MaterializeStructureEntry {
+                    outcome: MaterializeOutcome::Miss(dummy_node(42)),
+                    read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                        Arc::from([root_fact]),
+                    ),
+                    dispatch_dep_signature: Arc::from([]),
+                    self_root_canonicals: Arc::from([Arc::<str>::from(canonical)]),
+                    validated_at_generation: generation,
+                },
+            )
+        });
+
+        assert!(matches!(
+            admission,
+            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                reason: crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+                ..
+            }
+        ));
     }
 
     #[test]

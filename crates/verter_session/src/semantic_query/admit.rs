@@ -74,7 +74,7 @@ pub enum Admission {
 ///
 /// Forward note (§18.4): the gate keys on the presence of the rooting fact
 /// KIND on `sig` ([`records_missing_dependency_fact`](ReadSetSignature::records_missing_dependency_fact)
-/// = a `DerivedFactKind::ImportRoute` fact present;
+/// = a `ResolveImports` fact with a captured resolution witness present;
 /// [`records_negative_resolution_fact`](ReadSetSignature::records_negative_resolution_fact)
 /// = a negative `ResolvedImportClause` / `ResolvedReexportBinding`
 /// `UNRESOLVED_SENTINEL` fact present). It does NOT correlate that fact to the

@@ -624,6 +624,7 @@ fn all_non_admission_reasons() -> Vec<NonAdmissionReason> {
     let _exhaustive_compile_check = |r: NonAdmissionReason| match r {
         NonAdmissionReason::IntrinsicNonCacheable => (),
         NonAdmissionReason::SignatureOverflow => (),
+        NonAdmissionReason::MutationUnstable => (),
         NonAdmissionReason::EmptySignature => (),
         NonAdmissionReason::SelfRootConflict => (),
         NonAdmissionReason::RouteGenerationDependency => (),

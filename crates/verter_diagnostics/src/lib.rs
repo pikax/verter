@@ -19,6 +19,7 @@
 //! AnalysisSnapshot → LintVisitor → [Rule1, Rule2, ...] → DiagnosticSet
 //! ```
 
+pub mod block_facts;
 pub mod casing;
 mod comment_directives;
 mod config;
@@ -30,6 +31,7 @@ mod linter;
 pub mod rules;
 mod visitor;
 
+pub use block_facts::{project_block_facts, SfcBlockAttribute, SfcBlockFact, SfcBlockRole};
 pub use comment_directives::parse_comment_directives;
 pub use config::{
     discover_lint_config, parse_rule_severity, strip_json_comments, strip_trailing_commas,

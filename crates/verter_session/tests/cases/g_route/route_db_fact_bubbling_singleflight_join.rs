@@ -316,6 +316,8 @@ fn follower_bubbles_leader_facts_and_advances_coalesced_counter() {
         FactReadSetFinalise::NonCacheable(_) => {
             panic!("follower tracer unexpectedly non-cacheable")
         }
-        FactReadSetFinalise::Overflow => panic!("follower outer tracer overflowed"),
+        FactReadSetFinalise::Overflow | FactReadSetFinalise::MutationUnstable => {
+            panic!("follower outer tracer overflowed")
+        }
     }
 }

@@ -110,7 +110,10 @@ pub fn install_fact_tracer_for_tests<F, R>(
 where
     F: FnOnce() -> R,
 {
-    crate::fact_signature_helpers::install_fact_tracer(host, f)
+    crate::fact_signature_helpers::install_fact_tracer(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        f,
+    )
 }
 
 /// Open a REAL cacheability tracer scope and hand `f` the scope's
@@ -129,7 +132,10 @@ pub fn with_cacheability_scope_for_tests<F, R>(host: &crate::VerterHost, f: F) -
 where
     F: for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
 {
-    crate::fact_signature_helpers::with_cacheability_scope(host, f)
+    crate::fact_signature_helpers::with_cacheability_scope(
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        f,
+    )
 }
 
 /// Convert a dispatch-fence `DepSignature` into a
@@ -670,9 +676,13 @@ pub fn component_meta_cold_traced_read_set_for_tests(
     owner_canonical: &str,
 ) -> Option<crate::resolver_core::FactReadSetFinalise> {
     let canonical = host.resolve_alias_or_canonical(owner_canonical);
-    let (resolved_opt, read_set) = host.with_fact_tracer(|| {
-        crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-            host.resolve_component_meta(canonical.as_str(), crate::types::ProjectionMode::Expanded)
+    let (resolved_opt, read_set) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+                host.resolve_component_meta(
+                    canonical.as_str(),
+                    crate::types::ProjectionMode::Expanded,
+                )
                 .map(|resolved| {
                     let _ = crate::host_manage::extract_component_meta_from_resolved(
                         host,
@@ -682,8 +692,8 @@ pub fn component_meta_cold_traced_read_set_for_tests(
                         ctx,
                     );
                 })
-        })
-    });
+            })
+        });
     resolved_opt?;
     Some(read_set.finalise())
 }

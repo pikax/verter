@@ -956,9 +956,10 @@ pub struct RequestContext {
     pub prepared_decl_bundle_reject_self_root_untracked: AtomicU64,
     /// Bundle warm-read rejection — self-root tracked, hash differs.
     pub prepared_decl_bundle_reject_self_root_hash_mismatch: AtomicU64,
-    /// Bundle warm-read rejection — `ImportRoute` snapshot absent.
+    /// Legacy event slot retained for wire compatibility; the deleted
+    /// `ImportRoute` digest no longer emits an absent-vs-mismatch split.
     pub prepared_decl_bundle_reject_import_route_absent: AtomicU64,
-    /// Bundle warm-read rejection — `ImportRoute` snapshot differs.
+    /// Bundle warm-read rejection — a path-precise resolution witness moved.
     pub prepared_decl_bundle_reject_import_route_mismatch: AtomicU64,
     /// Bundle warm-read rejection — unattributed (must stay 0).
     pub prepared_decl_bundle_reject_other: AtomicU64,

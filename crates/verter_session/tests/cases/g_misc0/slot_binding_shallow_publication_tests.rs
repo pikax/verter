@@ -162,8 +162,9 @@ fn indexed_access_slot_binding_does_not_expand_nested_callback_payload() {
     // demand: the SHALLOW published shape is exactly what this guard
     // pins (a demand would resolve and invert the claim).
     let controls_source = controls_binding
-        .type_source
-        .present()
+        .publication
+        .result()
+        .selected_source()
         .expect("toolbar.controls must publish a typed source");
     let shallow_binding = verter_session::test_only::semantic_source_probe::shallow_type_expr(
         &host,

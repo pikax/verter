@@ -153,17 +153,18 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
     let unraisable = graph.intern_node(SemanticNodeData::Union(StdArc::from(
         vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
     )));
-    let (_carrier, facts) = host.with_fact_tracer(|| {
-        let carrier = super::raise_node_to_sealed_carrier(
-            &dispatch,
-            unraisable,
-            crate::semantic_query::DepSignature::default(),
-        );
-        assert!(
-            carrier.result_is_partial(),
-            "a present-but-unraisable composite must degrade PARTIAL, never admitted complete"
-        );
-    });
+    let (_carrier, facts) =
+        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let carrier = super::raise_node_to_sealed_carrier(
+                &dispatch,
+                unraisable,
+                crate::semantic_query::DepSignature::default(),
+            );
+            assert!(
+                carrier.result_is_partial(),
+                "a present-but-unraisable composite must degrade PARTIAL, never admitted complete"
+            );
+        });
     assert!(
         matches!(
             facts.finalise(),

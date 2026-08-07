@@ -450,7 +450,7 @@ impl ProjectSemanticDispatch<'_> {
                 partial_reasons: PartialReasonSet::SEMANTIC_QUERY_FAULT,
             };
         };
-        let Some(hot) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
+        let Some(product) = crate::structural_carrier_producer::macro_type_arg_hot_ref(
             self.ctx,
             canonical,
             macro_index,
@@ -470,7 +470,7 @@ impl ProjectSemanticDispatch<'_> {
             owner: owner.clone(),
             macro_index,
             macro_kind,
-            type_args: Arc::from([hot.node()]),
+            type_args: Arc::from([product.hot.node()]),
             context: self.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
         crate::component_meta_audit::merge_dep_signature_into_local_fence(
@@ -600,7 +600,7 @@ impl ProjectSemanticDispatch<'_> {
         }
 
         let mut observed_self_roots = vec![owner_root];
-        for root in self.observed_self_roots_from_nodes([hot.node(), node]) {
+        for root in self.observed_self_roots_from_nodes([product.hot.node(), node]) {
             if !observed_self_roots.contains(&root) {
                 observed_self_roots.push(root);
             }
