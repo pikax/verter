@@ -54,20 +54,10 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "AwaitHead",
     "Base64UrlStringV1",
     "BlockContentArtifactSchemaVersion",
+    "BlockContentAvailabilityV1",
     "BlockContentBasisTokenV1",
     "BlockContentCapturedEchoV1",
-    "BlockContentDependencyReadEchoV1",
-    "BlockContentDependencyReadRequestV1",
-    "BlockContentDependencyReadResponseV1",
-    "BlockContentDependencyReadResponseV1BudgetExceeded",
-    "BlockContentDependencyReadResponseV1Cancelled",
-    "BlockContentDependencyReadResponseV1CorrelationRejected",
-    "BlockContentDependencyReadResponseV1Cycle",
-    "BlockContentDependencyReadResponseV1Failed",
-    "BlockContentDependencyReadResponseV1NotFound",
-    "BlockContentDependencyReadResponseV1Resolved",
-    "BlockContentDependencyReadResponseV1ScopeDenied",
-    "BlockContentDependencyReadResponseV1Stale",
+    "BlockContentCorrelationTokenV1",
     "BlockContentOriginFingerprintV1",
     "BlockContentOriginV1",
     "BlockContentOriginV1External",
@@ -92,10 +82,8 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "BlockContentResolveResponseV1PreCaptureStale",
     "BlockContentResolveResponseV1PreCaptureUnavailable",
     "BlockContentResolveResponseV1Resolved",
-    "BlockContentWorkTokenV1",
     "BlockRecoveryReasonV1",
     "CacheClusterSchemaVersion",
-    "CanonicalConfigBytesV1",
     "CanonicalRangeV1",
     "CanonicalRangeV1Lsp",
     "CanonicalRangeV1Offset",
@@ -129,29 +117,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "ContractDegradation",
     "ContractDegradationCode",
     "ContractExactness",
-    "DeniedCapabilityV1",
-    "DependencyFingerprintV1",
-    "DependencyReadBudgetKindV1",
-    "DependencyReadFactOutcomeV1",
-    "DependencyReadFactOutcomeV1Missing",
-    "DependencyReadFactOutcomeV1Resolved",
-    "DependencyReadFactV1",
-    "DependencyReadFailureV1",
-    "DependencyReadKindV1",
-    "DependencyReadNegativeReasonV1",
-    "DependencyReadOutcomeKindV1",
-    "DependencyReadSetV1",
-    "DependencyReadTerminalCauseV1",
-    "DependencyRequestCorrelationAuditEventV1",
-    "DependencyRequestCorrelationAuditEventV1Consumed",
-    "DependencyRequestCorrelationAuditEventV1OutstandingDestroyed",
-    "DependencyRequestCorrelationAuditEventV1Pending",
-    "DependencyRequestCorrelationAuditEventV1Rejected",
-    "DependencyRequestCorrelationRejectV1",
-    "DependencyRequestIdV1",
-    "DependencyResolutionProvenanceV1",
-    "DependencyResolverKindV1",
-    "DependencyTokenV1",
     "DescriptorHandle",
     "DescriptorManifestToken",
     "DirectiveArgumentV1",
@@ -175,7 +140,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "DocumentStructureV1",
     "DocumentUnavailableReasonV1",
     "DocumentUriV1",
-    "DynamicModuleAuthorityV1",
     "EachHead",
     "EntityDecodeRecipeV1",
     "EntityDecodeRecipeV1Html5Attribute",
@@ -236,11 +200,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "PositionEncodingSessionTokenV1",
     "PostCaptureProcessingFailureV1",
     "PreCaptureValidationFailureV1",
-    "PreprocessorIdentityV1",
-    "PreprocessorStepV1",
-    "PreprocessorWorkSpecV1",
-    "ProcessorBrokerInstanceTokenV1",
-    "ProcessorSandboxKindV1",
     "ProviderProtocolVersion",
     "PublicCallSignature",
     "PublicDerivedHandlerShape",
@@ -318,6 +277,8 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "StructureBlockV1",
     "StructureProtocolVersion",
     "StructureSectionV1",
+    "StampedBlockContentRequestV1",
+    "StampedBlockContentResultV1",
     "StyleDialectV1",
     "StyleDialectV1Css",
     "StyleDialectV1Custom",
@@ -393,17 +354,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "TerminalTypeDisplayFormat",
     "TextDocumentIdentifierV1",
     "TextSyntax",
-    "TransformChainFingerprintV1",
-    "TrustedBrokerChannelBindingV1",
-    "TrustedBrokerProcessingFailureV1",
-    "TrustedBrokerWorkEchoV1",
-    "TrustedBrokerWorkRequestV1",
-    "TrustedBrokerWorkResultV1",
-    "TrustedBrokerWorkResultV1Cancelled",
-    "TrustedBrokerWorkResultV1Failed",
-    "TrustedBrokerWorkResultV1Success",
-    "TrustedProcessorAttestationV1",
-    "TrustedProcessorCapabilityManifestV1",
     "TypeExactness",
     "TypePublicationMeta",
     "TypeReferenceLookupFailure",
@@ -424,7 +374,6 @@ const RULING_REQUIRED_TYPES: &[&str] = &[
     "Utf8TextV1",
     "VueDirectiveKindV1",
     "WasmSchemaVersion",
-    "WorkerRequestNonceV1",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -641,29 +590,6 @@ fn validate_frozen_schema(schema: &Value) -> Result<(), String> {
     if schema["grammars"]["PublicHashV1"] != "^sha256:[0-9a-f]{64}$" {
         return Err("PublicHashV1 grammar drifted".into());
     }
-    if schema["declarations"]["PreprocessorStepV1"]["fields"]
-        != serde_json::json!([
-            {"name":"identity","type":"PreprocessorIdentityV1","tag":1,"presence":"R"},
-            {"name":"trusted_attestation_hash","type":"PublicHashV1","tag":2,"presence":"R"},
-            {"name":"input_space_token","type":"SourceSpaceTokenV1","tag":3,"presence":"R"},
-            {"name":"output_space_token","type":"SourceSpaceTokenV1","tag":4,"presence":"R"},
-            {"name":"input_hash","type":"ContentHashV1","tag":5,"presence":"R"},
-            {"name":"output_hash","type":"ContentHashV1","tag":6,"presence":"R"},
-            {"name":"map_hash","type":"QualifiedSourceMapHashV1","tag":7,"presence":"R"}
-        ])
-    {
-        return Err("PreprocessorStepV1 tag/presence ledger drifted".into());
-    }
-    if schema["declarations"]["DependencyResolutionProvenanceV1"]["fields"]
-        .as_array()
-        .is_none_or(|fields| {
-            fields.len() != 6
-                || fields[1]
-                    != serde_json::json!({"name":"importer_space_token","type":"SourceSpaceTokenV1","tag":2,"presence":"O"})
-        })
-    {
-        return Err("DependencyResolutionProvenanceV1 tag/presence ledger drifted".into());
-    }
     if schema["declarations"]["PreCaptureValidationFailureV1"]["values"]
         != serde_json::json!([
             {"name":"MissingOwner","number":1},
@@ -745,30 +671,6 @@ fn scanners_replacement_schema_mutations_fail_completeness() {
         .unwrap_err()
         .contains("PublicationPolicyExactOnly"));
 
-    let mut dropped_attestation = schema.clone();
-    dropped_attestation["declarations"]["PreprocessorStepV1"]["fields"]
-        .as_array_mut()
-        .unwrap()
-        .remove(1);
-    assert!(validate_frozen_schema(&dropped_attestation)
-        .unwrap_err()
-        .contains("PreprocessorStepV1 tag/presence"));
-
-    let mut representation_only = schema.clone();
-    representation_only["declarations"]["DependencyResolutionProvenanceV1"]["fields"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "name": "resolved_display_url",
-            "type": "String",
-            "tag": 7,
-            "presence": "O"
-        }));
-    assert_eq!(
-        validate_frozen_schema(&representation_only).unwrap_err(),
-        "DependencyResolutionProvenanceV1 tag/presence ledger drifted"
-    );
-
     let mut flat_range = schema.clone();
     flat_range["declarations"]["CanonicalRangeV1"]["representation"] =
         Value::String("record".into());
@@ -780,7 +682,7 @@ fn scanners_replacement_schema_mutations_fail_completeness() {
     cross_phase["declarations"]["PreCaptureValidationFailureV1"]["values"]
         .as_array_mut()
         .unwrap()
-        .push(serde_json::json!({"name":"ProcessorExecutionFailed","number":7}));
+        .push(serde_json::json!({"name":"PostCaptureFailure","number":7}));
     assert_eq!(
         validate_frozen_schema(&cross_phase).unwrap_err(),
         "pre-capture phase algebra drifted"
@@ -797,6 +699,157 @@ fn scanners_replacement_schema_declaration_deletion_is_rejected() {
     assert!(validate_frozen_schema(&schema)
         .unwrap_err()
         .contains("DocumentStructureResponseV1Available"));
+}
+
+fn validate_stamped_block_content_contract(schema: &Value) -> Result<(), String> {
+    let declarations = schema["declarations"]
+        .as_object()
+        .ok_or("missing declarations")?;
+    let require_exact_record = |name: &str, expected_fields: Value| {
+        let declaration = declarations
+            .get(name)
+            .ok_or_else(|| format!("missing {name} declaration"))?;
+        if declaration["kind"] != "record" {
+            return Err(format!("{name} is not a record"));
+        }
+        if declaration["fields"] != expected_fields {
+            return Err(format!("{name} field ledger drifted"));
+        }
+        Ok(())
+    };
+
+    if declarations["BlockContentAvailabilityV1"]["kind"] != "enum"
+        || declarations["BlockContentAvailabilityV1"]["values"]
+            != serde_json::json!([
+                {"name":"NativeAvailable","number":1},
+                {"name":"ProcessedContentRequired","number":2},
+                {"name":"SuppliedAvailable","number":3},
+                {"name":"Missing","number":4},
+                {"name":"Conflict","number":5},
+                {"name":"Stale","number":6}
+            ])
+    {
+        return Err("BlockContentAvailabilityV1 closed algebra drifted".into());
+    }
+
+    require_exact_record(
+        "StampedBlockContentRequestV1",
+        serde_json::json!([
+            {"name":"correlation_token","type":"BlockContentCorrelationTokenV1","tag":1,"presence":"R"},
+            {"name":"block_token","type":"ArtifactBlockTokenV1","tag":2,"presence":"R"},
+            {"name":"owner_revision","type":"DocumentRevisionTokenV1","tag":3,"presence":"R"},
+            {"name":"artifact_token","type":"FrameworkArtifactTokenV1","tag":4,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":5,"presence":"R"},
+            {"name":"source_space_token","type":"SourceSpaceTokenV1","tag":6,"presence":"R"},
+            {"name":"availability","type":"BlockContentAvailabilityV1","tag":7,"presence":"R"},
+            {"name":"language","type":"ResolvedLanguageV1","tag":8,"presence":"R"},
+            {"name":"content","type":"Utf8TextV1","tag":9,"presence":"R"},
+            {"name":"content_hash","type":"ContentHashV1","tag":10,"presence":"R"},
+            {"name":"prior_basis_token","type":"BlockContentBasisTokenV1","tag":11,"presence":"O"}
+        ]),
+    )?;
+    require_exact_record(
+        "StampedBlockContentResultV1",
+        serde_json::json!([
+            {"name":"correlation_token","type":"BlockContentCorrelationTokenV1","tag":1,"presence":"R"},
+            {"name":"block_token","type":"ArtifactBlockTokenV1","tag":2,"presence":"R"},
+            {"name":"owner_revision","type":"DocumentRevisionTokenV1","tag":3,"presence":"R"},
+            {"name":"artifact_token","type":"FrameworkArtifactTokenV1","tag":4,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":5,"presence":"R"},
+            {"name":"source_space_token","type":"SourceSpaceTokenV1","tag":6,"presence":"R"},
+            {"name":"code","type":"Utf8TextV1","tag":7,"presence":"R"},
+            {"name":"code_hash","type":"ContentHashV1","tag":8,"presence":"R"},
+            {"name":"source_map","type":"Utf8TextV1","tag":9,"presence":"O"},
+            {"name":"source_map_hash","type":"ContentHashV1","tag":10,"presence":"O"},
+            {"name":"supplied_provenance","type":"BlockContentOriginFingerprintV1","tag":11,"presence":"O"},
+            {"name":"expected_language","type":"ResolvedLanguageV1","tag":12,"presence":"R"},
+            {"name":"prior_basis_token","type":"BlockContentBasisTokenV1","tag":13,"presence":"O"}
+        ]),
+    )?;
+    require_exact_record(
+        "BlockContentCapturedEchoV1",
+        serde_json::json!([
+            {"name":"request","type":"BlockContentPreCaptureEchoV1","tag":1,"presence":"R"},
+            {"name":"basis_token","type":"BlockContentBasisTokenV1","tag":2,"presence":"R"}
+        ]),
+    )?;
+
+    let captured_echo_field = serde_json::json!({
+        "name":"echo",
+        "type":"BlockContentCapturedEchoV1",
+        "tag":1,
+        "presence":"R"
+    });
+    for terminal in [
+        "BlockContentResolveResponseV1Resolved",
+        "BlockContentResolveResponseV1PostCaptureFailed",
+        "BlockContentResolveResponseV1PostCaptureStaleWithReplacement",
+        "BlockContentResolveResponseV1PostCaptureStaleNeedsRecapture",
+        "BlockContentResolveResponseV1PostCaptureSuperseded",
+        "BlockContentResolveResponseV1PostCaptureClosed",
+        "BlockContentResolveResponseV1PostCaptureCancelled",
+    ] {
+        let fields = declarations
+            .get(terminal)
+            .and_then(|declaration| declaration["fields"].as_array())
+            .ok_or_else(|| format!("missing {terminal} fields"))?;
+        if fields.first() != Some(&captured_echo_field) {
+            return Err(format!("{terminal} lost the captured echo"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stamped_block_content_schema_is_additive_and_capture_complete() {
+    let schema = read_json("schemas/scanners-replacement-v1.schema.json");
+    validate_stamped_block_content_contract(&schema).unwrap();
+
+    let mut missing_prior = schema.clone();
+    missing_prior["declarations"]["StampedBlockContentRequestV1"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field["name"] != "prior_basis_token");
+    assert_eq!(
+        validate_stamped_block_content_contract(&missing_prior).unwrap_err(),
+        "StampedBlockContentRequestV1 field ledger drifted"
+    );
+
+    let mut open_availability = schema.clone();
+    open_availability["declarations"]["BlockContentAvailabilityV1"]["values"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name":"Unknown","number":7}));
+    assert_eq!(
+        validate_stamped_block_content_contract(&open_availability).unwrap_err(),
+        "BlockContentAvailabilityV1 closed algebra drifted"
+    );
+
+    let mut unsealed_hash = schema.clone();
+    unsealed_hash["declarations"]["StampedBlockContentResultV1"]["fields"][7]["type"] =
+        Value::String("Utf8TextV1".into());
+    assert_eq!(
+        validate_stamped_block_content_contract(&unsealed_hash).unwrap_err(),
+        "StampedBlockContentResultV1 field ledger drifted"
+    );
+
+    let mut missing_capture_basis = schema.clone();
+    missing_capture_basis["declarations"]["BlockContentCapturedEchoV1"]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert_eq!(
+        validate_stamped_block_content_contract(&missing_capture_basis).unwrap_err(),
+        "BlockContentCapturedEchoV1 field ledger drifted"
+    );
+
+    let mut pre_capture_terminal = schema;
+    pre_capture_terminal["declarations"]["BlockContentResolveResponseV1PostCaptureClosed"]
+        ["fields"][0]["type"] = Value::String("BlockContentPreCaptureEchoV1".into());
+    assert_eq!(
+        validate_stamped_block_content_contract(&pre_capture_terminal).unwrap_err(),
+        "BlockContentResolveResponseV1PostCaptureClosed lost the captured echo"
+    );
 }
 
 #[test]

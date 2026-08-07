@@ -61,10 +61,7 @@ pub mod script;
 #[cfg(not(feature = "bench"))]
 pub(crate) mod script;
 
-#[cfg(feature = "bench")]
-pub mod style;
-#[cfg(not(feature = "bench"))]
-pub(crate) mod style;
+pub mod style_planner;
 
 #[cfg(feature = "bench")]
 pub mod template;

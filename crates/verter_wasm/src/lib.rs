@@ -354,7 +354,9 @@ impl WasmVerterHost {
     ///
     /// Returns the same changeset structure as [`upsert`](Self::upsert).
     ///
-    /// Throws if the canonical ID is unknown or the request is malformed.
+    /// Every result must echo `block_token`, `owner_revision`,
+    /// `artifact_token`, and `basis_token`; the host validates those stamps
+    /// and the source-space/hash fields after the JavaScript await.
     #[wasm_bindgen(js_name = applyBlockOverrides)]
     pub fn apply_block_overrides(&self, request: JsValue) -> Result<JsValue, JsValue> {
         let ffi_req = parse_wasm_input::<FfiBlockOverrideRequest>(request)?;

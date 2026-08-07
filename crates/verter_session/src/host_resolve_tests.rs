@@ -6,9 +6,9 @@ use verter_workspace::WorkspaceRead;
 #[cfg(target_arch = "wasm32")]
 use crate::shared::read_lock;
 use crate::{
-    BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy, CompileProfile, FileLanguage,
-    HostConfig, HostDiagnostic, HostError, HostSeverity, PreprocessorBlockType, PublicApiMode,
-    UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    BlockContentRefusal, BlockOverrideEntry, BlockOverrideRequest, CompileErrorPolicy,
+    CompileProfile, FileLanguage, HostConfig, HostDiagnostic, HostError, HostSeverity,
+    PublicApiMode, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 use verter_compiler::compile::CompileTarget;
 use verter_compiler::tsc::{TscDeclarationShapeReason, TscGenerationError};
@@ -592,7 +592,10 @@ fn assert_missing_src_compile_error(
             compile_profile: profile(),
         })
         .expect_err("external block content must fail closed");
-    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
+    assert!(matches!(
+        error,
+        HostError::BlockContentRefused(BlockContentRefusal::Unavailable { .. })
+    ));
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -655,7 +658,7 @@ fn missing_style_src_produces_compile_error_and_no_outputs() {
 }
 
 #[test]
-fn external_src_can_compile_via_owner_dependency_mapping() {
+fn external_src_owner_dependency_mapping_does_not_bypass_registered_vfs_identity() {
     let host = strict_host();
     let source =
         "<template src=\"@/partials/panel.html\"></template>\n<script setup>const n = 1</script>";
@@ -677,8 +680,17 @@ fn external_src_can_compile_via_owner_dependency_mapping() {
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect_err("typed external block content is deferred until B3");
-    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
+        .expect_err("a dependency-map row is not a registered external VFS artifact");
+    assert!(
+        matches!(
+            &error,
+            HostError::BlockContentRefused(BlockContentRefusal::Unavailable {
+                availability: crate::BlockContentAvailability::Missing,
+                ..
+            })
+        ),
+        "unexpected external-content refusal: {error:?}"
+    );
 }
 
 #[test]
@@ -772,15 +784,15 @@ fn missing_template_src_retries_successfully_after_dependency_arrives() {
 
     upsert_non_sfc(&host, "/src/resolved.html", "<div>resolved</div>");
 
-    let error = host
+    let output = host
         .get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some("/src/Comp.vue".to_string()),
             node_kind: Some(VirtualNodeKind::Main),
             compile_profile: profile(),
         })
-        .expect_err("external content remains deferred after dependency registration");
-    assert!(matches!(error, HostError::ExternalBlockContentDeferred(_)));
+        .expect("external content lowers after dependency registration");
+    assert!(output.code.contains("resolved"));
 }
 
 #[test]
@@ -1912,7 +1924,7 @@ fn testing_public_api_ignores_define_expose_narrowing() {
 }
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_with_profile_uses_override_script_state() {
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\ndefineProps<{ raw: string }>()\n</script>\n<template><div/></template>";
@@ -1923,12 +1935,9 @@ fn public_api_with_profile_uses_override_script_state() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/Comp.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("defineProps<{ overrideProp: number }>()"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "defineProps<{ overrideProp: number }>()",
+            )],
         })
         .expect("script override should succeed");
 
@@ -1958,7 +1967,7 @@ fn public_api_with_profile_uses_override_script_state() {
 /// `cached_tsc_extract` write in the Vue projector. The profile render then
 /// occupies the raw-derived cache slot before the raw projection control runs.
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_profile_override_does_not_populate_raw_extract_cache() {
     let host = strict_host();
     upsert_vue(
@@ -1972,12 +1981,9 @@ fn public_api_profile_override_does_not_populate_raw_extract_cache() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/CacheOwner.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("defineProps<{ overrideProp: number }>()"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "defineProps<{ overrideProp: number }>()",
+            )],
         })
         .expect("script override should succeed");
 
@@ -2017,7 +2023,7 @@ fn public_api_profile_override_does_not_populate_raw_extract_cache() {
 // ── TSC extract cache tests ──────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_dep() {
     let host = strict_host();
     upsert_vue(
@@ -2036,12 +2042,9 @@ fn public_api_with_profile_uses_override_script_state_for_imported_macro_type_de
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/Types.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                code: Arc::from("export type Props = string"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "export type Props = string",
+            )],
         })
         .expect("dependency script override should succeed");
 

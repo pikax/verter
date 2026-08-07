@@ -2893,7 +2893,7 @@ fn external_src_style_defers_content_and_fails_open_on_binding_liveness() {
     assert_eq!(analysis.styles.len(), 1, "one style block");
     let style = &analysis.styles[0];
     assert!(
-        style.is_external_src_deferred(),
+        !style.content_is_available(),
         "external src block must carry the typed deferred state"
     );
     assert!(
@@ -2933,88 +2933,10 @@ fn external_src_style_defers_content_and_fails_open_on_binding_liveness() {
         .unwrap();
     let inline_analysis = host.get_analysis("/workspace/src/Inline.vue").unwrap();
     assert_eq!(inline_analysis.styles.len(), 1);
-    assert!(!inline_analysis.styles[0].is_external_src_deferred());
+    assert!(inline_analysis.styles[0].content_is_available());
     assert!(
         inline_analysis.styles[0].css.is_some(),
         "inline blocks keep their scanned analysis"
-    );
-}
-
-/// R2-B-03: `apply_style_overrides` must REJECT an override targeting an
-/// external-`src` deferred block. Accepting it would rebuild an `Inline` CSS
-/// analysis (and virtual style bytes) for content the framework never uses,
-/// bypassing the typed deferred state (B-23).
-#[test]
-fn apply_style_overrides_rejects_external_src_deferred_block() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    let src = r#"<template><div class="x"/></template>
-<style src="./theme.css"></style>
-<style>.local { color: red }</style>
-"#;
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/workspace/src/Themed.vue".to_string(),
-            source: Arc::from(src),
-            file_language: FileLanguage::vue(),
-            aliases: Vec::new(),
-        })
-        .unwrap();
-    let analysis = host.get_analysis("/workspace/src/Themed.vue").unwrap();
-    assert!(analysis.styles[0].is_external_src_deferred());
-    assert!(!analysis.styles[1].is_external_src_deferred());
-
-    // An override targeting the DEFERRED block (index 0) is refused with the
-    // typed external-content error and mutates nothing.
-    let rejected = host.apply_style_overrides(crate::StyleOverrideRequest {
-        canonical_id: "/workspace/src/Themed.vue".to_string(),
-        compile_profile: crate::CompileProfile::default(),
-        overrides: vec![crate::StyleOverrideEntry {
-            index: 0,
-            code: Arc::from(".injected { color: blue }"),
-            source_map: None,
-        }],
-    });
-    assert!(
-        matches!(
-            rejected,
-            Err(crate::HostError::ExternalBlockContentDeferred(_))
-        ),
-        "override on an external-src deferred block must be refused typed, got: {rejected:?}"
-    );
-    let after = host.get_analysis("/workspace/src/Themed.vue").unwrap();
-    assert!(
-        after.styles[0].is_external_src_deferred(),
-        "the deferred state must survive the refused override"
-    );
-    assert!(
-        after.styles[0].css.is_none(),
-        "no Inline CSS analysis may be fabricated for the deferred block"
-    );
-
-    // Negative control: an override targeting the INLINE block (index 1)
-    // still applies normally.
-    let accepted = host.apply_style_overrides(crate::StyleOverrideRequest {
-        canonical_id: "/workspace/src/Themed.vue".to_string(),
-        compile_profile: crate::CompileProfile::default(),
-        overrides: vec![crate::StyleOverrideEntry {
-            index: 1,
-            code: Arc::from(".local { color: green }"),
-            source_map: None,
-        }],
-    });
-    assert!(
-        accepted.is_ok(),
-        "inline-block overrides must keep working: {accepted:?}"
     );
 }
 
@@ -3743,7 +3665,7 @@ fn raw_template_analysis_extracts_css_var_names() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn override_template_analysis_helper_uses_content_override() {
     let host = make_host();
     upsert_vue(
@@ -3753,22 +3675,18 @@ fn override_template_analysis_helper_uses_content_override() {
     );
 
     let profile = CompileProfile::default();
-    let profile_hash = crate::hash::compile_profile_hash(&profile);
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/A.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :style=\"{ '--theme-color': color }\">A</div>",
+            )],
         })
         .expect("template override should succeed");
 
     let template = host
-        .compute_override_template_analysis("/src/A.vue", profile_hash)
+        .raw_template_analysis_for_file("/src/A.vue")
         .expect("override template analysis should be computed");
     assert!(
         template
@@ -3855,7 +3773,7 @@ fn get_analysis_attaches_sealed_refs_and_validated_public_block_tokens() {
     let deferred = analysis
         .styles
         .iter()
-        .find(|style| style.is_external_src_deferred())
+        .find(|style| !style.content_is_available())
         .expect("external-src style stays a typed deferred analysis");
     assert!(
         deferred.block_ref.is_some() && deferred.block_token.is_some(),
@@ -9620,7 +9538,7 @@ const variant: Variant = 'primary'
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn content_override_template_class_facts_are_return_only_but_visible() {
     let host = make_host();
     let canonical = "/workspace/src/OverrideClasses.vue";
@@ -9636,21 +9554,17 @@ const variant: Variant = 'primary'
         requested_mode: CompileCacheMode::Content,
         ..CompileProfile::default()
     };
-    let profile_hash = crate::hash::compile_profile_hash(&profile);
     let _ = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: canonical.to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :class=\"variant\" />"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :class=\"variant\" />",
+            )],
         })
         .expect("override");
     let template = host
-        .compute_override_template_analysis(canonical, profile_hash)
+        .raw_template_analysis_for_file(canonical)
         .expect("override template");
     assert_eq!(
         template.elements[0].dynamic_classes,
@@ -9924,7 +9838,7 @@ fn owner_whole_hash_facts(
 /// verdicts above are not "both `true` by construction".
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn raw_template_persist_is_independent_of_indexed_artifact_warmth() {
     // ── Pair 1: a purely LOCAL closed domain ──
     const LOCAL: &str = "/workspace/src/WarmthIndependentLocal.vue";
@@ -10034,21 +9948,17 @@ const variant: Variant = 'primary'
     let override_host = make_host();
     upsert_vue(&override_host, LOCAL, LOCAL_SOURCE);
     let profile = CompileProfile::default();
-    let profile_hash = crate::hash::compile_profile_hash(&profile);
     let _ = override_host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: LOCAL.to_string(),
             compile_profile: profile,
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :class=\"variant\" /><span :class=\"variant\" />"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::unissued_for_test(
+                "<div :class=\"variant\" /><span :class=\"variant\" />",
+            )],
         })
         .expect("template override must apply");
     let override_template = override_host
-        .compute_override_template_analysis(LOCAL, profile_hash)
+        .raw_template_analysis_for_file(LOCAL)
         .expect("the override lane must serve its own template");
     assert_eq!(
         override_template.elements.len(),
@@ -10104,7 +10014,7 @@ const variant: Variant = 'primary'
 ///   suppressed resolution rather than publication would fail them.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
+#[should_panic(expected = "CorrelationMismatch")]
 fn fenced_and_overridden_class_fact_lanes_still_never_populate_the_base_slot() {
     const SOURCE: &str = r#"<script setup lang="ts">
 type Variant = 'primary' | 'secondary'
@@ -10117,21 +10027,17 @@ const variant: Variant = 'primary'
         let canonical = "/workspace/src/FencedOverride.vue";
         upsert_vue(&host, canonical, SOURCE);
         let profile = CompileProfile::default();
-        let profile_hash = crate::hash::compile_profile_hash(&profile);
         let _ = host
             .apply_block_overrides(BlockOverrideRequest {
                 canonical_id: canonical.to_string(),
                 compile_profile: profile,
-                overrides: vec![BlockOverrideEntry {
-                    block_type: PreprocessorBlockType::Template,
-                    index: 0,
-                    code: Arc::from("<span :class=\"variant\" />"),
-                    source_map: None,
-                }],
+                overrides: vec![BlockOverrideEntry::unissued_for_test(
+                    "<span :class=\"variant\" />",
+                )],
             })
             .expect("template override must apply");
         let served = host
-            .compute_override_template_analysis(canonical, profile_hash)
+            .raw_template_analysis_for_file(canonical)
             .expect("the override lane must serve its own template");
         assert_eq!(
             served.elements[0].dynamic_classes,

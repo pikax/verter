@@ -17,12 +17,17 @@ pub enum SelectorKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectorComponentKind {
+    Type,
+    Class,
+    DynamicClass,
+    Id,
     Namespace,
     Attribute,
     Nesting,
     PseudoClass,
     PseudoElement,
     FunctionalPseudo,
+    Interpolation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +66,17 @@ pub struct NthExpression {
     pub b: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorComponent {
     kind: SelectorComponentKind,
-    span: Span,
+    facts: SelectorFacts,
+    full_span: Span,
+    name_span: Option<Span>,
+    attribute: Option<SelectorAttribute>,
+    pseudo: Option<SelectorPseudo>,
+    static_fragments: Vec<Span>,
+    interpolations: Vec<SelectorInterpolation>,
+    nested_components: Vec<SelectorComponent>,
 }
 
 impl SelectorComponent {
@@ -74,8 +86,68 @@ impl SelectorComponent {
     }
 
     #[inline]
+    pub const fn facts(&self) -> SelectorFacts {
+        self.facts
+    }
+
+    #[inline]
     pub const fn span(&self) -> Span {
-        self.span
+        self.full_span
+    }
+
+    #[inline]
+    pub const fn full_span(&self) -> Span {
+        self.full_span
+    }
+
+    #[inline]
+    pub const fn name_span(&self) -> Option<Span> {
+        self.name_span
+    }
+
+    #[inline]
+    pub fn static_fragments(&self) -> &[Span] {
+        &self.static_fragments
+    }
+
+    #[inline]
+    pub fn interpolations(&self) -> &[SelectorInterpolation] {
+        &self.interpolations
+    }
+
+    #[inline]
+    pub fn attribute(&self) -> Option<&SelectorAttribute> {
+        self.attribute.as_ref()
+    }
+
+    #[inline]
+    pub fn pseudo(&self) -> Option<&SelectorPseudo> {
+        self.pseudo.as_ref()
+    }
+
+    pub fn nested_components(&self) -> &[SelectorComponent] {
+        &self.nested_components
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectorInterpolation {
+    full_span: Span,
+    payload_span: Span,
+    complete: bool,
+}
+
+impl SelectorInterpolation {
+    pub const fn full_span(&self) -> Span {
+        self.full_span
+    }
+
+    pub const fn payload_span(&self) -> Span {
+        self.payload_span
+    }
+
+    pub const fn is_complete(&self) -> bool {
+        self.complete
     }
 }
 
@@ -101,6 +173,8 @@ impl SelectorCombinator {
 pub struct SelectorAttribute {
     span: Span,
     matcher: Option<AttributeMatcher>,
+    name_span: Option<Span>,
+    value_span: Option<Span>,
 }
 
 impl SelectorAttribute {
@@ -113,15 +187,24 @@ impl SelectorAttribute {
     pub const fn matcher(&self) -> Option<AttributeMatcher> {
         self.matcher
     }
+
+    pub const fn name_span(&self) -> Option<Span> {
+        self.name_span
+    }
+
+    pub const fn value_span(&self) -> Option<Span> {
+        self.value_span
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorPseudo {
     span: Span,
     argument_span: Span,
     kind: PseudoFunctionKind,
     selector_count: u32,
     nth: Option<NthExpression>,
+    selector_list: Option<Box<SelectorList>>,
 }
 
 impl SelectorPseudo {
@@ -149,160 +232,558 @@ impl SelectorPseudo {
     pub const fn nth(&self) -> Option<NthExpression> {
         self.nth
     }
-}
 
-pub struct SelectorStructure {
-    source: CssSource,
-    span: Span,
-    top_level_selector_count: u32,
-    components: Vec<SelectorComponent>,
-    combinators: Vec<SelectorCombinator>,
-    attributes: Vec<SelectorAttribute>,
-    pseudos: Vec<SelectorPseudo>,
-}
-
-impl SelectorStructure {
     #[inline]
+    pub fn selector_list(&self) -> Option<&SelectorList> {
+        self.selector_list.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorCompleteness {
+    Complete,
+    Recovered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorTrust {
+    Static,
+    DynamicSelector,
+    EvaluationRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectorFacts {
+    trust: SelectorTrust,
+    completeness: SelectorCompleteness,
+}
+
+impl SelectorFacts {
+    pub const fn trust(self) -> SelectorTrust {
+        self.trust
+    }
+
+    pub const fn completeness(self) -> SelectorCompleteness {
+        self.completeness
+    }
+
+    pub const fn is_complete_static(self) -> bool {
+        matches!(self.trust, SelectorTrust::Static)
+            && matches!(self.completeness, SelectorCompleteness::Complete)
+    }
+
+    pub const fn is_dynamic(self) -> bool {
+        !matches!(self.trust, SelectorTrust::Static)
+    }
+
+    fn combine(self, other: Self) -> Self {
+        let trust = match (self.trust, other.trust) {
+            (SelectorTrust::EvaluationRequired, _) | (_, SelectorTrust::EvaluationRequired) => {
+                SelectorTrust::EvaluationRequired
+            }
+            (SelectorTrust::DynamicSelector, _) | (_, SelectorTrust::DynamicSelector) => {
+                SelectorTrust::DynamicSelector
+            }
+            _ => SelectorTrust::Static,
+        };
+        let completeness = if matches!(
+            (self.completeness, other.completeness),
+            (
+                SelectorCompleteness::Complete,
+                SelectorCompleteness::Complete
+            )
+        ) {
+            SelectorCompleteness::Complete
+        } else {
+            SelectorCompleteness::Recovered
+        };
+        Self {
+            trust,
+            completeness,
+        }
+    }
+}
+
+impl Default for SelectorFacts {
+    fn default() -> Self {
+        Self {
+            trust: SelectorTrust::Static,
+            completeness: SelectorCompleteness::Complete,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComplexSelectorPart {
+    Compound(SelectorCompound),
+    Combinator(SelectorCombinator),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorCompound {
+    span: Span,
+    components: Vec<SelectorComponent>,
+    facts: SelectorFacts,
+}
+
+impl SelectorCompound {
     pub const fn span(&self) -> Span {
         self.span
     }
 
-    #[inline]
-    pub const fn top_level_selector_count(&self) -> u32 {
-        self.top_level_selector_count
-    }
-
-    #[inline]
-    pub fn source(&self) -> &CssSource {
-        &self.source
-    }
-
-    #[inline]
     pub fn components(&self) -> &[SelectorComponent] {
         &self.components
     }
 
-    #[inline]
-    pub fn combinators(&self) -> &[SelectorCombinator] {
-        &self.combinators
-    }
-
-    #[inline]
-    pub fn attributes(&self) -> &[SelectorAttribute] {
-        &self.attributes
-    }
-
-    #[inline]
-    pub fn pseudos(&self) -> &[SelectorPseudo] {
-        &self.pseudos
+    pub const fn facts(&self) -> SelectorFacts {
+        self.facts
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComplexSelector {
+    kind: SelectorKind,
+    span: Span,
+    parts: Vec<ComplexSelectorPart>,
+    facts: SelectorFacts,
+}
+
+impl ComplexSelector {
+    pub const fn kind(&self) -> SelectorKind {
+        self.kind
+    }
+
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    pub fn parts(&self) -> &[ComplexSelectorPart] {
+        &self.parts
+    }
+
+    pub fn compounds(&self) -> Vec<&SelectorCompound> {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                ComplexSelectorPart::Compound(value) => Some(value),
+                ComplexSelectorPart::Combinator(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn combinators(&self) -> Vec<&SelectorCombinator> {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                ComplexSelectorPart::Combinator(value) => Some(value),
+                ComplexSelectorPart::Compound(_) => None,
+            })
+            .collect()
+    }
+
+    pub const fn facts(&self) -> SelectorFacts {
+        self.facts
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorList {
+    span: Span,
+    selectors: Vec<ComplexSelector>,
+    facts: SelectorFacts,
+}
+
+impl SelectorList {
+    pub const fn span(&self) -> Span {
+        self.span
+    }
+
+    pub fn selectors(&self) -> &[ComplexSelector] {
+        &self.selectors
+    }
+
+    pub const fn facts(&self) -> SelectorFacts {
+        self.facts
+    }
+}
+
+pub struct SelectorStructure {
+    source: CssSource,
+    list: SelectorList,
+}
+
+impl SelectorStructure {
+    pub const fn span(&self) -> Span {
+        self.list.span
+    }
+
+    pub fn list(&self) -> &SelectorList {
+        &self.list
+    }
+
+    pub fn top_level_selector_count(&self) -> u32 {
+        u32::try_from(self.list.selectors.len()).unwrap_or(u32::MAX)
+    }
+
+    pub fn source(&self) -> &CssSource {
+        &self.source
+    }
+
+    pub const fn facts(&self) -> SelectorFacts {
+        self.list.facts
+    }
+
+    pub fn all_components(&self) -> Vec<&SelectorComponent> {
+        let mut output = Vec::new();
+        collect_components(&self.list, &mut output);
+        output
+    }
+
+    pub fn components(&self) -> Vec<&SelectorComponent> {
+        self.all_components()
+    }
+
+    pub fn all_combinators(&self) -> Vec<&SelectorCombinator> {
+        let mut output = Vec::new();
+        collect_combinators(&self.list, &mut output);
+        output
+    }
+
+    pub fn combinators(&self) -> Vec<&SelectorCombinator> {
+        self.all_combinators()
+    }
+
+    pub fn all_attributes(&self) -> Vec<&SelectorAttribute> {
+        self.all_components()
+            .into_iter()
+            .filter_map(SelectorComponent::attribute)
+            .collect()
+    }
+
+    pub fn attributes(&self) -> Vec<&SelectorAttribute> {
+        self.all_attributes()
+    }
+
+    pub fn all_pseudos(&self) -> Vec<&SelectorPseudo> {
+        self.all_components()
+            .into_iter()
+            .filter_map(SelectorComponent::pseudo)
+            .collect()
+    }
+
+    pub fn pseudos(&self) -> Vec<&SelectorPseudo> {
+        self.all_components()
+            .into_iter()
+            .filter(|component| component.kind == SelectorComponentKind::FunctionalPseudo)
+            .filter_map(SelectorComponent::pseudo)
+            .collect()
+    }
+}
+
+fn collect_components<'a>(list: &'a SelectorList, output: &mut Vec<&'a SelectorComponent>) {
+    for selector in &list.selectors {
+        for part in &selector.parts {
+            if let ComplexSelectorPart::Compound(compound) = part {
+                for component in &compound.components {
+                    output.push(component);
+                    collect_nested_components(component, output);
+                    if let Some(nested) = component
+                        .pseudo
+                        .as_ref()
+                        .and_then(SelectorPseudo::selector_list)
+                    {
+                        collect_components(nested, output);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_nested_components<'a>(
+    component: &'a SelectorComponent,
+    output: &mut Vec<&'a SelectorComponent>,
+) {
+    for nested in &component.nested_components {
+        output.push(nested);
+        collect_nested_components(nested, output);
+    }
+}
+
+fn collect_combinators<'a>(list: &'a SelectorList, output: &mut Vec<&'a SelectorCombinator>) {
+    for selector in &list.selectors {
+        for part in &selector.parts {
+            match part {
+                ComplexSelectorPart::Compound(compound) => {
+                    for component in &compound.components {
+                        if let Some(nested) = component
+                            .pseudo
+                            .as_ref()
+                            .and_then(SelectorPseudo::selector_list)
+                        {
+                            collect_combinators(nested, output);
+                        }
+                    }
+                }
+                ComplexSelectorPart::Combinator(combinator) => output.push(combinator),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum BuiltSelectorNode {
+    List(SelectorList),
+    Complex(ComplexSelector),
+    Compound(SelectorCompound),
+    Combinator(SelectorCombinator),
+    Component(SelectorComponent),
+    Container(Vec<BuiltSelectorNode>),
+}
+
+#[derive(Debug)]
 struct OpenNode {
     kind: SyntaxKind,
     start: u32,
     token_start: usize,
-    selector_count: u32,
+    children: Vec<BuiltSelectorNode>,
+    recovered: bool,
 }
 
-struct SelectorSink {
+pub(crate) struct SelectorSink {
     source: CssSource,
     open: SmallVec<[OpenNode; 16]>,
-    selector_list_depth: u32,
-    top_level_selector_count: u32,
-    components: Vec<SelectorComponent>,
-    combinators: Vec<SelectorCombinator>,
-    attributes: Vec<SelectorAttribute>,
-    pseudos: Vec<SelectorPseudo>,
     tokens: Vec<SyntaxToken>,
+    list: Option<SelectorList>,
 }
 
 impl SelectorSink {
-    fn new(source: CssSource) -> Self {
+    pub(crate) fn new(source: CssSource) -> Self {
         Self {
             source,
             open: SmallVec::new(),
-            selector_list_depth: 0,
-            top_level_selector_count: 0,
-            components: Vec::new(),
-            combinators: Vec::new(),
-            attributes: Vec::new(),
-            pseudos: Vec::new(),
             tokens: Vec::new(),
+            list: None,
         }
     }
 
-    fn finish(self) -> SelectorStructure {
-        SelectorStructure {
+    pub(crate) fn finish(self) -> SelectorStructure {
+        let list = self.list.unwrap_or_else(|| SelectorList {
             span: Span::new(self.source.origin(), self.source.end()),
+            selectors: Vec::new(),
+            facts: SelectorFacts::default(),
+        });
+        SelectorStructure {
             source: self.source,
-            top_level_selector_count: self.top_level_selector_count,
-            components: self.components,
-            combinators: self.combinators,
-            attributes: self.attributes,
-            pseudos: self.pseudos,
+            list,
         }
     }
 
-    fn record_node(&mut self, open: OpenNode, end: u32) {
+    fn build_node(&self, open: OpenNode, end: u32) -> Option<BuiltSelectorNode> {
         let span = Span::new(open.start, end);
         let tokens = &self.tokens[open.token_start..];
+        let recovered = open.recovered;
+        let recovered_facts = SelectorFacts {
+            trust: SelectorTrust::Static,
+            completeness: if recovered {
+                SelectorCompleteness::Recovered
+            } else {
+                SelectorCompleteness::Complete
+            },
+        };
         match open.kind {
-            SyntaxKind::Combinator => {
-                let kind = combinator_kind(tokens, &self.source);
-                self.combinators.push(SelectorCombinator { kind, span });
-            }
-            SyntaxKind::NamespaceSelector => {
-                self.components.push(SelectorComponent {
-                    kind: SelectorComponentKind::Namespace,
-                    span,
+            SyntaxKind::SelectorList => {
+                let selectors: Vec<_> = open
+                    .children
+                    .into_iter()
+                    .filter_map(|child| match child {
+                        BuiltSelectorNode::Complex(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                let facts = selectors.iter().fold(recovered_facts, |facts, selector| {
+                    facts.combine(selector.facts)
                 });
-            }
-            SyntaxKind::AttributeSelector => {
-                let matcher = attribute_matcher(tokens, &self.source);
-                self.attributes.push(SelectorAttribute { span, matcher });
-                self.components.push(SelectorComponent {
-                    kind: SelectorComponentKind::Attribute,
+                Some(BuiltSelectorNode::List(SelectorList {
                     span,
-                });
+                    selectors,
+                    facts,
+                }))
             }
-            SyntaxKind::NestingSelector => self.components.push(SelectorComponent {
-                kind: SelectorComponentKind::Nesting,
+            SyntaxKind::Selector => {
+                let parts: Vec<_> = open
+                    .children
+                    .into_iter()
+                    .filter_map(|child| match child {
+                        BuiltSelectorNode::Compound(value) => {
+                            Some(ComplexSelectorPart::Compound(value))
+                        }
+                        BuiltSelectorNode::Combinator(value) => {
+                            Some(ComplexSelectorPart::Combinator(value))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let facts = parts.iter().fold(recovered_facts, |facts, part| {
+                    let child = match part {
+                        ComplexSelectorPart::Compound(value) => value.facts,
+                        ComplexSelectorPart::Combinator(_) => SelectorFacts::default(),
+                    };
+                    facts.combine(child)
+                });
+                Some(BuiltSelectorNode::Complex(ComplexSelector {
+                    kind: SelectorKind::Complex,
+                    span,
+                    parts,
+                    facts,
+                }))
+            }
+            SyntaxKind::CompoundSelector => {
+                let components: Vec<_> = open
+                    .children
+                    .into_iter()
+                    .filter_map(|child| match child {
+                        BuiltSelectorNode::Component(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                let facts = components.iter().fold(recovered_facts, |facts, component| {
+                    facts.combine(component.facts)
+                });
+                Some(BuiltSelectorNode::Compound(SelectorCompound {
+                    span,
+                    components,
+                    facts,
+                }))
+            }
+            SyntaxKind::Combinator => Some(BuiltSelectorNode::Combinator(SelectorCombinator {
+                kind: combinator_kind(tokens, &self.source),
                 span,
-            }),
-            SyntaxKind::PseudoElement => self.components.push(SelectorComponent {
-                kind: SelectorComponentKind::PseudoElement,
-                span,
-            }),
-            SyntaxKind::PseudoClass => self.components.push(SelectorComponent {
-                kind: SelectorComponentKind::PseudoClass,
-                span,
-            }),
-            SyntaxKind::PseudoSelectorList
-            | SyntaxKind::NthSelector
-            | SyntaxKind::UnknownPseudoFunction => {
-                let kind = pseudo_kind(tokens, &self.source);
-                let argument_span = pseudo_argument_span(tokens, span);
-                let nth = matches!(
+            })),
+            kind if selector_component_kind(kind).is_some() => {
+                let nested_components: Vec<_> = open
+                    .children
+                    .iter()
+                    .filter_map(|child| match child {
+                        BuiltSelectorNode::Component(component) => Some(component.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut interpolations: Vec<_> = nested_components
+                    .iter()
+                    .filter(|component| component.kind == SelectorComponentKind::Interpolation)
+                    .filter_map(|component| component.interpolations.first().copied())
+                    .collect();
+                let mut component_kind = selector_component_kind(kind).unwrap();
+                if kind == SyntaxKind::ClassSelector && !interpolations.is_empty() {
+                    component_kind = SelectorComponentKind::DynamicClass;
+                }
+                let name_span = selector_name_span(component_kind, tokens);
+                let static_fragments = if component_kind == SelectorComponentKind::DynamicClass {
+                    tokens
+                        .iter()
+                        .filter(|token| {
+                            token.kind() == TokenKind::Ident
+                                && !interpolations.iter().any(|interpolation| {
+                                    interpolation.full_span.start <= token.start
+                                        && token.end <= interpolation.full_span.end
+                                })
+                        })
+                        .map(|token| Span::new(token.start, token.end))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let attribute =
+                    (kind == SyntaxKind::AttributeSelector).then(|| SelectorAttribute {
+                        span,
+                        matcher: attribute_matcher(tokens, &self.source),
+                        name_span: attribute_name_span(tokens),
+                        value_span: attribute_value_span(tokens),
+                    });
+                let pseudo = matches!(
                     kind,
-                    PseudoFunctionKind::NthChild | PseudoFunctionKind::NthLastChild
+                    SyntaxKind::PseudoClass
+                        | SyntaxKind::PseudoElement
+                        | SyntaxKind::PseudoSelectorList
+                        | SyntaxKind::NthSelector
+                        | SyntaxKind::UnknownPseudoFunction
                 )
-                .then(|| parse_an_plus_b_tokens(tokens, &self.source))
-                .flatten();
-                self.pseudos.push(SelectorPseudo {
-                    span,
-                    argument_span,
-                    kind,
-                    selector_count: open.selector_count,
-                    nth,
+                .then(|| {
+                    let pseudo_kind = pseudo_kind(tokens, &self.source);
+                    let selector_list = open.children.iter().find_map(|child| match child {
+                        BuiltSelectorNode::List(value) => Some(Box::new(value.clone())),
+                        _ => None,
+                    });
+                    let selector_count = selector_list.as_ref().map_or(0, |list| {
+                        u32::try_from(list.selectors.len()).unwrap_or(u32::MAX)
+                    });
+                    let nth = matches!(
+                        pseudo_kind,
+                        PseudoFunctionKind::NthChild | PseudoFunctionKind::NthLastChild
+                    )
+                    .then(|| parse_an_plus_b_tokens(tokens, &self.source))
+                    .flatten();
+                    SelectorPseudo {
+                        span,
+                        argument_span: pseudo_argument_span(tokens, span),
+                        kind: pseudo_kind,
+                        selector_count,
+                        nth,
+                        selector_list,
+                    }
                 });
-                self.components.push(SelectorComponent {
-                    kind: SelectorComponentKind::FunctionalPseudo,
-                    span,
-                });
+                if kind == SyntaxKind::Interpolation {
+                    let opener_end = tokens.first().map_or(span.start, |token| token.end);
+                    let closed = tokens
+                        .last()
+                        .is_some_and(|token| token.kind() == TokenKind::RightBrace);
+                    let payload_end = if closed {
+                        tokens.last().map_or(end, |token| token.start)
+                    } else {
+                        end
+                    };
+                    interpolations.push(SelectorInterpolation {
+                        full_span: span,
+                        payload_span: Span::new(opener_end, payload_end),
+                        complete: closed && !recovered,
+                    });
+                }
+                let own_trust = match component_kind {
+                    SelectorComponentKind::DynamicClass => SelectorTrust::DynamicSelector,
+                    SelectorComponentKind::Interpolation | SelectorComponentKind::Nesting => {
+                        SelectorTrust::EvaluationRequired
+                    }
+                    _ => SelectorTrust::Static,
+                };
+                let mut facts = SelectorFacts {
+                    trust: own_trust,
+                    completeness: if recovered {
+                        SelectorCompleteness::Recovered
+                    } else {
+                        SelectorCompleteness::Complete
+                    },
+                };
+                for nested in &nested_components {
+                    facts = facts.combine(nested.facts);
+                }
+                if let Some(list) = pseudo.as_ref().and_then(SelectorPseudo::selector_list) {
+                    facts = facts.combine(list.facts);
+                }
+                Some(BuiltSelectorNode::Component(SelectorComponent {
+                    kind: component_kind,
+                    facts,
+                    full_span: span,
+                    name_span,
+                    attribute,
+                    pseudo,
+                    static_fragments,
+                    interpolations,
+                    nested_components,
+                }))
             }
-            _ => {}
+            _ if !open.children.is_empty() => Some(BuiltSelectorNode::Container(open.children)),
+            _ => None,
         }
     }
 }
@@ -310,29 +791,13 @@ impl SelectorSink {
 impl ParseEventSink for SelectorSink {
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
         match event {
-            ParseEvent::StartNode { kind, start, .. } => {
-                if kind == SyntaxKind::Selector {
-                    if let Some(pseudo) = self.open.iter_mut().rev().find(|node| {
-                        matches!(
-                            node.kind,
-                            SyntaxKind::PseudoSelectorList | SyntaxKind::NthSelector
-                        )
-                    }) {
-                        pseudo.selector_count = pseudo.selector_count.saturating_add(1);
-                    }
-                }
-                if kind == SyntaxKind::SelectorList {
-                    self.selector_list_depth += 1;
-                } else if kind == SyntaxKind::Selector && self.selector_list_depth == 1 {
-                    self.top_level_selector_count += 1;
-                }
-                self.open.push(OpenNode {
-                    kind,
-                    start,
-                    token_start: self.tokens.len(),
-                    selector_count: 0,
-                });
-            }
+            ParseEvent::StartNode { kind, start, .. } => self.open.push(OpenNode {
+                kind,
+                start,
+                token_start: self.tokens.len(),
+                children: Vec::new(),
+                recovered: false,
+            }),
             ParseEvent::Token(token) => self.tokens.push(token),
             ParseEvent::FinishNode { kind, end } => {
                 let open = self
@@ -340,14 +805,71 @@ impl ParseEventSink for SelectorSink {
                     .pop()
                     .expect("parser emits balanced selector nodes");
                 debug_assert_eq!(open.kind, kind);
-                self.record_node(open, end);
-                if kind == SyntaxKind::SelectorList {
-                    self.selector_list_depth -= 1;
+                if let Some(built) = self.build_node(open, end) {
+                    if let Some(parent) = self.open.last_mut() {
+                        match built {
+                            BuiltSelectorNode::Container(children) => {
+                                parent.children.extend(children);
+                            }
+                            value => parent.children.push(value),
+                        }
+                    } else if let BuiltSelectorNode::List(list) = built {
+                        self.list = Some(list);
+                    }
                 }
             }
-            ParseEvent::Diagnostic(_) => {}
+            ParseEvent::Diagnostic(_) => {
+                for open in &mut self.open {
+                    open.recovered = true;
+                }
+            }
         }
         Ok(())
+    }
+}
+
+fn selector_component_kind(kind: SyntaxKind) -> Option<SelectorComponentKind> {
+    match kind {
+        SyntaxKind::TypeSelector => Some(SelectorComponentKind::Type),
+        SyntaxKind::ClassSelector => Some(SelectorComponentKind::Class),
+        SyntaxKind::IdSelector => Some(SelectorComponentKind::Id),
+        SyntaxKind::NamespaceSelector => Some(SelectorComponentKind::Namespace),
+        SyntaxKind::AttributeSelector => Some(SelectorComponentKind::Attribute),
+        SyntaxKind::NestingSelector => Some(SelectorComponentKind::Nesting),
+        SyntaxKind::PseudoClass => Some(SelectorComponentKind::PseudoClass),
+        SyntaxKind::PseudoElement => Some(SelectorComponentKind::PseudoElement),
+        SyntaxKind::PseudoSelectorList
+        | SyntaxKind::NthSelector
+        | SyntaxKind::UnknownPseudoFunction => Some(SelectorComponentKind::FunctionalPseudo),
+        SyntaxKind::Interpolation => Some(SelectorComponentKind::Interpolation),
+        _ => None,
+    }
+}
+
+fn selector_name_span(kind: SelectorComponentKind, tokens: &[SyntaxToken]) -> Option<Span> {
+    match kind {
+        SelectorComponentKind::Type | SelectorComponentKind::Class => tokens
+            .iter()
+            .find(|token| token.kind() == TokenKind::Ident)
+            .map(|token| Span::new(token.start, token.end)),
+        SelectorComponentKind::Id => tokens
+            .iter()
+            .find(|token| token.kind() == TokenKind::Hash)
+            .map(|token| Span::new(token.start.saturating_add(1), token.end)),
+        SelectorComponentKind::PseudoClass
+        | SelectorComponentKind::PseudoElement
+        | SelectorComponentKind::FunctionalPseudo => tokens
+            .iter()
+            .find(|token| matches!(token.kind(), TokenKind::Ident | TokenKind::Function))
+            .map(|token| {
+                let end = if token.kind() == TokenKind::Function {
+                    token.end.saturating_sub(1)
+                } else {
+                    token.end
+                };
+                Span::new(token.start, end)
+            }),
+        _ => None,
     }
 }
 
@@ -444,6 +966,49 @@ fn attribute_matcher(tokens: &[SyntaxToken], source: &CssSource) -> Option<Attri
         "*" => Some(AttributeMatcher::Substring),
         _ => None,
     }
+}
+
+fn attribute_name_span(tokens: &[SyntaxToken]) -> Option<Span> {
+    let matcher = attribute_matcher_token_index(tokens);
+    tokens[..matcher.unwrap_or(tokens.len())]
+        .iter()
+        .rev()
+        .find(|token| token.kind() == TokenKind::Ident)
+        .map(|token| Span::new(token.start, token.end))
+}
+
+fn attribute_value_span(tokens: &[SyntaxToken]) -> Option<Span> {
+    let matcher = attribute_matcher_token_index(tokens)?;
+    let token = tokens[matcher + 1..]
+        .iter()
+        .find(|token| !token.kind().is_trivia() && token.kind() != TokenKind::Delim)?;
+    let mut span = Span::new(token.start, token.end);
+    if token.kind() == TokenKind::String && token.end.saturating_sub(token.start) >= 2 {
+        span.start = span.start.saturating_add(1);
+        span.end = span.end.saturating_sub(1);
+    }
+    Some(span)
+}
+
+fn attribute_matcher_token_index(tokens: &[SyntaxToken]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind() {
+            TokenKind::Function | TokenKind::LeftParen | TokenKind::LeftBrace => depth += 1,
+            TokenKind::RightParen | TokenKind::RightBrace if depth > 0 => depth -= 1,
+            TokenKind::Delim if depth == 0 => {
+                let next = tokens.get(index + 1);
+                if next.is_some_and(|next| next.kind() == TokenKind::Delim) {
+                    continue;
+                }
+                if next.is_some_and(|next| next.kind() != TokenKind::RightBracket) {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn next_attribute_non_trivia(tokens: &[SyntaxToken], index: &mut usize) -> Option<SyntaxToken> {

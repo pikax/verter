@@ -625,14 +625,6 @@ pub(super) fn member_visibility_to_string(
         verter_type_expr::MemberVisibility::Private => "private".to_string(),
     }
 }
-pub(super) fn host_block_type_to_string(bt: host::PreprocessorBlockType) -> String {
-    match bt {
-        host::PreprocessorBlockType::Template => "template".to_string(),
-        host::PreprocessorBlockType::Script => "script".to_string(),
-        host::PreprocessorBlockType::Style => "style".to_string(),
-        host::PreprocessorBlockType::Custom => "custom".to_string(),
-    }
-}
 pub(super) fn host_module_reference_syntax_to_string(syntax: impl std::fmt::Debug) -> String {
     match format!("{syntax:?}").as_str() {
         "StaticImport" => "staticImport".to_string(),

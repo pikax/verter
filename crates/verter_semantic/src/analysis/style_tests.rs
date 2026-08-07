@@ -243,7 +243,7 @@ fn test_empty_css() {
 
 #[test]
 fn test_malformed_css_graceful() {
-    // The scanner is lenient — broken syntax still produces partial results
+    // Recovery is local, so broken syntax still produces partial results.
     let analysis = analyze_css("{{{invalid$$$css}}}");
     // Even if it fails to parse, we should get a valid StyleBlockAnalysis
     assert_eq!(analysis.lang, StyleAnalysisLang::Css);
@@ -968,34 +968,15 @@ fn test_parse_attribute_operators() {
     );
 }
 
-// ── strip_css_comments tests ──
-
-#[test]
-fn strip_css_comments_no_comments() {
-    assert!(strip_css_comments_dialect(".a > .b", CssScanDialect::Css).is_none());
-}
-
-#[test]
-fn strip_css_comments_inline_comment() {
-    let result = strip_css_comments_dialect(".a /* comment */ > .b", CssScanDialect::Css).unwrap();
-    assert_eq!(result, ".a   > .b");
-}
-
-#[test]
-fn strip_css_comments_multiple() {
-    let result = strip_css_comments_dialect("/* x */.a/* y */.b", CssScanDialect::Css).unwrap();
-    assert_eq!(result, " .a .b");
-}
-
 #[test]
 fn selector_with_inline_comment_parsed() {
     let analysis = analyze_css(".a /* comment */ > .b { color: red; }");
     let css = analysis.css.as_ref().expect("should have CSS analysis");
     assert_eq!(css.selectors.len(), 1);
-    // The selector text should have the comment stripped
+    // The syntax authority is lossless: comments stay in the selector span.
     assert!(
-        !css.selectors[0].text.contains("/*"),
-        "selector text should not contain CSS comments"
+        css.selectors[0].text.contains("/* comment */"),
+        "selector text should retain CSS comments"
     );
     // Structural parse should succeed
     assert!(
@@ -1023,7 +1004,7 @@ fn nested_selector_text_does_not_contain_declarations() {
     // Find all selectors
     let selector_texts: Vec<&str> = css.selectors.iter().map(|s| s.text.as_str()).collect();
 
-    // Positive: should contain the parent and nested selectors
+    // Positive: should contain the parent and nested selectors.
     assert!(
         selector_texts.contains(&".ns-popover"),
         "should contain .ns-popover selector: {:?}",
@@ -1530,7 +1511,7 @@ fn special_pseudo_global_recorded_with_span_and_inner() {
         .special_pseudos
         .iter()
         .find(|p| p.kind == SpecialPseudoKind::Global)
-        .expect(":global must be recorded by the scanner");
+        .expect(":global must be recorded by the syntax projection");
     assert_eq!(
         &src[pseudo.start as usize..pseudo.end as usize],
         ":global(.g)"
@@ -1555,6 +1536,77 @@ fn special_pseudo_deep_and_slotted_recorded() {
     let flags = analysis.analysis_flags();
     assert!(flags.contains(StyleAnalysisFlags::HAS_DEEP));
     assert!(flags.contains(StyleAnalysisFlags::HAS_SLOTTED));
+}
+
+// @ai-generated - Exact r2 pair: interpolation taints only its component, not the pseudo kind or literal siblings.
+#[test]
+fn interpolated_special_pseudos_preserve_kind_flags_and_disjoint_classes() {
+    for (name, kind, flag) in [
+        (
+            "global",
+            SpecialPseudoKind::Global,
+            StyleAnalysisFlags::HAS_GLOBAL,
+        ),
+        (
+            "deep",
+            SpecialPseudoKind::Deep,
+            StyleAnalysisFlags::HAS_DEEP,
+        ),
+    ] {
+        for (argument, expected_classes) in [(".a .b", vec!["a", "b"]), (".a .#{$x}", vec!["a"])] {
+            let source = format!(":{name}({argument}) {{ color: red; }}");
+            let analysis = build_scanned_style_analysis(
+                StyleAnalysisLang::Scss,
+                &source,
+                VueStyleInput::default(),
+                true,
+                false,
+                None,
+                0,
+            );
+            let css = analysis.css.as_ref().expect("SCSS analysis");
+            let classes: Vec<_> = css
+                .classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .collect();
+            assert_eq!(classes, expected_classes, "{source}");
+            assert_eq!(
+                analysis
+                    .special_pseudos
+                    .iter()
+                    .map(|pseudo| pseudo.kind)
+                    .collect::<Vec<_>>(),
+                vec![kind],
+                "{source}"
+            );
+            assert!(analysis.analysis_flags().contains(flag), "{source}");
+        }
+    }
+}
+
+// @ai-generated - Exact r2 pair: an ambiguous Stylus child cannot recover its intact rule owner.
+#[test]
+fn stylus_colonless_declaration_preserves_rule_body_span() {
+    for source in [".a\n  color: red", ".a\n  color red"] {
+        let analysis = build_scanned_style_analysis(
+            StyleAnalysisLang::Stylus,
+            source,
+            VueStyleInput::default(),
+            true,
+            false,
+            None,
+            0,
+        );
+        let css = analysis.css.as_ref().expect("Stylus analysis");
+        let selector = css.selectors.first().expect(".a selector");
+        assert_eq!(selector.text, ".a", "{source}");
+        assert_eq!(
+            selector.rule_body_span,
+            Some(Span::new(2, source.len() as u32)),
+            "{source}"
+        );
+    }
 }
 
 #[test]
@@ -1590,7 +1642,7 @@ fn analyzed_selector_serde_roundtrips_body_span_and_class_join() {
 }
 
 #[test]
-fn sass_indented_stays_unscanned() {
+fn sass_indented_uses_shared_syntax_projection() {
     let analysis = build_scanned_style_analysis(
         StyleAnalysisLang::Sass,
         ".a\n  color: red",
@@ -1600,8 +1652,59 @@ fn sass_indented_stays_unscanned() {
         None,
         0,
     );
-    assert!(
-        analysis.css.is_none(),
-        "indented Sass is not brace-scannable"
-    );
+    let css = analysis.css.expect("indented Sass is structurally parsed");
+    assert_eq!(css.classes.len(), 1);
+    assert_eq!(css.classes[0].name, "a");
+    assert_eq!(css.classes[0].span, Span::new(1, 2));
+}
+
+// @ai-generated - Proves every authored dialect uses one authority and damaged nodes stay local.
+#[test]
+fn all_five_dialects_extract_disjoint_complete_classes_after_damage() {
+    for (lang, input, expected) in [
+        (
+            StyleAnalysisLang::Css,
+            ".bad { color: \"oops\n}\n.css { color: red; }",
+            "css",
+        ),
+        (
+            StyleAnalysisLang::Scss,
+            ".bad { color: \"oops\n}\n.scss { color: red; }",
+            "scss",
+        ),
+        (
+            StyleAnalysisLang::Less,
+            ".bad { color: \"oops\n}\n.less { color: red; }",
+            "less",
+        ),
+        (
+            StyleAnalysisLang::Sass,
+            ".bad\n  color: #{$x\n.sass\n  color: red\n",
+            "sass",
+        ),
+        (
+            StyleAnalysisLang::Stylus,
+            ".bad\n  color ${x\n.stylus\n  color red\n",
+            "stylus",
+        ),
+    ] {
+        let analysis = build_scanned_style_analysis(
+            lang,
+            input,
+            VueStyleInput::default(),
+            true,
+            false,
+            None,
+            0,
+        );
+        let css = analysis.css.expect("dialect syntax projection");
+        assert!(
+            css.classes.iter().any(|class| class.name == expected),
+            "{lang:?}: {:?}",
+            css.classes
+                .iter()
+                .map(|class| &class.name)
+                .collect::<Vec<_>>()
+        );
+    }
 }

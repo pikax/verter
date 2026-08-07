@@ -59,6 +59,7 @@ mod audited_request_tests;
 mod authored_evidence_producer;
 #[cfg(test)]
 mod block_6c_view_hoist_tests;
+mod block_content;
 mod cache;
 pub mod cache_schema;
 pub mod carrier_artifact_cohort;
@@ -332,7 +333,6 @@ pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
 pub mod session_view;
 mod shared;
-pub(crate) mod source_map_remap;
 #[cfg(test)]
 mod source_root_retention_tests;
 #[cfg(test)]
@@ -393,6 +393,7 @@ pub mod projection_bench_support {
     };
 }
 
+pub use block_content::hash_block_content;
 pub use host_audit_runtime::{
     ActiveRegistration, AuditRequestRegistration, AuditRuntimeSnapshot, HostAuditRuntime,
 };
@@ -402,15 +403,10 @@ pub use verter_language::{
     LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 
-// Per-call-site instrumentation accessors. Production-on
-// (the counter map is bumped on every `HostStoreView::from_host`
-// invocation) so the bench can dump the attribution table at the end
-// of each pass. The dump is keyed by `&'static Location` propagated
+// Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation).
 // through the `#[track_caller]` rail from the warm-hit validator
 // down to `HostStoreView::from_host`.
-// The coherent-build sweep counter is the batch-saturation gate's actual
-// base-view sweep count (NOT the per-call `from_host` count, which also
-// bumps on cheap token-stable Arc-clone hits): warm batches sweep ~O(1).
+// The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
 pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 pub use resolver_store::{
@@ -438,8 +434,7 @@ use shared::Shared;
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
-/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile
-/// compile slots. It is designed to be long-lived (one per Vite dev server or
+/// `VerterHost` owns all tracked files, their parse snapshots, and per-profile compile slots. It is designed to be long-lived (one per Vite dev server or
 /// WASM session) and provides the full upsert-resolve-load lifecycle:
 ///
 /// 1. [`upsert`](Self::upsert) â€” parse and store a file, returning change info
@@ -453,6 +448,12 @@ pub struct VerterHost {
     pub(crate) registered_source_authority: carrier_publication_store::SourceAuthorityHandle,
     pub(crate) carrier_grammar_authority: carrier_publication_store::GrammarAuthorityHandle,
     pub(crate) carrier_publication_store: carrier_publication_store::PublicationStoreHandle,
+    pub(crate) block_content_state: Shared<crate::block_content::BlockContentState>,
+    pub(crate) block_content_admission_fence: parking_lot::Mutex<()>,
+    pub(crate) block_content_correlation_counter: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(crate) block_content_admission_seam_hook:
+        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// The single host-level language classification authority:
     /// composes the static `LanguageRegistry` with the project
     /// capability snapshot (empty until a capability producer lands).

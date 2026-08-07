@@ -269,12 +269,44 @@ The IDE virtual filename used behind this API is internal. Consumers should rely
 
 #### `host.applyBlockOverrides(request)`
 
-Apply preprocessed block overrides (template, script, style, or custom blocks). Used after an external preprocessor (Pug, SCSS, Less, Stylus, etc.) has transformed block content.
+Apply externally processed template, script, style, or custom-block content.
+Each result must echo the sealed identity and source stamps from the matching
+`preprocessorRequests` entry returned by `upsert()`. The host revalidates those
+stamps and the code/map hashes after the processor await; stale or mismatched
+results are refused without cache mutation. Block type and index are descriptive
+metadata only and are not accepted as identity.
 
 ```ts
+import { createHash } from "node:crypto";
+
+function hashBlockContent(value: string | Buffer): string {
+  const digest = createHash("sha256")
+    .update("verter.block-content.bytes.v1\0")
+    .update(value)
+    .digest("hex");
+  return `sha256:${digest}`;
+}
+
+const update = host.upsert({
+  inputId: "/path/to/App.vue",
+  source: '<template lang="pug">p Hello</template>',
+});
+const pending = update.preprocessorRequests[0];
+const processedHtml = "<p>Hello</p>";
+
 const result = host.applyBlockOverrides({
-  canonicalId: "/path/to/App.vue",
-  overrides: [{ blockType: "style", index: 0, code: processedCss }],
+  canonicalId: update.canonicalId,
+  overrides: [{
+    correlationToken: pending.correlationToken,
+    blockToken: pending.blockToken,
+    ownerRevision: pending.ownerRevision,
+    artifactToken: pending.artifactToken,
+    basisToken: pending.basisToken,
+    sourceSpaceToken: pending.sourceSpaceToken,
+    code: processedHtml,
+    codeHash: hashBlockContent(processedHtml),
+    suppliedProvenance: "pug@3",
+  }],
 });
 ```
 

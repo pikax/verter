@@ -35,6 +35,7 @@ pub enum TokenKind {
     LessInterpolationStart,
     LessEscapedString,
     UnicodeRange,
+    StylusInterpolationStart,
 }
 
 impl TokenKind {
@@ -77,6 +78,7 @@ impl TokenKind {
             29 => Self::LessInterpolationStart,
             30 => Self::LessEscapedString,
             31 => Self::UnicodeRange,
+            32 => Self::StylusInterpolationStart,
             _ => Self::Delim,
         }
     }
@@ -96,6 +98,7 @@ impl TokenKind {
                 | Self::LeftBrace
                 | Self::ScssInterpolationStart
                 | Self::LessInterpolationStart
+                | Self::StylusInterpolationStart
         )
     }
 
@@ -117,6 +120,7 @@ impl TokenFlags {
     pub const NUMBER_INTEGER: u16 = 1 << 3;
     pub const UNTERMINATED: u16 = 1 << 4;
     pub const DIALECT_EXTENSION: u16 = 1 << 5;
+    pub const CONTAINS_NEWLINE: u16 = 1 << 6;
 }
 
 #[repr(C)]

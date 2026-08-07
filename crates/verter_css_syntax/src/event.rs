@@ -32,6 +32,15 @@ pub enum SyntaxKind {
     AtRulePrelude,
     AtRuleBlock,
     Recovery,
+    ClassSelector,
+    IdSelector,
+    TypeSelector,
+    Interpolation,
+    IndentedBlock,
+    AmbiguousStatement,
+    VariableDeclaration,
+    MixinOrFunctionHeader,
+    ControlDirective,
 }
 
 impl SyntaxKind {
@@ -64,6 +73,16 @@ impl SyntaxKind {
             24 => Self::UnknownAtRule,
             25 => Self::AtRulePrelude,
             26 => Self::AtRuleBlock,
+            27 => Self::Recovery,
+            28 => Self::ClassSelector,
+            29 => Self::IdSelector,
+            30 => Self::TypeSelector,
+            31 => Self::Interpolation,
+            32 => Self::IndentedBlock,
+            33 => Self::AmbiguousStatement,
+            34 => Self::VariableDeclaration,
+            35 => Self::MixinOrFunctionHeader,
+            36 => Self::ControlDirective,
             _ => Self::Recovery,
         }
     }

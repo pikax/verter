@@ -20,6 +20,7 @@
 
 pub mod carrier_compiler;
 pub mod ctx;
+pub(crate) mod generated_chunk;
 pub mod generated_identifier;
 #[doc(hidden)]
 pub mod registered_carrier_projection;
@@ -37,9 +38,10 @@ pub mod sourcemap_e2e_helpers;
 
 pub use carrier_compiler::{
     CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
-    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
-    RuntimeDiagnosticSeverity, RuntimeMainModule, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, TemplateFacts,
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
+    RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
+    RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
 };
 pub use ctx::CarrierCompilerCtx;
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};

@@ -17,8 +17,8 @@ use crate::hash::{hash_16, semantic_hash};
 use crate::id::resolve_external;
 use crate::types::{
     DescriptorMin, DiagnosticsSnapshot, ExternalBlockKind, ExternalSourceRequest, FileMeta,
-    HostDiagnostic, HostSeverity, ParseSnapshot, PreprocessorBlockType, PreprocessorRequest,
-    SliceHashes, SrcBlockInfo,
+    HostDiagnostic, HostSeverity, ParseSnapshot, PendingPreprocessorRequest, SliceHashes,
+    SrcBlockInfo,
 };
 
 /// Closed failure while assigning carrier statements to typed script regions.
@@ -237,13 +237,11 @@ pub(crate) fn find_attr(attrs: &[(&str, &str)], name: &str) -> Option<String> {
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_resolve_src_block(
     canonical_id: &str,
     attrs: &[(&str, &str)],
     tag_name: &str,
     block_kind: ExternalBlockKind,
-    index: usize,
     tag_open_start: u32,
     tag_open_end: u32,
     tag_close: Option<u32>,
@@ -255,9 +253,13 @@ pub(crate) fn try_resolve_src_block(
         external_requests.push(ExternalSourceRequest {
             owner_canonical_id: canonical_id.to_string(),
             block_kind,
-            index,
+            opening_start: tag_open_start,
             specifier: src,
             resolved_canonical_id: resolved.clone(),
+            block_token: String::new(),
+            owner_revision: String::new(),
+            artifact_token: String::new(),
+            carrier_source_space_token: String::new(),
         });
         src_blocks.push(SrcBlockInfo {
             tag_name: tag_name.to_string(),
@@ -754,18 +756,7 @@ fn build_svelte_snapshot_from_eval_source(
     // change reporting; they are never used to excuse a stale warm hit.
     let semantic_hash = whole_hash;
 
-    let preprocessor_requests = build_preprocessor_requests(
-        &None,
-        None,
-        &None,
-        None,
-        &style_langs,
-        &style_content_spans,
-        &[],
-        &[],
-        &[],
-        source,
-    );
+    let preprocessor_requests = build_preprocessor_requests(&artifact.common.inventory, source);
 
     // Run the shallow analysis over the eval-source under the carrier's RESOLVED
     // script dialect (the producer stamped `lang="ts"/"tsx"/"jsx"/"js"` onto the
@@ -877,7 +868,7 @@ fn build_svelte_snapshot_from_eval_source(
     // Svelte style + markup class facts — the carrier analog of the Vue
     // style-analysis / template-element class inventory. Svelte styles are
     // scoped by default; per-selector `:global(...)` opt-outs are recorded by
-    // the scanner as special pseudos.
+    // the style syntax projection as special pseudos.
     snapshot.style_analyses = build_style_analyses_from_inventory(
         &artifact.common.inventory,
         source,
@@ -1203,10 +1194,9 @@ pub(crate) fn collect_vue_src_blocks(
     let mut src_blocks = Vec::new();
     let mut external_requests = Vec::new();
 
-    for (idx, script) in [parsed.script(), parsed.script_setup()]
+    for script in [parsed.script(), parsed.script_setup()]
         .into_iter()
         .flatten()
-        .enumerate()
     {
         if let Some(src_span) = script.src {
             let specifier = source[src_span.start as usize..src_span.end as usize].to_string();
@@ -1221,9 +1211,13 @@ pub(crate) fn collect_vue_src_blocks(
             external_requests.push(ExternalSourceRequest {
                 owner_canonical_id: canonical_id.to_string(),
                 block_kind: ExternalBlockKind::Script,
-                index: idx,
+                opening_start: script.tag_open.start,
                 specifier,
                 resolved_canonical_id: resolved,
+                block_token: String::new(),
+                owner_revision: String::new(),
+                artifact_token: String::new(),
+                carrier_source_space_token: String::new(),
             });
         }
     }
@@ -1235,7 +1229,6 @@ pub(crate) fn collect_vue_src_blocks(
             &attrs,
             "template",
             ExternalBlockKind::Template,
-            0,
             ast.root.tag_open.start,
             ast.root.tag_open.end,
             ast.root.tag_close.as_ref().map(|c| c.start),
@@ -1244,7 +1237,7 @@ pub(crate) fn collect_vue_src_blocks(
         );
     }
 
-    for (idx, style) in parsed.style_nodes().iter().enumerate() {
+    for style in parsed.style_nodes() {
         let mut attrs = extract_attrs(&style.attributes, source);
         if style.scoped {
             attrs.push(("scoped", "true"));
@@ -1257,7 +1250,6 @@ pub(crate) fn collect_vue_src_blocks(
             &attrs,
             "style",
             ExternalBlockKind::Style,
-            idx,
             style.tag_open.start,
             style.tag_open.end,
             style.tag_close.as_ref().map(|c| c.start),
@@ -1266,7 +1258,7 @@ pub(crate) fn collect_vue_src_blocks(
         );
     }
 
-    for (idx, custom) in parsed.unknown_nodes().iter().enumerate() {
+    for custom in parsed.unknown_nodes() {
         let block_type =
             &source[custom.tag_open.start as usize + 1..custom.tag_open.name_end as usize];
         let mut attrs = extract_attrs(&custom.attributes, source);
@@ -1276,7 +1268,6 @@ pub(crate) fn collect_vue_src_blocks(
             &attrs,
             block_type,
             ExternalBlockKind::Custom,
-            idx,
             custom.tag_open.start,
             custom.tag_open.end,
             custom.tag_close.as_ref().map(|c| c.start),
@@ -1308,8 +1299,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     let mut script_count = 0;
     let mut has_script = false;
     let mut script_lang: Option<String> = None;
-    // Content span for script block (used for preprocessor request content extraction)
-    let mut script_content_span: Option<(u32, u32)> = None;
 
     for script in [parsed.script(), parsed.script_setup()]
         .into_iter()
@@ -1330,10 +1319,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
             if let Some(lang) = find_attr(&attrs, "lang") {
                 if lang != "true" {
                     script_lang = Some(lang);
-                    // Capture content span for the script with non-native lang
-                    if let Some(span) = script.content {
-                        script_content_span = Some((span.start, span.end));
-                    }
                 }
             }
         }
@@ -1361,8 +1346,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     let mut template_hash = None;
     let mut template_attrs_fp = Vec::new();
     let mut template_lang: Option<String> = None;
-    // Content span for template block (used for preprocessor request content extraction)
-    let mut template_content_span: Option<(u32, u32)> = None;
 
     if let Some(ast) = parsed.template_ast() {
         template_count = 1;
@@ -1371,7 +1354,6 @@ pub(crate) fn build_vue_snapshot_from_parsed(
             template_hash = Some(hash_16(
                 &source.as_bytes()[content.start as usize..content.end as usize],
             ));
-            template_content_span = Some((content.start, content.end));
         } else {
             template_hash = Some(hash_16(&[]));
         }
@@ -1582,18 +1564,8 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     };
 
     // Build preprocessor requests for non-native languages
-    let preprocessor_requests = build_preprocessor_requests(
-        &template_lang,
-        template_content_span,
-        &script_lang,
-        script_content_span,
-        &style_langs,
-        &style_content_spans,
-        &custom_types,
-        &custom_langs,
-        &custom_content_spans,
-        source,
-    );
+    let preprocessor_requests =
+        build_preprocessor_requests(&framework_parse.common.inventory, source);
 
     ParseSnapshot {
         whole_hash,
@@ -1627,91 +1599,50 @@ pub(crate) fn build_vue_snapshot_from_parsed(
 /// A non-native language is any `lang` that the Rust compiler cannot handle natively:
 /// - Template: anything other than HTML (or no `lang`)
 /// - Script: anything not in `[ts, tsx, js, jsx]`
-/// - Style: anything other than CSS (or no `lang`)
+/// - Style: anything outside CSS/SCSS/Sass/Less/Stylus
 /// - Custom: any custom block with a `lang` attribute
-#[allow(clippy::too_many_arguments)]
 fn build_preprocessor_requests(
-    template_lang: &Option<String>,
-    template_content_span: Option<(u32, u32)>,
-    script_lang: &Option<String>,
-    script_content_span: Option<(u32, u32)>,
-    style_langs: &[Option<String>],
-    style_content_spans: &[Option<(u32, u32)>],
-    custom_types: &[String],
-    custom_langs: &[Option<String>],
-    custom_content_spans: &[Option<(u32, u32)>],
+    inventory: &verter_language::CarrierBlockInventory,
     source: &str,
-) -> Vec<PreprocessorRequest> {
+) -> Vec<PendingPreprocessorRequest> {
+    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, SectionRole};
+
     let mut requests = Vec::new();
 
-    // Template: non-native if template_lang is Some (already filtered for "html")
-    if let Some(lang) = template_lang {
-        let content = template_content_span
-            .map(|(s, e)| &source[s as usize..e as usize])
-            .unwrap_or("");
-        requests.push(PreprocessorRequest {
-            block_type: PreprocessorBlockType::Template,
-            index: 0,
-            lang: lang.clone(),
+    for block in inventory.blocks() {
+        let CarrierBlock::Section { id, role, syntax } = block else {
+            continue;
+        };
+        let content_class = crate::block_content::role_class(role);
+        let lang = crate::block_content::role_lang(inventory, role, syntax);
+        if crate::block_content::block_content_is_native(inventory, role, syntax, &lang) {
+            continue;
+        }
+        let Some(block_ref) = inventory.block_ref(*id) else {
+            continue;
+        };
+        let content = inventory
+            .slice(
+                verter_language::parse_artifact::carrier_inventory::SourceSlice::new(
+                    syntax.content_span,
+                ),
+            )
+            .unwrap_or_else(|_| {
+                source
+                    .get(syntax.content_span.start as usize..syntax.content_span.end as usize)
+                    .unwrap_or_default()
+            });
+        let custom_type = match role {
+            SectionRole::Custom { normalized_name } => Some(normalized_name.to_string()),
+            _ => None,
+        };
+        requests.push(PendingPreprocessorRequest {
+            content_class,
+            block_ref,
+            lang,
             content: content.to_string(),
+            custom_type,
         });
-    }
-
-    // Script: non-native if not in [ts, tsx, js, jsx]
-    if let Some(lang) = script_lang {
-        let is_native = matches!(
-            lang.as_str(),
-            "ts" | "tsx" | "js" | "jsx" | "TS" | "TSX" | "JS" | "JSX"
-        );
-        if !is_native {
-            let content = script_content_span
-                .map(|(s, e)| &source[s as usize..e as usize])
-                .unwrap_or("");
-            requests.push(PreprocessorRequest {
-                block_type: PreprocessorBlockType::Script,
-                index: 0,
-                lang: lang.clone(),
-                content: content.to_string(),
-            });
-        }
-    }
-
-    // Style: non-native if lang is Some and not "css"
-    for (idx, lang_opt) in style_langs.iter().enumerate() {
-        if let Some(lang) = lang_opt {
-            if !lang.eq_ignore_ascii_case("css") {
-                let content = style_content_spans
-                    .get(idx)
-                    .and_then(|s| *s)
-                    .map(|(s, e)| &source[s as usize..e as usize])
-                    .unwrap_or("");
-                requests.push(PreprocessorRequest {
-                    block_type: PreprocessorBlockType::Style,
-                    index: idx,
-                    lang: lang.clone(),
-                    content: content.to_string(),
-                });
-            }
-        }
-    }
-
-    // Custom: any custom block with a lang attribute
-    for (idx, lang_opt) in custom_langs.iter().enumerate() {
-        if let Some(lang) = lang_opt {
-            let content = custom_content_spans
-                .get(idx)
-                .and_then(|s| *s)
-                .map(|(s, e)| &source[s as usize..e as usize])
-                .unwrap_or("");
-            requests.push(PreprocessorRequest {
-                block_type: PreprocessorBlockType::Custom,
-                index: idx,
-                lang: lang.clone(),
-                content: content.to_string(),
-            });
-            // Also store custom block type name in context for the caller
-            let _ = custom_types.get(idx); // suppress unused warning
-        }
     }
 
     requests
@@ -1830,19 +1761,20 @@ fn build_style_analyses_from_inventory(
                 .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("true"));
             let is_module = !matches!(module, StyleModule::None) || module_attr.is_some();
 
-            // `<style src="...">`: the content lives in an external file and
-            // stays DEFERRED (B-23) — never slice the inline span (Vue ignores
-            // it) and never fabricate an empty-but-positive analysis. The
-            // typed deferred state is what consumers key "unavailable" off.
+            // Raw carrier parsing cannot read the host VFS. Record an external
+            // style as typed-deferred here — never slice Vue's ignored inline
+            // span or fabricate empty-positive facts. Host selection later
+            // hydrates native CSS/SCSS/Sass/Less/Stylus bytes from the
+            // registered external artifact, or a sealed supplied result for a
+            // processed dialect.
             if named_attr(inventory, syntax, "src").is_some() {
-                let mut analysis =
-                    verter_semantic::analysis::build_external_src_deferred_style_analysis(
-                        analysis_lang(dialect, lang_attr),
-                        !vue_style_semantics || *scoped,
-                        is_module,
-                        module_name,
-                        content_offset,
-                    );
+                let mut analysis = verter_semantic::analysis::build_external_src_style_analysis(
+                    analysis_lang(dialect, lang_attr),
+                    !vue_style_semantics || *scoped,
+                    is_module,
+                    module_name,
+                    content_offset,
+                );
                 analysis.block_ref = inventory.block_ref(*id);
                 return Some(analysis);
             }
@@ -1885,9 +1817,8 @@ fn build_style_analyses_from_inventory(
 
             let sfc_source_len = source.len() as u32;
             let analysis_lang = analysis_lang(dialect, lang_attr);
-            // CSS, SCSS and Less run the brace-based scanner (dialect-aware) so class
-            // and selector facts exist for every brace-based style block; indented
-            // languages (Sass, Stylus) keep the Vue-features-only analysis.
+            // All five authored dialects use the shared style syntax authority.
+            // Only complete static nodes are projected as concrete semantic facts.
             let mut analysis = verter_semantic::analysis::build_scanned_style_analysis(
                 analysis_lang,
                 css_content,
@@ -2464,6 +2395,7 @@ pub(crate) fn parse_non_sfc_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockContentClass;
 
     /// The statically classified registry row for a path — tests
     /// thread it exactly like production call sites thread the
@@ -3492,8 +3424,8 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
-        assert_eq!(req.block_type, PreprocessorBlockType::Template);
-        assert_eq!(req.index, 0);
+        assert_eq!(req.content_class, BlockContentClass::Template);
+        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "pug");
         assert!(
             req.content.contains("div hello"),
@@ -3510,8 +3442,8 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
-        assert_eq!(req.block_type, PreprocessorBlockType::Script);
-        assert_eq!(req.index, 0);
+        assert_eq!(req.content_class, BlockContentClass::Script);
+        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "coffee");
         assert!(
             req.content.contains("x = 1"),
@@ -3532,21 +3464,13 @@ watch(count, (value, oldValue) => {
         );
     }
 
-    /// @ai-generated - preprocessor request for scss style
+    /// SCSS is a native block-content dialect; the bundler may still transform
+    /// it later, but analysis/selection does not require a caller result.
     #[test]
-    fn preprocessor_request_for_scss_style() {
+    fn no_preprocessor_request_for_native_scss_style() {
         let source = "<template><div>hello</div></template>\n<style lang=\"scss\">\n.a { .b { color: red } }\n</style>";
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
-        assert_eq!(snap.preprocessor_requests.len(), 1);
-        let req = &snap.preprocessor_requests[0];
-        assert_eq!(req.block_type, PreprocessorBlockType::Style);
-        assert_eq!(req.index, 0);
-        assert_eq!(req.lang, "scss");
-        assert!(
-            req.content.contains(".a { .b"),
-            "content should contain '.a {{ .b', got: {}",
-            req.content
-        );
+        assert!(snap.preprocessor_requests.is_empty());
     }
 
     /// SCSS style blocks scan to full CSS facts (classes with exact
@@ -3787,14 +3711,19 @@ watch(count, (value, oldValue) => {
         assert_eq!(snapshot.markup_class_tokens[0].name, "card");
     }
 
-    /// Indented Sass stays fail-closed: Vue features only, no scanned CSS.
+    /// Indented Sass uses the shared syntax authority without preprocessing.
     #[test]
-    fn sass_style_block_stays_unscanned() {
+    fn sass_style_block_uses_shared_syntax_authority() {
         let source =
             "<template><div>x</div></template>\n<style lang=\"sass\">\n.a\n  color: red\n</style>";
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::LSP);
         assert_eq!(snap.style_analyses.len(), 1);
-        assert!(snap.style_analyses[0].css.is_none());
+        let css = snap.style_analyses[0]
+            .css
+            .as_ref()
+            .expect("authored Sass has structural analysis");
+        assert_eq!(css.classes.len(), 1);
+        assert_eq!(css.classes[0].name, "a");
     }
 
     /// @ai-generated - preprocessor request for custom block with lang
@@ -3804,8 +3733,8 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
-        assert_eq!(req.block_type, PreprocessorBlockType::Custom);
-        assert_eq!(req.index, 0);
+        assert_eq!(req.content_class, BlockContentClass::Custom);
+        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "yaml");
         assert!(
             req.content.contains("hello: world"),
@@ -3821,19 +3750,19 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(
             snap.preprocessor_requests.len(),
-            3,
-            "should have 3 preprocessor requests: template, script, style"
+            2,
+            "SCSS is native; only template and script need supplied output"
         );
 
         // Verify each type is present
         let types: Vec<_> = snap
             .preprocessor_requests
             .iter()
-            .map(|r| r.block_type)
+            .map(|r| r.content_class)
             .collect();
-        assert!(types.contains(&PreprocessorBlockType::Template));
-        assert!(types.contains(&PreprocessorBlockType::Script));
-        assert!(types.contains(&PreprocessorBlockType::Style));
+        assert!(types.contains(&BlockContentClass::Template));
+        assert!(types.contains(&BlockContentClass::Script));
+        assert!(!types.contains(&BlockContentClass::Style));
     }
 
     #[test]

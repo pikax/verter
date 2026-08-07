@@ -110,16 +110,23 @@ pub struct FfiUpsertRequest {
 
 /// A single preprocessed block override (template, script, style, or custom).
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FfiBlockOverrideEntry {
-    /// Block type: "template", "script", "style", or "custom".
-    pub block_type: String,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: u32,
+    pub correlation_token: String,
+    pub block_token: String,
+    pub owner_revision: String,
+    pub artifact_token: String,
+    pub expected_language: String,
+    pub prior_basis_token: Option<String>,
+    pub basis_token: String,
+    pub source_space_token: String,
     /// Preprocessed code.
     pub code: String,
+    pub code_hash: String,
     /// Source map from the preprocessor, if available.
     pub source_map: Option<String>,
+    pub source_map_hash: Option<String>,
+    pub supplied_provenance: Option<String>,
 }
 
 /// Request to apply preprocessed block overrides (unified API).
@@ -182,9 +189,12 @@ pub struct FfiDiagnosticsSnapshot {
 pub struct FfiExternalSourceRequest {
     pub owner_canonical_id: String,
     pub block_kind: String,
-    pub index: u32,
     pub specifier: String,
     pub resolved_canonical_id: String,
+    pub block_token: String,
+    pub owner_revision: String,
+    pub artifact_token: String,
+    pub carrier_source_space_token: String,
 }
 
 /// Summary of a single import statement found in a script block.
@@ -218,14 +228,25 @@ pub struct FfiModuleReference {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiPreprocessorRequest {
-    /// Block type: "template", "script", "style", or "custom".
-    pub block_type: String,
-    /// Block index (0 for template/script, 0..N for styles/custom blocks).
-    pub index: u32,
+    pub content_class: String,
     /// The `lang` attribute value (e.g., "pug", "coffee", "scss").
     pub lang: String,
     /// Raw content of the block that needs preprocessing.
     pub content: String,
+    pub availability: String,
+    pub correlation_token: String,
+    pub block_token: String,
+    pub owner_revision: String,
+    pub artifact_token: String,
+    pub expected_language: String,
+    /// Caller-held basis before the host captured this request. Absent for a
+    /// tokenless first resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_basis_token: Option<String>,
+    pub basis_token: String,
+    pub source_space_token: String,
+    pub content_hash: String,
+    pub custom_type: Option<String>,
 }
 
 /// A single export signature extracted from a file's script block.

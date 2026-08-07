@@ -432,8 +432,12 @@ fn external_src_compile_is_typed_and_fail_closed() {
     });
     assert!(matches!(
         outcome,
-        Err(crate::HostError::ExternalBlockContentDeferred(value))
-            if value == crate::carrier_publication_store::ExternalBlockContentDeferred::B23
+        Err(crate::HostError::BlockContentRefused(
+            crate::BlockContentRefusal::Unavailable {
+                availability: crate::BlockContentAvailability::Missing,
+                ..
+            }
+        ))
     ));
 }
 

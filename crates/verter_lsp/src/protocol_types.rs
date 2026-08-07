@@ -290,57 +290,6 @@ pub struct GetVirtualFilesParams {
     pub uri: String,
 }
 
-/// Params for `$/verter/applyStyleOverrides` request.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApplyStyleOverridesParams {
-    pub uri: String,
-    pub overrides: Vec<StyleOverrideParam>,
-    /// The `documentRevisionToken` of the structure the override was computed
-    /// against. REQUIRED: a request without it is refused typed
-    /// (`missingTokens`) — the handler REFUSES a mismatched-revision apply,
-    /// because an async transpile result bound to revision A must never
-    /// overwrite revision B's state. `Option` only so an absent field yields
-    /// the typed refusal instead of a deserialization error.
-    #[serde(default)]
-    pub document_revision_token: Option<String>,
-    /// The `artifactToken` of the same captured structure. Same REQUIRED /
-    /// refusal semantics as `document_revision_token`.
-    #[serde(default)]
-    pub artifact_token: Option<String>,
-}
-
-/// A single style override entry from the client.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StyleOverrideParam {
-    pub index: u32,
-    pub code: String,
-    pub source_map: Option<String>,
-}
-
-/// Typed refusal reason for `$/verter/applyStyleOverrides` (additive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum StyleOverrideRefusal {
-    /// The captured revision/artifact token no longer matches the live
-    /// document: the override describes superseded bytes and was NOT applied.
-    RevisionMismatch,
-    /// The request carried no (or only one) captured structure token: a
-    /// revision-unvalidatable apply is refused, never applied unfenced.
-    MissingTokens,
-}
-
-/// Response for `$/verter/applyStyleOverrides` request.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApplyStyleOverridesResponse {
-    pub success: bool,
-    /// Present only when the apply was refused without mutation (additive).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refusal: Option<StyleOverrideRefusal>,
-}
-
 /// Params for `$/verter/getAnalysis` (and `$/verter/getBindingTypes`) request.
 #[derive(Debug, Deserialize)]
 pub struct GetAnalysisParams {

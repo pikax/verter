@@ -523,7 +523,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 let mut buf = String::with_capacity(full_prefix.len() + 16);
                 buf.push_str(&full_prefix);
                 buf.push_str("return null\n}");
-                out.overwrite(tag_open.start, close_end, &buf);
+                out.overwrite_or_root_prefix(tag_open.start, close_end, &buf);
             }
             1 => {
                 let child = &children[0];
@@ -536,7 +536,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 32);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
-                    out.overwrite(tag_open.start, child.start, &prefix);
+                    out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
 
                     // Emit the v-if condition prefix with per-segment source mapping.
                     if let Some(ref cond) = child.condition_prefix {
@@ -551,7 +551,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                         }
                     }
 
-                    out.overwrite(close_start, close_end, "\n}");
+                    out.overwrite_or_root_suffix(close_start, close_end, "\n}");
                 } else if self.root_element_has_v_memo(root_children, source) {
                     // v-memo root: `_withMemo(..., () => (_openBlock(), …))`
                     // owns its openBlock inside the memo factory (emitted by
@@ -560,16 +560,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                     let mut prefix = String::with_capacity(full_prefix.len() + 8);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return ");
-                    out.overwrite(tag_open.start, child.start, &prefix);
-                    out.overwrite(close_start, close_end, "\n}");
+                    out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    out.overwrite_or_root_suffix(close_start, close_end, "\n}");
                 } else {
                     // Single root — block root with _openBlock + _createElementBlock
                     out.add_vdom_import(VdomHelper::OpenBlock);
                     let mut prefix = String::with_capacity(full_prefix.len() + 24);
                     prefix.push_str(&full_prefix);
                     prefix.push_str("return (_openBlock(), ");
-                    out.overwrite(tag_open.start, child.start, &prefix);
-                    out.overwrite(close_start, close_end, ")\n}");
+                    out.overwrite_or_root_prefix(tag_open.start, child.start, &prefix);
+                    out.overwrite_or_root_suffix(close_start, close_end, ")\n}");
                 }
             }
             _ => {
@@ -582,7 +582,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 let mut prefix = String::with_capacity(full_prefix.len() + 80);
                 prefix.push_str(&full_prefix);
                 prefix.push_str("return (_openBlock(), _createElementBlock(_Fragment, null, [");
-                out.overwrite(tag_open.start, children[0].start, &prefix);
+                out.overwrite_or_root_prefix(tag_open.start, children[0].start, &prefix);
 
                 // Delegate to wrap_array_text_runs for separators AND text
                 // wrapping. This handles:
@@ -632,7 +632,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
                 close_buf.push_str("\n], ");
                 close_buf.push_str(flag_str);
                 close_buf.push_str("))\n}");
-                out.overwrite(close_start, close_end, &close_buf);
+                out.overwrite_or_root_suffix(close_start, close_end, &close_buf);
             }
         }
     }

@@ -142,7 +142,6 @@ function service(
   const client = {
     sendRequest: async (type: unknown, params: unknown) => {
       requests?.push({ type, params });
-      if (type === RequestType.ApplyStyleOverrides) return { success: true };
       return respond(
         params as {
           requestToken: string;
@@ -235,68 +234,6 @@ describe("CssService doValidation availability fail-closed (TE-C-11)", () => {
     const svc = service((params) => available(params, dirty, { src: true }));
     const results = await svc.doValidation(URI, dirty, 1);
     expect(results).toEqual([]);
-  });
-
-  it("sends no style override for an external-src preprocessor block (R2-B-03)", async () => {
-    const external = '<style src="./theme.sass" lang="sass"></style>';
-    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
-    const requests: Array<{ type: unknown; params: unknown }> = [];
-    const svc = service(
-      (params) => available(params, external, { dialect: "sass", src: true }),
-      requests,
-    );
-    await svc.doValidation(URI, external, 1);
-    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(0);
-  });
-
-  it("still sends the override for an INLINE preprocessor block (negative control)", async () => {
-    const inline = '<style lang="sass">.a\n  color: red\n</style>';
-    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
-    const requests: Array<{ type: unknown; params: unknown }> = [];
-    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
-    await svc.doValidation(URI, inline, 1);
-    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(1);
-  });
-
-  it("binds the override to the captured revision/artifact tokens (R2-B-04)", async () => {
-    const inline = '<style lang="sass">.a\n  color: red\n</style>';
-    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
-    const requests: Array<{ type: unknown; params: unknown }> = [];
-    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
-    await svc.doValidation(URI, inline, 1);
-    const override = requests.find((r) => r.type === RequestType.ApplyStyleOverrides);
-    expect(override).toBeDefined();
-    expect(override?.params).toMatchObject({
-      uri: URI,
-      documentRevisionToken: "rev-1",
-      artifactToken: "artifact-1",
-    });
-  });
-
-  it("drops a transpile result whose document moved before the send (R2-B-04)", async () => {
-    const inline = '<style lang="sass">.a\n  color: red\n</style>';
-    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 1 });
-    const requests: Array<{ type: unknown; params: unknown }> = [];
-    const svc = service((params) => available(params, inline, { dialect: "sass" }), requests);
-    let startedResolve!: () => void;
-    const started = new Promise<void>((resolve) => {
-      startedResolve = resolve;
-    });
-    transpileGate.started = () => startedResolve();
-    let release!: () => void;
-    transpileGate.block = new Promise((resolve) => {
-      release = resolve;
-    });
-    const pending = svc.doValidation(URI, inline, 1);
-    // Wait until revision A's transpile is genuinely in flight (admission
-    // already passed), THEN commit revision B and release the transpile.
-    await started;
-    liveDocuments().splice(0, liveDocuments().length, { uri: { toString: () => URI }, version: 2 });
-    release();
-    transpileGate.block = undefined;
-    transpileGate.started = undefined;
-    await pending;
-    expect(requests.filter((r) => r.type === RequestType.ApplyStyleOverrides)).toHaveLength(0);
   });
 
   it("a stale invocation publishes nothing and never overwrites a newer revision's cache (R3-B-04)", async () => {

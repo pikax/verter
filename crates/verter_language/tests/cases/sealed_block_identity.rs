@@ -53,13 +53,14 @@ fn style_inventory(class_a: char, class_b: char, generation: u64) -> CarrierBloc
         },
     };
 
-    CarrierBlockInventory::new(
+    CarrierBlockInventory::new_registered(
         Arc::from([SourceSpaceDescriptor::registered(space, &snapshot)]),
         Arc::new(NormalizedNameTable {
             values: Arc::from([Arc::from("style")]),
         }),
         Arc::from([style_section(0, 0), style_section(1, 19)]),
         Arc::new(MarkupSyntaxArena::default()),
+        &[&snapshot],
     )
     .expect("valid fixture inventory")
 }

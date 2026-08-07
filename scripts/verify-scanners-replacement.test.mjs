@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -113,11 +113,60 @@ test("legacy extension reference guard rejects a package regression", () => {
     // discriminates the plant, not fixture noise.
     verifyNoLegacyExtensionAuthority(root, files);
 
-    writeFileSync(join(root, "package.json"), '{"scripts":{"package":"cd extensions/vscode"}}');
+    const plantedReference = "extensions/vscode";
+    assert.equal(
+      readFileSync(join(root, "package.json"), "utf8").includes(plantedReference),
+      false,
+      "package reference plant must be new",
+    );
+    writeFileSync(join(root, "package.json"), `{"scripts":{"package":"cd ${plantedReference}"}}`);
+    const plantedSource = readFileSync(join(root, "package.json"), "utf8");
+    assert.equal(plantedSource.includes(plantedReference), true, "package reference plant applied");
+    assert.equal(
+      plantedSource.split(plantedReference).length - 1,
+      1,
+      "package reference plant must be unique",
+    );
     assert.throws(
       () => verifyNoLegacyExtensionAuthority(root, files),
       /package.json references extensions\/vscode/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy extension generator provenance guard rejects each planted regression", () => {
+  const root = mkdtempSync(join(tmpdir(), "verter-b4-"));
+  try {
+    const files = writeHealthyTree(root);
+    verifyNoLegacyExtensionAuthority(root, files);
+
+    for (const relative of [
+      "packages/playground/scripts/generate-vue-language.ts",
+      "packages/playground/src/editor/vueLanguage.ts",
+    ]) {
+      const absolute = join(root, relative);
+      const healthy = readFileSync(absolute, "utf8");
+      const plantedReference = "extensions/vue-vscode";
+      assert.equal(healthy.includes(plantedReference), false, `${relative} plant must be new`);
+      writeFileSync(absolute, plantedReference);
+      const planted = readFileSync(absolute, "utf8");
+      assert.equal(planted.includes(plantedReference), true, `${relative} plant applied`);
+      assert.equal(
+        planted.split(plantedReference).length - 1,
+        1,
+        `${relative} plant must be unique`,
+      );
+      assert.throws(
+        () => verifyNoLegacyExtensionAuthority(root, files),
+        new RegExp(
+          `${relative.replaceAll("/", "\\/")} (lacks the current grammar authority|references extensions\\/vue-vscode)`,
+        ),
+      );
+      writeFileSync(absolute, healthy);
+      verifyNoLegacyExtensionAuthority(root, files);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

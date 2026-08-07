@@ -1,0 +1,30 @@
+error[E0432]: unresolved imports `verter_session::StyleOverrideEntry`, `verter_session::StyleOverrideRequest`
+ --> tests/cases/compile-fail/style_ordinal_override_api_is_not_public.rs:8:38
+  |
+8 | use verter_session::{CompileProfile, StyleOverrideEntry, StyleOverrideRequest, VerterHost};
+  |                                      ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `StyleOverrideRequest` in the root
+  |                                      |
+  |                                      no `StyleOverrideEntry` in the root
+  |
+help: a similar name exists in the module
+  |
+8 - use verter_session::{CompileProfile, StyleOverrideEntry, StyleOverrideRequest, VerterHost};
+8 + use verter_session::{CompileProfile, BlockOverrideEntry, StyleOverrideRequest, VerterHost};
+  |
+help: a similar name exists in the module
+  |
+8 - use verter_session::{CompileProfile, StyleOverrideEntry, StyleOverrideRequest, VerterHost};
+8 + use verter_session::{CompileProfile, StyleOverrideEntry, BlockOverrideRequest, VerterHost};
+  |
+
+error[E0599]: no method named `apply_style_overrides` found for reference `&VerterHost` in the current scope
+  --> tests/cases/compile-fail/style_ordinal_override_api_is_not_public.rs:11:18
+   |
+11 |     let _ = host.apply_style_overrides(StyleOverrideRequest {
+   |             -----^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `apply_block_overrides` with a similar name
+   |
+11 -     let _ = host.apply_style_overrides(StyleOverrideRequest {
+11 +     let _ = host.apply_block_overrides(StyleOverrideRequest {
+   |

@@ -150,6 +150,7 @@ pub fn parse_with_sink(
 
 pub struct Parser<'a> {
     source: &'a CssSource,
+    dialect: CssDialect,
     mode: CssParseMode,
     entry: CssEntryPoint,
     lexer: Lexer<'a>,
@@ -167,6 +168,7 @@ impl<'a> Parser<'a> {
     ) -> Self {
         Self {
             source,
+            dialect,
             mode,
             entry,
             lexer: Lexer::new(source, dialect),
@@ -180,6 +182,11 @@ impl<'a> Parser<'a> {
         mut self,
         sink: &mut impl ParseEventSink,
     ) -> Result<ParseSummary, CssParseFailure> {
+        if self.entry == CssEntryPoint::Stylesheet
+            && crate::layout::should_use_layout(self.source, self.dialect)
+        {
+            return crate::layout::parse_layout(self.source, self.dialect, self.mode, sink);
+        }
         match self.entry {
             CssEntryPoint::Stylesheet => {
                 self.start(sink, SyntaxKind::Stylesheet, self.source.origin())?;
@@ -436,6 +443,9 @@ impl<'a> Parser<'a> {
                 TokenKind::RightBrace => {
                     self.recover_current(sink, CssDiagnosticKind::UnexpectedClosingDelimiter)?;
                 }
+                TokenKind::AtKeyword if self.is_mixin_at_keyword(token) => {
+                    self.parse_mixin_or_function(sink)?;
+                }
                 TokenKind::AtKeyword => self.parse_at_rule(sink, AtRuleContext::RuleList)?,
                 TokenKind::ScssVariable if self.looks_like_declaration() => {
                     self.parse_declaration(sink, DeclarationContext::Style)?;
@@ -443,6 +453,7 @@ impl<'a> Parser<'a> {
                 TokenKind::LessVariable if self.looks_like_declaration() => {
                     self.parse_declaration(sink, DeclarationContext::Style)?;
                 }
+                _ if self.looks_like_less_mixin() => self.parse_mixin_or_function(sink)?,
                 _ => self.parse_qualified_rule(sink, false)?,
             }
         }
@@ -509,13 +520,95 @@ impl<'a> Parser<'a> {
                 kind if kind.is_trivia() || kind == TokenKind::Semicolon => {
                     self.bump(sink)?;
                 }
+                TokenKind::AtKeyword if self.is_mixin_at_keyword(token) => {
+                    self.parse_mixin_or_function(sink)?;
+                }
                 TokenKind::AtKeyword => self.parse_at_rule(sink, AtRuleContext::StyleBlock)?,
                 _ if self.looks_like_declaration() => {
                     self.parse_declaration(sink, declaration_context)?;
                 }
+                _ if self.looks_like_less_mixin() => self.parse_mixin_or_function(sink)?,
                 _ => self.parse_qualified_rule(sink, true)?,
             }
         }
+    }
+
+    fn is_mixin_at_keyword(&self, token: SyntaxToken) -> bool {
+        if !matches!(self.dialect, CssDialect::Scss | CssDialect::Sass) {
+            return false;
+        }
+        let name = self.source.token_text(token).trim_start_matches('@');
+        identifier_is_any(name, &["mixin", "function", "include", "extend"])
+    }
+
+    fn looks_like_less_mixin(&mut self) -> bool {
+        if self.dialect != CssDialect::Less {
+            return false;
+        }
+        let Some(first) = self.peek() else {
+            return false;
+        };
+        if first.kind() != TokenKind::Delim || self.source.token_text(first) != "." {
+            return false;
+        }
+        self.lexer
+            .clone()
+            .find(|token| !token.kind().is_trivia())
+            .is_some_and(|token| token.kind() == TokenKind::Function && token.start == first.end)
+    }
+
+    fn parse_mixin_or_function(
+        &mut self,
+        sink: &mut impl ParseEventSink,
+    ) -> Result<(), CssParseFailure> {
+        let start = self.current_position();
+        self.start(sink, SyntaxKind::MixinOrFunctionHeader, start)?;
+        self.start(sink, SyntaxKind::ComponentValueList, start)?;
+        while let Some(token) = self.peek() {
+            match token.kind() {
+                TokenKind::Semicolon | TokenKind::LeftBrace | TokenKind::RightBrace => break,
+                kind if kind.is_opening_delimiter() => self.parse_component_block(sink)?,
+                kind if kind.is_closing_delimiter() => {
+                    self.recover_current(sink, CssDiagnosticKind::UnexpectedClosingDelimiter)?;
+                }
+                _ => {
+                    self.bump(sink)?;
+                }
+            }
+        }
+        let header_end = self.current_position();
+        self.finish(sink, SyntaxKind::ComponentValueList, header_end)?;
+
+        if self.peek().map(SyntaxToken::kind) == Some(TokenKind::Semicolon) {
+            let end = self.bump(sink)?.map_or(header_end, |token| token.end);
+            return self.finish(sink, SyntaxKind::MixinOrFunctionHeader, end);
+        }
+        if self.peek().map(SyntaxToken::kind) != Some(TokenKind::LeftBrace) {
+            return self.finish(sink, SyntaxKind::MixinOrFunctionHeader, header_end);
+        }
+
+        let opener = self.peek().expect("mixin block has an opener");
+        self.start(sink, SyntaxKind::RuleBlock, opener.start)?;
+        self.bump(sink)?;
+        self.enter_nesting(TokenKind::LeftBrace)?;
+        let block_result = self.parse_block_items(sink, DeclarationContext::Style);
+        self.leave_nesting();
+        block_result?;
+        let end = if self.peek().map(SyntaxToken::kind) == Some(TokenKind::RightBrace) {
+            self.bump(sink)?
+                .map_or(self.source.end(), |token| token.end)
+        } else {
+            let end = self.source.end();
+            self.diagnostic(
+                sink,
+                CssDiagnosticKind::UnterminatedBlock,
+                Span::new(end, end),
+                RecoveryKind::CloseAtEndOfInput,
+            )?;
+            end
+        };
+        self.finish(sink, SyntaxKind::RuleBlock, end)?;
+        self.finish(sink, SyntaxKind::MixinOrFunctionHeader, end)
     }
 
     fn looks_like_declaration(&mut self) -> bool {
@@ -699,7 +792,13 @@ impl<'a> Parser<'a> {
     ) -> Result<(), CssParseFailure> {
         let at_keyword = self.peek().expect("at-rule begins with an at-keyword");
         let raw_name = &self.source.token_text(at_keyword)[1..];
-        let kind = classify_at_rule(raw_name);
+        let kind = if matches!(self.dialect, CssDialect::Scss | CssDialect::Sass)
+            && identifier_is_any(raw_name, &["if", "else", "for", "each", "while", "return"])
+        {
+            SyntaxKind::ControlDirective
+        } else {
+            classify_at_rule(raw_name)
+        };
         let descriptor_context = if identifier_is_any(raw_name, &["font-face"]) {
             DeclarationContext::FontFaceDescriptor
         } else {
@@ -815,14 +914,27 @@ impl<'a> Parser<'a> {
             TokenKind::LeftBracket => (SyntaxKind::ComponentValueBlock, TokenKind::RightBracket),
             TokenKind::LeftBrace
             | TokenKind::ScssInterpolationStart
-            | TokenKind::LessInterpolationStart => {
-                (SyntaxKind::ComponentValueBlock, TokenKind::RightBrace)
+            | TokenKind::LessInterpolationStart
+            | TokenKind::StylusInterpolationStart => {
+                let node = if matches!(
+                    open_kind,
+                    TokenKind::ScssInterpolationStart
+                        | TokenKind::LessInterpolationStart
+                        | TokenKind::StylusInterpolationStart
+                ) {
+                    SyntaxKind::Interpolation
+                } else {
+                    SyntaxKind::ComponentValueBlock
+                };
+                (node, TokenKind::RightBrace)
             }
             _ => return Ok(()),
         };
         let flags = if matches!(
             open_kind,
-            TokenKind::ScssInterpolationStart | TokenKind::LessInterpolationStart
+            TokenKind::ScssInterpolationStart
+                | TokenKind::LessInterpolationStart
+                | TokenKind::StylusInterpolationStart
         ) {
             NodeFlags::DIALECT_EXTENSION
         } else {
@@ -926,6 +1038,35 @@ impl<'a> Parser<'a> {
             }
 
             match token.kind() {
+                TokenKind::Ident if at_type_position => {
+                    self.parse_selector_name_component(sink, SyntaxKind::TypeSelector, false)?;
+                    at_type_position = false;
+                }
+                TokenKind::Delim if at_type_position && self.source.token_text(token) == "*" => {
+                    self.parse_selector_name_component(sink, SyntaxKind::TypeSelector, false)?;
+                    at_type_position = false;
+                }
+                TokenKind::Delim if self.source.token_text(token) == "." => {
+                    let mut probe = self.lexer.clone();
+                    if next_adjacent_after_comments(&mut probe).is_some_and(|(next, _)| {
+                        matches!(
+                            next.kind(),
+                            TokenKind::Ident
+                                | TokenKind::ScssInterpolationStart
+                                | TokenKind::LessInterpolationStart
+                                | TokenKind::StylusInterpolationStart
+                        )
+                    }) {
+                        self.parse_selector_name_component(sink, SyntaxKind::ClassSelector, true)?;
+                    } else {
+                        self.bump(sink)?;
+                    }
+                    at_type_position = false;
+                }
+                TokenKind::Hash if token.flags & TokenFlags::ID_HASH != 0 => {
+                    self.parse_selector_name_component(sink, SyntaxKind::IdSelector, false)?;
+                    at_type_position = false;
+                }
                 TokenKind::Comma => {
                     if compound_open {
                         self.finish(sink, SyntaxKind::CompoundSelector, token.start)?;
@@ -1002,6 +1143,42 @@ impl<'a> Parser<'a> {
             self.finish(sink, SyntaxKind::Selector, end)?;
         }
         self.finish(sink, SyntaxKind::SelectorList, end)
+    }
+
+    fn parse_selector_name_component(
+        &mut self,
+        sink: &mut impl ParseEventSink,
+        kind: SyntaxKind,
+        has_prefix: bool,
+    ) -> Result<(), CssParseFailure> {
+        let start = self.current_position();
+        self.start(sink, kind, start)?;
+        self.bump(sink)?;
+        if has_prefix {
+            while self
+                .peek()
+                .is_some_and(|token| token.kind() == TokenKind::Comment)
+            {
+                self.bump(sink)?;
+            }
+        }
+        while let Some(token) = self.peek() {
+            match token.kind() {
+                TokenKind::Ident if token.start == self.current_position() => {
+                    self.bump(sink)?;
+                }
+                TokenKind::ScssInterpolationStart
+                | TokenKind::LessInterpolationStart
+                | TokenKind::StylusInterpolationStart
+                    if token.start == self.current_position() =>
+                {
+                    self.parse_component_block(sink)?;
+                }
+                _ => break,
+            }
+        }
+        let end = self.current_position();
+        self.finish(sink, kind, end)
     }
 
     fn parse_selector_attribute(
@@ -1169,10 +1346,10 @@ impl<'a> Parser<'a> {
         };
         let name = name_token.map_or("", |token| token_name(self.source, token));
         let functional = name_token.map(SyntaxToken::kind) == Some(TokenKind::Function);
-        let kind = if pseudo_element {
-            SyntaxKind::PseudoElement
-        } else if functional && is_selector_list_pseudo(name) {
+        let kind = if functional && is_selector_list_pseudo(name, pseudo_element) {
             SyntaxKind::PseudoSelectorList
+        } else if pseudo_element {
+            SyntaxKind::PseudoElement
         } else if functional && is_nth_pseudo(name) {
             SyntaxKind::NthSelector
         } else if functional {
@@ -1321,8 +1498,26 @@ fn classify_at_rule(name: &str) -> SyntaxKind {
     }
 }
 
-fn is_selector_list_pseudo(name: &str) -> bool {
-    identifier_is_any(name, &["is", "where", "not", "has"])
+fn is_selector_list_pseudo(name: &str, pseudo_element: bool) -> bool {
+    if pseudo_element {
+        identifier_is_any(
+            name,
+            &[
+                "is",
+                "where",
+                "not",
+                "has",
+                "v-deep",
+                "v-slotted",
+                "v-global",
+            ],
+        )
+    } else {
+        identifier_is_any(
+            name,
+            &["is", "where", "not", "has", "deep", "slotted", "global"],
+        )
+    }
 }
 
 fn is_nth_pseudo(name: &str) -> bool {

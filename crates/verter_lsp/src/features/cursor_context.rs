@@ -5,8 +5,8 @@ use verter_session::carrier_publication_store::RegisteredFileStructure;
 
 use crate::documents::carrier_structure::{
     classify_cursor, markup_cursor_region, markup_element_at, markup_gap_window_start,
-    markup_open_tag_at, project_markup_open_tags, CarrierBlockView, CarrierCursorContext,
-    MarkupCursorRegion, MarkupOpenTagFact,
+    markup_open_tag_at, project_markup_open_tags, svelte_head_cursor_fact, CarrierBlockView,
+    CarrierCursorContext, MarkupCursorRegion, MarkupOpenTagFact, SvelteHeadCursorFact,
 };
 
 // =============================================================================
@@ -322,8 +322,8 @@ fn classify_root_or_template_context(
         });
     // Svelte block-head completion contexts (D5): `{#snippet |` (slot-name the
     // enclosing component accepts) and `{@render |` (in-scope snippet callee).
-    // These fire on a bounded same-line scan before the generic classification;
-    // both positions are otherwise indistinguishable from text content.
+    // The parser-owned family and payload spans distinguish these positions
+    // from identical marker bytes inside attributes, text, and comments.
     if language == Some(CarrierTemplateLanguage::Vue) {
         if let Some(ctx) = slot_name_context_from_markup(offset, source, analysis, structure) {
             return CursorContext::Template(ctx);
@@ -331,46 +331,34 @@ fn classify_root_or_template_context(
     }
     if language == Some(CarrierTemplateLanguage::Svelte) {
         let markup_facts = structure.map(project_markup_open_tags);
-        let line_start = source[..offset as usize]
-            .rfind('\n')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
-        let before_cursor = &source[line_start..offset as usize];
-        // The marker must be the LAST thing before the cursor: `{#snippet `
-        // or `{@render ` followed only by an in-progress identifier.
-        let snippet_head = before_cursor.rfind("{#snippet ").is_some_and(|idx| {
-            before_cursor[idx + "{#snippet ".len()..]
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '$')
-        });
-        if snippet_head {
-            let tag_name = analysis
-                .and_then(|snapshot| snapshot.template.as_ref())
-                .and_then(|template| {
-                    template
-                        .components
-                        .iter()
-                        .filter(|component| {
-                            offset >= component.span.start && offset < component.span.end
-                        })
-                        .min_by_key(|component| component.span.end - component.span.start)
-                        .map(|component| component.name.clone())
-                })
-                .or_else(|| {
-                    markup_facts
-                        .as_deref()
-                        .and_then(|facts| nearest_component_ancestor(facts, offset))
-                })
-                .unwrap_or_default();
-            return CursorContext::Template(TemplateCursorContext::SvelteSnippetName { tag_name });
-        }
-        let render_head = before_cursor.rfind("{@render ").is_some_and(|idx| {
-            before_cursor[idx + "{@render ".len()..]
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-        });
-        if render_head {
-            return CursorContext::Template(TemplateCursorContext::SvelteRenderCallee);
+        match structure.and_then(|structure| svelte_head_cursor_fact(structure, offset)) {
+            Some(SvelteHeadCursorFact::SnippetName) => {
+                let tag_name = analysis
+                    .and_then(|snapshot| snapshot.template.as_ref())
+                    .and_then(|template| {
+                        template
+                            .components
+                            .iter()
+                            .filter(|component| {
+                                offset >= component.span.start && offset < component.span.end
+                            })
+                            .min_by_key(|component| component.span.end - component.span.start)
+                            .map(|component| component.name.clone())
+                    })
+                    .or_else(|| {
+                        markup_facts
+                            .as_deref()
+                            .and_then(|facts| nearest_component_ancestor(facts, offset))
+                    })
+                    .unwrap_or_default();
+                return CursorContext::Template(TemplateCursorContext::SvelteSnippetName {
+                    tag_name,
+                });
+            }
+            Some(SvelteHeadCursorFact::RenderCallee) => {
+                return CursorContext::Template(TemplateCursorContext::SvelteRenderCallee);
+            }
+            None => {}
         }
         // Edit-time syntax is newer than the optional semantic snapshot. A
         // freshly typed `prop={expr}` must therefore be classified before

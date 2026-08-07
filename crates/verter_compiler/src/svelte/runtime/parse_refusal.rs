@@ -133,6 +133,17 @@ fn prepare_style_surface(
         .content
         .unwrap_or(Span::new(style.tag_open.end, style.tag_open.end));
 
+    if style
+        .lang
+        .as_deref()
+        .is_some_and(|lang| !lang.eq_ignore_ascii_case("css"))
+    {
+        return Err(UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+            code: "svelte-runtime-style-stage-requires-plain-css",
+            span: style.content.unwrap_or(style.tag_open),
+        });
+    }
+
     // The css output mode is a PARSE-DOMAIN fact (options element + compile
     // option); an unprovable mode fails closed on the mode surface (the
     // `<style>` content, or the open tag when content is absent).

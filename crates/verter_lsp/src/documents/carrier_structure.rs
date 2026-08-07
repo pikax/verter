@@ -5,7 +5,7 @@
 
 use verter_language::parse_artifact::carrier_inventory::{
     AttributeValue, CarrierAttribute, CarrierBlock, MarkupElementSyntax, MarkupNodeKind,
-    SectionRole, TaggedSyntax,
+    SectionRole, SvelteControlBlockHead, SvelteStandaloneTagFamily, TaggedSyntax,
 };
 use verter_session::carrier_publication_store::{
     ArtifactAttributeRef, FrameworkBlockRef, RegisteredFileStructure,
@@ -244,6 +244,46 @@ pub fn offset_in_markup_comment(facts: &[MarkupCommentFact], offset: u32) -> boo
         offset >= fact.interior_start
             && (offset < fact.end || (fact.open_ended && offset == fact.end))
     })
+}
+
+/// Parser-owned Svelte head position at the edit cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteHeadCursorFact {
+    SnippetName,
+    RenderCallee,
+}
+
+/// Classify a Svelte snippet/render head only from parser-minted family and
+/// payload spans. The inclusive end admits the ordinary edit cursor directly
+/// after an empty or in-progress identifier without searching source text.
+pub fn svelte_head_cursor_fact(
+    structure: &RegisteredFileStructure,
+    offset: u32,
+) -> Option<SvelteHeadCursorFact> {
+    structure
+        .inventory()
+        .markup()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind() {
+            MarkupNodeKind::SvelteControlBlock(block) => match &block.head {
+                SvelteControlBlockHead::Snippet { name_span, .. }
+                    if offset >= name_span.start.saturating_sub(1) && offset <= name_span.end =>
+                {
+                    Some(SvelteHeadCursorFact::SnippetName)
+                }
+                _ => None,
+            },
+            MarkupNodeKind::SvelteStandaloneTag(tag)
+                if tag.family == SvelteStandaloneTagFamily::Render
+                    && tag.expression_span.is_some_and(|span| {
+                        offset >= span.start.saturating_sub(1) && offset <= span.end
+                    }) =>
+            {
+                Some(SvelteHeadCursorFact::RenderCallee)
+            }
+            _ => None,
+        })
 }
 
 /// Cursor-region classification over the registered markup arena, for

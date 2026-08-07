@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    decode_css_identifier, parse_lossless, parse_selector_structure, parse_with_sink, CssDialect,
-    CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink,
-    SelectorComponentKind, SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
+    decode_css_identifier, parse_lossless, parse_selector_structure, parse_style_ir,
+    parse_with_sink, CssDialect, CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags,
+    ParseEvent, ParseEventSink, SelectorComponentKind, StyleCompleteness, StyleStatement,
+    SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
 };
 
 fn tokens(source: &CssSource, dialect: CssDialect) -> Vec<(TokenKind, u16, u32, u32)> {
@@ -53,7 +54,12 @@ fn css_syntax_wpt_tokenization_is_exact() {
             (TokenKind::Colon, 0, 36, 37),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 37, 38),
             (TokenKind::BadString, TokenFlags::UNTERMINATED, 38, 40),
-            (TokenKind::Whitespace, TokenFlags::TRIVIA, 40, 41),
+            (
+                TokenKind::Whitespace,
+                TokenFlags::TRIVIA | TokenFlags::CONTAINS_NEWLINE,
+                40,
+                41,
+            ),
             (TokenKind::Semicolon, 0, 41, 42),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 42, 43),
             (TokenKind::Ident, 0, 43, 44),
@@ -63,7 +69,12 @@ fn css_syntax_wpt_tokenization_is_exact() {
             (TokenKind::Semicolon, 0, 54, 55),
             (TokenKind::Whitespace, TokenFlags::TRIVIA, 55, 56),
             (TokenKind::RightBrace, 0, 56, 57),
-            (TokenKind::Whitespace, TokenFlags::TRIVIA, 57, 59),
+            (
+                TokenKind::Whitespace,
+                TokenFlags::TRIVIA | TokenFlags::CONTAINS_NEWLINE,
+                57,
+                59,
+            ),
         ]
     );
     assert_eq!(
@@ -106,6 +117,122 @@ fn css_and_dialect_extensions_are_distinct_and_lossless() {
         source.slice_tokens(Lexer::new(&source, CssDialect::Less)),
         source.text()
     );
+}
+
+// @ai-generated - Verifies layout facts and Stylus interpolation remain lexical and lossless.
+#[test]
+fn layout_newlines_and_stylus_interpolation_are_lexical_facts() {
+    let input = ".icon-{name}\n  color red\n.value-${tone}\n";
+    let source = CssSource::new(Arc::from(input), 11).unwrap();
+    let stylus: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+
+    let newline_tokens: Vec<_> = stylus
+        .iter()
+        .filter(|token| token.flags & TokenFlags::CONTAINS_NEWLINE != 0)
+        .map(|token| source.token_text(*token))
+        .collect();
+    assert_eq!(newline_tokens, vec!["\n  ", "\n", "\n"]);
+
+    let interpolations: Vec<_> = stylus
+        .iter()
+        .filter(|token| token.kind() == TokenKind::StylusInterpolationStart)
+        .map(|token| source.token_text(*token))
+        .collect();
+    assert_eq!(interpolations, vec!["{", "${"]);
+    assert_eq!(source.slice_tokens(stylus), input);
+}
+
+// @ai-generated - Regression for adjacent Stylus rule braces being mistaken for interpolation.
+#[test]
+fn adjacent_stylus_rule_braces_are_plain_braces() {
+    for input in [
+        ".btn{\n  color: red;\n}",
+        "#hero{\n  color: red;\n}",
+        "foo(){\n  color: red;\n}",
+    ] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::LeftBrace),
+            "{input}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::StylusInterpolationStart),
+            "{input}"
+        );
+        let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+        assert!(
+            parsed.diagnostics().is_empty(),
+            "{input}: {:#?}",
+            parsed.diagnostics()
+        );
+        assert!(
+            matches!(
+                parsed.statements().first(),
+                Some(StyleStatement::Rule(rule))
+                    if rule.completeness() == StyleCompleteness::Complete
+            ) | matches!(
+                parsed.statements().first(),
+                Some(StyleStatement::MixinOrFunction(value))
+                    if value.completeness() == StyleCompleteness::Complete
+            ),
+            "{input}: {:#?}",
+            parsed.statements()
+        );
+    }
+
+    let compact = CssSource::new(Arc::from(".btn{color:red}"), 0).unwrap();
+    assert!(
+        Lexer::new(&compact, CssDialect::Stylus).any(|token| token.kind() == TokenKind::LeftBrace)
+    );
+
+    for input in [".btn{ color red }", ".btn{color red}", ".btn{ }"] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::LeftBrace),
+            "{input}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind() == TokenKind::StylusInterpolationStart),
+            "{input}"
+        );
+        let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+        assert!(
+            matches!(parsed.statements().first(), Some(StyleStatement::Rule(_))),
+            "{input}: {:#?}",
+            parsed.statements()
+        );
+        let classes: Vec<_> = parsed
+            .complete_static_classes()
+            .map(|class| parsed.source().slice(class.name_span()).to_owned())
+            .collect();
+        assert_eq!(classes, vec!["btn"], "{input}");
+    }
+}
+
+// @ai-generated - Exact r2 ternary interpolation repro cannot become a concrete braced rule.
+#[test]
+fn stylus_ternary_brace_remains_interpolation() {
+    let input = "p{a ? b : c}\n  color red";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let tokens: Vec<_> = Lexer::new(&source, CssDialect::Stylus).collect();
+    assert!(tokens
+        .iter()
+        .any(|token| token.kind() == TokenKind::StylusInterpolationStart));
+    assert!(!tokens
+        .iter()
+        .any(|token| token.kind() == TokenKind::LeftBrace));
+    let parsed = parse_style_ir(source, CssDialect::Stylus, CssParseMode::Recover).unwrap();
+    assert!(parsed.has_dynamic_selectors());
 }
 
 #[test]
@@ -185,7 +312,7 @@ fn strings_consume_shared_css_escapes_and_escaped_newlines() {
             "\"\\a\nx\"",
             CssDialect::Css,
             TokenKind::String,
-            TokenFlags::CONTAINS_ESCAPE,
+            TokenFlags::CONTAINS_ESCAPE | TokenFlags::CONTAINS_NEWLINE,
         ),
         (
             "\"\\123456x\"",
@@ -197,7 +324,7 @@ fn strings_consume_shared_css_escapes_and_escaped_newlines() {
             "\"x\\\r\ny\"",
             CssDialect::Css,
             TokenKind::String,
-            TokenFlags::CONTAINS_ESCAPE,
+            TokenFlags::CONTAINS_ESCAPE | TokenFlags::CONTAINS_NEWLINE,
         ),
         (
             "~\"\\41 B\"",

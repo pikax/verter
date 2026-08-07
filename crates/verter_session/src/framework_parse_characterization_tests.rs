@@ -178,28 +178,34 @@ fn eval_source_for_two_script_sfc_is_position_preserving_and_stable() {
 // ───────────────────────── content overrides ─────────────────────────
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
 fn block_override_roundtrip_produces_identical_analysis() {
     let source = "<template lang=\"pug\">div hello</template>\n<script setup lang=\"ts\">const msg: string = 'hi';</script>\n";
     let host = make_host();
-    upsert_vue(&host, "Ovr.vue", source);
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "Ovr.vue".to_string(),
+            source: Arc::from(source),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let request = update.preprocessor_requests.first().expect("Pug request");
 
     let profile = CompileProfile::default();
     let result = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "Ovr.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div>hello</div>"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                request,
+                "<div>hello</div>",
+            )],
         })
         .expect("block override should apply");
     assert!(
-        !result.changed_virtual_ids.is_empty() || !result.changed_virtual_nodes.is_empty(),
-        "template override must report changed nodes"
+        result.changed,
+        "template admission must report a state change"
     );
 
     // The override-aware analysis surface stays identical: one binding
@@ -219,18 +225,16 @@ fn block_override_roundtrip_produces_identical_analysis() {
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "Ovr.vue".to_string(),
             compile_profile: profile,
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div>hello</div>"),
-                source_map: None,
-            }],
+            overrides: vec![BlockOverrideEntry::supplied_for_test(
+                request,
+                "<div>hello</div>",
+            )],
         })
-        .expect("idempotent re-apply");
-    assert!(
-        again.changed_virtual_ids.is_empty(),
-        "identical override hash must round-trip as no_change"
-    );
+        .expect_err("a correlation token is single-use");
+    assert!(matches!(
+        again,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationTerminal)
+    ));
 
     // The authoritative source type is computed from the RAW scheduler
     // parse and survives the override layer untouched.

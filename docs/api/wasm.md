@@ -132,6 +132,47 @@ The `Host` class exposes the same methods as `@verter/native`'s `VerterHost`:
 
 See the [@verter/native documentation](./native.md) for detailed descriptions of each method and their parameter types.
 
+`applyBlockOverrides` uses sealed block identity, never a style index. Echo the
+stamps from the `preprocessorRequests` entry and hash the exact bytes returned by
+the processor:
+
+```ts
+async function hashBlockContent(value: string): Promise<string> {
+  const prefix = new TextEncoder().encode("verter.block-content.bytes.v1\0");
+  const bytes = new TextEncoder().encode(value);
+  const input = new Uint8Array(prefix.length + bytes.length);
+  input.set(prefix);
+  input.set(bytes, prefix.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  return `sha256:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+const update = host.upsert({
+  inputId: "/src/App.vue",
+  source: '<template lang="pug">p Hello</template>',
+});
+const pending = update.preprocessorRequests[0];
+const code = "<p>Hello</p>";
+
+host.applyBlockOverrides({
+  canonicalId: update.canonicalId,
+  overrides: [{
+    correlationToken: pending.correlationToken,
+    blockToken: pending.blockToken,
+    ownerRevision: pending.ownerRevision,
+    artifactToken: pending.artifactToken,
+    basisToken: pending.basisToken,
+    sourceSpaceToken: pending.sourceSpaceToken,
+    code,
+    codeHash: await hashBlockContent(code),
+  }],
+});
+```
+
+The host validates the current revision, artifact, basis, source space, code
+hash, and optional source-map hash after the asynchronous processor completes.
+It refuses stale or mismatched results without mutating its caches.
+
 #### Shared module reference flow
 
 `host.upsert()` now returns `moduleReferences`, which are classified as:

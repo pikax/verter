@@ -1,4 +1,4 @@
-//! Framework-neutral CSS, SCSS, and Less lexical and grammar authority.
+//! Framework-neutral CSS, SCSS, indented Sass, Less, and Stylus syntax authority.
 //!
 //! The parser emits one lossless event stream to arbitrary sinks. Runtime
 //! consumers can process that stream directly; [`LosslessCstSink`] is an
@@ -9,10 +9,13 @@ pub mod cst;
 pub mod diagnostic;
 pub mod dialect;
 pub mod event;
+mod layout;
 pub mod lexer;
 pub mod parser;
 pub mod selector;
+pub mod style_ir;
 pub mod token;
+pub mod version;
 
 pub use cst::{parse_lossless, LosslessCst, LosslessCstSink, SyntaxElement, SyntaxNode};
 pub use diagnostic::{
@@ -24,11 +27,21 @@ pub use event::{NodeFlags, ParseEvent, ParseEventSink, ParseSummary, SyntaxKind}
 pub use lexer::Lexer;
 pub use parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource, Parser, SourceSize};
 pub use selector::{
-    parse_selector_structure, AttributeMatcher, CombinatorKind, NthExpression, PseudoFunctionKind,
-    SelectorAttribute, SelectorCombinator, SelectorComponent, SelectorComponentKind, SelectorKind,
-    SelectorPseudo, SelectorStructure,
+    parse_selector_structure, AttributeMatcher, CombinatorKind, ComplexSelector,
+    ComplexSelectorPart, NthExpression, PseudoFunctionKind, SelectorAttribute, SelectorCombinator,
+    SelectorCompleteness, SelectorComponent, SelectorComponentKind, SelectorCompound,
+    SelectorFacts, SelectorInterpolation, SelectorKind, SelectorList, SelectorPseudo,
+    SelectorStructure, SelectorTrust,
+};
+pub use style_ir::{
+    parse_component_value_tree, parse_style_ir, ComponentBlock, ComponentDelimiter,
+    ComponentFunction, ComponentToken, ComponentValue, ComponentValueTree, StaticClassFact,
+    StyleBlock, StyleBlockKind, StyleCompleteness, StyleDeclaration, StyleDirective,
+    StyleMixinOrFunction, StyleRule, StyleStatement, StyleSyntaxIr, StyleSyntaxIrSink,
+    UnknownStatement, UnknownStatementKind, ValueInterpolation,
 };
 pub use token::{
     css_identifier_eq_ignore_ascii_case, decode_css_identifier, DecodedName, SyntaxToken,
     TokenFlags, TokenKind,
 };
+pub use version::CssSyntaxGrammarVersion;

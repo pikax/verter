@@ -30,7 +30,7 @@ use verter_span::Span;
 use crate::framework_common::carrier_compiler::{
     CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput, ParseOptions,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    TemplateFacts,
+    RuntimeOutputDescriptor, SourceMapFidelity, TemplateFacts,
 };
 use crate::framework_common::ctx::{receive_svelte_carrier_token, CarrierCompilerCtx};
 
@@ -201,12 +201,22 @@ impl SvelteCarrierCompiler {
             })
             .collect();
 
+        let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+        let output_descriptor = RuntimeOutputDescriptor::generated(
+            &projection.code,
+            (!projection.source_map.is_empty()).then_some(projection.source_map.as_str()),
+            &[(space.as_str(), artifact.as_str())],
+            SourceMapFidelity::Approximate,
+        );
         let ide = IdeOutput {
             code: projection.code,
             source_map: projection.source_map,
             is_jsx: projection.is_jsx,
             duration_ms,
             destructured_block: None,
+            output_descriptor,
+            generated_template_hole: None,
+            generated_template_chunk: None,
         };
         (ide, diagnostics)
     }
@@ -380,6 +390,13 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 // styles population). Injected-mode css is inlined in the
                 // module (no artifact), and a style-less component has none.
                 if let Some(css) = module.css {
+                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+                    let output_descriptor = RuntimeOutputDescriptor::generated(
+                        &css.code,
+                        css.source_map.as_deref(),
+                        &[(space.as_str(), artifact.as_str())],
+                        SourceMapFidelity::Approximate,
+                    );
                     bundle.styles.push(
                         crate::framework_common::carrier_compiler::RuntimeStyleBlock {
                             code: css.code,
@@ -387,6 +404,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                             lang: None,
                             scope_hash: Some(css.hash),
                             has_global: css.has_global,
+                            output_descriptor,
                         },
                     );
                 }
@@ -474,6 +492,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 filename: opts.filename.clone(),
                 skip_source_map: !opts.source_map,
                 embed_ambient_types: opts.embed_ambient_types,
+                block_content: opts.block_content.clone(),
             };
             let (ide, mut diagnostics) = Self::project_ide(parsed, source, &ide_opts);
             bundle.tsx = Some(ide);

@@ -1,5 +1,0 @@
-error: cannot construct `AttestedDeniedWorker` with struct literal syntax due to private fields
- --> tests/ui/mint_attested_worker.rs:4:19
-  |
-4 |     let _forged = AttestedDeniedWorker {};
-  |                   ^^^^^^^^^^^^^^^^^^^^

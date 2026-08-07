@@ -31,6 +31,13 @@ pub mod parse;
 pub mod render;
 pub mod types;
 
+use std::sync::Arc;
+
+use verter_css_syntax::{
+    parse_style_ir, ComplexSelectorPart, CssDialect, CssParseMode, CssSource, SelectorCompleteness,
+    SelectorComponent, SelectorComponentKind, SelectorList, StyleCompleteness, StyleStatement,
+    StyleSyntaxIr,
+};
 use verter_span::Span;
 
 use super::ir::SvelteRuntimeIr;
@@ -84,11 +91,13 @@ pub enum StylePlanFailureClass {
 /// while letting the css-analysis diagnostic surface FIRST (a css failure is
 /// reported before any template-lowering failure — the css-first diagnostic
 /// order). The two halves are one pipeline, not alternative paths.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedStyleBody {
     /// The span-bearing CSS AST with the ANALYZER metadata populated (the
     /// matcher verdicts land later, in the completion stage).
     ast: StyleSheet,
+    /// Shared syntax authority used for trust/completeness admission. The
+    /// Svelte-specific AST remains temporarily for exact 5.56.3 behavior.
+    syntax: StyleSyntaxIr,
     /// The analyzer facts (keyframes / global collection).
     analysis: analyze::CssAnalysis,
 }
@@ -107,6 +116,31 @@ pub fn analyze_style_body(
         span: err.span,
         construct: None,
     })?;
+    let css = source
+        .get(content.start as usize..content.end as usize)
+        .ok_or(StylePlanFailure {
+            class: StylePlanFailureClass::ParseAnalysis,
+            code: "css_expected_identifier",
+            span: content,
+            construct: None,
+        })?;
+    let syntax_source =
+        CssSource::new(Arc::from(css), content.start).map_err(|_| StylePlanFailure {
+            class: StylePlanFailureClass::ParseAnalysis,
+            code: "css_expected_identifier",
+            span: content,
+            construct: None,
+        })?;
+    let syntax =
+        parse_style_ir(syntax_source, CssDialect::Css, CssParseMode::Recover).map_err(|_| {
+            StylePlanFailure {
+                class: StylePlanFailureClass::ParseAnalysis,
+                code: "css_expected_identifier",
+                span: content,
+                construct: None,
+            }
+        })?;
+    validate_svelte_style_ir(syntax.statements())?;
     let analysis =
         analyze::analyze_stylesheet(source, &mut ast).map_err(|err| StylePlanFailure {
             class: StylePlanFailureClass::ParseAnalysis,
@@ -114,7 +148,76 @@ pub fn analyze_style_body(
             span: err.span,
             construct: None,
         })?;
-    Ok(AnalyzedStyleBody { ast, analysis })
+    Ok(AnalyzedStyleBody {
+        ast,
+        syntax,
+        analysis,
+    })
+}
+
+fn validate_svelte_style_ir(statements: &[StyleStatement]) -> Result<(), StylePlanFailure> {
+    for statement in statements {
+        let body = match statement {
+            StyleStatement::Rule(rule) => {
+                if rule.completeness() != StyleCompleteness::Complete
+                    || !selector_list_is_static_or_nesting(rule.selector_list())
+                {
+                    return Err(StylePlanFailure {
+                        class: StylePlanFailureClass::SelectorUnprovable,
+                        code: "svelte-runtime-unsupported-style-selector",
+                        span: rule.selector_list().span(),
+                        construct: Some("untrusted-style-syntax-ir"),
+                    });
+                }
+                Some(rule.body())
+            }
+            StyleStatement::Declaration(declaration) => declaration.body(),
+            StyleStatement::AtRule(rule) => rule.body(),
+            StyleStatement::MixinOrFunction(rule) => rule.body(),
+            StyleStatement::Unknown(unknown) => {
+                return Err(StylePlanFailure {
+                    class: StylePlanFailureClass::SelectorUnprovable,
+                    code: "svelte-runtime-unsupported-style-selector",
+                    span: unknown.span(),
+                    construct: Some("untrusted-style-syntax-ir"),
+                });
+            }
+        };
+        if let Some(body) = body {
+            validate_svelte_style_ir(body.statements())?;
+        }
+    }
+    Ok(())
+}
+
+fn selector_list_is_static_or_nesting(list: &SelectorList) -> bool {
+    list.facts().completeness() == SelectorCompleteness::Complete
+        && list.selectors().iter().all(|selector| {
+            selector.parts().iter().all(|part| match part {
+                ComplexSelectorPart::Combinator(_) => true,
+                ComplexSelectorPart::Compound(compound) => compound
+                    .components()
+                    .iter()
+                    .all(selector_component_is_static_or_nesting),
+            })
+        })
+}
+
+fn selector_component_is_static_or_nesting(component: &SelectorComponent) -> bool {
+    if matches!(
+        component.kind(),
+        SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation
+    ) {
+        return false;
+    }
+    component
+        .nested_components()
+        .iter()
+        .all(selector_component_is_static_or_nesting)
+        && component
+            .pseudo()
+            .and_then(|pseudo| pseudo.selector_list())
+            .is_none_or(selector_list_is_static_or_nesting)
 }
 
 /// The TEMPLATE-DOMAIN half of the plan build: run the selector-to-template
@@ -141,7 +244,12 @@ pub fn complete_style_scope_plan(
     ir: &SvelteRuntimeIr<'_>,
     want_source_map: bool,
 ) -> Result<ProvenStyleScopePlan, StylePlanFailure> {
-    let AnalyzedStyleBody { mut ast, analysis } = analyzed;
+    let AnalyzedStyleBody {
+        mut ast,
+        syntax,
+        analysis,
+    } = analyzed;
+    debug_assert_eq!(syntax.dialect(), CssDialect::Css);
     let content = ast.span;
     let facts = matcher::match_stylesheet(&mut ast, ir).map_err(|refusal| StylePlanFailure {
         class: StylePlanFailureClass::SelectorUnprovable,

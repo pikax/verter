@@ -199,7 +199,7 @@ impl VerterHost {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
@@ -239,7 +239,7 @@ impl VerterHost {
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
             crate::project_semantic_dispatch::template_class_facts::TemplateClassPublicationScope::Fenced(
-                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::ContentOverride,
+                crate::project_semantic_dispatch::template_class_facts::TemplateClassFenceReason::SessionOverlay,
             ),
         );
         let class_domains = crate::template_convert::TemplateClassDomainIndex::from_semantic_facts(
@@ -533,7 +533,10 @@ impl VerterHost {
         // `get_analysis_via_view` is a genuine no-op for this case and
         // the call routes through the existing internal pipeline.
         let view = crate::session_view::HostViewRef::new(self);
-        self.get_analysis_via_view(canonical_or_alias, &view)
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let mut snapshot = self.get_analysis_via_view(&canonical, &view)?;
+        snapshot.styles = self.hydrate_style_content(&canonical, &snapshot.styles);
+        Some(snapshot)
     }
 
     pub(super) fn get_analysis_snapshot_internal(
@@ -2061,6 +2064,7 @@ impl VerterHost {
     /// (which clears the workspace's per-owner state and reverse-axis
     /// entries via `EdgeStore::remove_file`).
     pub fn remove(&self, canonical_or_alias: &str) -> Option<HostRemoveResult> {
+        let _block_content_fence = self.block_content_admission_fence.lock();
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
         // Read aliases from DependencyState (D48 split — aliases live
@@ -2105,6 +2109,7 @@ impl VerterHost {
         // File deletion drops all three D48 sub-states at once.
         self.drop_all_per_canonical_compile_caches(&canonical);
         self.scheduler.remove(&canonical);
+        write_lock(&self.block_content_state).close_owner(&canonical);
         // Evict all resolver caches so that untracked-file acceptance in
         // the store view's `validates` method does not return stale facts
         // for a deleted file.
@@ -2448,29 +2453,6 @@ impl VerterHost {
         }
     }
 
-    pub(super) fn compute_override_template_analysis(
-        &self,
-        canonical: &str,
-        profile_hash: u64,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
-        let override_with_parse = {
-            let cc = self.compile_cache().get(canonical)?;
-            cc.content_overrides.get(&profile_hash)?.clone()
-        };
-
-        let file_language = self.language_classifier().classify(canonical);
-        self.build_template_analysis(
-            canonical,
-            override_with_parse.parse.whole_hash,
-            &file_language,
-            &override_with_parse.source,
-            override_with_parse.framework_parse.clone(),
-            &override_with_parse.parse.src_blocks,
-            &override_with_parse.parse.external_requests,
-            &override_with_parse.parse.script_analysis,
-        )
-    }
-
     /// Returns cross-component CSS variable flow for a given variable name.
     ///
     /// Scans all files in the host to find where the variable is defined (in `<style>`),
@@ -2522,27 +2504,8 @@ impl VerterHost {
             }
 
             // Check template for :style CSS variable bindings
-            let template_analysis = if let Some(profile_hash) = profile_hash {
-                self.compile_cache()
-                    .get(&canonical_id)
-                    .and_then(|cc| {
-                        if cc.content_overrides.contains_key(&profile_hash) {
-                            let session_node =
-                                crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                            session_node
-                                .peek_template_analysis(&cc, profile_hash)
-                                .map(Arc::new)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| {
-                        self.compute_override_template_analysis(&canonical_id, profile_hash)
-                    })
-                    .or_else(|| self.raw_template_analysis_for_file(&canonical_id))
-            } else {
-                self.raw_template_analysis_for_file(&canonical_id)
-            };
+            let _ = profile_hash;
+            let template_analysis = self.raw_template_analysis_for_file(&canonical_id);
 
             if let Some(ref tmpl) = template_analysis {
                 if tmpl.css_var_names.iter().any(|n| n == var_name) {

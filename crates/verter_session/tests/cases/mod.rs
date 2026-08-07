@@ -43,6 +43,7 @@ mod g_type;
 mod handle_capable_consumer_guards;
 mod host_preset_policy;
 mod integration_test_layout_guard;
+mod native_content_handoff;
 mod nextest_slow_timeout_matches_advertised_budget;
 mod oracle_driver;
 mod oracle_query_specs_shared;

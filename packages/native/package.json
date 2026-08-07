@@ -7,8 +7,8 @@
     "compiler",
     "napi",
     "native",
-    "vue",
-    "svelte"
+    "svelte",
+    "vue"
   ],
   "homepage": "https://verterjs.dev/",
   "license": "MIT",
@@ -47,7 +47,8 @@
     "artifacts": "napi artifacts",
     "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
     "pretest": "pnpm run ensure-native-loader",
-    "test": "vitest run"
+    "test:types": "tsc -p tsconfig.types.json",
+    "test": "pnpm run test:types && vitest run"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.6.2",

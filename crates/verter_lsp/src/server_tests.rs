@@ -20033,7 +20033,7 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sync_pending_carrier_provider_file_defers_external_content_before_b3() {
+async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_output() {
     let temp = tempfile::tempdir().expect("temp dir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src/partials")).expect("create partials dir");
@@ -20078,12 +20078,14 @@ async fn sync_pending_carrier_provider_file_defers_external_content_before_b3() 
             version: 1,
             text: "<template src=\"@/partials/panel.html\"></template>\n<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>".to_string(),
         });
-    // B2 resolves the authored link but does not ingest external block bytes;
-    // B3 owns the typed content broker.
+    // The registered VFS read admits external bytes for classification,
+    // analysis, and the composed IDE surface below.
+    let external_source = host
+        .get_source(&format!("{workspace_id}/src/partials/panel.html"))
+        .expect("registered external source should be admitted from the VFS");
     assert!(
-        host.get_source(&format!("{workspace_id}/src/partials/panel.html"))
-            .is_none(),
-        "external src bytes must remain deferred before B3"
+        external_source.contains("props.msg"),
+        "the admitted source must be the registered external template"
     );
     // Type deps (types.ts) are resolved via VFS workspace read fallback during
     // compilation but may not be explicitly loaded into the scheduler.
@@ -20147,19 +20149,33 @@ async fn sync_pending_carrier_provider_file_defers_external_content_before_b3() 
     assert_eq!(synced, SyncOutcome::FullyReconciled);
 
     let profile = documents.tsx_profile.read().clone();
-    assert!(
-        host.get_ide(&app_id, &profile).is_none(),
-        "external-content deferral must not publish an IDE success"
+    let ide = host
+        .get_ide(&app_id, &profile)
+        .expect("admitted external template must publish a composed IDE surface");
+    assert!(ide.code.contains("props.msg"));
+    let source_map: serde_json::Value = serde_json::from_str(
+        ide.source_map
+            .as_deref()
+            .expect("composed IDE surface must publish its map"),
+    )
+    .expect("composed IDE map must be valid JSON");
+    let sources = source_map["sources"]
+        .as_array()
+        .expect("composed IDE map must declare source spaces");
+    assert_eq!(
+        sources.len(),
+        2,
+        "carrier script and external template must remain distinct map sources"
     );
 
     let calls = provider.file_sync_calls();
     assert!(
-        !calls.iter().any(|call| matches!(
+        calls.iter().any(|call| matches!(
             call,
-            MockCall::OpenFile { path, .. } | MockCall::UpdateFile { path, .. }
-                if path.ends_with(".tsx")
+            MockCall::OpenFile { path, content } | MockCall::UpdateFile { path, content }
+                if path.ends_with(".tsx") && content.contains("props.msg")
         )),
-        "deferred external content must not push a TSX success"
+        "composed external content must be pushed through the TSX provider surface"
     );
 }
 
@@ -32675,129 +32691,4 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
          projection the failed open never built — otherwise this path leaves the \
          document stranded with no IDE features"
     );
-}
-
-/// R3-B-01: the style-override token validation and the host apply must be
-/// ONE freshness transaction under the document-commit fence
-/// (`did_change_mutex`). Pre-fix the handler validated the tokens against
-/// the registry, dropped the guard, and only then mutated the host — a
-/// `did_change` commit could land INSIDE that window, so revision A's
-/// compiled CSS was applied onto revision B's host state.
-///
-/// The registry seam fires between validation and the host apply; the
-/// committer runs the production commit discipline (the did_change fence
-/// held across the registry commit + host upsert, exactly what
-/// `handle_did_change` does). GREEN: the fenced committer cannot commit
-/// inside the window. RED pre-fix: it committed there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn style_override_apply_is_atomic_with_document_commits() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let v1 = "<template><div class=\"x\"/></template>\n<style>.x { color: red }</style>\n";
-    let v2 = "<template><div class=\"y\"/></template>\n<style>.y { color: blue }</style>\n";
-    let (_temp, service, drain_handle, _provider, workspace_id) =
-        make_definition_test_server(&[("src/Styled.vue", "vue", v1)]).await;
-    let server = service.inner();
-    let uri = workspace_uri(&workspace_id, "src/Styled.vue");
-
-    let (revision_token, artifact_token) = {
-        let doc = server.documents.get(&uri).expect("open doc");
-        (
-            doc.document_revision.public_token(),
-            doc.feature_snapshot
-                .as_ref()
-                .expect("carrier snapshot")
-                .structure()
-                .public_artifact_token()
-                .as_str()
-                .to_string(),
-        )
-    };
-
-    let committed = Arc::new(AtomicBool::new(false));
-    let interleaved = Arc::new(AtomicBool::new(false));
-    let (fire_tx, fire_rx) = std::sync::mpsc::channel::<()>();
-    {
-        let committed = Arc::clone(&committed);
-        let interleaved = Arc::clone(&interleaved);
-        server
-            .documents
-            .set_before_style_override_host_apply_hook(Box::new(move |_, _| {
-                let _ = fire_tx.send(());
-                // Bounded observation window: an UNfenced concurrent commit
-                // lands here quickly; a fenced one stays blocked for the
-                // whole window.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
-                while std::time::Instant::now() < deadline {
-                    if committed.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                interleaved.store(committed.load(Ordering::SeqCst), Ordering::SeqCst);
-            }));
-    }
-
-    let handle = tokio::runtime::Handle::current();
-    let response = tokio::task::block_in_place(|| {
-        std::thread::scope(|scope| {
-            let committer = scope.spawn({
-                let committed = Arc::clone(&committed);
-                let uri = uri.clone();
-                let handle = handle.clone();
-                move || {
-                    fire_rx
-                        .recv_timeout(std::time::Duration::from_secs(20))
-                        .expect("the apply must reach the validation-to-apply window");
-                    handle.block_on(async {
-                        let document_commit_guard = server.did_change_mutex.lock().await;
-                        let _ = server.documents.did_change(&uri, 2, v2);
-                        drop(document_commit_guard);
-                    });
-                    committed.store(true, Ordering::SeqCst);
-                }
-            });
-            let apply = scope.spawn({
-                let handle = handle.clone();
-                let uri = uri.clone();
-                let revision_token = revision_token.clone();
-                let artifact_token = artifact_token.clone();
-                move || {
-                    handle.block_on(server.apply_style_overrides(
-                        crate::server::protocol_types::ApplyStyleOverridesParams {
-                            uri: uri.as_str().to_string(),
-                            overrides: vec![crate::server::protocol_types::StyleOverrideParam {
-                                index: 0,
-                                code: ".compiled { color: green }".to_string(),
-                                source_map: None,
-                            }],
-                            document_revision_token: Some(revision_token),
-                            artifact_token: Some(artifact_token),
-                        },
-                    ))
-                }
-            });
-            let response = apply.join().expect("apply thread");
-            committer.join().expect("committer thread");
-            response
-        })
-    });
-
-    assert!(
-        !interleaved.load(Ordering::SeqCst),
-        "a document commit landed between style-override token validation and the host \
-         apply - the validate-and-apply window is not fenced against did_change"
-    );
-    let response = response.expect("apply response");
-    assert!(
-        response.success,
-        "the current-revision fenced apply must succeed, got {response:?}"
-    );
-    assert!(
-        committed.load(Ordering::SeqCst),
-        "the concurrent commit must land after the apply completes"
-    );
-
-    drain_handle.abort();
-    drop(service);
 }

@@ -28,6 +28,47 @@ fn upsert_vue(host: &VerterHost, id: &str, src: &str) -> HostUpdateResult {
     .unwrap()
 }
 
+fn unissued_override(code: &str) -> BlockOverrideEntry {
+    let correlation_token = BlockContentCorrelationToken::parse_untrusted("not-issued").unwrap();
+    let block_token =
+        verter_session::carrier_publication_store::ArtifactBlockToken::parse_untrusted(
+            "not-issued",
+        )
+        .unwrap();
+    let owner_revision = BlockContentOwnerRevisionToken::parse_untrusted("not-issued").unwrap();
+    let artifact_token =
+        verter_session::carrier_publication_store::FrameworkArtifactToken::parse_untrusted(
+            "not-issued",
+        )
+        .unwrap();
+    let basis_token = BlockContentBasisToken::parse_untrusted("not-issued").unwrap();
+    BlockOverrideEntry {
+        correlation_token: correlation_token.clone(),
+        block_token: block_token.clone(),
+        owner_revision: owner_revision.clone(),
+        artifact_token: artifact_token.clone(),
+        basis_token: basis_token.clone(),
+        captured_echo: BlockContentCapturedEcho {
+            request: BlockContentPreCaptureEcho {
+                correlation_token,
+                canonical_id: "not-issued".to_string(),
+                block_token,
+                owner_revision,
+                artifact_token,
+                expected_language: "not-issued".to_string(),
+                prior_basis_token: None,
+            },
+            basis_token,
+        },
+        source_space_token: BlockContentSourceSpaceToken::parse_untrusted("not-issued").unwrap(),
+        code: Arc::from(code),
+        code_hash: hash_block_content(code),
+        source_map: None,
+        source_map_hash: None,
+        supplied_provenance: None,
+    }
+}
+
 #[test]
 fn resolve_query_param_tolerance_and_order() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -191,46 +232,6 @@ fn compile_profile_changes_produce_different_cached_outputs() {
 }
 
 #[test]
-fn style_override_updates_style_without_reupsert() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
-    let _ = upsert_vue(&host, "Comp.vue", src);
-
-    let before = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
-        })
-        .unwrap();
-
-    let _ = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides: vec![StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".a{color:green}"),
-                source_map: None,
-            }],
-        })
-        .unwrap();
-
-    let after = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
-        })
-        .unwrap();
-
-    assert_ne!(before.code.as_ref(), after.code.as_ref());
-    assert_eq!(after.code.as_ref(), ".a{color:green}");
-}
-
-#[test]
 fn update_result_contains_both_bundler_and_lsp_ids() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
@@ -269,15 +270,20 @@ fn src_policy_missing_external_source_produces_deterministic_error() {
         })
         .unwrap_err();
 
-    assert!(matches!(err, HostError::ExternalBlockContentDeferred(_)));
+    assert!(matches!(
+        err,
+        HostError::BlockContentRefused(BlockContentRefusal::Unavailable {
+            availability: BlockContentAvailability::Missing,
+            ..
+        })
+    ));
 }
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn external_upsert_invalidates_dependent_owner() {
+fn external_reupsert_refreshes_the_owners_native_content_artifact() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
-    let _ = upsert_vue(
+    let owner = upsert_vue(
         &host,
         "Comp.vue",
         "<template src=\"./tpl.html\"></template><script setup>const n = 1</script>",
@@ -293,12 +299,13 @@ fn external_upsert_invalidates_dependent_owner() {
         })
         .unwrap();
 
+    let request = owner.external_source_requests.first().unwrap().clone();
     let first = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("Comp.vue?vue&type=template".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
+        .get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id.clone(),
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
         })
         .unwrap();
 
@@ -313,15 +320,17 @@ fn external_upsert_invalidates_dependent_owner() {
         .unwrap();
 
     let second = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("Comp.vue?vue&type=template".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
+        .get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id,
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
         })
         .unwrap();
 
-    assert_ne!(first.code.as_ref(), second.code.as_ref());
+    assert_eq!(first.content.as_deref(), Some("<div>A</div>"));
+    assert_eq!(second.content.as_deref(), Some("<section>B</section>"));
+    assert_ne!(first.content_hash, second.content_hash);
 }
 
 #[test]
@@ -586,93 +595,6 @@ fn get_virtual_file_no_raw_id_no_canonical_returns_invalid_query() {
 }
 
 #[test]
-fn apply_style_overrides_nonexistent_returns_missing_source() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-
-    let err = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "nonexistent.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides: vec![],
-        })
-        .unwrap_err();
-
-    assert!(matches!(err, HostError::MissingSource { .. }));
-}
-
-#[test]
-fn apply_style_overrides_idempotent_reapply_returns_not_changed() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
-    let _ = upsert_vue(&host, "Comp.vue", src);
-
-    let overrides = vec![StyleOverrideEntry {
-        index: 0,
-        code: Arc::from(".a{color:green}"),
-        source_map: None,
-    }];
-
-    let first = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides: overrides.clone(),
-        })
-        .unwrap();
-    assert!(first.changed);
-
-    let second = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides,
-        })
-        .unwrap();
-    assert!(!second.changed);
-}
-
-/// @ai-generated - When style override hash is unchanged, changed_virtual_nodes must be empty
-#[test]
-fn apply_style_overrides_idempotent_has_empty_changed_nodes() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
-    let _ = upsert_vue(&host, "Comp.vue", src);
-
-    let overrides = vec![StyleOverrideEntry {
-        index: 0,
-        code: Arc::from(".a{color:green}"),
-        source_map: None,
-    }];
-
-    // First apply changes something
-    let _ = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides: overrides.clone(),
-        })
-        .unwrap();
-
-    // Second apply is idempotent — nothing changed
-    let second = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides,
-        })
-        .unwrap();
-
-    assert!(!second.changed);
-    assert!(
-        second.changed_virtual_nodes.is_empty(),
-        "when nothing changed, changed_virtual_nodes should be empty, got: {:?}",
-        second.changed_virtual_nodes
-    );
-    assert!(second.changed_virtual_ids.is_empty());
-    assert!(second.changed_lsp_ids.is_empty());
-}
-
-#[test]
 fn custom_block_detection_and_retrieval() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template><i18n>{\"en\": {\"hello\": \"world\"}}</i18n>";
@@ -859,14 +781,13 @@ fn non_sfc_reupsert_with_same_content_reports_not_changed() {
     assert!(!second.changed);
 }
 
-/// @ai-generated - Non-SFC reupsert still invalidates dependents via invalidate_dependents
+/// @ai-generated - A non-SFC VFS reupsert is observed by the owner's block identity.
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn non_sfc_reupsert_still_invalidates_dependents() {
+fn non_sfc_reupsert_refreshes_owner_block_content() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // Comp.vue depends on tpl.html via src
-    let _ = upsert_vue(
+    let owner = upsert_vue(
         &host,
         "/src/Comp.vue",
         "<template src=\"./tpl.html\"></template><script setup>const n = 1</script>",
@@ -881,13 +802,13 @@ fn non_sfc_reupsert_still_invalidates_dependents() {
         })
         .unwrap();
 
-    // Compile Comp.vue to populate cache
+    let request = owner.external_source_requests.first().unwrap().clone();
     let first = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("/src/Comp.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
+        .get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id.clone(),
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
         })
         .unwrap();
 
@@ -902,17 +823,24 @@ fn non_sfc_reupsert_still_invalidates_dependents() {
         })
         .unwrap();
 
-    // Comp.vue should recompile with new template
     let second = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("/src/Comp.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
+        .get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id,
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
         })
         .unwrap();
 
-    assert_ne!(first.code.as_ref(), second.code.as_ref());
+    assert_eq!(
+        first.availability,
+        BlockContentAvailability::NativeAvailable
+    );
+    assert_eq!(
+        second.availability,
+        BlockContentAvailability::NativeAvailable
+    );
+    assert_ne!(first.content_hash, second.content_hash);
 }
 
 /// @ai-generated - Style removal: 3 styles → 1 style reports removed nodes
@@ -1288,48 +1216,6 @@ fn source_map_present_when_requested() {
     );
 }
 
-/// Style overrides are cleared when whole_hash changes (per plan invalidation matrix).
-/// Any source edit (even template-only) shifts SFC-absolute byte offsets, making cached
-/// synthetic parses and remapped CSS spans stale. The bundler re-applies overrides.
-#[test]
-fn style_override_cleared_on_source_reupsert() {
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let src1 = "<script setup>const n = 1</script><template><div>{{n}}</div></template><style>.a{color:red}</style>";
-    let _ = upsert_vue(&host, "Comp.vue", src1);
-
-    let _ = host
-        .apply_style_overrides(StyleOverrideRequest {
-            canonical_id: "Comp.vue".to_string(),
-            compile_profile: profile_dev(),
-            overrides: vec![StyleOverrideEntry {
-                index: 0,
-                code: Arc::from(".a{color:green}"),
-                source_map: None,
-            }],
-        })
-        .unwrap();
-
-    // Re-upsert with a template change — whole_hash changes, overrides cleared
-    let src2 = "<script setup>const n = 1</script><template><section>{{n}}</section></template><style>.a{color:red}</style>";
-    let _ = upsert_vue(&host, "Comp.vue", src2);
-
-    // Style override should be cleared — compiles with raw style (red)
-    let style = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
-        })
-        .unwrap();
-    assert!(
-        style.code.contains("red"),
-        "override should be cleared after re-upsert (whole_hash changed), got: {}",
-        style.code
-    );
-}
-
-/// @ai-generated - Requesting Template on script-only SFC returns MissingVirtualNode
 #[test]
 fn get_virtual_file_missing_node_returns_error() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -1559,14 +1445,13 @@ fn empty_script_setup_block() {
 // Task 4: remove invalidates dependent compile slots
 // ═══════════════════════════════════════════════════════════
 
-/// @ai-generated - Removing a dependency file invalidates owners' compile slots
+/// @ai-generated - Removing a VFS dependency makes the owner's block content missing.
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn remove_invalidates_dependent_compile_slots() {
+fn remove_makes_dependent_block_content_missing() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // Comp.vue depends on tpl.html via src
-    let _ = upsert_vue(
+    let owner = upsert_vue(
         &host,
         "/src/Comp.vue",
         "<template src=\"./tpl.html\"></template><script setup>const n = 1</script>",
@@ -1581,32 +1466,32 @@ fn remove_invalidates_dependent_compile_slots() {
         })
         .unwrap();
 
-    // Compile to populate cache
-    let first = host
-        .get_virtual_file(VirtualQuery {
-            raw_id: Some("/src/Comp.vue".to_string()),
-            canonical_id: None,
-            node_kind: None,
-            compile_profile: profile_dev(),
+    let request = owner.external_source_requests.first().unwrap().clone();
+    assert_eq!(
+        host.get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id.clone(),
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
         })
-        .unwrap();
-    assert!(!first.code.is_empty());
+        .unwrap()
+        .availability,
+        BlockContentAvailability::NativeAvailable
+    );
 
     // Remove the dependency — this should invalidate Comp.vue's compile slots
     host.remove("/src/tpl.html");
 
-    // Comp.vue should now fail to compile (missing external source)
-    let result = host.get_virtual_file(VirtualQuery {
-        raw_id: Some("/src/Comp.vue".to_string()),
-        canonical_id: None,
-        node_kind: None,
-        compile_profile: profile_dev(),
-    });
-    // Should either error (strict) or recompile (and fail because tpl.html is gone)
-    // Under DevServeLastKnownGood, it would serve the last-good if the slot was
-    // invalidated. Since we clear compile_slots (including last_good), this should
-    // produce a CompileError.
-    assert!(result.is_err(), "should fail after dependency removed");
+    let missing = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: owner.canonical_id,
+            block_token: request.block_token.clone(),
+            compile_profile: CompileProfile::default(),
+            expected_basis_token: None,
+        })
+        .unwrap();
+    assert_eq!(missing.availability, BlockContentAvailability::Missing);
+    assert!(missing.content.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -3240,8 +3125,7 @@ fn css_var_flow_across_files() {
 }
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn css_var_flow_with_template_override_profile() {
+fn unissued_template_content_is_refused_without_affecting_css_var_flow() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(
         &host,
@@ -3250,18 +3134,19 @@ fn css_var_flow_with_template_override_profile() {
     );
 
     let profile = CompileProfile::default();
-    let _ = host
+    let error = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/A.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
-                source_map: None,
-            }],
+            overrides: vec![unissued_override(
+                "<div :style=\"{ '--theme-color': color }\">A</div>",
+            )],
         })
-        .expect("template override should succeed");
+        .expect_err("only a host-issued correlation may admit supplied bytes");
+    assert!(matches!(
+        error,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationMismatch)
+    ));
 
     let raw_flow = host.css_var_flow("--theme-color", None);
     let override_flow = host.css_var_flow("--theme-color", Some(&profile));
@@ -3273,14 +3158,13 @@ fn css_var_flow_with_template_override_profile() {
     );
     assert_eq!(
         override_flow.template_definitions.len(),
-        1,
-        "profile-aware css_var_flow should use override template analysis"
+        0,
+        "refused bytes must not create a profile-specific analysis path"
     );
 }
 
 #[test]
-#[should_panic(expected = "ExternalBlockContentDeferred")]
-fn override_compile_slot_does_not_poison_raw_css_var_flow() {
+fn refused_unissued_content_does_not_poison_compile_or_raw_css_var_flow() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = upsert_vue(
         &host,
@@ -3289,18 +3173,19 @@ fn override_compile_slot_does_not_poison_raw_css_var_flow() {
     );
 
     let profile = CompileProfile::default();
-    let _ = host
+    let error = host
         .apply_block_overrides(BlockOverrideRequest {
             canonical_id: "/src/A.vue".to_string(),
             compile_profile: profile.clone(),
-            overrides: vec![BlockOverrideEntry {
-                block_type: PreprocessorBlockType::Template,
-                index: 0,
-                code: Arc::from("<div :style=\"{ '--theme-color': color }\">A</div>"),
-                source_map: None,
-            }],
+            overrides: vec![unissued_override(
+                "<div :style=\"{ '--theme-color': color }\">A</div>",
+            )],
         })
-        .expect("template override should succeed");
+        .expect_err("only a host-issued correlation may admit supplied bytes");
+    assert!(matches!(
+        error,
+        HostError::BlockContentRefused(BlockContentRefusal::CorrelationMismatch)
+    ));
 
     let _ = host
         .get_virtual_file(VirtualQuery {
@@ -3321,7 +3206,7 @@ fn override_compile_slot_does_not_poison_raw_css_var_flow() {
     );
     assert_eq!(
         override_flow.template_definitions.len(),
-        1,
-        "override profile should still expose the template css var definition"
+        0,
+        "refused bytes must not populate profile-specific template analysis"
     );
 }

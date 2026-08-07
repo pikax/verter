@@ -17,7 +17,7 @@
 //! - [`ProjectIndex`] — Aggregates file-level usage into cross-file indexes
 //!   (provide/inject validation, component graph, CSS class tracking).
 //! - [`build_css_style_analysis`] / [`build_preprocessor_style_analysis`] —
-//!   Analyse CSS style blocks for selectors, specificity, and Vue-specific
+//!   Analyse five style dialects for selectors, specificity, and Vue-specific
 //!   features (`:deep`, `:global`, `v-bind()`).
 
 mod build;
@@ -56,6 +56,7 @@ pub mod scope;
 pub mod script_shallow_index;
 pub mod selector_match;
 pub mod style;
+mod style_syntax;
 pub mod template;
 pub mod template_class_facts;
 pub mod top_level_owners;
@@ -107,12 +108,12 @@ pub use routes::{
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
 pub use style::{
-    build_css_style_analysis, build_external_src_deferred_style_analysis,
-    build_preprocessor_style_analysis, build_scanned_style_analysis,
-    compute_structured_specificity, parse_selector, AnalyzedSelector, AttributeOperator,
-    AttributeSelector, CompoundSelector, CssScanDialect, SelectorCombinator, SelectorPseudoClass,
-    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
-    StyleAnalysisLang, StyleBlockAnalysis, StyleContentAvailability, VBindInput, VueStyleInput,
+    build_css_style_analysis, build_external_src_style_analysis, build_preprocessor_style_analysis,
+    build_scanned_style_analysis, compute_structured_specificity, parse_selector, AnalyzedSelector,
+    AttributeOperator, AttributeSelector, BlockContentAvailability, CompoundSelector,
+    SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
+    StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
+    VueStyleInput,
 };
 pub use template::{
     extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,

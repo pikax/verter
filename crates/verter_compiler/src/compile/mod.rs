@@ -2,7 +2,7 @@
 //!
 //! Drives the full SFC → JS compilation:
 //!   1. Tokenize → `Syntax` (parse SFC structure + template AST)
-//!   2. Style codegen (v-bind scan + `process_style`) — if `CompileTarget::STYLE`
+//!   2. Typed style rewrites (v-bind, CSS Modules, scoping) — if `CompileTarget::STYLE`
 //!   3. Script codegen (macros, bindings, imports) — if `CompileTarget::needs_script()`
 //!   4. Template codegen (VDOM or Vapor render function) — if `CompileTarget::TEMPLATE`
 //!   5. TSX codegen (valid JSX for LSP type checking) — if `CompileTarget::TSX`
@@ -42,25 +42,57 @@ use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
 use crate::code_transform::{CodeTransform, SourceMapOptions};
-use crate::css::{process_style, types::ProcessStyleOptions};
 use crate::diagnostics::{
     CompilerErrorCode, Diagnostic, DiagnosticSeverity, SyntaxPluginContext, SyntaxPluginOptions,
 };
 use crate::ide;
-use crate::parser::types::{ParsedSfc, StyleLang};
+use crate::parser::types::{ParsedSfc, RootNodeScript, StyleLang};
 use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
-use crate::style::generate_style;
+use crate::style_planner::{
+    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
+    PlainCssInput, StyleRewriteFailure, StyleRewriteOutcome,
+};
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
 use crate::template::oxc::types::OxcParsedAst;
-use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
+use crate::tokenizer::byte::{
+    tokenize, tokenize_sfc, tokenize_sfc_with_delimiters, tokenize_with_delimiters,
+};
 use crate::tsc;
+use verter_css_syntax::CssDialect;
 
 use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
 use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
+
+fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
+    match lang {
+        None | Some(StyleLang::Css) => Some(CssDialect::Css),
+        Some(StyleLang::Scss) => Some(CssDialect::Scss),
+        Some(StyleLang::Sass) => Some(CssDialect::Sass),
+        Some(StyleLang::Less) => Some(CssDialect::Less),
+        Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
+        Some(StyleLang::Unknown) => None,
+    }
+}
+
+fn push_style_rewrite_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    content_start: u32,
+    error: &StyleRewriteFailure,
+) {
+    diagnostics.push(Diagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: CompilerErrorCode::XCssParseError,
+        plugin: "style-planner",
+        message: error.to_string(),
+        span: error.span.map(|span| {
+            crate::common::Span::new(content_start + span.start, content_start + span.end)
+        }),
+    });
+}
 
 // ── Orchestrator ───────────────────────────────────────────────────
 
@@ -111,6 +143,84 @@ pub(crate) fn parse_sfc(
     syntax.into_parsed_sfc()
 }
 
+/// Parse one selected HTML template source space without fabricating an SFC.
+pub(crate) fn parse_template_block(
+    input: &str,
+    delimiters: Option<(&str, &str)>,
+    custom_elements: Option<&[String]>,
+) -> ParsedSfc {
+    let bytes = input.as_bytes();
+    let syntax_options = if let Some(prefixes) = custom_elements {
+        let prefixes = prefixes.to_vec();
+        SyntaxPluginOptions {
+            is_custom_element: Box::new(move |tag_name: &[u8]| {
+                prefixes
+                    .iter()
+                    .any(|prefix| tag_name.starts_with(prefix.as_bytes()))
+            }),
+            ..SyntaxPluginOptions::default()
+        }
+    } else {
+        SyntaxPluginOptions::default()
+    };
+    let ctx = SyntaxPluginContext {
+        input,
+        bytes,
+        options: &syntax_options,
+        diagnostics: Vec::new(),
+    };
+    let mut syntax = Syntax::new(true);
+    if let Some((open, close)) = delimiters {
+        tokenize_with_delimiters(
+            bytes,
+            |event| syntax.handle(&event, &ctx),
+            open.as_bytes(),
+            close.as_bytes(),
+        );
+    } else {
+        tokenize(bytes, |event| syntax.handle(&event, &ctx));
+    }
+    syntax.into_parsed_sfc()
+}
+
+/// Describe one admitted raw script unit without fabricating carrier markup.
+pub(crate) fn parse_script_block(input: &str, lang: &str, is_setup: bool) -> ParsedSfc {
+    let length = input.len() as u32;
+    let lang_kind = crate::cursor::ScriptLanguage::from_bytes(lang.as_bytes());
+    let script = RootNodeScript {
+        tag_open: crate::types::NodeTag {
+            start: 0,
+            end: 0,
+            name_end: 0,
+        },
+        tag_close: Some(crate::types::NodeTag {
+            start: length,
+            end: length,
+            name_end: length,
+        }),
+        is_setup,
+        lang: Some(lang_kind),
+        lang_value: Some(lang.to_string().into_boxed_str()),
+        src: None,
+        generic: None,
+        attrs: None,
+        attributes: Vec::new(),
+        content: Some(crate::common::Span::new(0, length)),
+    };
+    ParsedSfc {
+        template_ast: None,
+        script_node: (!is_setup).then_some(script.clone()),
+        script_setup_node: is_setup.then_some(script),
+        style_nodes: Vec::new(),
+        unknown_nodes: Vec::new(),
+        has_style_scope: false,
+        has_style_module: false,
+        is_vapor: false,
+        diagnostics: Vec::new(),
+        has_errors: false,
+    }
+}
+
 /// Byte span `[start, end)` of the `<template>` region in the SFC source.
 ///
 /// Used as part of the shared template-expression overlay key so the parsed
@@ -124,6 +234,30 @@ fn template_region_span(template_ast: &crate::ast::types::TemplateAst) -> (u32, 
             .unwrap_or(root.tag_open.end)
     });
     (root.tag_open.start, end)
+}
+
+pub(crate) fn template_unit_used_vars(
+    input: &str,
+    parsed: &ParsedSfc,
+    delimiters: Option<(String, String)>,
+    custom_elements: Option<Vec<String>>,
+    allocator: &Allocator,
+) -> FxHashSet<String> {
+    let Some(template_ast) = parsed.template_ast() else {
+        return FxHashSet::default();
+    };
+    let parse_options = template_expr_overlay::ParseOptionsKey::new(delimiters, custom_elements);
+    let mut store = template_expr_overlay::TemplateExprStore::new();
+    let oxc = store.get_or_build(
+        template_ast,
+        input,
+        allocator,
+        template_region_span(template_ast),
+        &parse_options,
+        SourceType::tsx(),
+        false,
+    );
+    template_expr_overlay::collect_template_used_vars(oxc, template_ast, input).0
 }
 
 /// Collect OXC expression parse errors from template expressions and emit them
@@ -220,6 +354,20 @@ pub(crate) fn compile(
     macro_semantics: &VueMacroSemanticInput,
     allocator: &Allocator,
 ) -> VerterCompileResult {
+    compile_with_parsed(input, options, verter_options, macro_semantics, allocator).1
+}
+
+/// Compile a Vue SFC and retain the exact parse used by code generation.
+///
+/// This is the standalone bridge for consumers that must qualify emitted
+/// block maps without reparsing the carrier.
+pub(crate) fn compile_with_parsed(
+    input: &str,
+    options: &CodegenOptions,
+    verter_options: &VerterCompileOptions,
+    macro_semantics: &VueMacroSemanticInput,
+    allocator: &Allocator,
+) -> (ParsedSfc, VerterCompileResult) {
     let parse_start = Instant::now();
     let parsed = parse_sfc(
         input,
@@ -233,7 +381,7 @@ pub(crate) fn compile(
     if let Some(observer) = verter_audit::current_observer() {
         observer.record_phase_timing("compile.parse", parse_duration_ms);
     }
-    compile_inner(
+    let result = compile_inner(
         input,
         &parsed,
         options,
@@ -241,7 +389,8 @@ pub(crate) fn compile(
         macro_semantics,
         allocator,
         parse_duration_ms,
-    )
+    );
+    (parsed, result)
 }
 
 /// Compile a pre-parsed SFC. Skips tokenization and parsing.
@@ -366,50 +515,115 @@ fn compile_inner(
     if options.target.needs_style() {
         for style in parsed.style_nodes() {
             let style_start = Instant::now();
-            let style_result = generate_style(style, input, allocator, scope_id_str);
-            all_v_bind_vars.extend(style_result.v_bind_vars);
-
-            // Apply v-bind overwrites to the style content
             let style_code = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
-                let style_alloc = Allocator::new();
-                let mut style_ct = CodeTransform::new(style_source, &style_alloc);
+                let dialect = style_dialect(style.lang);
+                let source_name = options.filename.as_deref().unwrap_or("<style>");
+                let mut rewritten = style_source.to_string();
 
-                // Apply v-bind overwrites (need to shift positions relative to content start)
-                for (start, end, replacement) in &style_result.out.overwrites {
-                    let rel_start = start - content.start;
-                    let rel_end = end - content.start;
-                    let replacement = style_alloc.alloc_str(replacement);
-                    style_ct.overwrite(rel_start, rel_end, replacement);
+                let authored_dialect = dialect.unwrap_or(CssDialect::Css);
+                match transform_vue_v_bind(
+                    AuthoredStyleInput::new(
+                        style_source,
+                        authored_dialect,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    ),
+                    scope_id_str,
+                ) {
+                    Ok(StyleRewriteOutcome::Unchanged { facts }) => {
+                        all_v_bind_vars.extend(facts.v_bind_vars);
+                    }
+                    Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                        rewritten = code;
+                        all_v_bind_vars.extend(facts.v_bind_vars);
+                    }
+                    Err(error) => {
+                        push_style_rewrite_diagnostic(&mut all_diagnostics, content.start, &error);
+                    }
                 }
-                let modified_css = style_ct.build_string();
 
-                // Run CSS processing (scoped, modules)
-                if matches!(style.lang, None | Some(StyleLang::Css)) {
-                    let process_opts = ProcessStyleOptions {
-                        scope_id: scope_id_str,
-                        scoped: style.scoped,
-                        is_module: style.module,
-                        module_name: None,
-                        filename: options.filename.as_deref(),
-                        sourcemap: false,
-                    };
-                    match process_style(&modified_css, &process_opts) {
-                        Ok(result) => result.code.into_owned(),
-                        Err(e) => {
-                            all_diagnostics.push(Diagnostic {
-                                severity: DiagnosticSeverity::Error,
-                                code: CompilerErrorCode::XCssParseError,
-                                plugin: "style",
-                                message: e.to_string(),
-                                span: None,
-                            });
-                            modified_css
+                if style.module && dialect == Some(CssDialect::Css) {
+                    match PlainCssInput::try_new(
+                        &rewritten,
+                        authored_dialect,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    ) {
+                        Ok(plain) => match transform_vue_css_modules(plain, scope_id_str) {
+                            Ok(StyleRewriteOutcome::Unchanged { .. }) => {}
+                            Ok(StyleRewriteOutcome::Rewritten { code, .. }) => rewritten = code,
+                            Err(error) => {
+                                push_style_rewrite_diagnostic(
+                                    &mut all_diagnostics,
+                                    content.start,
+                                    &error,
+                                );
+                                rewritten.clear();
+                            }
+                        },
+                        Err(error) => {
+                            push_style_rewrite_diagnostic(
+                                &mut all_diagnostics,
+                                content.start,
+                                &error,
+                            );
+                            rewritten.clear();
                         }
                     }
-                } else {
-                    modified_css
                 }
+
+                if style.scoped && !rewritten.is_empty() {
+                    let plain = PlainCssInput::try_new(
+                        &rewritten,
+                        authored_dialect,
+                        source_name,
+                        "standalone:carrier",
+                        "standalone:carrier-bytes",
+                    );
+                    match plain {
+                        Ok(plain) => match transform_vue_scoped_css(plain, scope_id_str) {
+                            Ok(StyleRewriteOutcome::Unchanged { facts }) => {
+                                for refusal in &facts.refusals {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        content.start,
+                                        refusal,
+                                    );
+                                }
+                            }
+                            Ok(StyleRewriteOutcome::Rewritten { code, facts, .. }) => {
+                                for refusal in &facts.refusals {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        content.start,
+                                        refusal,
+                                    );
+                                }
+                                rewritten = code;
+                            }
+                            Err(error) => {
+                                push_style_rewrite_diagnostic(
+                                    &mut all_diagnostics,
+                                    content.start,
+                                    &error,
+                                );
+                                rewritten.clear();
+                            }
+                        },
+                        Err(error) => {
+                            push_style_rewrite_diagnostic(
+                                &mut all_diagnostics,
+                                content.start,
+                                &error,
+                            );
+                            rewritten.clear();
+                        }
+                    }
+                }
+                rewritten
             } else {
                 String::new()
             };
@@ -466,15 +680,22 @@ fn compile_inner(
         options.custom_elements.clone(),
     );
     let mut expr_store = template_expr_overlay::TemplateExprStore::new();
+    let transferred_bindings = verter_options.template_binding_metadata.as_ref();
     let mut script_bindings: rustc_hash::FxHashMap<
         &str,
         crate::template::code_gen::binding::BindingType,
-    > = rustc_hash::FxHashMap::default();
+    > = transferred_bindings
+        .into_iter()
+        .flat_map(|metadata| metadata.bindings.iter())
+        .map(|(name, kind)| (allocator.alloc_str(name) as &str, *kind))
+        .collect();
     let mut script_block: Option<VerterScriptBlock> = None;
     // Official `setup-maybe-ref` user imports — inline template refs to
     // these names bind `ref_key`/`ref` (populated by the script lane and
     // threaded to the VDOM resolver).
-    let mut ref_bindable_imports: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    let mut ref_bindable_imports: rustc_hash::FxHashSet<String> = transferred_bindings
+        .map(|metadata| metadata.ref_bindable_imports.clone())
+        .unwrap_or_default();
 
     // Inline-template (official production topology): the render function is
     // emitted INSIDE `setup()` as a returned closure that references setup
@@ -487,9 +708,12 @@ fn compile_inner(
         && !verter_options.ssr
         && !has_parse_errors
         && parsed.script_setup().is_some()
-        && parsed.template_ast().is_some();
+        && (parsed.template_ast().is_some() || verter_options.runtime_template_hole);
 
-    if options.target.needs_script() {
+    let use_transferred_script_semantics = transferred_bindings.is_some()
+        && parsed.script().is_none()
+        && parsed.script_setup().is_none();
+    if options.target.needs_script() && !use_transferred_script_semantics {
         let script_start = Instant::now();
 
         let mut ct = CodeTransform::new(input, allocator);
@@ -497,9 +721,11 @@ fn compile_inner(
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
         // This avoids the text-based heuristic and correctly handles TS type positions.
-        let template_used_vars: Option<FxHashSet<String>> = if let (false, Some(template_ast_ref)) =
-            (has_parse_errors, parsed.template_ast())
+        let template_used_vars: Option<FxHashSet<String>> = if let Some(used) =
+            verter_options.template_used_vars.as_ref()
         {
+            Some(used.clone())
+        } else if let (false, Some(template_ast_ref)) = (has_parse_errors, parsed.template_ast()) {
             // Runtime / script-import-elision lane — completion-prefix
             // matching off so partial identifiers stay real references.
             let oxc_ast = expr_store.get_or_build(
@@ -648,7 +874,7 @@ fn compile_inner(
         // codegen itself. All template-expression source mappings stay on the
         // single shared CT, so the merged module keeps full map fidelity.
         let mut inline_tpl_imports: Vec<&'static str> = Vec::new();
-        if inline_active {
+        if inline_active && parsed.template_ast().is_some() {
             let template_ast = parsed
                 .template_ast()
                 .expect("inline_active requires a template");
@@ -723,6 +949,20 @@ fn compile_inner(
             let inject_pos = inline_inject_pos.expect("inline mode sets inline_inject_pos");
             ct.move_slice(tpl_start, tpl_end, inject_pos);
         }
+        const RUNTIME_TEMPLATE_HOLE: &str = "/* verter-runtime-template-hole */";
+        let runtime_template_marker = verter_options
+            .runtime_template_hole
+            .then(|| {
+                inline_inject_pos.and_then(|inject_pos| {
+                    ct.prepend_left_with_generated_marker(
+                        inject_pos,
+                        RUNTIME_TEMPLATE_HOLE,
+                        0,
+                        RUNTIME_TEMPLATE_HOLE.len() as u32,
+                    )
+                })
+            })
+            .flatten();
 
         // Emit imports from script codegen. Inline mode merges the script and
         // template helper sets into ONE deduplicated import line (official
@@ -739,7 +979,7 @@ fn compile_inner(
         };
         if !all_imports.is_empty() {
             let runtime = options.runtime_module_name.as_deref().unwrap_or("vue");
-            let mut sorted = all_imports;
+            let mut sorted = all_imports.clone();
             sorted.sort_unstable();
             sorted.dedup();
             let specifiers: Vec<String> = sorted
@@ -755,6 +995,8 @@ fn compile_inner(
         }
 
         let script_code = ct.build_string();
+        let generated_template_hole =
+            runtime_template_marker.and_then(|marker| ct.generated_content_range(marker));
         let sourcemap_start = Instant::now();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
@@ -796,6 +1038,8 @@ fn compile_inner(
                 source_map: script_source_map,
                 setup: has_script_setup,
                 attrs: script_attrs,
+                generated_template_hole,
+                runtime_imports: all_imports.clone(),
             })
         } else if has_scoped_style || use_vapor || verter_options.ssr {
             // Template-only component with scoped styles, vapor mode, or SSR:
@@ -820,6 +1064,8 @@ fn compile_inner(
                 source_map: String::new(),
                 setup: false,
                 attrs: Vec::new(),
+                generated_template_hole: None,
+                runtime_imports: Vec::new(),
             })
         } else {
             // A completely empty SFC is a valid EMPTY component (see
@@ -833,6 +1079,21 @@ fn compile_inner(
             )
         };
     } // end if needs_script
+
+    let template_binding_metadata = TemplateBindingMetadata {
+        bindings: script_bindings
+            .iter()
+            .map(|(name, kind)| ((*name).to_string(), *kind))
+            .collect(),
+        has_script: parsed.script().is_some()
+            || parsed.script_setup().is_some()
+            || transferred_bindings.is_some_and(|metadata| metadata.has_script),
+        const_props: verter_options
+            .prop_constness_overrides
+            .clone()
+            .or_else(|| transferred_bindings.and_then(|m| m.const_props.clone())),
+        ref_bindable_imports: ref_bindable_imports.clone(),
+    };
 
     // ── 5. Template codegen ───────────────────────────────────────
     // Borrow the template AST (it may be needed for both VDOM and TSX codegen).
@@ -940,15 +1201,20 @@ fn compile_inner(
                         } else {
                             CodeGenMode::Vdom
                         },
-                        is_inline: false,
+                        is_inline: verter_options.runtime_inline_template_chunk,
                         is_production: options.is_production,
                         comments: options.comments.unwrap_or(!options.is_production),
                         force_js: verter_options.force_js,
                         self_name: to_pascal_case(&component_name),
-                        const_props: verter_options.prop_constness_overrides.clone(),
+                        const_props: verter_options
+                            .prop_constness_overrides
+                            .clone()
+                            .or_else(|| transferred_bindings.and_then(|m| m.const_props.clone())),
                         // Full 6-param render signature only when the SFC has a
                         // script block (official: `bindingMetadata && !inline`).
-                        has_script: parsed.script().is_some() || parsed.script_setup().is_some(),
+                        has_script: parsed.script().is_some()
+                            || parsed.script_setup().is_some()
+                            || transferred_bindings.is_some_and(|metadata| metadata.has_script),
                         ref_bindable_imports: ref_bindable_imports.clone(),
                         has_scoped_style,
                         hoist_static: options.resolve_hoist_static(),
@@ -1122,13 +1388,27 @@ fn compile_inner(
         // regardless of `target.needs_style()` because the IDE/TSX target does
         // not run full style codegen yet still needs sound style liveness. A
         // single unparseable `v-bind()` marks the set incomplete → fail open.
-        let style_usage = style_usage::extract_style_v_bind_usage(
-            parsed
+        let style_usage = if let Some(complete) = verter_options.style_v_bind_usage_complete {
+            style_usage::StyleVBindUsage {
+                used: verter_options.style_v_bind_vars.iter().cloned().collect(),
+                complete,
+            }
+        } else {
+            let mut usage = style_usage::extract_style_v_bind_usage_for_dialects(
+                parsed.style_nodes().iter().filter_map(|style| {
+                    let content = style.content.as_ref()?;
+                    Some((
+                        &input[content.start as usize..content.end as usize],
+                        style_dialect(style.lang)?,
+                    ))
+                }),
+            );
+            usage.complete &= parsed
                 .style_nodes()
                 .iter()
-                .filter_map(|s| s.content.as_ref())
-                .map(|c| &input[c.start as usize..c.end as usize]),
-        );
+                .all(|style| style_dialect(style.lang).is_some());
+            usage
+        };
 
         let tsx_script_opts = ide::IdeScriptOptions {
             component_name: &component_name,
@@ -1176,7 +1456,12 @@ fn compile_inner(
         });
 
         // Script codegen — emits function wrapper spanning script to template end
-        let tsx_script_result = ide::script::generate_ide_script(
+        let generated_template_end = if options.ide_chunk_boundaries {
+            Some(template_end.unwrap_or(0))
+        } else {
+            template_end
+        };
+        let mut tsx_script_result = ide::script::generate_ide_script(
             parsed.script(),
             parsed.script_setup(),
             template_ast_opt,
@@ -1184,8 +1469,15 @@ fn compile_inner(
             &mut tsx_ct,
             &tsx_alloc,
             &tsx_script_opts,
-            template_end,
+            generated_template_end,
         );
+        if let Some(metadata) = verter_options.template_binding_metadata.as_ref() {
+            for (name, binding) in &metadata.bindings {
+                tsx_script_result
+                    .bindings
+                    .insert(tsx_alloc.alloc_str(name), *binding);
+            }
+        }
 
         // Remove style/custom blocks (NOT template — template codegen transforms it)
         for style in parsed.style_nodes() {
@@ -1209,6 +1501,7 @@ fn compile_inner(
         remove_inter_block_gaps(&mut tsx_ct, input.len() as u32, &block_ranges);
 
         // Template codegen — transforms template JSX in place on the same CT
+        let mut generated_template_chunk = None;
         if !has_parse_errors {
             if let Some(template_ast) = template_ast_opt {
                 let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
@@ -1258,6 +1551,18 @@ fn compile_inner(
                         &tsx_t_opts,
                         &tsx_script_result.template_component_bindings,
                     );
+                    if options.ide_chunk_boundaries {
+                        let mut chunk_ct = CodeTransform::new(input, &tsx_alloc);
+                        tsx_out.clone().apply_to(&mut chunk_ct);
+                        let code = chunk_ct.build_string();
+                        let source_map = chunk_ct.generate_map_json(SourceMapOptions {
+                            source: options.filename.as_deref(),
+                            file: options.filename.as_deref(),
+                            include_content: true,
+                        });
+                        generated_template_chunk =
+                            Some(crate::compile::types::GeneratedCodeChunk { code, source_map });
+                    }
                     tsx_out.apply_to(&mut tsx_ct);
                 }
             }
@@ -1277,6 +1582,8 @@ fn compile_inner(
             || template_start
                 .is_some_and(|ts| parsed.script().is_some_and(|s| ts < s.tag_open.start));
 
+        const GENERATED_TEMPLATE_HOLE: &str = "/* verter-generated-template-hole */";
+        let mut generated_template_marker = None;
         if template_before_script {
             if let (Some(ts), Some(te)) = (template_start, template_end) {
                 // Compute move target: after the last script closing tag
@@ -1297,13 +1604,49 @@ fn compile_inner(
                 });
 
                 let suffix = tsx_script_result.return_close.as_deref().unwrap_or("");
-                tsx_ct.move_with_suffix(ts, te, move_target, suffix);
+                if options.ide_chunk_boundaries {
+                    let suffix = format!("{GENERATED_TEMPLATE_HOLE}{suffix}");
+                    generated_template_marker = tsx_ct.move_with_suffix_and_generated_marker(
+                        ts,
+                        te,
+                        move_target,
+                        &suffix,
+                        0,
+                        GENERATED_TEMPLATE_HOLE.len() as u32,
+                    );
+                } else {
+                    tsx_ct.move_with_suffix(ts, te, move_target, suffix);
+                }
             }
         } else if let (Some(return_close), Some(pos)) = (
             &tsx_script_result.return_close,
             tsx_script_result.return_close_pos,
         ) {
-            tsx_ct.prepend_left(pos, return_close);
+            if options.ide_chunk_boundaries {
+                let content = format!("{GENERATED_TEMPLATE_HOLE}{return_close}");
+                generated_template_marker = tsx_ct.prepend_left_with_generated_marker(
+                    pos,
+                    &content,
+                    0,
+                    GENERATED_TEMPLATE_HOLE.len() as u32,
+                );
+            } else {
+                tsx_ct.prepend_left(pos, return_close);
+            }
+        }
+        if options.ide_chunk_boundaries && tsx_script_result.return_close.is_none() {
+            let script_end = parsed
+                .script_setup()
+                .or_else(|| parsed.script())
+                .and_then(|script| script.content.as_ref().map(|content| content.end));
+            if let Some(script_end) = script_end {
+                generated_template_marker = tsx_ct.prepend_left_with_generated_marker(
+                    script_end,
+                    GENERATED_TEMPLATE_HOLE,
+                    0,
+                    GENERATED_TEMPLATE_HOLE.len() as u32,
+                );
+            }
         }
 
         // Append type constructs via CT outro — they have no sourcemap mapping
@@ -1363,12 +1706,17 @@ fn compile_inner(
             }
         }
 
+        let generated_template_hole =
+            generated_template_marker.and_then(|marker| tsx_ct.generated_content_range(marker));
+
         Some(VerterTsxBlock {
             code: tsx_code,
             source_map: tsx_sm,
             duration_ms: tsx_dur,
             is_jsx,
             destructured_block,
+            generated_template_hole,
+            generated_template_chunk,
         })
     } else {
         None
@@ -1409,6 +1757,8 @@ fn compile_inner(
                 duration_ms: tsc_dur,
                 is_jsx: false,
                 destructured_block: None,
+                generated_template_hole: None,
+                generated_template_chunk: None,
             }),
             Err(error) => {
                 all_diagnostics.push(tsc_generation_diagnostic(error));
@@ -1455,6 +1805,7 @@ fn compile_inner(
         requested_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
         actual_mode: verter_audit::payloads::tags::CompileCacheModeTag::Session,
         downgrade_reason: None,
+        template_binding_metadata,
     }
 }
 

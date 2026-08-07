@@ -46,8 +46,6 @@ and fixture disposition are recorded in
 Verter remains beta software. The public [guide](../guide/index.md) is the
 authority for user-facing maturity and installation expectations.
 
-Trusted-broker frames use AEAD as defense in depth on the vetted channel, not as an acceptance obligation beyond authenticated integrity and anti-replay.
-
 ## Projection safety and diagnostics
 
 Type projection is stack-safe without imposing a structural-depth limit.

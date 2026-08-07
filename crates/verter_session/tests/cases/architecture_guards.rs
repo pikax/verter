@@ -3088,6 +3088,14 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "typeinfo_scratch_cache",
             "§5.3 / Phase 3: per-host LRU mapping scratch URI → SemanticNodeId for `evaluate_type_expression(cacheable: true)`. Session-local synthesis cache, not a project-state result memoiser; ProjectTypeStore is for cross-request project-wide results.",
         ),
+        (
+            "block_content_admission_fence",
+            "docs/arch/scanners-replacement-preprocessor-interim.md §Sealed handoff: a mutex serializes validation and atomic admission after asynchronous provider work. NOT a cache; admitted artifacts live in block_content_state.",
+        ),
+        (
+            "block_content_admission_seam_hook",
+            "Block-content admission-fence regression pin: Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after validation and before publication for deterministic owner-publication races. Compiled out in production builds. NOT a cache.",
+        ),
     ]
     .into_iter()
     .collect()
@@ -5193,14 +5201,6 @@ mod foundations_guards {
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/tsconfig.rs",
-            // Trusted-processor broker substrate — executable attestation,
-            // denial probes, and namespace/AppContainer profile staging are
-            // real-OS process security duties, never workspace source. A VFS
-            // route would attest or probe different authority.
-            "crates/verter_processor_broker/src/attestation.rs",
-            "crates/verter_processor_broker/src/lifecycle.rs",
-            "crates/verter_processor_broker/src/platform/linux.rs",
-            "crates/verter_processor_broker/src/platform/windows.rs",
             // tsgo toolchain provisioning (the 4-tier resolver) — real-OS
             // walks of PATH dirs, project `node_modules` (flat + pnpm store),
             // the update cache, and the bundled sidecar to locate a supported
@@ -5661,6 +5661,8 @@ mod foundations_guards {
         // assembly (compile → bundle → assemble) instead of a hand copy.
         // Test-support public API (consumer: verter_vue_conformance dev-dep).
         "pub use compile::assemble_vue_main_module",
+        // Stamped handoff callers hash code and maps with the host-owned domain.
+        "pub use block_content::hash_block_content",
         // verter_napi::meta, verter_wasm::tests::audit
         "pub mod component_meta_audit",
         // verter_napi::meta
@@ -5970,7 +5972,6 @@ mod foundations_guards {
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
-        "pub(crate) mod source_map_remap",
         "pub(crate) mod template_convert",
         "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
@@ -9284,22 +9285,6 @@ mod foundations_guards {
         (
             "crates/verter_vue_conformance/src/lib.rs",
             "dev/CI-only, non-published Vue conformance corpus READER (`read_text_normalized` + case-dir enumeration) — reads ONLY the crate-owned vendored/committed corpus (`env!(\"CARGO_MANIFEST_DIR\")/corpus`: cases, official goldens, known-divergences), never workspace/semantic/VFS state. Test-fixture I/O, not a NativeFs/VFS disk-boundary bypass — sibling of the `verter_svelte_conformance/src/generate.rs` exemption.",
-        ),
-        (
-            "crates/verter_processor_broker/src/attestation.rs",
-            "trusted-processor executable attestation hashes the exact real-OS worker image the kernel launches before dispatch and admission. This is security evidence over an executable, never workspace/semantic/VFS source; WorkspaceAccess would attest different authority.",
-        ),
-        (
-            "crates/verter_processor_broker/src/lifecycle.rs",
-            "private denied-worker conformance performs a real ambient filesystem escape attempt inside the sandbox. Direct OS access is the mutation under test; WorkspaceAccess would bypass the OS sandbox and make the proof non-discriminating. No workspace content is admitted or published.",
-        ),
-        (
-            "crates/verter_processor_broker/src/platform/linux.rs",
-            "Linux namespace sandbox launch owns a private tmpfs/chroot staging directory and removes the parent-side scratch directory on teardown. These are kernel sandbox artifacts for an external process, never workspace/semantic/VFS state.",
-        ),
-        (
-            "crates/verter_processor_broker/src/platform/windows.rs",
-            "Windows AppContainer launch copies the attested worker into its private profile storage and removes that sandbox artifact on teardown. AppContainer profile storage is real-OS process substrate and cannot route through WorkspaceAccess.",
         ),
 ];
 

@@ -3332,7 +3332,8 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
         ..Default::default()
     };
 
-    let blocks = test_carrier_blocks(source);
+    let structure = crate::documents::carrier_structure::test_structure(source, true);
+    let blocks = project_carrier_blocks(&structure);
     let line_index = LineIndex::new_utf16(source);
     let cursor = source.find("{@render ").unwrap() + "{@render ".len();
     let pos = line_index.offset_to_position(cursor as u32).unwrap();
@@ -3346,7 +3347,7 @@ fn test_svelte_render_callee_completions_in_scope_snippets() {
         None,
         Some("file:///ws/src/List.svelte"),
         false,
-        None,
+        Some(&structure),
     );
     let items = result
         .expect("render-callee completion must produce items")

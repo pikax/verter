@@ -6,6 +6,7 @@
  * so we use camelCase for all object properties despite the TS types showing snake_case.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import { loadHost, resetHost, generateComponentId, getHash } from "./compiler";
 
 describe("loadHost", () => {
@@ -252,7 +253,7 @@ describe("host: upsert + getVirtualFile", () => {
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
-      '<i18n lang="json">{"en":{"hello":"Hello"}}</i18n>',
+      '<i18n>{"en":{"hello":"Hello"}}</i18n>',
     ].join("\n");
 
     const profile = { filename: "/test/App.vue" };
@@ -404,40 +405,86 @@ describe("host: applyBlockOverrides", () => {
     resetHost();
   });
 
-  // @ai-generated - Block overrides replace style output without re-upsert
-  it("overrides style content without re-upsert", () => {
+  // @ai-generated - A sealed, stamped result replaces one processed block without re-upsert.
+  it("admits one stamped result and rejects correlation replay", () => {
     const host = loadHost();
+    const authoredPreprocessorSyntax = "$authored-color: red";
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
-      "<style>.a { color: red }</style>",
+      `<style lang="postcss">${authoredPreprocessorSyntax}; .authored-only { color: $authored-color }</style>`,
     ].join("\n");
 
     const profile = { filename: "/test/App.vue" };
+    const styleRequest = {
+      rawId: "/test/App.vue?vue&type=style&index=0",
+      compileProfile: profile,
+    };
 
-    host.upsert({
+    const update = host.upsert({
       inputId: "/test/App.vue",
       source: sfc,
       compileProfile: profile,
     } as any);
 
-    const before = host.getVirtualFile({
-      rawId: "/test/App.vue?vue&type=style&index=0",
-      compileProfile: profile,
-    } as any);
+    const request = update.preprocessorRequests[0];
+    expect(request.availability).toBe("processedContentRequired");
+    expect(request.content).toContain(authoredPreprocessorSyntax);
+    expect(() => host.getVirtualFile(styleRequest as any)).toThrow(/ProcessedContentRequired/);
+
+    const code = ".supplied-only { color: green }";
 
     host.applyBlockOverrides({
       canonicalId: "/test/App.vue",
       compileProfile: profile,
-      overrides: [{ blockType: "style", index: 0, code: ".a { color: green }" }],
+      overrides: [
+        {
+          correlationToken: request.correlationToken,
+          blockToken: request.blockToken,
+          ownerRevision: request.ownerRevision,
+          artifactToken: request.artifactToken,
+          expectedLanguage: request.expectedLanguage,
+          priorBasisToken: request.priorBasisToken,
+          basisToken: request.basisToken,
+          sourceSpaceToken: request.sourceSpaceToken,
+          code,
+          codeHash: `sha256:${createHash("sha256")
+            .update("verter.block-content.bytes.v1\0")
+            .update(code)
+            .digest("hex")}`,
+          suppliedProvenance: "compiler.spec",
+        },
+      ],
     } as any);
 
-    const after = host.getVirtualFile({
-      rawId: "/test/App.vue?vue&type=style&index=0",
-      compileProfile: profile,
-    } as any);
+    const compiledStyle = host.getVirtualFile(styleRequest as any);
+    expect(compiledStyle.code).toContain(".supplied-only");
+    expect(compiledStyle.code).toContain("color: green");
+    expect(compiledStyle.code).not.toContain(authoredPreprocessorSyntax);
+    expect(compiledStyle.code).not.toContain(".authored-only");
 
-    expect(before.code).not.toBe(after.code);
-    expect(after.code).toContain("green");
+    expect(() =>
+      host.applyBlockOverrides({
+        canonicalId: "/test/App.vue",
+        compileProfile: profile,
+        overrides: [
+          {
+            correlationToken: request.correlationToken,
+            blockToken: request.blockToken,
+            ownerRevision: request.ownerRevision,
+            artifactToken: request.artifactToken,
+            expectedLanguage: request.expectedLanguage,
+            priorBasisToken: request.priorBasisToken,
+            basisToken: request.basisToken,
+            sourceSpaceToken: request.sourceSpaceToken,
+            code,
+            codeHash: `sha256:${createHash("sha256")
+              .update("verter.block-content.bytes.v1\0")
+              .update(code)
+              .digest("hex")}`,
+          },
+        ],
+      } as any),
+    ).toThrow(/correlation.*terminal/i);
   });
 });

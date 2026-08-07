@@ -173,10 +173,6 @@ async fn serve() {
         VerterLanguageServer::document_drop_edit,
     )
     .custom_method(
-        "$/verter/applyStyleOverrides",
-        VerterLanguageServer::apply_style_overrides,
-    )
-    .custom_method(
         "$/verter/getRouteTree",
         VerterLanguageServer::get_route_tree,
     )

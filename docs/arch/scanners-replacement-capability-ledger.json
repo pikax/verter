@@ -3,7 +3,8 @@
     "generated_from_head": "72d7608a9623b372dd9d4361e9102eebcc3c52f1",
     "authority": [
         "scanners-replacement-verter §6 B0/§7/§8.2-8.3",
-        "T-B schema ratification v2"
+        "T-B schema ratification v2",
+        "2026-08-05 stamped-handoff reconciliation: eight handoff rows migrate; ContentOverrideWithParse remains B-44 delete"
     ],
     "verification": "scripts/verify-scanners-replacement.mjs is the campaign-gate execution-proof orchestrator for this cutover, run manually by the orchestrator at plan gates (not a CI job); durable enforcement stays the in-suite structural guards that run in normal CI workspace suites.",
     "row_schema": [
@@ -79,22 +80,22 @@
         "proof": "Evidence lives in the FL2-B DISCOVERY-RECEIPT.md input-bound receipt (fixed tip, input hashes/counts, per-hit dispositions, ledger diff) plus the FL2-B2 unit's RED-first decoy tests named on the residual rows; ledger-internal statistics above are freshness checks of this document only, never discovery proof."
     },
     "statistics": {
-        "rows_total": 47,
+        "rows_total": 48,
         "by_capability_class": {
-            "manual_geometry": 14,
+            "manual_geometry": 15,
             "root_scanner": 5,
             "nested_language_parser": 2,
             "pre_registration_probe": 1,
             "public_projection": 1,
             "carrier_parser": 6,
-            "synthetic_carrier": 6,
+            "stamped_content_handoff": 8,
+            "synthetic_carrier": 1,
             "shipped_bundle": 8,
-            "trusted_processor": 3,
             "standalone_compile": 1
         },
         "by_disposition": {
-            "delete": 35,
-            "migrate": 9,
+            "delete": 27,
+            "migrate": 18,
             "allowed_nested": 2,
             "allowed_standalone": 1
         }
@@ -261,6 +262,22 @@
             "architecture_guard": "analysis_absent_fallback_requires_parser_facts_not_a_source_scan; svelte_braced_attribute_requires_parser_facts_not_a_source_scan"
         },
         {
+            "path": "crates/verter_lsp/src/features/cursor_context.rs",
+            "symbol": "svelte_snippet_render_marker_scans",
+            "runtime_role": "production_runtime",
+            "provenance": "source",
+            "shipped_artifact": null,
+            "shipping_target": null,
+            "rust_target": null,
+            "candidate_evidence": "R3-A-02/R3-B-03 — MIGRATED: free-form same-line marker scans deleted; cursor classification now consumes parser-minted SvelteControlBlockHead::Snippet and SvelteStandaloneTagFamily::Render facts with their registered payload spans",
+            "processor_authority": null,
+            "capability_class": "manual_geometry",
+            "disposition": "migrate",
+            "acceptance_id": "B-19",
+            "test": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings; test_svelte_snippet_name_context; test_svelte_render_callee_context",
+            "architecture_guard": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings"
+        },
+        {
             "path": "crates/verter_lsp/src/features/definition.rs",
             "symbol": "html_comment_source_scan",
             "runtime_role": "production_runtime",
@@ -396,12 +413,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471 (fail-closed at 72d7608a9: typed ExternalBlockContentDeferred(B-23); DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source@0f28184d76:L2983,L3471 (typed ExternalBlockContentDeferred; VFS read and native parse migration owned by the native-content cutover)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect; processed_classes_stay_typed_until_a_stamped_result_is_admitted",
             "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
@@ -444,13 +461,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L1207 (OPEN at 72d7608a9 — surface DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate); interim contract: docs/arch/scanners-replacement-preprocessor-interim.md)",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "crates/verter_session/src/parse.rs",
@@ -460,12 +477,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280 (fail-closed at 72d7608a9: external-src style analysis is typed-deferred B-23; DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source@0f28184d76:L285,L2280 (external-src style analysis is typed-deferred; VFS read and native parse migration owned by the native-content cutover)",
             "processor_authority": null,
             "capability_class": "carrier_parser",
             "disposition": "migrate",
             "acceptance_id": "B-23",
-            "test": "external_src_compile_is_typed_and_fail_closed; torn_lane_template_and_script_overrides_refuse_typed_b23",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect; processed_classes_stay_typed_until_a_stamped_result_is_admitted",
             "architecture_guard": "raw_registered_carrier_parser_is_not_public"
         },
         {
@@ -476,13 +493,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source@0f28184d76:L3018 (OPEN at 72d7608a9 — storage DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate) with the callback surface; the block_splice synthetic-source half is deleted)",
+            "candidate_evidence": "tracked_source@0f28184d76:L3018 (synthetic content-override cache deletion owned by the SCH-ADD sealed-token handoff cutover; the block_splice synthetic-source half is deleted)",
             "processor_authority": null,
             "capability_class": "synthetic_carrier",
             "disposition": "delete",
             "acceptance_id": "B-44",
-            "test": "torn_lane_style_override_lives_without_carrier_reparse",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "supplied_template_runtime_compile_is_typed_unavailable; supplied_style_analysis_fails_closed_without_a_source_space_descriptor",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "crates/verter_wasm/src/lib.rs",
@@ -492,13 +509,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "extensions/typescript-plugin/index.js",
@@ -556,12 +573,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "generated_manifest (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "generated_manifest (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -572,12 +589,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — NAPI arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -668,12 +685,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — preprocessor callback lane, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-94",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -700,12 +717,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface type, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -716,12 +733,12 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — callback-surface option, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "trusted_processor",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "architecture_guard": "compiler.spec.ts::returns a VerterHost instance with expected methods"
         },
         {
@@ -754,7 +771,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -770,7 +787,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -786,7 +803,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -802,7 +819,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/vue-vscode/package.json",
@@ -818,7 +835,7 @@
             "disposition": "migrate",
             "acceptance_id": "B-78",
             "test": "fresh_vsix_scanner_inventory_inspection",
-            "architecture_guard": "distributed_shipping_receipt (DEFERRED end-of-plan: broker/VSIX worker attestation — BRK-H-01 pre-entry gate)"
+            "architecture_guard": "distributed_shipping_receipt"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -828,13 +845,13 @@
             "shipped_artifact": null,
             "shipping_target": null,
             "rust_target": null,
-            "candidate_evidence": "tracked_source (OPEN at 72d7608a9 — WASM JS arm of the callback surface, DEFERRED to the P-C1 end-of-plan broker unit (BRK-H-01 pre-entry gate))",
+            "candidate_evidence": "tracked_source (permanent JavaScript/bundler content handoff; B-80 correlation semantics and sealed-token stamp migration owned by SCH-ADD)",
             "processor_authority": null,
-            "capability_class": "synthetic_carrier",
-            "disposition": "delete",
+            "capability_class": "stamped_content_handoff",
+            "disposition": "migrate",
             "acceptance_id": "B-83",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
-            "architecture_guard": "torn_lane_template_and_script_overrides_refuse_typed_b23"
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
+            "architecture_guard": "processed_classes_stay_typed_until_a_stamped_result_is_admitted"
         },
         {
             "path": "packages/wasm/src/index.ts",
@@ -985,6 +1002,19 @@
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
+            "path": "crates/verter_lsp/src/features/cursor_context.rs",
+            "symbol": "svelte_snippet_render_marker_scans",
+            "Vue": "required",
+            "Svelte": "required",
+            "cold": "required",
+            "warm": "required",
+            "pre_semantic": "required",
+            "edit": "required",
+            "close_reopen": "required",
+            "test": "svelte_head_context_ignores_marker_decoys_inside_attribute_strings",
+            "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
+        },
+        {
             "path": "crates/verter_lsp/src/features/definition.rs",
             "symbol": "html_comment_source_scan",
             "Vue": "required",
@@ -1098,7 +1128,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "external_src_compile_is_typed_and_fail_closed",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1137,7 +1167,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1150,7 +1180,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "external_src_compile_is_typed_and_fail_closed",
+            "test": "native_external_script_is_a_registered_parsed_vfs_artifact; native_external_style_reads_registered_vfs_content_and_parses_its_dialect",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1163,7 +1193,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_style_override_lives_without_carrier_reparse",
+            "test": "supplied_template_runtime_compile_is_typed_unavailable; supplied_style_analysis_fails_closed_without_a_source_space_descriptor",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1176,7 +1206,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1228,7 +1258,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1241,7 +1271,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "compiler.spec.ts::overrides style content without re-upsert",
+            "test": "compiler.spec.ts::host: applyBlockOverrides / admits one stamped result and rejects correlation replay",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1319,7 +1349,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1345,7 +1375,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1358,7 +1388,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {
@@ -1449,7 +1479,7 @@
             "pre_semantic": "required",
             "edit": "required",
             "close_reopen": "required",
-            "test": "torn_lane_block_override_surface_routes_style_live_and_content_typed",
+            "test": "processed_classes_stay_typed_until_a_stamped_result_is_admitted; supplied_validated_precedence_exposes_exactly_one_live_source",
             "audit_assertion": "alternate producer/root-scan counter zero or typed admission event"
         },
         {

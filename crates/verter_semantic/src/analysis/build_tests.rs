@@ -2426,7 +2426,7 @@ fn mark_bindings_used_in_style_quoted_expression() {
 fn mark_bindings_used_in_style_external_src_deferred_fails_open() {
     let mut result = analyze("const color = 'red';\nconst size = 12;");
     let style_analyses = vec![crate::analysis::style::StyleBlockAnalysis {
-        content_availability: crate::analysis::style::StyleContentAvailability::ExternalSrcDeferred,
+        content_availability: crate::analysis::style::BlockContentAvailability::Missing,
         ..Default::default()
     }];
     result.mark_bindings_used_in_style(&style_analyses);

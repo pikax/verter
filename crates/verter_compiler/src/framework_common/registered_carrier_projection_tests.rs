@@ -895,11 +895,12 @@ fn projected_inventory_mutations_discriminate_without_reading_source_again() {
     let projection = project(&accepted);
     let inventory = projection.inventory();
     let rebuild = |blocks: Vec<CarrierBlock>| {
-        CarrierBlockInventory::new(
+        CarrierBlockInventory::new_registered(
             Arc::from(inventory.source_spaces().to_vec()),
             Arc::new(inventory.normalized_names().clone()),
             Arc::from(blocks),
             Arc::new(inventory.markup().clone()),
+            &[accepted.source()],
         )
         .expect("valid semantic mutation")
     };
@@ -954,11 +955,12 @@ fn projected_inventory_validation_rejects_identity_span_and_cardinality_mutation
     let mut spaces = inventory.source_spaces().to_vec();
     spaces[0].byte_len += 1;
     assert!(matches!(
-        CarrierBlockInventory::new(
+        CarrierBlockInventory::new_registered(
             Arc::from(spaces),
             Arc::new(inventory.normalized_names().clone()),
             Arc::from(inventory.blocks().to_vec()),
             Arc::new(inventory.markup().clone()),
+            &[accepted.source()],
         ),
         Err(InventoryValidationError::SourceLengthMismatch(_))
     ));
@@ -969,11 +971,12 @@ fn projected_inventory_validation_rejects_identity_span_and_cardinality_mutation
     };
     syntax.full_span.end = u32::MAX;
     assert!(matches!(
-        CarrierBlockInventory::new(
+        CarrierBlockInventory::new_registered(
             Arc::from(inventory.source_spaces().to_vec()),
             Arc::new(inventory.normalized_names().clone()),
             Arc::from(blocks),
             Arc::new(inventory.markup().clone()),
+            &[accepted.source()],
         ),
         Err(InventoryValidationError::InvalidSpan(_))
     ));
@@ -981,11 +984,12 @@ fn projected_inventory_validation_rejects_identity_span_and_cardinality_mutation
     let mut arena = inventory.markup().clone();
     arena.roots = Arc::from([arena.roots()[0], arena.roots()[0]]);
     assert!(matches!(
-        CarrierBlockInventory::new(
+        CarrierBlockInventory::new_registered(
             Arc::from(inventory.source_spaces().to_vec()),
             Arc::new(inventory.normalized_names().clone()),
             Arc::from(inventory.blocks().to_vec()),
             Arc::new(arena),
+            &[accepted.source()],
         ),
         Err(InventoryValidationError::InvalidRootOwnership(_))
     ));

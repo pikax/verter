@@ -1,20 +1,16 @@
-//! `impl VerterHost` — upsert and style-override methods.
+//! `impl VerterHost` — source upsert methods.
 //!
-//! Contains [`VerterHost::upsert`] and [`VerterHost::apply_style_overrides`],
-//! which handle file ingestion, change detection, cache invalidation, and
-//! style override application.
+//! Contains [`VerterHost::upsert`] and internal compile-input projection,
+//! which handle file ingestion, change detection, and cache invalidation.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-
 // `Instant` is only referenced by `upsert_legacy` (WASM-only). Native paths
 // measure parse durations via the scheduler executor.
 
-use crate::cache::sorted_nodes;
-use crate::hash::{compile_profile_hash, style_override_hash};
-use crate::id::{canonicalize_id, render_ids};
+use crate::id::canonicalize_id;
+use crate::shared::write_lock;
 use crate::types::*;
 use crate::upsert::compute_upsert_changes_from_parse;
 use crate::upsert::{build_upsert_result, UpsertResultData};
@@ -306,6 +302,11 @@ impl VerterHost {
         if requests.is_empty() {
             return Vec::new();
         }
+        // Owner publication and post-await supplied-content admission share
+        // one fence. The lock covers scheduler commit plus host publication,
+        // so no owner revision can land between an override's current-stamp
+        // validation and its atomic admission.
+        let _block_content_fence = self.block_content_admission_fence.lock();
         verter_workspace::probe_scope!(UPSERT_MANY);
         // 2–5: build the transaction (resolve + uniqueness-check canonicals
         //      first, capture context once, prepare each request, ONE
@@ -670,6 +671,8 @@ impl VerterHost {
                 .iter()
                 .map(crate::types::ScriptModuleReference::from)
                 .collect();
+            let preprocessor_requests =
+                self.materialize_preprocessor_requests(&canonical_id, &parse.preprocessor_requests);
             return Ok(HostUpdateResult {
                 canonical_id,
                 changed: false,
@@ -684,7 +687,7 @@ impl VerterHost {
                 external_source_requests: parse.external_requests.clone(),
                 import_specifiers,
                 module_references,
-                preprocessor_requests: parse.preprocessor_requests.clone(),
+                preprocessor_requests,
                 export_signatures: parse.export_signatures.clone(),
                 parse_duration_ms,
             });
@@ -742,8 +745,6 @@ impl VerterHost {
                 .or_default();
             let profile = profile_ref.value_mut();
             if whole_hash_changed {
-                profile.content_overrides.clear();
-                profile.style_overrides.clear();
                 crate::host_manage::push_cache_drained_at_upsert(
                     "compile_cache_overrides",
                     &canonical_id,
@@ -861,13 +862,15 @@ impl VerterHost {
         crate::host_manage::push_cache_drained_at_upsert("dependency_cache", &canonical_id);
 
         // ── Build result data from parse ──
+        write_lock(&self.block_content_state).supersede_owner(&canonical_id);
         let result_data = UpsertResultData {
             new_meta: parse.meta.clone(),
             parse_diagnostics: parse.parse_diagnostics.clone(),
             imports: parse.script_analysis.imports.clone(),
             module_references: parse.script_analysis.module_references.clone(),
             external_requests: parse.external_requests.clone(),
-            preprocessor_requests: parse.preprocessor_requests.clone(),
+            preprocessor_requests: self
+                .materialize_preprocessor_requests(&canonical_id, &parse.preprocessor_requests),
             export_signatures: parse.export_signatures.clone(),
         };
 
@@ -1025,318 +1028,5 @@ impl VerterHost {
         }
 
         parsed_edges
-    }
-
-    /// Apply preprocessor-compiled style overrides for a file+profile.
-    ///
-    /// Called by the bundler after an external CSS preprocessor (Sass, Less, etc.)
-    /// has compiled each `<style>` block. The overrides replace the raw style
-    /// content in the compile slot so that `get_virtual_file` serves the
-    /// preprocessed CSS. Returns a [`HostUpdateResult`] listing affected style nodes.
-    pub fn apply_style_overrides(
-        &self,
-        req: StyleOverrideRequest,
-    ) -> Result<HostUpdateResult, HostError> {
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .style_override_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let canonical = self.resolve_alias_or_canonical(&req.canonical_id);
-        let profile_hash = compile_profile_hash(&req.compile_profile);
-
-        let mut by_index = FxHashMap::default();
-        for ov in req.overrides {
-            by_index.insert(ov.index, ov);
-        }
-        let override_hash = style_override_hash(&by_index);
-
-        // Read raw data needed for CSS analysis + span remapping.
-        // On scheduler path: read from scheduler snapshots (raw, unmodified).
-        // The override results go into compile_cache per-profile.
-        {
-            use crate::host_executor::{HostAnalysisData, HostSourceData};
-
-            let source_snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
-                HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                }
-            })?;
-            let hd = source_snap
-                .downcast_data::<HostSourceData>()
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-            let analysis_snap = self.scheduler.try_get_analysis(&canonical);
-            let raw_style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> =
-                analysis_snap
-                    .as_ref()
-                    .and_then(|a| a.downcast_data::<HostAnalysisData>())
-                    .map(|ad| Arc::clone(&ad.style_analyses))
-                    .unwrap_or_default();
-
-            // External-`src` blocks defer their content (B-23): an override
-            // targeting a deferred block would rebuild an `Inline` CSS
-            // analysis and virtual style bytes for content the framework
-            // never uses. Refuse the whole request typed, before any cache
-            // mutation — never fabricate inline state for a deferred block.
-            for &idx in by_index.keys() {
-                if raw_style_analyses
-                    .get(idx)
-                    .is_some_and(|analysis| analysis.is_external_src_deferred())
-                {
-                    return Err(HostError::ExternalBlockContentDeferred(
-                        crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
-                    ));
-                }
-            }
-
-            // Check previous hash
-            let previous_hash = self
-                .compile_cache()
-                .get(&canonical)
-                .and_then(|cc| cc.style_overrides.get(&profile_hash).map(|o| o.hash))
-                .unwrap_or(0);
-            if override_hash == previous_hash {
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = hd.parse.external_requests.clone();
-                return Ok(result);
-            }
-
-            let source = &source_snap.source;
-            let meta = &hd.parse.meta;
-
-            // Inventory-owned geometry: the ORIGINAL content handed to
-            // source-map remapping is the SELECTED style block's
-            // `content_span`, read from the registered inventory. The
-            // parser already owns block geometry (raw-text termination,
-            // case-insensitive close tags), so a raw delimiter search over
-            // the source bytes is forbidden here — it diverges from the
-            // parser on exactly the inputs that matter (`</style`-prefixed
-            // literals inside a style body, `</STYLE>` closes). Override
-            // indices are style ordinals, so the projection filters the
-            // inventory to style sections in source order — the same
-            // ordinal domain the style analyses are built from.
-            let style_content_slices: Vec<&str> = hd
-                .structure
-                .as_ref()
-                .map(|structure| {
-                    use verter_language::parse_artifact::carrier_inventory::{
-                        CarrierBlock, SectionRole,
-                    };
-                    let inventory = structure.inventory();
-                    inventory
-                        .blocks()
-                        .iter()
-                        .filter_map(|block| match block {
-                            CarrierBlock::Section {
-                                role: SectionRole::Style { .. },
-                                syntax,
-                                ..
-                            } => Some(inventory.slice_span(syntax.content_span).unwrap_or("")),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Re-analyze compiled CSS and remap spans
-            let mut analyses_vec: Vec<Option<verter_semantic::analysis::StyleBlockAnalysis>> =
-                vec![None; raw_style_analyses.len()];
-            let mut lang_overrides_vec: Vec<Option<String>> = vec![None; meta.style_langs.len()];
-
-            for (&idx, ov) in &by_index {
-                if idx < raw_style_analyses.len() {
-                    let existing = &raw_style_analyses[idx];
-                    let content_offset = existing.content_offset;
-
-                    let mut new_analysis = verter_semantic::analysis::build_css_style_analysis(
-                        &ov.code,
-                        verter_semantic::analysis::VueStyleInput::default(),
-                        existing.scoped,
-                        existing.is_module,
-                        existing.module_name.as_deref(),
-                        content_offset,
-                    );
-                    new_analysis.block_ref = existing.block_ref.clone();
-                    new_analysis.block_token = existing.block_token.clone();
-
-                    if let (Some(sm_json), Some(ref mut css)) =
-                        (&ov.source_map, &mut new_analysis.css)
-                    {
-                        // Fail-closed: no inventory entry for this ordinal
-                        // ⇒ empty original content (the remap degrades to
-                        // identity), never a raw-source scan.
-                        let original_content = style_content_slices.get(idx).copied().unwrap_or("");
-                        crate::source_map_remap::remap_css_analysis_spans(
-                            css,
-                            &ov.code,
-                            sm_json,
-                            original_content,
-                            content_offset,
-                        );
-                    }
-
-                    if let Some(ref css) = new_analysis.css {
-                        css.debug_assert_valid_spans(source.len() as u32);
-                    }
-                    new_analysis.v_binds = existing.v_binds.clone();
-                    new_analysis.special_pseudos = existing.special_pseudos.clone();
-
-                    analyses_vec[idx] = Some(new_analysis);
-                }
-                if idx < lang_overrides_vec.len() {
-                    lang_overrides_vec[idx] = Some("css".to_string());
-                }
-            }
-
-            // Store in compile_cache
-            let layer = StyleOverrideLayer {
-                hash: override_hash,
-                by_index: by_index.clone(),
-            };
-            if let Some(mut cc) = self.compile_cache().get_mut(&canonical) {
-                cc.style_overrides.insert(
-                    profile_hash,
-                    StyleOverrideWithAnalysis {
-                        layer: layer.clone(),
-                        analyses: analyses_vec,
-                        lang_overrides: lang_overrides_vec,
-                        hash: override_hash,
-                    },
-                );
-                let session_node =
-                    crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
-                session_node.remove(&mut cc, profile_hash);
-            }
-
-            let mut changed_nodes: Vec<VirtualNodeKind> = by_index
-                .keys()
-                .map(|idx| VirtualNodeKind::Style { index: *idx })
-                .collect();
-            changed_nodes = sorted_nodes(changed_nodes);
-
-            let mut changed_virtual_ids = Vec::new();
-            let mut changed_lsp_ids = Vec::new();
-            for node in &changed_nodes {
-                let (b, l) = render_ids(&canonical, node, meta);
-                changed_virtual_ids.push(b);
-                changed_lsp_ids.push(l);
-            }
-
-            let result = HostUpdateResult {
-                canonical_id: canonical,
-                changed: true,
-                slice_changes: SliceChanges::default(),
-                changed_virtual_nodes: changed_nodes,
-                removed_virtual_nodes: Vec::new(),
-                changed_virtual_ids,
-                removed_virtual_ids: Vec::new(),
-                changed_lsp_ids,
-                removed_lsp_ids: Vec::new(),
-                diagnostics: DiagnosticsSnapshot::default(),
-                external_source_requests: hd.parse.external_requests.clone(),
-                import_specifiers: Vec::new(),
-                module_references: Vec::new(),
-                preprocessor_requests: Vec::new(),
-                export_signatures: Vec::new(),
-                parse_duration_ms: 0.0,
-            };
-            self.bump_store_view_epoch();
-            Ok(result)
-        }
-
-        // Legacy path (WASM)
-    }
-
-    /// Apply preprocessed block overrides for template, script, style, and custom blocks.
-    ///
-    /// The interim contract of this surface (see
-    /// `docs/arch/scanners-replacement-preprocessor-interim.md`):
-    ///
-    /// - **Template/script CONTENT overrides refuse with the typed
-    ///   [`HostError::ExternalBlockContentDeferred`] (acceptance `B-23`).**
-    ///   Recompiling from a spliced synthetic carrier source is
-    ///   unrepresentable; the typed refusal is the sole result until the
-    ///   typed block-content admission path lands.
-    /// - **Style overrides (and custom blocks routed through style
-    ///   analysis) stay LIVE**: they delegate to
-    ///   [`Self::apply_style_overrides`], which layers the compiled CSS into
-    ///   the per-profile compile slot WITHOUT reparsing the carrier.
-    /// - **The surface itself remains reachable** from the NAPI and WASM
-    ///   bindings' `applyBlockOverrides` (and the unplugin
-    ///   `BlockPreprocessor`), so both behaviours are user-visible.
-    pub fn apply_block_overrides(
-        &self,
-        req: BlockOverrideRequest,
-    ) -> Result<HostUpdateResult, HostError> {
-        let canonical = self.resolve_alias_or_canonical(&req.canonical_id);
-        // Separate overrides into template/script vs style buckets
-        let mut template_override: Option<ContentOverride> = None;
-        let mut script_override: Option<ContentOverride> = None;
-        let mut style_overrides_vec: Vec<StyleOverrideEntry> = Vec::new();
-
-        for ov in req.overrides {
-            match ov.block_type {
-                PreprocessorBlockType::Template => {
-                    template_override = Some(ContentOverride {
-                        code: ov.code,
-                        source_map: ov.source_map,
-                    });
-                }
-                PreprocessorBlockType::Script => {
-                    script_override = Some(ContentOverride {
-                        code: ov.code,
-                        source_map: ov.source_map,
-                    });
-                }
-                PreprocessorBlockType::Style | PreprocessorBlockType::Custom => {
-                    style_overrides_vec.push(StyleOverrideEntry {
-                        index: ov.index,
-                        code: ov.code,
-                        source_map: ov.source_map,
-                    });
-                }
-            }
-        }
-
-        // Handle style overrides via the existing mechanism
-        if !style_overrides_vec.is_empty() {
-            let style_req = StyleOverrideRequest {
-                canonical_id: req.canonical_id.clone(),
-                compile_profile: req.compile_profile.clone(),
-                overrides: style_overrides_vec,
-            };
-            // Apply style overrides (this also invalidates the compile slot)
-            let _ = self.apply_style_overrides(style_req)?;
-        }
-
-        // Handle template/script content overrides
-        let has_content_overrides = template_override.is_some() || script_override.is_some();
-        if !has_content_overrides {
-            // Only style overrides were provided; style overrides already handled above.
-            // Read external_requests from scheduler (or files on WASM).
-            {
-                use crate::host_executor::HostSourceData;
-                let snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
-                    HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    }
-                })?;
-                let hd = snap.downcast_data::<HostSourceData>().ok_or_else(|| {
-                    HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    }
-                })?;
-                let mut result = HostUpdateResult::no_change(canonical);
-                result.external_source_requests = hd.parse.external_requests.clone();
-                result.changed = true;
-                return Ok(result);
-            }
-        }
-
-        Err(HostError::ExternalBlockContentDeferred(
-            crate::carrier_publication_store::ExternalBlockContentDeferred::B23,
-        ))
     }
 }
