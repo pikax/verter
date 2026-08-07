@@ -31,9 +31,9 @@ use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef};
 use crate::semantic_query::{
-    FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep, FlowReturnUnsupported,
-    PrimitiveKind, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue,
+    FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
+    FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
 };
 
 /// The consumer outcome of one sealed function-return demand
@@ -88,7 +88,74 @@ pub(crate) enum ConsumerFold {
     /// one level down, inside the evaluator, where the marker keeps every
     /// modelled sibling; by the time a no-value outcome reaches HERE the
     /// evaluation has already declined to localise it.
-    Partial,
+    ///
+    /// The carried reason set is what the consumers disagree over, and it
+    /// is derived per-OUTCOME rather than per-arm: see
+    /// [`degradation_reason_class`] for a degraded success (whose surface
+    /// is either faithful or merely unverified) and
+    /// [`NO_VALUE_REASON_CLASS`] for a no-value outcome (which has no
+    /// surface at all, so only a consumer that splices the AUTHORED
+    /// declaration can contain it).
+    Partial(PartialReasonSet),
+}
+
+/// The partial class EVERY typed NO-VALUE [`FlowReturnFailure`] carries:
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`], the TSC-lane-contained
+/// class.
+///
+/// One rule rather than a per-variant match, because the classification
+/// axis is the CONSUMER, not the cause, and every no-value cause lands on
+/// the same side of it. A consumer that splices the AUTHORED declaration
+/// and lets an external checker type it (the Vue macro TSC projection) is
+/// unaffected by ANY of them — the declaration rides verbatim whether the
+/// substrate failed on a control surface, a missing body, a budget edge or
+/// a torn view. A consumer that derives its output FROM the value (the
+/// runtime `props: {...}` projection, `get_component_meta`) is broken by
+/// all of them alike: there is no surface, so publishing around it emits
+/// an empty props object for a component that declares props.
+///
+/// A per-variant match here would be a constant-returning stub. The
+/// distinctions that DO matter are recorded elsewhere and survive: the
+/// class-member inference rail records its own precise
+/// `BUDGET_EXCEEDED` into the file-level aggregate (pinned by
+/// `tsc_class_inference_budget_is_exact_partial_and_non_cacheable`), and
+/// the typed `FlowReturnFailure` itself is what the flow-return consumers
+/// branch on.
+const NO_VALUE_REASON_CLASS: PartialReasonSet = PartialReasonSet::FLOW_RETURN_UNVERIFIED;
+
+/// The partial class a DEGRADED SUCCESS's typed
+/// [`FlowReturnDegradation`] carries — the split the two Vue macro
+/// codegen lanes disagree over.
+///
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`] — the surface is
+/// FAITHFUL: every modelled sibling is exact, and the one position the
+/// substrate could not type carries the typed marker rather than a
+/// fabricated `any`. An unmodelled position, an unresolved-value carrier,
+/// an unrepresentable callee, a failed binding initializer. BOTH lanes
+/// contain it: the TSC lane splices the AUTHORED declaration, and the
+/// runtime lane emits exactly the members the faithful surface carries.
+///
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] — the member set is
+/// complete but one member's TYPE may be WRONG: a write effect the
+/// evaluator did not apply, a conditional `var` join it has no algebra
+/// for, a declared union it could not reduce, a call on a non-callable
+/// binding that evaluated to `any`. Only the TSC lane contains it,
+/// because only the TSC lane never reads the value — its public
+/// projection is the authored argument. The runtime lane derives the
+/// `props: {...}` constructor sets FROM the value, so it must refuse.
+fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReasonSet {
+    match degradation {
+        FlowReturnDegradation::UnmodeledPosition
+        | FlowReturnDegradation::UnresolvedValue
+        | FlowReturnDegradation::UnrepresentableCallee
+        | FlowReturnDegradation::FailedBindingInitializer => {
+            PartialReasonSet::FLOW_RETURN_UNINFERRED
+        }
+        FlowReturnDegradation::NonCallableBinding
+        | FlowReturnDegradation::UnappliedWriteEffect
+        | FlowReturnDegradation::ConditionalVarDefinition
+        | FlowReturnDegradation::UnreducedDeclaredUnion => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+    }
 }
 
 impl FunctionReturnNode {
@@ -117,9 +184,14 @@ impl FunctionReturnNode {
             Self::Declared(_) | Self::Absent => ConsumerFold::Clean,
             Self::Flow(result) => match result.degradation() {
                 None => ConsumerFold::Clean,
-                Some(_) => ConsumerFold::Partial,
+                Some(degradation) => ConsumerFold::Partial(degradation_reason_class(degradation)),
             },
-            Self::DeclaredMiss | Self::NoValue(_) => ConsumerFold::Partial,
+            // A declared locator that could not be raised is a RESOLUTION
+            // miss rather than a body-derived inference, but it lands on
+            // the same side of the consumer axis: the TSC splice is
+            // unaffected, a value-derived surface is not.
+            Self::DeclaredMiss => ConsumerFold::Partial(NO_VALUE_REASON_CLASS),
+            Self::NoValue(_) => ConsumerFold::Partial(NO_VALUE_REASON_CLASS),
         }
     }
 }
@@ -337,7 +409,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // [`FunctionReturnNode::consumer_fold`] classification.
                 match node.consumer_fold() {
                     ConsumerFold::Clean => {}
-                    ConsumerFold::Partial => self.fold_flow_return_uninferred_rails(),
+                    ConsumerFold::Partial(reasons) => self.fold_flow_return_consumer_rails(reasons),
                 }
                 node
             }
@@ -2222,23 +2294,33 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// A hold is a promise the SCC fixed point will union the hold
     /// TARGET's whole admitted return into this entry's result. Inside a
     /// composite that promise is false: the callee's return is not this
-    /// object's value, it is one member of it. So the position takes the
-    /// marker AND the hold it created is dropped — leaving it registered
-    /// would union the callee's return into the composite. `holds_before`
-    /// is the frame's hold count taken immediately before the
-    /// sub-expression, so a sibling's hold is never disturbed.
+    /// object's value, it is one member of it. So the sub-expression's
+    /// hold is dropped — leaving it registered would union the callee's
+    /// return into the composite. `holds_before` is the frame's hold count
+    /// taken immediately before the sub-expression, so a sibling's hold is
+    /// never disturbed.
+    ///
+    /// The truncation is UNCONDITIONAL over the outcome, because the
+    /// direct-call site registers a hold on the VALUE arm too: a callee
+    /// that popped as a PROVISIONAL member of this component leaves an
+    /// obligation edge even though it also handed back a usable value.
+    /// Truncating only the `Hold` arm left that one registered, and the
+    /// fixed point then unioned the callee's whole return into the
+    /// composite — the exact outcome the paragraph above forbids
+    /// (`t3a(){return {m:t3b(true)}}` / `t3b(c){if(c)return t3a();return
+    /// 1}` published `1 | { m: 1 }`, and a bare `1` is not in `t3a`'s
+    /// range for any input). The obligation itself is unaffected: it lives
+    /// on the transaction's pending set, and the component's fixed point
+    /// still iterates every member.
     fn settle_composite_part(
         &mut self,
         outcome: Positional<SemanticNodeId>,
         holds_before: usize,
     ) -> SemanticNodeId {
+        self.holds.truncate(holds_before);
         match outcome {
             Positional::Value(node) => node,
-            Positional::Hold => {
-                self.holds.truncate(holds_before);
-                self.unmodeled_position()
-            }
-            Positional::Unmodeled => self.unmodeled_position(),
+            Positional::Hold | Positional::Unmodeled => self.unmodeled_position(),
         }
     }
 

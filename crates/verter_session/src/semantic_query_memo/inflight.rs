@@ -95,6 +95,12 @@ pub(super) struct InflightState {
     /// warm gate suppresses the outer result. `false` for the abort/retry
     /// path. Distinct from [`Self::cache_suppress`] (memo admission only).
     pub(super) result_is_partial: bool,
+    /// The winner build's partial CLASSES — see
+    /// [`crate::semantic_query::CacheRead::partial_reasons`]. Published
+    /// alongside [`Self::result_is_partial`] and returned verbatim to a
+    /// joiner, so a rendezvous does not launder a named class into the
+    /// anonymous bridge on the follower's side.
+    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
     /// The generation-qualified execution owner that claimed this flight.
     /// Joiners register a temporary wait-for edge to this owner before
     /// parking, allowing cross-thread cycles to escape through ReturnOnly.

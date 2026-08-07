@@ -2517,6 +2517,7 @@ impl MaterializeStructureDb {
                                 walker_diagnostics: Arc::from([]),
                                 cache_suppress: false,
                                 result_is_partial: false,
+                                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                             },
                             signature: entry.read_set_signature,
                             self_root_canonicals: entry.self_root_canonicals,
@@ -2629,6 +2630,7 @@ impl MaterializeStructureDb {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         self.store.insert_for_test(
             key,
@@ -2657,6 +2659,7 @@ impl MaterializeStructureDb {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         self.store.insert_for_test(
             key,

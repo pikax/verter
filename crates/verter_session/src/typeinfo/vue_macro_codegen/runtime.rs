@@ -52,7 +52,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if runtime_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -72,7 +72,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if runtime_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -89,7 +89,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         carrier_context
                     },
                 );
-                if macro_projection_faulted() {
+                if runtime_projection_faulted() {
                     return false;
                 }
                 if resolved != node {
@@ -357,7 +357,7 @@ pub(super) fn classify_runtime(
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
     let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
-    if macro_projection_faulted() {
+    if runtime_projection_faulted() {
         return Err(partial_failure());
     }
     let classification = match result {
@@ -372,7 +372,7 @@ pub(super) fn classify_runtime(
         QueryResult::Recursive(_) => {
             return Err(ProjectionFailure::Partial(MacroPartialReason::Recursion))
         }
-        QueryResult::Error(_) => return Err(resolution_failure()),
+        QueryResult::Error(_) => return Err(runtime_resolution_failure()),
     };
 
     let skip_check = classification.kinds().contains(&BroadRuntimeKind::Unknown)
@@ -618,15 +618,14 @@ fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool 
     })
 }
 
-/// The Vue-macro projection's CONTAINED partial class.
+/// The TSC lane's CONTAINED partial classes.
 ///
-/// A macro projection emits the AUTHORED declarations verbatim into the
+/// The TSC projection emits the AUTHORED declarations verbatim into the
 /// generated TSX and splices the AUTHORED type argument; the external
 /// checker then computes the member types itself. So a body-derived return
-/// THIS substrate could not infer
-/// ([`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) says nothing about
-/// whether the projection is the full surface — and faulting on it deleted
-/// the WHOLE props projection from the generated TSX over one class
+/// THIS substrate could not infer, and one it inferred but could not
+/// verify, both say nothing about whether the TSX is the full surface —
+/// and faulting on them deleted the WHOLE props projection over one class
 /// member's return type, for programs the checker types without
 /// difficulty.
 ///
@@ -634,20 +633,76 @@ fn is_top_level_macro(macros: &[AnalyzedMacro], candidate_index: usize) -> bool 
 /// superseded generation, an unstable view, a recursion limit, a missing
 /// dependency, a semantic-query fault, and the boolean-bridge
 /// `PROPAGATED` are all statements about the REQUEST rather than about one
-/// declaration's inference.
+/// declaration's inference. A declaration-local budget the class-member
+/// inference records precisely still reaches the FILE-level aggregate
+/// through its own rail, so a budget-truncated class member keeps the
+/// entry `Complete` (the authored splice is intact) while the file result
+/// reports `BUDGET_EXCEEDED` and warms nothing.
+const TSC_CONTAINED: PartialReasonSet =
+    PartialReasonSet::FLOW_RETURN_UNINFERRED.union(PartialReasonSet::FLOW_RETURN_UNVERIFIED);
+
+/// The RUNTIME lane's CONTAINED partial class — strictly NARROWER than
+/// [`TSC_CONTAINED`], and that difference is the whole point of having two.
+///
+/// The runtime lane does not splice anything authored: it emits a
+/// `props: {...}` option object built FROM the resolved members and their
+/// classified constructors. A FAITHFUL surface (every modelled sibling
+/// exact, the untypable position carrying the typed marker) is safe to
+/// emit — that is exactly what the runtime lane published before this
+/// substrate existed. Nothing else is: an UNVERIFIED value's member set is
+/// complete but a member's type may be silently wrong, and a NO-VALUE
+/// outcome has no member set at all, so publishing around it emits
+/// `props: {}` for a component that declares props. Both are runtime
+/// validation defects the external checker never sees.
+const RUNTIME_CONTAINED: PartialReasonSet = PartialReasonSet::FLOW_RETURN_UNINFERRED;
+
+/// Whether the observed completeness FAULTS the TSC projection.
 pub(super) fn macro_projection_faulted() -> bool {
     !macro_projection_residual(crate::request_context::current_cold_compute_completeness())
         .is_empty()
 }
 
-/// The reasons of `completeness` that FAULT a Vue-macro projection — the
-/// observed set minus the contained class.
+/// Whether the observed completeness FAULTS the RUNTIME projection —
+/// for a demand that READS member types (broad constructors).
+pub(super) fn runtime_projection_faulted() -> bool {
+    runtime_projection_faulted_with(true)
+}
+
+/// [`runtime_projection_faulted`] for a demand that may not read member
+/// TYPES at all.
+///
+/// A TSX-only (IDE) compile takes the public binding NAMES out of the
+/// runtime bundle and never reads `RuntimePropType`. An UNVERIFIED value
+/// has a complete member set — only a member's type may be wrong — so for
+/// a names-only demand it is contained exactly as the TSC lane contains
+/// it. The narrower `RUNTIME_CONTAINED` applies only where a constructor
+/// set is actually derived from the value.
+pub(super) fn runtime_projection_faulted_with(reads_member_types: bool) -> bool {
+    let contained = if reads_member_types {
+        RUNTIME_CONTAINED
+    } else {
+        TSC_CONTAINED
+    };
+    !crate::request_context::current_cold_compute_completeness()
+        .reasons()
+        .without(contained)
+        .is_empty()
+}
+
+/// The reasons of `completeness` that FAULT the TSC projection — the
+/// observed set minus [`TSC_CONTAINED`].
 pub(super) fn macro_projection_residual(
     completeness: crate::semantic_query::ResultCompleteness,
 ) -> PartialReasonSet {
-    completeness
-        .reasons()
-        .without(PartialReasonSet::FLOW_RETURN_UNINFERRED)
+    completeness.reasons().without(TSC_CONTAINED)
+}
+
+/// The reasons of `completeness` that FAULT the RUNTIME projection — the
+/// observed set minus [`RUNTIME_CONTAINED`].
+pub(super) fn runtime_projection_residual(
+    completeness: crate::semantic_query::ResultCompleteness,
+) -> PartialReasonSet {
+    completeness.reasons().without(RUNTIME_CONTAINED)
 }
 
 pub(super) fn is_codegen_macro(kind: AnalyzedMacroKind) -> bool {
@@ -669,6 +724,15 @@ pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {
 
 pub(super) fn resolution_failure() -> ProjectionFailure {
     if macro_projection_faulted() {
+        partial_failure()
+    } else {
+        ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)
+    }
+}
+
+/// [`resolution_failure`] for the RUNTIME lane — the narrower containment.
+pub(super) fn runtime_resolution_failure() -> ProjectionFailure {
+    if runtime_projection_faulted() {
         partial_failure()
     } else {
         ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)

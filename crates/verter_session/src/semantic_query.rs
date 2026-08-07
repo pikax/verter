@@ -3737,21 +3737,43 @@ impl PartialReasonSet {
     /// preserved for fail-closed consumers and is never warm-admitted as a
     /// complete result.
     pub const MISSING_DEPENDENCY: Self = Self(1 << 13);
-    /// A body-derived (`FlowReturn`) return this substrate could not infer
-    /// — either no value at all, or a usable value with an unmodelled
-    /// interior position.
+    /// A body-derived (`FlowReturn`) return produced a USABLE value in
+    /// which one interior POSITION has no modelled type and says so.
+    ///
+    /// Scoped to a DEGRADED SUCCESS whose published surface is FAITHFUL:
+    /// every modelled sibling is present and exact, and the one position
+    /// the substrate could not type carries the typed unresolved marker
+    /// rather than a fabricated `any`. A NO-VALUE outcome is NOT this
+    /// class — there is no surface to be faithful about, so it keeps a
+    /// faulting class and every consumer sees it.
     ///
     /// A NAMED class rather than the boolean-bridge
     /// [`PROPAGATED`](Self::PROPAGATED), because two consumers must treat
     /// it differently and neither may be forced to guess. A consumer that
     /// PUBLISHES the inferred type (`get_component_meta`) is genuinely
-    /// incomplete and must not warm. A consumer that emits the AUTHORED
-    /// declaration for an external checker to type (the Vue macro TSC
-    /// projection) is complete regardless: it splices the declaration
-    /// verbatim, so an inference this substrate cannot do is not a defect
-    /// of its output — and faulting there deleted the WHOLE props
-    /// projection from the generated TSX over one member's return type.
+    /// incomplete and must not warm. Both Vue macro codegen lanes are
+    /// complete regardless: the TSC projection splices the AUTHORED
+    /// declaration for an external checker, and the runtime projection
+    /// emits every member the faithful surface carries — faulting there
+    /// deleted the WHOLE props projection over one member's return type,
+    /// for a component whose props the same tree resolves correctly.
     pub const FLOW_RETURN_UNINFERRED: Self = Self(1 << 14);
+    /// A body-derived (`FlowReturn`) return produced a USABLE value the
+    /// substrate could not fully VERIFY: an unapplied write effect, a
+    /// conditional `var` join it has no algebra for, a declared union it
+    /// could not reduce, a call on a non-callable binding. Every member is
+    /// present; one of them may be silently WRONG.
+    ///
+    /// Distinct from [`FLOW_RETURN_UNINFERRED`](Self::FLOW_RETURN_UNINFERRED)
+    /// because the two macro codegen lanes diverge here, and ONE bit
+    /// cannot carry that. The TSC projection never reads the value for its
+    /// public surface — it splices the authored declaration and the
+    /// external checker computes the members — so an unverified value is
+    /// not a defect of its output. The RUNTIME projection emits `props:
+    /// {...}` FROM the resolved members, so it must fault: emitting a
+    /// constructor set derived from a value that may be wrong is exactly
+    /// the wrong-and-warm class.
+    pub const FLOW_RETURN_UNVERIFIED: Self = Self(1 << 15);
 
     /// The empty reason set (no partial reasons recorded).
     #[must_use]
@@ -3908,6 +3930,26 @@ pub struct CacheRead<T> {
     /// (see [`crate::request_context`] and
     /// [`crate::cache_runtime::refuse_result_cache_admission_if_partial`]).
     pub result_is_partial: bool,
+    /// **The classes behind [`Self::result_is_partial`]**, carried ACROSS
+    /// the query/build boundary.
+    ///
+    /// The boolean alone forces every consumer to re-lift a partial child
+    /// under the unclassified bridge
+    /// [`PartialReasonSet::PROPAGATED`]. That is not merely lossy: a
+    /// consumer that treats ONE class as CONTAINED (the Vue macro
+    /// projection and
+    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) sees the bridge bit
+    /// arrive ALONGSIDE the named class the producer already recorded, so
+    /// the containment subtracts the name and the anonymous duplicate of
+    /// the SAME cause still faults it. Carrying the classes here removes
+    /// the duplicate at its source.
+    ///
+    /// Invariant: empty whenever `result_is_partial` is `false`. When
+    /// `result_is_partial` is `true` this is the union of the classes the
+    /// producing build observed; read it through
+    /// [`Self::partial_reason_classes`], which substitutes the bridge for
+    /// a producer that genuinely could not name one.
+    pub partial_reasons: PartialReasonSet,
 }
 
 impl<T> CacheRead<T> {
@@ -3924,6 +3966,25 @@ impl<T> CacheRead<T> {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: PartialReasonSet::empty(),
+        }
+    }
+
+    /// The partial classes this read carries — the ONE read accessor.
+    ///
+    /// Empty for a complete read. For a partial read it is the producer's
+    /// own classes, or [`PartialReasonSet::PROPAGATED`] when the producer
+    /// set the boolean without naming one (the residual bridge, which no
+    /// longer duplicates a class the producer DID name).
+    #[inline]
+    #[must_use]
+    pub fn partial_reason_classes(&self) -> PartialReasonSet {
+        if !self.result_is_partial {
+            PartialReasonSet::empty()
+        } else if self.partial_reasons.is_empty() {
+            PartialReasonSet::PROPAGATED
+        } else {
+            self.partial_reasons
         }
     }
 }

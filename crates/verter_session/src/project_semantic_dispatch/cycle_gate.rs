@@ -86,6 +86,7 @@ impl ProjectSemanticDispatch<'_> {
                 req_ctx.bump_type_resolution_ref_root_cycle_hit();
             }
         }
+        let read_partial_reasons = read.partial_reason_classes();
         let (value, defensive) = match read.value {
             QueryResult::Value(SemanticQueryValue::MaterializationCycleGate(outcome)) => {
                 (outcome, false)
@@ -119,12 +120,20 @@ impl ProjectSemanticDispatch<'_> {
         // the defensive conversion above forces them). A Decided outcome
         // carries the producer's rails verbatim.
         let is_fallback = !value.is_decided();
+        // The defensive conversion is a partial with no class of its own —
+        // it rides the anonymous bridge on top of whatever the read named.
+        let partial_reasons = read_partial_reasons.union(if defensive {
+            crate::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            crate::semantic_query::PartialReasonSet::empty()
+        });
         CacheRead {
             value,
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress || is_fallback || defensive,
             result_is_partial: read.result_is_partial || defensive,
+            partial_reasons,
         }
     }
 

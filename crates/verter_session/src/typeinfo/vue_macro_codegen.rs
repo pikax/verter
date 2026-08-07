@@ -646,16 +646,27 @@ impl VerterHost {
                 let _completeness_scope =
                     crate::request_context::ColdComputeCompletenessScope::enter();
                 let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                // The producer's OWN completeness, with the CONTAINED class
-                // subtracted: a body-derived return this substrate could not
-                // infer does not make the emitted TSX an incomplete surface
-                // (the declarations ride verbatim and the external checker
-                // types them), so it must not report the file-level result
-                // partial either. Every other reason class survives —
-                // including the declaration-local budget classification the
-                // class-member inference records precisely.
+                // The producer's OWN completeness, with the CONTAINED
+                // classes subtracted: a body-derived return this substrate
+                // could not infer does not make the emitted TSX an
+                // incomplete surface (the declarations ride verbatim and
+                // the external checker types them), so it must not report
+                // the file-level result partial either. Every other reason
+                // class survives — including the declaration-local budget
+                // classification the class-member inference records
+                // precisely on its own rail.
+                //
+                // WHICH classes are contained depends on the STRICTEST lane
+                // this demand actually renders. A demand that derives
+                // runtime constructors FROM the value keeps the narrow
+                // `RUNTIME_CONTAINED`; a TSX-only / names-only demand keeps
+                // `TSC_CONTAINED`, because neither reads a member's type.
                 let observed = crate::request_context::current_cold_compute_completeness();
-                let residual = macro_projection_residual(observed);
+                let residual = if demand.wants_runtime_constructors() {
+                    runtime_projection_residual(observed)
+                } else {
+                    macro_projection_residual(observed)
+                };
                 state.completeness = if residual.is_empty() {
                     crate::semantic_query::ResultCompleteness::Complete
                 } else {
@@ -789,20 +800,35 @@ impl VerterHost {
                         }),
                 );
             }
-            let payload_failure = if macro_projection_faulted() {
+            // PER-LANE payload failure. The two lanes contain DIFFERENT
+            // partial classes (`TSC_CONTAINED` vs the strictly narrower
+            // `RUNTIME_CONTAINED`), so a single shared verdict would either
+            // delete the TSX over a class the checker handles, or emit a
+            // runtime `props` object built from a value the substrate
+            // could not verify. They are computed separately and never
+            // merged.
+            let tsc_payload_failure = if macro_projection_faulted() {
                 Some(partial_failure())
             } else if payload.is_none() {
                 Some(resolution_failure())
             } else {
                 None
             };
+            let runtime_payload_failure =
+                if runtime_projection_faulted_with(demand.wants_runtime_constructors()) {
+                    Some(partial_failure())
+                } else if payload.is_none() {
+                    Some(runtime_resolution_failure())
+                } else {
+                    None
+                };
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
                 let outcome = {
                     let _runtime_scope =
                         crate::request_context::ColdComputeCompletenessScope::enter();
-                    match (payload_failure, payload) {
+                    match (runtime_payload_failure, payload) {
                         (Some(failure), _) => failure.runtime(),
                         (None, Some(payload)) => match mac.kind {
                             AnalyzedMacroKind::DefineProps => {
@@ -835,6 +861,7 @@ impl VerterHost {
                                 mac,
                                 payload_index,
                                 effective_index,
+                                demand.wants_runtime_constructors(),
                                 &mut state.counters,
                                 &mut walker_diagnostics,
                             ),
@@ -878,7 +905,7 @@ impl VerterHost {
                 let mut walker_diagnostics = Vec::new();
                 let outcome = {
                     let _tsc_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-                    match (payload_failure, payload) {
+                    match (tsc_payload_failure, payload) {
                         (Some(failure), _) => failure.tsc(),
                         (None, Some(payload)) => self.project_tsc_macro(
                             ctx,
@@ -1145,7 +1172,7 @@ impl VerterHost {
             ),
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted() {
+        if runtime_projection_faulted_with(classify_constructors) {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1229,6 +1256,7 @@ impl VerterHost {
         mac: &AnalyzedMacro,
         payload_index: usize,
         effective_index: usize,
+        reads_member_types: bool,
         counters: &mut VueMacroCodegenCounters,
         walker_diagnostics: &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
     ) -> MacroRuntimeOutcome {
@@ -1248,7 +1276,7 @@ impl VerterHost {
             runtime_context,
             Some(walker_diagnostics),
         );
-        if macro_projection_faulted() {
+        if runtime_projection_faulted_with(reads_member_types) {
             return partial_failure().runtime();
         }
         let Some(surface) = surface else {
@@ -1266,7 +1294,7 @@ impl VerterHost {
             effective_index,
             runtime_context,
         );
-        if macro_projection_faulted() {
+        if runtime_projection_faulted_with(reads_member_types) {
             return partial_failure().runtime();
         }
         MacroRuntimeOutcome::Complete(MacroRuntimeShape::Emits(emits))

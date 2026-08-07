@@ -246,6 +246,13 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// through nested reads. Gates the component-meta + shape/materialize
     /// warm caches.
     pub result_is_partial: bool,
+    /// **The classes behind [`Self::result_is_partial`]** — see
+    /// [`crate::semantic_query::CacheRead::partial_reasons`]. Empty when
+    /// the build is complete; the union of the observed classes otherwise.
+    /// The shared cold-build helper copies this onto the returned
+    /// `CacheRead` so a partial's CLASS survives the query/build boundary
+    /// instead of being re-lifted as the unclassified bridge.
+    pub partial_reasons: crate::semantic_query::PartialReasonSet,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
     /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
@@ -330,6 +337,7 @@ impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
@@ -357,6 +365,7 @@ impl From<QueryBuildOutput<SemanticNodeId>>
             walker_diagnostics: output.walker_diagnostics,
             cache_suppress: output.cache_suppress,
             result_is_partial: output.result_is_partial,
+            partial_reasons: output.partial_reasons,
             taint: output.taint,
             observed_self_roots: output.observed_self_roots,
             graph_carrier: output.graph_carrier,
@@ -378,6 +387,7 @@ impl<T> QueryBuildOutput<T> {
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
             result_is_partial: self.result_is_partial,
+            partial_reasons: self.partial_reasons,
             taint: self.taint,
             observed_self_roots: self.observed_self_roots,
             graph_carrier: self.graph_carrier,
@@ -793,6 +803,13 @@ pub(super) struct PathWalker<'a, 'b> {
     /// in lock-step with `cache_suppress` at the walker fatal/pathological
     /// paths.
     pub(super) result_is_partial: bool,
+    /// The classes behind [`Self::result_is_partial`] — see
+    /// [`crate::semantic_query::CacheRead::partial_reasons`]. The walker's
+    /// OWN fatal/pathological stops name no class (they are genuine
+    /// unclassified partials and stay so); this accumulates the classes
+    /// nested reads carried up, so a named class is not laundered into the
+    /// anonymous bridge on its way out of the walk.
+    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
     /// `true` when any nested contribution during this walk was an open /
     /// multi-alternative construction program (or a failed program
     /// projection) — see [`ShallowDiagnostic::OpenSpreadProgram`]. The
@@ -1099,6 +1116,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             open_spread_partial: false,
             original_path_non_empty: false,
         }
@@ -1182,6 +1200,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         let read = self.dispatch.execute_read(key);
         if read.result_is_partial {
             self.result_is_partial = true;
+            self.partial_reasons = self.partial_reasons.union(read.partial_reason_classes());
         }
         read.value
     }

@@ -599,6 +599,8 @@ fn finish_materialize_admission(
                 cache_suppress: true,
                 result_is_partial: crate::request_context::current_cold_compute_completeness()
                     .is_partial(),
+                partial_reasons: crate::request_context::current_cold_compute_completeness()
+                    .reasons(),
             },
             reason: crate::cache_runtime::NonAdmissionReason::IntrinsicNonCacheable,
         };
@@ -624,6 +626,8 @@ fn finish_materialize_admission(
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: true,
+                partial_reasons: crate::request_context::current_cold_compute_completeness()
+                    .reasons(),
             },
             reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
         };
@@ -667,6 +671,8 @@ fn finish_materialize_admission(
                     cache_suppress: true,
                     result_is_partial: crate::request_context::current_cold_compute_completeness()
                         .is_partial(),
+                    partial_reasons: crate::request_context::current_cold_compute_completeness()
+                        .reasons(),
                 },
                 reason,
             }
@@ -995,6 +1001,7 @@ pub(crate) fn materialize_component_meta_structure(
             // Same-key re-entry is a structurally-incomplete (recursive)
             // partial — gate it out of the MaterializeStructure warm cache.
             result_is_partial: true,
+            partial_reasons: crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
         };
     }
 
@@ -1007,6 +1014,7 @@ pub(crate) fn materialize_component_meta_structure(
             cache_suppress: false,
             // Depth-fuse abort yields a degraded (tainted) partial.
             result_is_partial: true,
+            partial_reasons: crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
         };
     }
 
@@ -1032,6 +1040,7 @@ pub(crate) fn materialize_component_meta_structure(
             cache_suppress: false,
             // Valid complete passthrough (package-ref / function skip).
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
     }
 
@@ -1059,6 +1068,7 @@ pub(crate) fn materialize_component_meta_structure(
                     cache_suppress: false,
                     // Valid complete passthrough (function-shape skip).
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 };
             }
         }
@@ -1553,6 +1563,7 @@ pub(crate) fn materialize_component_meta_structure(
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: true,
                         result_is_partial: false,
+                        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     }
                 }
             }
@@ -1637,6 +1648,9 @@ where
                         walker_diagnostics: Arc::from([]),
                         cache_suppress: true,
                         result_is_partial,
+                        partial_reasons: crate::request_context::current_cold_compute_completeness(
+                        )
+                        .reasons(),
                     },
                     reason,
                 }
@@ -1667,6 +1681,9 @@ where
                             walker_diagnostics: Arc::from([]),
                             cache_suppress: true,
                             result_is_partial: true,
+                            partial_reasons:
+                                crate::request_context::current_cold_compute_completeness()
+                                    .reasons(),
                         },
                         reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
                     }
@@ -1765,6 +1782,9 @@ where
                             // overflowed stays true so it never warms.
                             cache_suppress: true,
                             result_is_partial,
+                            partial_reasons:
+                                crate::request_context::current_cold_compute_completeness()
+                                    .reasons(),
                         },
                         reason,
                     }
@@ -1805,6 +1825,7 @@ fn run_uncached_materialisation(
             walker_diagnostics: Arc::from([]),
             cache_suppress: true,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         },
         ComputeAdmission::ReturnOnly { value: read, .. } => read,
         ComputeAdmission::Failed => crate::semantic_query::CacheRead {
@@ -1813,6 +1834,7 @@ fn run_uncached_materialisation(
             walker_diagnostics: Arc::from([]),
             cache_suppress: true,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         },
     }
 }
@@ -1842,6 +1864,7 @@ fn self_root_conflict_return_only(
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: false,
+        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
     }
 }
 
@@ -2166,6 +2189,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         let outcome = convert_dispatch_result(read, dummy_node(7), &mut fence);
         match outcome {
@@ -2188,6 +2212,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Value(id) => assert_eq!(id, dummy_node(42)),
@@ -2204,6 +2229,7 @@ mod tests {
             walker_diagnostics: Arc::from([]),
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
         match convert_dispatch_result(read, dummy_node(7), &mut fence) {
             MaterializeOutcome::Error(QueryError::Miss) => {}

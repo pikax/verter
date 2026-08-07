@@ -381,6 +381,12 @@ pub(super) struct BuildLocalTaint {
     /// frame was the top of the build-local stack. Inner-memo
     /// non-cacheability — benign or partial-derived.
     pub(super) cache_suppress: bool,
+    /// UNION of the partial CLASSES behind [`Self::result_is_partial`] —
+    /// see [`crate::semantic_query::CacheRead::partial_reasons`]. The
+    /// enclosing build copies this onto its `QueryBuildOutput`, so the
+    /// class a nested producer named survives out through the returned
+    /// `CacheRead` instead of being re-lifted as the anonymous bridge.
+    pub(super) partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 /// Panic-safe RAII guard for a cold-build-local taint frame.
@@ -736,6 +742,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .unwrap_or_else(|| Arc::from([])),
             cache_suppress: true,
             result_is_partial: true,
+            partial_reasons: reasons,
         }
     }
 
@@ -800,9 +807,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result_is_partial: bool,
         cache_suppress: bool,
     ) {
+        self.fold_into_top_build_local_taint_with(
+            result_is_partial,
+            cache_suppress,
+            crate::semantic_query::PartialReasonSet::empty(),
+        );
+    }
+
+    /// [`Self::fold_into_top_build_local_taint`] carrying the partial
+    /// CLASSES as well as the boolean.
+    ///
+    /// An unnamed partial (`reasons` empty) records the anonymous bridge
+    /// so the frame never reports "partial with no class"; a named one
+    /// records its own class, which is what lets a consumer subtract a
+    /// CONTAINED class without also having to subtract an anonymous
+    /// duplicate of the same cause.
+    pub(super) fn fold_into_top_build_local_taint_with(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
             top.result_is_partial |= result_is_partial;
             top.cache_suppress |= cache_suppress;
+            if result_is_partial {
+                top.partial_reasons = top.partial_reasons.union(if reasons.is_empty() {
+                    crate::semantic_query::PartialReasonSet::PROPAGATED
+                } else {
+                    reasons
+                });
+            }
         }
     }
 
@@ -821,26 +856,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// A top-level read with no active build frame naturally no-ops the
     /// build-local fold (the stack is empty); the sticky mark still fires.
-    pub(super) fn fold_cache_read_rails(&self, result_is_partial: bool, cache_suppress: bool) {
+    pub(super) fn fold_cache_read_rails(
+        &self,
+        result_is_partial: bool,
+        cache_suppress: bool,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
         if result_is_partial {
-            crate::request_context::mark_request_result_partial_from_read();
+            crate::request_context::mark_request_result_partial_from_read_with(reasons);
         }
-        self.fold_into_top_build_local_taint(result_is_partial, cache_suppress);
+        self.fold_into_top_build_local_taint_with(result_is_partial, cache_suppress, reasons);
     }
 
     /// [`Self::fold_cache_read_rails`] for the ONE sealed function-return
-    /// consumer: the same two rails, folded under the NAMED
-    /// [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNINFERRED`]
-    /// class instead of the boolean-bridge `PROPAGATED`.
+    /// consumer: the same two rails, folded under the NAMED class the
+    /// outcome's own classification produced instead of the
+    /// boolean-bridge `PROPAGATED`.
     ///
-    /// The class has to be named because its two consumers disagree about
-    /// what it means, and a boolean cannot carry that: publishing the
-    /// inferred type makes it a genuine partial, while emitting the
-    /// authored declaration for an external checker leaves the output
-    /// complete.
-    pub(super) fn fold_flow_return_uninferred_rails(&self) {
-        crate::request_context::mark_request_result_flow_return_uninferred();
-        self.fold_into_top_build_local_taint(true, true);
+    /// The classes have to be named because the consumers disagree about
+    /// what they mean, and a boolean cannot carry that: publishing the
+    /// inferred type makes any of them a genuine partial, while emitting
+    /// the authored declaration for an external checker leaves the output
+    /// complete, and emitting a runtime option object derived from the
+    /// value sits in between (safe for a faithful surface, unsafe for an
+    /// unverified one).
+    pub(super) fn fold_flow_return_consumer_rails(
+        &self,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) {
+        crate::request_context::mark_request_result_partial_with_reasons(reasons);
+        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /
@@ -1780,6 +1825,7 @@ fn widen_node_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -1801,6 +1847,7 @@ fn narrow_value_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -1965,6 +2012,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: Arc::from([]),
                     cache_suppress: true,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 };
             }
         }
@@ -2507,6 +2555,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let build_local = taint_guard.finish();
             output.result_is_partial |= build_local.result_is_partial;
             output.cache_suppress |= build_local.cache_suppress;
+            output.partial_reasons = output.partial_reasons.union(build_local.partial_reasons);
             // ReturnOnly never publishes — fenced-serve arm. A build
             // whose traced scope consumed a FENCED (ReturnOnly)
             // `IndexedReady` serve computed its value basis from a
@@ -2650,7 +2699,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.append_connected_limit_diagnostics(&key, reasons, &mut cache_read);
             }
         }
-        self.fold_cache_read_rails(cache_read.result_is_partial, cache_read.cache_suppress);
+        self.fold_cache_read_rails(
+            cache_read.result_is_partial,
+            cache_read.cache_suppress,
+            cache_read.partial_reason_classes(),
+        );
         tracing::debug!(
             target: "verter::dispatch::execute_via_helper",
             ?key,
@@ -3271,6 +3324,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
             QueryResult::Error(e) => {
@@ -3280,6 +3334,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
         };
@@ -3300,6 +3355,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         walker_diagnostics: slot_read.walker_diagnostics,
                         cache_suppress: slot_read.cache_suppress,
                         result_is_partial: slot_read.result_is_partial,
+                        partial_reasons: slot_read.partial_reasons,
                     };
                 }
             },
@@ -3310,6 +3366,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     walker_diagnostics: slot_read.walker_diagnostics,
                     cache_suppress: slot_read.cache_suppress,
                     result_is_partial: slot_read.result_is_partial,
+                    partial_reasons: slot_read.partial_reasons,
                 };
             }
         };
@@ -3330,6 +3387,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .cloned()
             .chain(binding_read.dep_signature.iter().cloned())
             .collect();
+        let composed_partial_reasons = slot_read
+            .partial_reason_classes()
+            .union(binding_read.partial_reason_classes());
         let value = match binding_read.value {
             QueryResult::Value(terminal_id) => {
                 // A non-shell-raisable terminal node maps to the SAME `Error(Miss)`
@@ -3357,6 +3417,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // partial on the Navigate slot hop must taint the composed
             // result even when the terminal binding hop completed.
             result_is_partial: slot_read.result_is_partial || binding_read.result_is_partial,
+            partial_reasons: composed_partial_reasons,
         }
     }
 

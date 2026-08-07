@@ -245,8 +245,27 @@ pub fn mark_request_result_partial() {
 /// `PROPAGATED` to an already-partial scope changes no `is_partial()`
 /// answer — only the reason set — so nothing else observes the difference.
 pub fn mark_request_result_partial_from_read() {
+    mark_request_result_partial_from_read_with(PartialReasonSet::empty());
+}
+
+/// [`mark_request_result_partial_from_read`] for a read that CARRIES its
+/// partial classes (see
+/// [`crate::semantic_query::CacheRead::partial_reasons`]).
+///
+/// A NAMED set is folded verbatim — that is the whole point of carrying it
+/// across the boundary, and it is unconditional: a consumer that treats one
+/// class as CONTAINED must see the class regardless of what the scope
+/// already holds. An EMPTY set falls back to the historical bridge
+/// behaviour: record [`PartialReasonSet::PROPAGATED`] only when the scope
+/// carries no reason yet, because stacking the unclassified bit on top of a
+/// named class would silently un-contain it.
+pub fn mark_request_result_partial_from_read_with(reasons: PartialReasonSet) {
     if let Some(ctx) = current_request_context() {
         ctx.request_result_is_partial.store(true, Ordering::Relaxed);
+    }
+    if !reasons.is_empty() {
+        fold_cold_compute_completeness(ResultCompleteness::partial(reasons));
+        return;
     }
     if current_cold_compute_completeness().is_partial() {
         return;
@@ -262,11 +281,18 @@ pub(crate) fn mark_request_result_inference_budget_exceeded() {
     mark_request_result_partial_with(PartialReasonSet::BUDGET_EXCEEDED);
 }
 
-/// Mark the active result partial for a body-derived return the flow
-/// substrate could not infer, under its OWN named class — see
-/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`].
-pub(crate) fn mark_request_result_flow_return_uninferred() {
-    mark_request_result_partial_with(PartialReasonSet::FLOW_RETURN_UNINFERRED);
+/// Mark the active result partial under an EXPLICIT reason set — the
+/// classifying producers' entry.
+///
+/// The flow-return consumer entry is the caller: a degraded success whose
+/// published surface is FAITHFUL rides
+/// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`] (contained by both Vue
+/// macro codegen lanes), while a value the substrate could not verify and
+/// every no-value outcome ride
+/// [`PartialReasonSet::FLOW_RETURN_UNVERIFIED`] (contained by the TSC lane
+/// only, since it splices the authored declaration).
+pub(crate) fn mark_request_result_partial_with_reasons(reasons: PartialReasonSet) {
+    mark_request_result_partial_with(reasons);
 }
 
 /// Mark the active result partial for the exact cancellation reason.
@@ -337,7 +363,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 #[inline]
 pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
     if read.result_is_partial {
-        mark_request_result_partial();
+        mark_request_result_partial_from_read_with(read.partial_reason_classes());
     }
 }
 

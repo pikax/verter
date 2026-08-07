@@ -1285,6 +1285,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: true,
+        partial_reasons: crate::semantic_query::PartialReasonSet::PROPAGATED,
     };
     assert!(
         !matches!(
@@ -1303,6 +1304,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: false,
+        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
     };
 
     // Gate behaviour for (2) — under its OWN request — must NOT suppress:
@@ -1392,6 +1394,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
         (
@@ -1402,6 +1405,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
         (
@@ -1412,6 +1416,7 @@ fn benign_non_cacheable_complete_results_still_warm_component_meta_final() {
                 walker_diagnostics: Arc::from([]),
                 cache_suppress: true,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             },
         ),
     ];

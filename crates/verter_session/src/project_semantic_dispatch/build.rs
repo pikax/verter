@@ -6707,6 +6707,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             std::mem::take(&mut walker.walker_diagnostics);
         let cache_suppress = walker.cache_suppress;
         let result_is_partial = walker.result_is_partial;
+        // The walker's OWN fatal / pathological stops name no class; the
+        // classes it accumulated came from nested reads. A partial with an
+        // empty set rides the anonymous bridge so the build never reports
+        // "partial with no class".
+        let partial_reasons = if result_is_partial && walker.partial_reasons.is_empty() {
+            crate::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            walker.partial_reasons
+        };
         // Supplement §5.D.0 r17 — surface a budget-exceeded
         // sentinel as `QueryResult::Recursive` so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` callers can
@@ -6726,6 +6735,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 walker_diagnostics,
                 cache_suppress,
                 result_is_partial,
+                partial_reasons,
                 taint: crate::semantic_query::ResultTaint::Clean,
                 observed_self_roots: Vec::new(),
                 graph_carrier: None,
@@ -6793,6 +6803,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             walker_diagnostics,
             cache_suppress,
             result_is_partial,
+            partial_reasons,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots,
             graph_carrier: None,

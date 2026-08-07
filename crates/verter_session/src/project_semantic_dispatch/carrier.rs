@@ -1030,7 +1030,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
         let resolved = self.resolve_carrier_subject_node_inner(node, context);
         let observed = observation.finish();
-        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        self.fold_into_top_build_local_taint_with(
+            observed.result_is_partial,
+            observed.cache_suppress,
+            observed.partial_reasons,
+        );
         resolved
     }
 
@@ -1101,7 +1105,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         ) {
             observed.cache_suppress = true;
         }
-        self.fold_into_top_build_local_taint(observed.result_is_partial, observed.cache_suppress);
+        self.fold_into_top_build_local_taint_with(
+            observed.result_is_partial,
+            observed.cache_suppress,
+            observed.partial_reasons,
+        );
         (resolved, observed)
     }
 

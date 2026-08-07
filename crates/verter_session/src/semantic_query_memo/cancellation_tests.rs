@@ -610,6 +610,7 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                         walker_diagnostics: Vec::new(),
                         cache_suppress: false,
                         result_is_partial: false,
+                        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                         taint: crate::semantic_query::ResultTaint::Clean,
                         observed_self_roots: Vec::new(),
                         graph_carrier: None,

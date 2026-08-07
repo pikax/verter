@@ -211,7 +211,7 @@ impl DeferredEvaluationFrame {
     fn merge_read<T>(&mut self, read: &CacheRead<T>) {
         self.completeness = self
             .completeness
-            .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+            .or_partial_if(read.result_is_partial, read.partial_reason_classes());
         self.cache_suppress |= read.cache_suppress;
     }
 
@@ -650,7 +650,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &read.dep_signature,
                     );
                     completeness = completeness
-                        .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+                        .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) => {
@@ -701,7 +701,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &read.dep_signature,
                     );
                     completeness = completeness
-                        .or_partial_if(read.result_is_partial, PartialReasonSet::PROPAGATED);
+                        .or_partial_if(read.result_is_partial, read.partial_reason_classes());
                     match read.value {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) => {
@@ -1096,7 +1096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 frame.completeness = frame.completeness.or_partial_if(
                                     observed.result_is_partial,
-                                    PartialReasonSet::PROPAGATED,
+                                    observed.partial_reasons,
                                 );
                                 frame.cache_suppress |= observed.cache_suppress;
                                 frame.advance_or_finish(resolved)
@@ -1150,6 +1150,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the matching funnel for evaluator-local ones.
     pub(super) fn fold_local_partial_completeness(&self, reasons: PartialReasonSet) {
         crate::request_context::fold_result_completeness(ResultCompleteness::partial(reasons));
-        self.fold_into_top_build_local_taint(true, true);
+        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 }

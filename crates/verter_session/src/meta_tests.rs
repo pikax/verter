@@ -2396,6 +2396,222 @@ defineProps<ReturnType<typeof makeProps>>()
     );
 }
 
+/// PUBLIC BOUNDARY, RENDERED BYTES — the two Vue macro codegen lanes
+/// contain DIFFERENT partial classes, and a component whose props type is
+/// derived from a helper body this substrate cannot fully infer still
+/// COMPILES wherever the lane's own output is unaffected.
+///
+/// Three independent facts, each of which the other two do not prove:
+///
+///  1. A FAITHFUL degraded surface (`R1Helper`: one member is
+///     `new Box()` through a local binding, every sibling exact) compiles
+///     on BOTH lanes and the runtime module still NAMES both props. This
+///     is the regression: the class was recorded, then an anonymous
+///     duplicate of the same cause was re-lifted at the query/build
+///     boundary, the containment subtracted only the name, and the macro
+///     diagnostic turned a contained inference gap into a hard
+///     `XUnavailableMacroSemanticResult` — deleting ALL module bytes for a
+///     component whose props `get_component_meta` publishes correctly on
+///     the same tree.
+///  2. An UNVERIFIED value (`R4Write`: the helper assigns to its own
+///     parameter, so the evaluator carries `UnappliedWriteEffect` — the
+///     member set is complete but a member's type may be WRONG) compiles
+///     on the TSC lane and REFUSES on the runtime lane. The TSC lane
+///     splices the AUTHORED declaration and an external checker types it;
+///     the runtime lane derives `props: {...}` constructor sets FROM the
+///     value. One shared verdict cannot serve both, which is why there are
+///     two containment sets.
+///  3. A NO-VALUE outcome (`R2Loop`: a return-bearing loop the substrate
+///     does not model) compiles on the TSC lane and REFUSES on the runtime
+///     lane. There is no surface at all, so the runtime lane would emit
+///     `props: {}` for a component that declares props — silently wrong at
+///     runtime, and worse than refusing. The TSC lane splices the authored
+///     declaration and is unaffected, which is why it still emits TSX.
+///
+/// `R3Clean` is the discrimination control: a blanket "never fault"
+/// regression passes rows 1–2 and fails nothing else, so the control also
+/// asserts the clean runtime module still declares its props.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`): every row's `ReturnType<typeof makeProps>` is an
+/// ordinary object type — `{ label: string; made: Box }`,
+/// `{ label: string }`, `{ label: string; n: number }` — so the generated
+/// TSX type-checks in all four cases.
+///
+/// Mutation recipe: dropping `CacheRead::partial_reasons` (re-lifting every
+/// partial as the anonymous `PROPAGATED` bridge) fails row 1 on BOTH lanes
+/// with the verbatim `XUnavailableMacroSemanticResult` diagnostic. Merging
+/// the two containment sets into one fails row 2 in whichever direction the
+/// merge went: `RUNTIME_CONTAINED` for both makes `R4Write` refuse on the
+/// TSC lane, `TSC_CONTAINED` for both makes it compile on the runtime lane.
+/// Containing the no-value class on the RUNTIME lane fails row 3.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_two_macro_codegen_lanes_contain_different_flow_return_classes() {
+    use verter_compiler::compile::CompileTarget;
+
+    /// `(canonical, script, compiles on the runtime lane, compiles on TSX)`
+    const ROWS: &[(&str, &str, bool, bool)] = &[
+        // A FAITHFUL degraded surface — contained by both lanes.
+        (
+            "/src/R1Helper.vue",
+            "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }",
+            true,
+            true,
+        ),
+        // A NO-VALUE outcome — contained by the TSC lane ONLY.
+        (
+            "/src/R2Loop.vue",
+            "function makeProps() { for (let i = 0; i < 1; i++) { return { label: \"x\" } } return { label: \"y\" } }",
+            false,
+            true,
+        ),
+        // The clean control.
+        (
+            "/src/R3Clean.vue",
+            "function makeProps() { return { label: \"x\", n: 1 } }",
+            true,
+            true,
+        ),
+        // An UNVERIFIED value — contained by the TSC lane ONLY.
+        (
+            "/src/R4Write.vue",
+            "function makeProps(seed: string) { seed = \"y\"; return { label: seed } }",
+            false,
+            true,
+        ),
+    ];
+
+    for (canonical, script, runtime_compiles, tsx_compiles) in ROWS {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+
+        for (target, expect_compiles) in [
+            (CompileTarget::BUNDLER, *runtime_compiles),
+            (CompileTarget::IDE, *tsx_compiles),
+        ] {
+            let response = host.get_virtual_file(crate::types::VirtualQuery {
+                raw_id: None,
+                canonical_id: Some((*canonical).to_string()),
+                node_kind: Some(crate::types::VirtualNodeKind::Main),
+                compile_profile: crate::types::CompileProfile {
+                    target,
+                    ..crate::types::CompileProfile::default()
+                },
+            });
+            match (expect_compiles, response) {
+                (true, Ok(response)) => {
+                    let errors: Vec<_> = response
+                        .diagnostics
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.code == "XUnavailableMacroSemanticResult")
+                        .collect();
+                    assert!(
+                        errors.is_empty(),
+                        "{canonical} @ {target:?}: this lane contains the observed class, so it \
+                         must emit its output without a macro diagnostic; got {errors:?}"
+                    );
+                    assert!(
+                        !response.code.is_empty(),
+                        "{canonical} @ {target:?}: no bytes emitted"
+                    );
+                }
+                (true, Err(err)) => panic!(
+                    "{canonical} @ {target:?}: this lane contains the observed class — it must \
+                     never delete the component's compiled output; got {err:?}"
+                ),
+                (false, Ok(response)) => panic!(
+                    "{canonical} @ {target:?}: this lane does NOT contain the observed class — \
+                     publishing around it emits a surface built on a value the substrate could \
+                     not produce or could not verify; got {} bytes",
+                    response.code.len()
+                ),
+                (false, Err(crate::types::HostError::CompileError(failure))) => {
+                    assert!(
+                        failure
+                            .diagnostics
+                            .diagnostics
+                            .iter()
+                            .any(|d| d.code == "XUnavailableMacroSemanticResult"),
+                        "{canonical} @ {target:?}: the refusal must be the macro-semantic \
+                         diagnostic, not an unrelated compile failure; got {:?}",
+                        failure.diagnostics.diagnostics
+                    );
+                }
+                (false, Err(other)) => panic!(
+                    "{canonical} @ {target:?}: expected a macro-semantic refusal; got {other:?}"
+                ),
+            }
+        }
+    }
+
+    // ROW 1's POSITIVE payload, and the reason the containment exists: the
+    // runtime module for the faithful degraded surface still declares BOTH
+    // props. A fix that merely stopped erroring — publishing `props: {}` —
+    // passes every assertion above and fails here.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/R1Helper.vue",
+            "<script setup lang=\"ts\">\nclass Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    let bundler = project
+        .host()
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/R1Helper.vue".to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: crate::types::CompileProfile {
+                target: CompileTarget::BUNDLER,
+                ..crate::types::CompileProfile::default()
+            },
+        })
+        .expect("the faithful degraded surface compiles on the runtime lane");
+    assert!(
+        bundler.code.contains("label") && bundler.code.contains("made"),
+        "the runtime module must declare BOTH props of the faithful degraded surface — \
+         emitting an empty props object is the silently-wrong outcome the refusal exists \
+         to prevent:\n{}",
+        bundler.code
+    );
+
+    // And the clean control's runtime module still declares its props.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/R3Clean.vue",
+            "<script setup lang=\"ts\">\nfunction makeProps() { return { label: \"x\", n: 1 } }\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>",
+        )
+        .unwrap();
+    let clean = project
+        .host()
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/R3Clean.vue".to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: crate::types::CompileProfile {
+                target: CompileTarget::BUNDLER,
+                ..crate::types::CompileProfile::default()
+            },
+        })
+        .expect("the clean control compiles");
+    assert!(
+        clean.code.contains("label") && clean.code.contains('n'),
+        "the clean control's runtime module must still declare its props:\n{}",
+        clean.code
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {

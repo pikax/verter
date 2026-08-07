@@ -182,6 +182,7 @@ fn narrow_cache_read(
         walker_diagnostics: read.walker_diagnostics,
         cache_suppress: read.cache_suppress,
         result_is_partial: read.result_is_partial,
+        partial_reasons: read.partial_reasons,
     }
 }
 
@@ -193,6 +194,7 @@ fn cancelled_cache_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
         walker_diagnostics: Arc::from([]),
         cache_suppress: true,
         result_is_partial: true,
+        partial_reasons: crate::semantic_query::PartialReasonSet::CANCELLED,
     }
 }
 
@@ -1974,6 +1976,7 @@ impl SemanticGraphStore {
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                 }
             })
         });
@@ -2101,6 +2104,7 @@ impl SemanticGraphStore {
                 walker_diagnostics: entry.walker_diagnostics,
                 cache_suppress: false,
                 result_is_partial: false,
+                partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
             }
         });
         if let Some(rctx) = crate::request_context::current_request_context() {
@@ -2444,6 +2448,7 @@ impl SemanticGraphStore {
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
             result_is_partial: false,
+            partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
         };
 
         // Instrumentation — fast-path attribution.
@@ -2608,6 +2613,7 @@ impl SemanticGraphStore {
                     cache_suppress: false,
                     // Same-path recursion sentinel is a partial — gate out of warm caches.
                     result_is_partial: true,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
                 };
             }
 
@@ -2639,27 +2645,31 @@ impl SemanticGraphStore {
             // Claim ownership or wait for the winner to publish.
             let mut state = inflight.state.lock();
             if state.claimed {
-                let wait_registration =
-                    if state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
-                        let winner = state.owner.unwrap_or(execution_owner);
-                        match self.wait_for_graph.register_wait(execution_owner, winner) {
-                            Ok(registration) => Some(registration),
-                            Err(wait_cycle::WaitCycle) => {
-                                drop(state);
-                                return CacheRead {
-                                    value: QueryResult::Recursive(recursion_sentinel()),
-                                    dep_signature: empty_signature(),
-                                    walker_diagnostics: Arc::from([]),
-                                    // A cross-thread wait-cycle carrier is an
-                                    // operational escape, never a warm fact.
-                                    cache_suppress: true,
-                                    result_is_partial: true,
-                                };
-                            }
+                let wait_registration = if state.completed.is_none()
+                    && !state.aborted
+                    && !ctx.is_cancelled()
+                {
+                    let winner = state.owner.unwrap_or(execution_owner);
+                    match self.wait_for_graph.register_wait(execution_owner, winner) {
+                        Ok(registration) => Some(registration),
+                        Err(wait_cycle::WaitCycle) => {
+                            drop(state);
+                            return CacheRead {
+                                value: QueryResult::Recursive(recursion_sentinel()),
+                                dep_signature: empty_signature(),
+                                walker_diagnostics: Arc::from([]),
+                                // A cross-thread wait-cycle carrier is an
+                                // operational escape, never a warm fact.
+                                cache_suppress: true,
+                                result_is_partial: true,
+                                partial_reasons:
+                                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+                            };
                         }
-                    } else {
-                        None
-                    };
+                    }
+                } else {
+                    None
+                };
                 // Cooperative wait — block on the per-entry condvar until
                 // `completed` is set OR the entry is aborted by a
                 // canonical-invalidation sweep. Joiners never busy-spin.
@@ -2734,6 +2744,7 @@ impl SemanticGraphStore {
                 // the carrier bubble below) its dep facts.
                 let cache_suppress = state.cache_suppress;
                 let result_is_partial = state.result_is_partial;
+                let partial_reasons = state.partial_reasons;
                 let walker_diagnostics = state
                     .walker_diagnostics
                     .clone()
@@ -2874,6 +2885,7 @@ impl SemanticGraphStore {
                     walker_diagnostics,
                     cache_suppress,
                     result_is_partial,
+                    partial_reasons,
                 };
             }
             state.claimed = true;
@@ -2918,6 +2930,7 @@ impl SemanticGraphStore {
             walker_diagnostics,
             cache_suppress,
             result_is_partial,
+            partial_reasons,
             taint: _, // §18 taint already consumed upstream by `admit_decision`.
             observed_self_roots: _,
             graph_carrier,
@@ -3226,6 +3239,7 @@ impl SemanticGraphStore {
                 state.cache_suppress = cache_suppress;
                 // Propagate the partial signal so a joiner inherits the taint.
                 state.result_is_partial = result_is_partial;
+                state.partial_reasons = partial_reasons;
                 state.walker_diagnostics = Some(std::sync::Arc::clone(&walker_diagnostics));
             }
         }
@@ -3259,6 +3273,7 @@ impl SemanticGraphStore {
             walker_diagnostics,
             cache_suppress,
             result_is_partial,
+            partial_reasons,
         }
     }
 
@@ -3281,6 +3296,8 @@ impl SemanticGraphStore {
             state.walker_diagnostics = None;
             state.cache_suppress = true;
             state.result_is_partial = true;
+            // A cancellation abort is a partial with its own precise class.
+            state.partial_reasons = crate::semantic_query::PartialReasonSet::CANCELLED;
         }
         inflight.ready.notify_all();
         self.retire_inflight(prepared, inflight, independent_owner);

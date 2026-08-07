@@ -1621,11 +1621,11 @@ fn meta_property_new_target_return_is_not_any() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(Number), degradation: None, candidates: 1 }
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
@@ -1867,7 +1867,7 @@ fn generic_overload_group_callee_degrades_as_unrepresentable() {
 ///
 /// ```text
 /// assertion `left == right` failed: callNew
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Ref { name: "CtorC", type_arguments: [] }, degradation: None, candidates: 1 }
 /// ```
 ///
@@ -1893,10 +1893,10 @@ fn construct_expression_return_is_the_instance_type() {
 /// Verbatim failure (un-ignored):
 ///
 /// ```text
-/// expected an object answer, got Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+/// expected an object answer, got Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
@@ -1920,11 +1920,11 @@ fn construct_signature_call_return_is_the_signature_instance_type() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
 ///  right: Union([Primitive(Number), Primitive(Undefined)])
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
@@ -1953,11 +1953,11 @@ fn optional_chained_call_return_unions_undefined() {
 ///
 /// ```text
 /// assertion `left == right` failed: callTagged
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(Boolean), degradation: None, candidates: 1 }
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
@@ -2041,11 +2041,11 @@ fn async_generator_return_is_wrapped_in_async_generator() {
 ///
 /// ```text
 /// assertion `left == right` failed
-///   left: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection })
+///   left: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection })
 ///  right: Ref { name: "Promise", type_arguments: [Primitive(Number)] }
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///
@@ -2327,11 +2327,11 @@ fn member_call_through_the_omit_utility_resolves_path_precisely() {
 ///
 /// ```text
 /// assertion `left == right` failed: tlCallSymKeyed
-///   left: Value { ty: Unknown(UnknownValue { raw: "semanticMiss", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
+///   left: Value { ty: Unknown(UnknownValue { raw: "unmodeledPosition", provenance: CompatibilityProjection }), degradation: Some(UnmodeledPosition), candidates: 0 }
 ///  right: Value { ty: Primitive(String), degradation: None, candidates: 1 }
 /// ```///
 /// The fail-closed DISPOSITION is now POSITIONAL: the value is the typed
-/// unresolved marker (projected `Unknown { raw: "semanticMiss" }`), the
+/// unresolved marker (projected `Unknown { raw: "unmodeledPosition" }`), the
 /// result is a degraded success and nothing warms — so the row observes a
 /// VALUE rather than `Miss`. The capability gap named below is unchanged.
 ///

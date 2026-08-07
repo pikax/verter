@@ -1373,6 +1373,142 @@ fn flow_return_direct_call_chain_charges_connected_work() {
     });
 }
 
+/// A callee hold registered from inside a COMPOSITE is dropped on the
+/// VALUE arm too, not only on the hold arm.
+///
+/// `settle_composite_part`'s own contract states the rule: "a hold is a
+/// promise the SCC fixed point will union the hold TARGET's whole admitted
+/// return into this entry's result. Inside a composite that promise is
+/// false: the callee's return is not this object's value, it is one member
+/// of it." The `Positional::Hold` arm truncated; the `Positional::Value`
+/// arm did not — and the direct-call site registers a hold on the value
+/// arm too whenever the callee popped as a PROVISIONAL member of the same
+/// component. So the fixed point unioned the callee's whole return into
+/// the composite anyway, exactly as the docstring says it must not.
+///
+/// `t3a` returns an object UNCONDITIONALLY, so a bare `1` arm is
+/// impossible for any input: the union `1 | { m: 1 }` cannot be produced
+/// by any execution of this program. (tsc types this pair `TS7023` —
+/// implicit `any` from circular inference — so there is no checker answer
+/// to disagree with; the falsifiable claim is the one the substrate makes
+/// about its OWN composition, and `1` is not in `t3a`'s range.)
+///
+/// Mutation recipe: removing `self.holds.truncate(holds_before)` from the
+/// `Positional::Value` arm restores `Union([Literal(1), Object{m}])`.
+#[test]
+fn a_composite_member_call_never_unions_the_callee_whole_return() {
+    let host = make_host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/composite-hold.ts".to_string()),
+        input_id: "/ws/composite-hold.ts".to_string(),
+        source: Arc::from(
+            "export function t3a() {\n  return { m: t3b(true) };\n}\nexport function t3b(c: boolean) {\n  if (c) return t3a();\n  return 1;\n}\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/composite-hold.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, "/ws/composite-hold.ts", "t3a");
+        if let verter_type_expr::TypeExpr::Union(arms) = &expr {
+            panic!(
+                "`t3a` returns an object literal UNCONDITIONALLY — its return can never be a \
+                 union with a bare callee arm; the composite leaked the member call's hold. \
+                 Got {arms:?}"
+            );
+        }
+    });
+}
+
+/// The sealed consumer entry classifies its fold by the OUTCOME, not by
+/// the arm — so a budget edge never rides the FAITHFUL class, and the
+/// runtime macro projection still faults on it.
+///
+/// The fold used to record ONE class for every non-`Clean` outcome. That
+/// made a budget-truncated evaluation indistinguishable from "the surface
+/// this substrate produced is faithful, only one position is marked", and
+/// the runtime lane's containment then subtracted it: a budget trip
+/// stopped faulting the `props: {...}` projection, which would publish a
+/// runtime option object derived from an evaluation that never finished.
+/// The budget edge is production-reachable through
+/// `MAX_CONNECTED_PROJECTION_WORK`, not a test-only edge.
+///
+/// The TSC lane deliberately CONTAINS it — a budget-truncated class-member
+/// inference leaves the authored declaration intact, and the file-level
+/// aggregate still reports the precise budget class and warms nothing
+/// (`tsc_class_inference_budget_is_exact_partial_and_non_cacheable`). So
+/// the discriminating assertion is about the FAITHFUL class specifically,
+/// not about containment in general.
+///
+/// Mutation recipe: mapping every `FlowReturnFailure` to
+/// `FLOW_RETURN_UNINFERRED` (the pre-classification fold) fails both
+/// assertions.
+#[test]
+fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
+    use crate::semantic_query::PartialReasonSet;
+
+    let host = make_host();
+    let mut source = String::new();
+    for index in 0..8 {
+        source.push_str(&format!(
+            "export function chain{index}() {{\n  return chain{}();\n}}\n",
+            index + 1
+        ));
+    }
+    source.push_str("export function chain8() {\n  return 1;\n}\n");
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/ws/budget-class.ts".to_string()),
+        input_id: "/ws/budget-class.ts".to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static("/ws/budget-class.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        dispatch.set_connected_limits_for_tests(4, u16::MAX);
+        let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: Arc::from("/ws/budget-class.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol: Arc::from("chain0"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        };
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let node = dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            "/ws/budget-class.ts",
+        );
+        let observed = crate::request_context::current_cold_compute_completeness();
+        scope.discard();
+
+        assert!(
+            matches!(
+                node,
+                super::flow_return::FunctionReturnNode::NoValue(
+                    crate::semantic_query::FlowReturnFailure::Budget(_)
+                )
+            ),
+            "the over-limit chain still degrades with Budget, got {node:?}"
+        );
+        let reasons = observed.reasons();
+        assert!(
+            !reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+            "a budget-truncated evaluation produced NO surface — it must never ride the \
+             FAITHFUL class, which both macro lanes contain; got {reasons:?}"
+        );
+        assert!(
+            reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "it rides the TSC-only class instead, so the runtime `props` projection still \
+             refuses while the authored TSC splice stays intact; got {reasons:?}"
+        );
+    });
+}
+
 /// ONE lexical binding authority: a hoisted nested function declaration
 /// shadows the outer same-name callee, and its own return is beyond the
 /// direct-call inventory — the call FAILS CLOSED (Unresolved), never

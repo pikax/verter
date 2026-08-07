@@ -475,6 +475,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
+                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
                     taint: crate::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
