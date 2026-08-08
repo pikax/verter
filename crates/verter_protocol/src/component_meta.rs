@@ -31,7 +31,7 @@ use crate::verter::v1::{
     UnionNode, UnknownNode, UnresolvedBranchReason, UnresolvedRootTargetReason, VueApiCallMeta,
 };
 
-pub const COMPONENT_META_SCHEMA_VERSION: u32 = 9;
+pub const COMPONENT_META_SCHEMA_VERSION: u32 = 10;
 
 pub fn component_meta_payload(meta: &FfiComponentMeta) -> ComponentMetaPayload {
     let mut builder = GraphBuilder::new();
@@ -3039,17 +3039,17 @@ mod tests {
         // computed node), plus authored method-kind and body facts).
         // The wire schema version the encoder stamps and the TS decoder gate
         // (`GRAPH_FORMAT_VERSION`, exact equality) demand in lockstep.
-        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 9);
+        assert_eq!(super::COMPONENT_META_SCHEMA_VERSION, 10);
     }
 
     #[test]
-    fn schema8_full_body_uses_tag_26_and_roundtrips_supported_contract() {
+    fn schema10_full_body_uses_tag_26_and_roundtrips_supported_contract() {
         let payload = build_test_payload();
-        assert_eq!(payload.schema_version, 9);
+        assert_eq!(payload.schema_version, 10);
         let encoded = payload.encode_to_vec();
         let decoded =
             ComponentMetaPayload::decode(encoded.as_slice()).expect("full payload decodes");
-        assert_eq!(decoded.schema_version, 9);
+        assert_eq!(decoded.schema_version, 10);
         let body = decoded.body.expect("component-meta body");
         let bytes = body.encode_to_vec();
         assert!(

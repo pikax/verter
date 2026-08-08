@@ -578,7 +578,7 @@ fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v9() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
     const RESOLVED_IMPORT_TARGET_SCHEMA: u32 = 7;
-    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 9);
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
 
     let stale = FileArtifactStore::new_with_schema_version_for_test(RESOLVED_IMPORT_TARGET_SCHEMA);
     stale.insert_synthetic_for_schema_test("/workspace/resolved-import-target-v7.ts");
@@ -601,20 +601,18 @@ fn resolved_import_target_schema_v7_artifacts_are_rejected_by_v9() {
 
 // @ai-generated - Pins rejection of cached object-spread surface materializations.
 #[test]
-fn object_spread_program_schema_v8_artifacts_are_rejected_by_v9() {
+fn object_spread_program_schema_v8_artifacts_are_rejected_by_v10() {
     use verter_session::file_artifact_store::FileArtifactStore;
 
     const PRE_OBJECT_SPREAD_PROGRAM_SCHEMA: u32 = 8;
-    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 9);
-    assert_eq!(STALE_SCHEMA_VERSION, PRE_OBJECT_SPREAD_PROGRAM_SCHEMA);
-
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
     let stale =
         FileArtifactStore::new_with_schema_version_for_test(PRE_OBJECT_SPREAD_PROGRAM_SCHEMA);
     stale.insert_synthetic_for_schema_test("/workspace/object-spread-program-v8.ts");
     assert_eq!(
         stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         1,
-        "a v8 artifact cannot be read under the object-spread-program v9 schema"
+        "a v8 artifact cannot be read under the object-spread-program v9+ schema"
     );
     assert_eq!(stale.len(), 0);
 
@@ -623,7 +621,36 @@ fn object_spread_program_schema_v8_artifacts_are_rejected_by_v9() {
     assert_eq!(
         current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
         0,
-        "a v9 artifact survives a matching-schema roundtrip"
+        "a current-schema artifact survives a matching-schema roundtrip"
+    );
+    assert_eq!(current.len(), 1);
+}
+
+// @ai-generated - Pins rejection of artifacts predating the indexed
+// call-site / expression-source fact shape.
+#[test]
+fn call_resolve_fact_schema_v9_artifacts_are_rejected_by_v10() {
+    use verter_session::file_artifact_store::FileArtifactStore;
+
+    const PRE_CALL_RESOLVE_FACT_SCHEMA: u32 = 9;
+    assert_eq!(CACHE_CLUSTER_SCHEMA_VERSION, 10);
+    assert_eq!(STALE_SCHEMA_VERSION, PRE_CALL_RESOLVE_FACT_SCHEMA);
+
+    let stale = FileArtifactStore::new_with_schema_version_for_test(PRE_CALL_RESOLVE_FACT_SCHEMA);
+    stale.insert_synthetic_for_schema_test("/workspace/call-resolve-facts-v9.ts");
+    assert_eq!(
+        stale.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        1,
+        "a v9 artifact cannot be read under the indexed-call-site v10 schema"
+    );
+    assert_eq!(stale.len(), 0);
+
+    let current = FileArtifactStore::new();
+    current.insert_synthetic_for_schema_test("/workspace/call-resolve-facts-v10.ts");
+    assert_eq!(
+        current.evict_if_schema_mismatch(CACHE_CLUSTER_SCHEMA_VERSION),
+        0,
+        "a v10 artifact survives a matching-schema roundtrip"
     );
     assert_eq!(current.len(), 1);
 }

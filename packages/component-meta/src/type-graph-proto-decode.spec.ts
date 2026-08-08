@@ -10,7 +10,7 @@ import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 describe("decodeTypedComponentMetaPayload", () => {
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(9);
+    expect(current.schemaVersion).toBe(10);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
@@ -18,7 +18,7 @@ describe("decodeTypedComponentMetaPayload", () => {
           create(ComponentMetaPayloadSchema, { ...current, schemaVersion: 7 }),
         ),
       ),
-    ).toThrow(/expected 9, found 7/);
+    ).toThrow(/expected 10, found 7/);
   });
 
   it("decodes supported contract type references from the shared graph", () => {
@@ -373,7 +373,7 @@ describe("typed property keys", () => {
 
   function payloadWithMembers(members: unknown[]) {
     return {
-      schemaVersion: 9,
+      schemaVersion: 10,
       typeGraph: {
         strings: ["/x.ts", "alpha", "tag", "Obj"],
         nodes: [
@@ -517,6 +517,6 @@ describe("typed property keys", () => {
       schemaVersion: 4,
     });
     const bytes = toBinary(ComponentMetaPayloadSchema, payload);
-    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 9, found 4/);
+    expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(/expected 10, found 4/);
   });
 });

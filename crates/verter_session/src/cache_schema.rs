@@ -89,7 +89,12 @@
 /// - `9` — canonical ordered object-spread programs replace cached eager/open
 ///   surface materializations. Version `8` entries cannot distinguish ordered
 ///   direct effects, correlated alternatives, or raw residual operands.
-pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 9;
+/// - `10` — indexed call-site / program-expression records on the function
+///   program index, the `expression_source` value-annotation fact, and the
+///   per-parameter `<const T>` fact. Version `9` entries lack these fact
+///   shapes and must fail closed rather than serve a call surface without
+///   its expression identity.
+pub const CACHE_CLUSTER_SCHEMA_VERSION: u32 = 10;
 
 /// Trait surface every participating Db implements. The implementation is a
 /// trivial getter — the reason it exists at all is so the architecture-guard
