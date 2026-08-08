@@ -27,7 +27,7 @@ impl ResolvedNativeProp {
         type_annotation: Option<String>,
     ) -> Option<Self> {
         Some(Self {
-            name: member.string_name()?.to_string(),
+            name: member.published_name()?.to_string(),
             is_optional: member.optional,
             type_annotation,
             visibility: member.visibility,

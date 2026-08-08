@@ -329,8 +329,9 @@ pub enum SliceStatement {
         /// and preserve the literal.
         widening_literal: bool,
     },
-    /// A return-free loop or labeled construct: effectful but fall-through
-    /// transparent.
+    /// A return-free loop: effectful but fall-through transparent. (A
+    /// return-free LABELED statement is transparent too, but its body
+    /// still lowers — as a block — so its inner rails keep deciding.)
     TransparentLoop,
     /// An unsupported construct (return-bearing loop, `with`, a
     /// `break`/`continue` jump no enclosing modelled construct absorbs, a
@@ -2677,17 +2678,22 @@ impl Lowerer<'_> {
                         hit_unsupported |= region.hit_unsupported;
                         (Box::new(region.region), region.may_break)
                     });
-                    // A `finally` that may RETURN overrides every pending
-                    // abrupt exit of the try/catch — including a `break`
-                    // targeting an enclosing construct — so the try
-                    // propagates its try/catch clauses' break exits only
-                    // when no such finally exists. The finally clause's
-                    // OWN break exits always propagate: they fire after
-                    // every override decision, they are never pending.
-                    let finally_may_return = finally
+                    // A `finally` that CANNOT fall through completes
+                    // abruptly on every path, and abrupt completion
+                    // discards the try/catch's pending exits — pending
+                    // returns AND pending `break`s alike. A finally that
+                    // CAN fall through overrides nothing on that path: a
+                    // pending break proceeds past the try when the finally
+                    // does not return, so the try/catch clauses' break
+                    // exits propagate whenever the finally has a
+                    // fall-through path (or does not exist). The finally
+                    // clause's OWN break exits always propagate: they fire
+                    // after every override decision, they are never
+                    // pending.
+                    let finally_blocks_exits = finally
                         .as_ref()
-                        .is_some_and(|(region, _)| slice_region_may_return(region));
-                    if !finally_may_return {
+                        .is_some_and(|(region, _)| !region.can_fall_through);
+                    if !finally_blocks_exits {
                         may_break.extend(clause_may_break);
                     }
                     if let Some((_, finally_may_break)) = &finally {

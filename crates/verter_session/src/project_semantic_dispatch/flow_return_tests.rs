@@ -3688,3 +3688,214 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
         });
     }
 }
+
+// ── Control-flow join precision (corpus twins: X22–X28) ────────────────
+
+/// Evaluate `makeProps` from an ad-hoc script, returning the projected
+/// return type and the typed degradation.
+fn flow_expr_for_script(
+    script: &str,
+) -> (
+    verter_type_expr::TypeExpr,
+    Option<crate::semantic_query::FlowReturnDegradation>,
+) {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/flow-control-probe.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(script),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+        };
+        let result = flow_result_value(dispatch, key);
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        (expr, result.degradation())
+    })
+}
+
+/// The `name` member's type from each union arm that declares it (or from
+/// the single object), sorted for an order-insensitive comparison.
+fn member_types(expr: &verter_type_expr::TypeExpr, name: &str) -> Vec<verter_type_expr::TypeExpr> {
+    let mut out: Vec<verter_type_expr::TypeExpr> = match expr {
+        verter_type_expr::TypeExpr::Union(arms) => arms
+            .iter()
+            .filter_map(|arm| {
+                let verter_type_expr::TypeExpr::Object(object) = arm else {
+                    return None;
+                };
+                object.properties.iter().find_map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(prop)
+                        if prop.string_name() == Some(name) =>
+                    {
+                        Some(prop.ty.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect(),
+        other => vec![object_prop(other, name).clone()],
+    };
+    out.sort_by_key(|ty| format!("{ty:?}"));
+    out.dedup();
+    out
+}
+
+fn string_literal(value: &str) -> verter_type_expr::TypeExpr {
+    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(value.to_string()))
+}
+
+/// A case that exits via `break` passes NO state to the next case: case 1
+/// is reachable only by the dispatch edge, so `x` there reads the entry
+/// value. tsgo 7.0.0-dev.20260526.1: `{ v: "a" } | { v: "b" }` — joining
+/// the broken-off arm's end state into the next case's start publishes
+/// `{ v: "a" | "b" }` where the checker has `"a"`.
+#[test]
+fn flow_return_switch_case_entry_excludes_broken_off_arm_state() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(v: number) { let x: \"a\" | \"b\" = \"a\"; switch (v) { case 0: x = \"b\"; break; case 1: return { v: x }; default: return { v: x } } return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    // The case-1 arm reads the entry value `"a"` EXACTLY (the broken-off
+    // arm's write never reaches it). The trailing arm publishes the
+    // WRITE's widened `String` where the checker assignment-reduces to
+    // `"b"` — the write-widening debt ledger entry X29_write_annotated_union_write_widens,
+    // pinned here so its fix flips this assertion to `Literal("b")`.
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![
+            string_literal("a"),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ]
+    );
+}
+
+/// A `var` defined only on a fall-through edge has no reaching definition
+/// on the dispatch edge: the read must degrade, never publish the
+/// fall-through arm's value clean. tsgo: `{ v: "a" | undefined } | { v: string }`.
+#[test]
+fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
+    let (_, degradation) = flow_expr_for_script(
+        "function makeProps(v: number) { switch (v) { case 0: var x: \"a\" | undefined = \"a\"; case 1: return { v: x } } return { v: \"z\" } }",
+    );
+    assert_eq!(
+        degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+    );
+}
+
+/// A binding WRITTEN in the try and read in the catch: the throw can
+/// precede the write, so the read must degrade rather than publish the
+/// entry value clean. tsgo: `{ v: "before" | "inside" }`.
+#[test]
+fn flow_return_try_written_binding_degrades_at_catch_read() {
+    let (_, degradation) = flow_expr_for_script(
+        "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }",
+    );
+    assert_eq!(
+        degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+    );
+}
+
+/// An assertion narrow established inside the try reaches neither the
+/// catch nor the try/catch join: both reads see the declared union.
+/// tsgo: `{ caught: string | number }`.
+#[test]
+fn flow_return_try_assertion_narrow_stays_clause_scoped() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\ndeclare function mayThrow(): void\nfunction makeProps(p: string | number) { try { assertString(p); mayThrow() } catch { return { caught: p } } return { caught: p } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "caught"),
+        vec![verter_type_expr::TypeExpr::union(vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        ])]
+    );
+}
+
+/// The switch twin: an assertion narrow established in one case must not
+/// leak into a sibling case. tsgo: `{ c: string | number }` (case 0's own
+/// narrowed arm subtype-reduces away against the unnarrowed arms).
+#[test]
+fn flow_return_switch_assertion_narrow_stays_case_scoped() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\nfunction makeProps(v: number, p: string | number) { switch (v) { case 0: assertString(p); return { c: p }; case 1: return { c: p }; default: return { c: p } } }",
+    );
+    assert_eq!(degradation, None);
+    let string_or_number = verter_type_expr::TypeExpr::union(vec![
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+    ]);
+    assert_eq!(
+        member_types(&expr, "c"),
+        vec![
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            string_or_number,
+        ]
+    );
+}
+
+/// A CONDITIONAL-returning finally absorbs the pending break only on the
+/// paths where it actually returns: its fall-through path lets the break
+/// proceed, so the trailing return contributes. tsgo:
+/// `{ one: number; s?: undefined } | { one?: undefined; s: string }`.
+#[test]
+fn flow_return_conditional_finally_keeps_pending_break_on_fallthrough() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps(c: boolean) { L: { try { break L } finally { if (c) { return { one: 1 } } } } return { s: \"x\" } }",
+    );
+    assert_eq!(degradation, None);
+    let verter_type_expr::TypeExpr::Union(_) = &expr else {
+        panic!("the finally return and the trailing return join as a union, got {expr:?}");
+    };
+    assert_eq!(
+        member_types(&expr, "one"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        )]
+    );
+    assert_eq!(
+        member_types(&expr, "s"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::String
+        )]
+    );
+}
+
+/// A destructured element DEFAULT drops the member's authored `undefined`
+/// arm. tsgo: `{ v: number }` — keeping the arm publishes
+/// `number | undefined`.
+#[test]
+fn flow_return_destructured_default_drops_authored_undefined() {
+    let (expr, degradation) = flow_expr_for_script(
+        "function makeProps({ x = 1 }: { x: number | undefined }) { return { v: x } }",
+    );
+    assert_eq!(degradation, None);
+    assert_eq!(
+        member_types(&expr, "v"),
+        vec![verter_type_expr::TypeExpr::Primitive(
+            verter_type_expr::PrimitiveName::Number
+        )]
+    );
+}

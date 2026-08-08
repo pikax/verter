@@ -1914,6 +1914,11 @@ const OPEN_DEBTS: &[&str] = &[
     // the row flips the moment the annotation's union reaches the member.
     "CC02_annotated_return_literal_union",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
+    // A whole-binding write to an annotated literal-union binding binds the
+    // RHS widened where the checker assignment-reduces to the declared
+    // constituent — pre-existing in the write application, surfaced by the
+    // switch case-entry measurement.
+    "X29_write_annotated_union_write_widens",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // Async return wrapping is unmodelled: the Promise is silently unwrapped
@@ -1945,7 +1950,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 2, 0, 2),
     (Owner::U6CallResolve, 4, 4, 0),
-    (Owner::U6ValueInference, 18, 18, 0),
+    (Owner::U6ValueInference, 26, 23, 1),
     (Owner::U6ContextualCore, 9, 8, 1),
     (Owner::U6FlowReturnSubstrate, 44, 36, 2),
     (Owner::U6NarrowTypeof, 9, 9, 0),

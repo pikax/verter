@@ -2289,6 +2289,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             conditional_arm_nesting: 0,
             narrowings: Vec::new(),
             param_writes: rustc_hash::FxHashMap::default(),
+            conditional_lexicals: rustc_hash::FxHashSet::default(),
+            conditional_params: rustc_hash::FxHashSet::default(),
             call_fresh_literal_returns: Vec::new(),
         };
         let holds;
@@ -2793,6 +2795,16 @@ struct FlowEvaluator<'d, 'b> {
     /// an applied write rides this map instead — same reaching-definition
     /// rule as the local layers, separate only because the storage is.
     param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
+    /// Lexical bindings whose surviving value is one control-flow path's,
+    /// not the join of every path that reaches the read (today: written
+    /// inside a `try` clause and observed in the `catch` / `finally` /
+    /// post-statement state, where the throw can precede the write).
+    /// Observing one records the conditional-definition degradation —
+    /// the same fail-closed contract as the `var`-layer membership, which
+    /// the lexical layer otherwise cannot express.
+    conditional_lexicals: rustc_hash::FxHashSet<String>,
+    /// The parameter-ordinal twin of `conditional_lexicals`.
+    conditional_params: rustc_hash::FxHashSet<u32>,
     /// Return nodes a COMPLETED call in this frame marked
     /// `fresh_literal_return` (a generic callee whose naked-binder return
     /// fixed to a fresh-preserved literal). The call executor records the
@@ -2820,7 +2832,12 @@ struct FlowContribution {
 
 /// One point-in-time snapshot of the evaluator's binding layers — the
 /// reaching-definitions state a multi-path construct (`switch` dispatch
-/// and fall-through, `try` / `catch` / `finally`) joins over.
+/// and fall-through, `try` / `catch` / `finally`) joins over. The
+/// narrowing overlay rides the state too: a guard or assertion fact lives
+/// on the path that established it, so a join INTERSECTS the overlay (a
+/// narrow holds past a join only when every joined path carries it) and a
+/// clause start restores the entering overlay — a narrow established in a
+/// `try` block or a sibling `case` can never leak across the boundary.
 #[derive(Clone)]
 struct FlowLayerState {
     locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
@@ -2831,6 +2848,18 @@ struct FlowLayerState {
     var_widening_locals: rustc_hash::FxHashSet<String>,
     var_conditional_locals: rustc_hash::FxHashSet<String>,
     param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
+    narrowings: Vec<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
+    /// Lexical-layer bindings whose surviving value is one path's, not the
+    /// join of every path that reaches the read (a `try`-internal write
+    /// observed in the `catch` / `finally` / after the statement). The
+    /// lexical twin of the `var`-layer conditional membership — observing
+    /// one records the same conditional-definition degradation.
+    conditional_lexicals: rustc_hash::FxHashSet<String>,
+    /// The parameter-write twin of `conditional_lexicals`, by ordinal.
+    conditional_params: rustc_hash::FxHashSet<u32>,
 }
 
 /// The outcome of evaluating ONE POSITION — a sub-expression, or one call
@@ -3402,6 +3431,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             var_widening_locals: self.var_widening_locals.clone(),
             var_conditional_locals: self.var_conditional_locals.clone(),
             param_writes: self.param_writes.clone(),
+            narrowings: self.narrowings.clone(),
+            conditional_lexicals: self.conditional_lexicals.clone(),
+            conditional_params: self.conditional_params.clone(),
         }
     }
 
@@ -3415,6 +3447,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.var_widening_locals = state.var_widening_locals;
         self.var_conditional_locals = state.var_conditional_locals;
         self.param_writes = state.param_writes;
+        self.narrowings = state.narrowings;
+        self.conditional_lexicals = state.conditional_lexicals;
+        self.conditional_params = state.conditional_params;
     }
 
     /// Complete a snapshot's parameter-write layer with the signature's
@@ -3437,7 +3472,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// both states carry holds the normalized union of its two values; a
     /// binding only one carries keeps that value. Membership flags union
     /// (a binding degraded / widening / conditional on ANY reaching path
-    /// keeps the flag) — the honest direction for a joined answer.
+    /// keeps the flag) — the honest direction for a joined answer. The
+    /// narrowing overlay INTERSECTS instead: a guard fact survives the
+    /// join only when BOTH paths established it (the checker's own rule —
+    /// a narrowing holds past a merge point only when it holds on every
+    /// incoming edge).
     fn join_layer_states(&self, a: &FlowLayerState, b: &FlowLayerState) -> FlowLayerState {
         let join_values =
             |from: &rustc_hash::FxHashMap<String, SemanticNodeId>,
@@ -3479,6 +3518,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         joined
             .var_conditional_locals
             .extend(b.var_conditional_locals.iter().cloned());
+        joined
+            .conditional_lexicals
+            .extend(b.conditional_lexicals.iter().cloned());
+        joined
+            .conditional_params
+            .extend(b.conditional_params.iter().copied());
         for (ordinal, node) in b.param_writes.iter() {
             match joined.param_writes.entry(*ordinal) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -3495,9 +3540,77 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 }
             }
         }
+        // The narrowing overlay intersects: keep exactly the facts the
+        // OTHER state also carries (a clone of `a`'s entries preserves the
+        // newest-first read order).
+        joined.narrowings = a
+            .narrowings
+            .iter()
+            .filter(|fact| b.narrowings.contains(fact))
+            .cloned()
+            .collect();
         joined
     }
 
+    /// The bindings whose value moved between two states — a write (or a
+    /// write-bearing join) on one path that the other path never saw.
+    /// Read at a clause boundary where an abrupt exit could have preceded
+    /// the write: observing such a binding must fail closed.
+    fn written_between(
+        &self,
+        before: &FlowLayerState,
+        after: &FlowLayerState,
+    ) -> (Vec<String>, Vec<String>, Vec<u32>) {
+        let moved = |past: &rustc_hash::FxHashMap<String, SemanticNodeId>,
+                     present: &rustc_hash::FxHashMap<String, SemanticNodeId>| {
+            present
+                .iter()
+                .filter(|(name, node)| past.get(*name).copied() != Some(**node))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<String>>()
+        };
+        let params = after
+            .param_writes
+            .iter()
+            .filter(|(ordinal, node)| before.param_writes.get(*ordinal).copied() != Some(**node))
+            .map(|(ordinal, _)| *ordinal)
+            .collect::<Vec<u32>>();
+        (
+            moved(&before.locals, &after.locals),
+            moved(&before.var_locals, &after.var_locals),
+            params,
+        )
+    }
+
+    /// Flag a set of try-internal writes on a clause-entry state: a read
+    /// of any of them in the clause fails closed (the throw can precede
+    /// the write, so the value is one path's, not the join's).
+    fn flag_clause_writes(
+        &self,
+        state: &mut FlowLayerState,
+        written: &(Vec<String>, Vec<String>, Vec<u32>),
+    ) {
+        state.conditional_lexicals.extend(written.0.iter().cloned());
+        state
+            .var_conditional_locals
+            .extend(written.1.iter().cloned());
+        state.conditional_params.extend(written.2.iter().copied());
+    }
+
+    /// Flag the `var` bindings a fall-through edge carries that the
+    /// dispatch edge (the state at the construct's entry) never defined:
+    /// their value has no reaching definition on the dispatch path, which
+    /// is exactly what the conditional-definition membership fails closed
+    /// on at a read.
+    fn flag_fallthrough_only_vars(&self, start: &mut FlowLayerState, entry: &FlowLayerState) {
+        let fallthrough_only: Vec<String> = start
+            .var_locals
+            .keys()
+            .filter(|name| !entry.var_locals.contains_key(*name))
+            .cloned()
+            .collect();
+        start.var_conditional_locals.extend(fallthrough_only);
+    }
     /// Flag the `var` bindings of a joined state that some normal-exit
     /// path never defined: their surviving value has no reaching
     /// definition on that path, which is exactly what the
@@ -3523,14 +3636,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Evaluate one clause region of a `try` statement in its own block
     /// scope, starting from `start`: lexical bindings declared inside do
     /// not escape (the catch parameter included); function-scoped `var`
-    /// and parameter writes do. Returns the clause's return contributions
-    /// and the end-of-clause state (parameter writes completed).
+    /// and parameter writes do. Returns the clause's return contributions,
+    /// the end-of-clause state (parameter writes completed), and the
+    /// writes the clause performed — computed BEFORE the block-scope
+    /// restore, so a write to an OUTER lexical binding is seen too.
+    #[allow(clippy::type_complexity)]
     fn eval_try_clause(
         &mut self,
         start: &FlowLayerState,
         region: &crate::flow_slice_content::SliceRegion,
         catch_param: Option<&Arc<str>>,
-    ) -> Result<(Vec<FlowContribution>, FlowLayerState), FlowReturnFailure> {
+    ) -> Result<
+        (
+            Vec<FlowContribution>,
+            FlowLayerState,
+            (Vec<String>, Vec<String>, Vec<u32>),
+        ),
+        FlowReturnFailure,
+    > {
         self.restore_layer_state(start.clone());
         let saved_locals = self.locals.clone();
         let saved_degraded = self.degraded_locals.clone();
@@ -3553,12 +3676,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         let (result, _) = self.eval_region(region);
         let contributions = result?;
+        let written = self.written_between(start, &self.layer_state());
         self.locals = saved_locals;
         self.degraded_locals = saved_degraded;
         self.widening_locals = saved_widening;
         let mut end = self.layer_state();
         self.complete_param_writes(&mut end);
-        Ok((contributions, end))
+        Ok((contributions, end, written))
     }
 
     /// READ one local across the two scope layers — the ONLY way to take
@@ -3583,10 +3707,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         if !self.locals.contains_key(name) && !self.var_locals.contains_key(name) {
             self.seed_destructured_param_element(name);
         }
-        // The lexical layer's conditional flag is always false: a
-        // block-scoped conditional binding never escapes its arm.
+        // The lexical layer's conditional flag comes from the
+        // try-clause-write membership (a binding whose surviving value is
+        // one path's, not the join's); a block-scoped conditional binding
+        // otherwise never escapes its arm.
         let (node, degraded, conditional) = if let Some(node) = self.locals.get(name) {
-            (*node, self.degraded_locals.contains(name), false)
+            (
+                *node,
+                self.degraded_locals.contains(name),
+                self.conditional_lexicals.contains(name),
+            )
         } else {
             let node = *self.var_locals.get(name)?;
             (
@@ -3658,7 +3788,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         });
         let (node, degraded) = match member {
             Some((value, optional)) => {
-                if optional && !has_default {
+                if has_default {
+                    // A default removes the member's `undefined` arm — the
+                    // authored one included (`{ x = 1 }` over
+                    // `x: number | undefined` binds `number`). A member
+                    // whose type IS `undefined` alone keeps it: the
+                    // default initializer's own type is not modelled.
+                    let stripped = match self.dispatch.graph().node_data(value).as_deref() {
+                        Some(SemanticNodeData::Union(arms)) => {
+                            let kept: Vec<SemanticNodeId> = arms
+                                .iter()
+                                .copied()
+                                .filter(|arm| {
+                                    !matches!(
+                                        self.dispatch.graph().node_data(*arm).as_deref(),
+                                        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                                    )
+                                })
+                                .collect();
+                            if kept.is_empty() || kept.len() == arms.len() {
+                                value
+                            } else {
+                                self.dispatch
+                                    .intern_normalized_union_or_intersection(&kept, true)
+                            }
+                        }
+                        _ => value,
+                    };
+                    (stripped, false)
+                } else if optional {
                     let undefined = self
                         .dispatch
                         .graph()
@@ -3755,6 +3913,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         }
         let root = if let Some(ordinal) = param_ordinal {
+            // The same conditional-write observation the direct parameter
+            // read folds: a `typeof p.…` leaf rooted at a try-written
+            // parameter degrades instead of projecting one path's value.
+            if self.conditional_params.contains(&ordinal) {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+                );
+            }
             self.param_writes
                 .get(&ordinal)
                 .copied()
@@ -4705,7 +4871,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     for case in cases.iter() {
                         let start = match &chain_end {
                             None => entry.clone(),
-                            Some(end) => self.join_layer_states(&entry, end),
+                            Some(end) => {
+                                let mut start = self.join_layer_states(&entry, end);
+                                // A `var` the fall-through edge first
+                                // defines has no reaching definition on the
+                                // dispatch edge: flag it so a read fails
+                                // closed instead of publishing the
+                                // fall-through arm's value clean.
+                                self.flag_fallthrough_only_vars(&mut start, &entry);
+                                start
+                            }
                         };
                         self.restore_layer_state(start);
                         let (case_result, _) = self.eval_region(&case.region);
@@ -4714,7 +4889,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         }
                         let end = self.layer_state();
-                        chain_end = Some(end.clone());
+                        // Only a clause whose path FALLS THROUGH passes its
+                        // end state to the next clause's start: a `break` /
+                        // `return` / `throw` exits the switch, and joining
+                        // that state into the next case would publish the
+                        // exited path's writes where the checker has the
+                        // dispatch edge's values.
+                        chain_end = case.region.can_fall_through.then_some(end.clone());
                         case_ends.push(end);
                     }
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
@@ -4766,36 +4947,52 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     catch,
                     finally,
                 } => {
-                    // The catch clause is entered from any throw point of
-                    // the try block; this model enters it from the try's
-                    // ENTRY state — assignments inside the try are not
-                    // visible in the catch. The finally clause runs on
-                    // every completion path; a finally that may RETURN
-                    // overrides the pending try/catch contributions on the
-                    // paths where it does not fall through (abrupt finally
-                    // completion discards a pending return — the checker's
-                    // own rule), and joins them where it does.
+                    // The catch / finally clauses are entered from ANY
+                    // throw point of the try block, so they start from the
+                    // try's ENTRY state: every try-internal write is
+                    // flagged (the throw can precede it — a read of a
+                    // try-written binding fails closed until throw-point
+                    // joins exist), and the overlay carries none of the
+                    // try's narrow facts (tsgo: a `catch` / `finally` body
+                    // reads the pre-try type, never the narrowed one).
+                    // Past the statement, a clause-established narrow
+                    // survives ONLY when no `catch` exists — the abrupt
+                    // paths then leave the frame, so the normal-completion
+                    // path's facts hold (tsgo narrows there) — minus any
+                    // the finally clause's own writes killed. A finally
+                    // that may RETURN overrides the pending try/catch
+                    // contributions on the paths where it does not fall
+                    // through (abrupt finally completion discards a
+                    // pending return — the checker's own rule), and joins
+                    // them where it does.
                     let mut entry = self.layer_state();
                     self.complete_param_writes(&mut entry);
                     let mut own: Vec<FlowContribution> = Vec::new();
                     let mut exit_states: Vec<FlowLayerState> = Vec::new();
-                    let (try_contributors, try_end) =
+                    let (try_contributors, try_end, try_written) =
                         match self.eval_try_clause(&entry, block, None) {
                             Ok(clause) => clause,
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         };
                     own.extend(try_contributors);
+                    let try_narrowings = try_end.narrowings.clone();
                     if block.can_fall_through {
                         exit_states.push(try_end);
                     }
+                    let mut catch_written = None;
                     if let Some(catch) = catch {
-                        let (catch_contributors, catch_end) =
-                            match self.eval_try_clause(&entry, &catch.region, catch.param.as_ref())
-                            {
-                                Ok(clause) => clause,
-                                Err(failure) => return (Err(failure), region.can_fall_through),
-                            };
+                        let mut catch_start = entry.clone();
+                        self.flag_clause_writes(&mut catch_start, &try_written);
+                        let (catch_contributors, catch_end, written) = match self.eval_try_clause(
+                            &catch_start,
+                            &catch.region,
+                            catch.param.as_ref(),
+                        ) {
+                            Ok(clause) => clause,
+                            Err(failure) => return (Err(failure), region.can_fall_through),
+                        };
                         own.extend(catch_contributors);
+                        catch_written = Some(written);
                         if catch.region.can_fall_through {
                             exit_states.push(catch_end);
                         }
@@ -4803,7 +5000,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // The pre-finally state joins every NORMAL completion
                     // of the try/catch. With none, no state reaches past
                     // the try — the entry stands in only to keep the
-                    // finally clause's own evaluation well-formed.
+                    // finally clause's own evaluation well-formed. The
+                    // clause writes stay flagged through it: the finally
+                    // (and the post-statement path) runs on the throw paths
+                    // too.
                     let mut pre_finally = match exit_states.split_first() {
                         Some((first, rest)) => {
                             let mut joined = first.clone();
@@ -4814,16 +5014,59 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                         None => entry.clone(),
                     };
+                    self.flag_clause_writes(&mut pre_finally, &try_written);
+                    if let Some(catch_written) = &catch_written {
+                        self.flag_clause_writes(&mut pre_finally, catch_written);
+                    }
                     if !exit_states.is_empty() {
                         self.flag_conditionally_defined_vars(&mut pre_finally, &exit_states);
                     }
                     match finally {
                         Some(finally) => {
-                            let (finally_contributors, _finally_end) =
-                                match self.eval_try_clause(&pre_finally, finally, None) {
+                            // The finally body runs on abrupt completions
+                            // too: its overlay is the ENTRY's, whatever the
+                            // clauses established (tsgo: a narrow from the
+                            // try does not apply inside the finally).
+                            let mut finally_start = pre_finally.clone();
+                            finally_start.narrowings = entry.narrowings.clone();
+                            let (finally_contributors, finally_end, finally_written) =
+                                match self.eval_try_clause(&finally_start, finally, None) {
                                     Ok(clause) => clause,
                                     Err(failure) => return (Err(failure), region.can_fall_through),
                                 };
+                            if catch.is_none() {
+                                // No catch: the abrupt paths leave the
+                                // frame, so past the statement the
+                                // normal-completion path's narrow facts
+                                // hold again — re-establish the try's,
+                                // minus any the finally's own writes
+                                // killed.
+                                let mut killed: rustc_hash::FxHashSet<
+                                    crate::flow_slice_content::SliceNarrowRoot,
+                                > = rustc_hash::FxHashSet::default();
+                                for name in finally_written.0.iter().chain(finally_written.1.iter())
+                                {
+                                    killed.insert(
+                                        crate::flow_slice_content::SliceNarrowRoot::Local(
+                                            Arc::from(name.as_str()),
+                                        ),
+                                    );
+                                }
+                                for ordinal in &finally_written.2 {
+                                    killed.insert(
+                                        crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
+                                    );
+                                }
+                                let restored: Vec<_> = try_narrowings
+                                    .iter()
+                                    .filter(|fact| {
+                                        !entry.narrowings.contains(fact)
+                                            && !killed.contains(&fact.0.root)
+                                    })
+                                    .cloned()
+                                    .collect();
+                                self.narrowings.extend(restored);
+                            }
                             if finally.can_fall_through {
                                 own.extend(finally_contributors);
                             } else if crate::flow_slice_content::slice_region_may_return(finally) {
@@ -4832,7 +5075,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 own = Vec::new();
                             }
                         }
-                        None => self.restore_layer_state(pre_finally),
+                        None => {
+                            // A catch clause exists (a bare `try` is
+                            // syntactically impossible without either
+                            // clause): its antecedent joins the flow past
+                            // the statement, so no clause-established
+                            // narrow survives — even when the catch itself
+                            // returns (tsgo, measured).
+                            pre_finally.narrowings = entry.narrowings;
+                            self.restore_layer_state(pre_finally);
+                        }
                     }
                     contributors.extend(own);
                 }
@@ -5229,6 +5481,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // across a closure boundary.
                 narrowings: Vec::new(),
                 param_writes: rustc_hash::FxHashMap::default(),
+                conditional_lexicals: rustc_hash::FxHashSet::default(),
+                conditional_params: rustc_hash::FxHashSet::default(),
                 call_fresh_literal_returns: Vec::new(),
             };
             let outcome = nested_evaluator.eval_region(body);
@@ -5499,6 +5753,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 };
                 if let Some(node) = self.narrowed_read(&subject) {
                     return Positional::Value(node);
+                }
+                // A parameter written inside a `try` clause and observed
+                // past a possible throw point: the value is one path's,
+                // not the join's — fail closed at the read.
+                if self.conditional_params.contains(ordinal) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+                    );
                 }
                 if let Some(node) = self.param_writes.get(ordinal).copied() {
                     return Positional::Value(node);

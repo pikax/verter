@@ -499,8 +499,12 @@ fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) 
         ..KnownSpreadKeys::default()
     };
     for member in surface.positive_members().iter() {
-        if let Some(name) = member.string_name() {
-            normalize_public_spread_key(name, &mut result.attrs, &mut result.listeners);
+        // The PUBLISHED name classifies: a numeric literal key is the
+        // property under its canonical string spelling, exactly like a
+        // string key; a symbol / computed key has no published name and
+        // marks the surface inexact, as before.
+        if let Some(name) = member.published_name() {
+            normalize_public_spread_key(name.as_ref(), &mut result.attrs, &mut result.listeners);
         } else {
             result.exact = false;
         }

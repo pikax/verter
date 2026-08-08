@@ -2148,9 +2148,16 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
         "r5LabeledSwitchVar",
         crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
-    // A `try` whose block binds the `var` unconditionally reaches the
-    // function scope clean — tsgo types `r5LabeledTryVar(): number`.
-    assert_clean_warm(&host, "r5LabeledTryVar", number());
+    // A `try` whose block binds the `var`: the binding is a try-internal
+    // write, and a read past the clause boundary fails closed (the throw
+    // can precede the write — the flag is unconditional until throw-point
+    // joins exist, so even this throw-free block degrades where tsgo's
+    // answer is a clean `number`; honest and never wrong-warm).
+    assert_degraded(
+        &host,
+        "r5LabeledTryVar",
+        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────

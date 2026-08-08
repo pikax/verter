@@ -248,7 +248,7 @@ fn expanded_shape_from_surface_view(
         .positive_members()
         .iter()
         .filter_map(|member| {
-            let name = member.string_name()?;
+            let name = member.published_name()?;
             Some(ExpandedProperty {
                 name: name.to_string(),
                 // Intrinsic surface members are open-position SUCCESSES: the
@@ -257,7 +257,7 @@ fn expanded_shape_from_surface_view(
                 ty: verter_type_expr::facts::SourcePosition::Present(member_value_source(
                     &dispatch,
                     member.value,
-                    name,
+                    name.as_ref(),
                     parent,
                 )),
                 optional: member.optional,
