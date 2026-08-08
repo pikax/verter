@@ -5440,15 +5440,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // helper returns the full `SurfaceMember` list so
                     // the per-key build loop can pick Identity fast
                     // path values + source modifiers when available.
-                    if let Some((members, source_is_partial)) = self
+                    if let Some((members, source_partial_classes)) = self
                         .dispatch
                         .mapped_surface_source_members_for_projection(source, self.context)
                     {
-                        // Two-signal fold: a genuinely-incomplete source
-                        // projection (budget / recursion / walker-fatal)
-                        // taints this synthesised mapped surface.
-                        if source_is_partial {
+                        // Two-signal fold, CLASS-PRESERVING: a
+                        // genuinely-incomplete source projection (budget /
+                        // recursion / walker-fatal) taints this synthesised
+                        // mapped surface — through the walker's typed
+                        // `partial_reasons` channel, so a contained
+                        // positional class (a member-local flow-return
+                        // marker inside the source's heritage) keeps its
+                        // class instead of re-lifting as the anonymous
+                        // `PROPAGATED` bridge no consumer lane contains.
+                        if !source_partial_classes.is_empty() {
                             self.result_is_partial = true;
+                            self.partial_reasons =
+                                self.partial_reasons.union(source_partial_classes);
                         }
                         if !members.is_empty() {
                             keys =

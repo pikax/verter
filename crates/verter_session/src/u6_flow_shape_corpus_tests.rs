@@ -1888,9 +1888,6 @@ const OPEN_DEBTS: &[&str] = &[
     "C04_emits_intersection_degraded",
     "C11_props_intersection_unmodelled_arm",
     "C12_heritage_unmodelled_clause",
-    // A mapped type over a flow-return heritage clause publishes ZERO members.
-    "C09_heritage_members_clean",
-    "C10_heritage_members_degraded",
     // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
     // The file loses its whole type-check surface for programs the checker
     // types without difficulty.
@@ -1948,7 +1945,7 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
-    (Owner::U2MappedTemplate, 2, 0, 2),
+    (Owner::U2MappedTemplate, 2, 1, 0),
     (Owner::U6CallResolve, 4, 4, 0),
     (Owner::U6ValueInference, 26, 23, 1),
     (Owner::U6ContextualCore, 9, 8, 1),

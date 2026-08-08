@@ -17238,10 +17238,13 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
 /// argument never opens it, so `Omit<Record<'a', T>, 'x'>` over an open
 /// `T` is CLOSED and materialises through the filter. A VALUE-PRODUCING utility
 /// (`ReturnType`, `InstanceType`, `Awaited`, …) makes NO closed-key
-/// claim: its produced surface is computed from its argument's VALUE
-/// structure, which the key-domain argument walk never inspects — it
-/// stays conservatively not-provably-closed (carrier preserved) until a
-/// per-utility output classification exists.
+/// claim FROM ITS ARGUMENT BINDINGS: its produced surface is computed from
+/// its argument's VALUE structure, which the key-domain argument walk
+/// never inspects. The registry rule therefore cannot prove it, and the
+/// walk falls back to a bounded ONE-HOP REDUCTION of the instantiation:
+/// `ReturnType<() => { a: string }>` reduces to a finite object surface
+/// and is CLOSED, while `ReturnType<() => T>` over an unbound `T` reduces
+/// to the open `T` and stays OPEN.
 ///
 /// **Discriminating.** The blanket "all args closed ⇒ closed" rule
 /// judges `Record<'a', T>` OPEN (the open value arg) — both CLOSED
@@ -17342,9 +17345,10 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
          utility's produced key domain is not argument-key-derived"
     );
 
-    // Even with an ALL-CLOSED argument, a value-producing utility stays
-    // not-provably-closed: the produced keys come from the argument's
-    // VALUE structure the key-domain walk never proved finite.
+    // With an ALL-CLOSED argument the registry rule still cannot prove a
+    // value-producing utility closed — but the bounded one-hop REDUCTION
+    // fallback behind it can: `ReturnType<() => {a}>` reduces to the
+    // finite object surface `{ a: string }`, whose key domain is exact.
     let fn_to_obj = graph.intern_node(SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
@@ -17359,13 +17363,13 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         return_type_span: None,
     });
     assert!(
-        super::raise::utility_enumeration_domain_is_open_or_unknown(
+        !super::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_omit,
             &[inst(builtin("ReturnType"), vec![fn_to_obj]), lit("x")],
         ),
-        "Omit<ReturnType<() => {{a}}>, 'x'> (node route) must stay not-provably-closed — \
-         no per-utility output classification exists for ReturnType yet"
+        "Omit<ReturnType<() => {{a}}>, 'x'> (node route) is CLOSED — the reduction fallback \
+         resolves the value-producing instantiation to a finite object surface"
     );
 
     // TYPEEXPR route parity for the value-producing family.
@@ -24272,7 +24276,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         direct_a.clone(),
         crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
-    let (members, partial) = dispatch
+    let (members, partial_classes) = dispatch
         .source_members_for_published_projection(
             open_source,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -24287,7 +24291,10 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         vec!["a"],
         "positive evidence only; observed {names:?}"
     );
-    assert!(partial, "the open program source must taint as partial");
+    assert!(
+        !partial_classes.is_empty(),
+        "the open program source must taint as partial"
+    );
 
     // Closed source `{ a: number, ...{ b: string } }`: exact members,
     // complete — the single closed alternative is a full witness.
@@ -24305,7 +24312,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         direct_a,
         crate::semantic_query::ObjectConstructionEffect::Spread(closed_inner),
     ]);
-    let (members, partial) = dispatch
+    let (members, partial_classes) = dispatch
         .source_members_for_published_projection(
             closed_source,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -24318,7 +24325,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
     names.sort_unstable();
     assert_eq!(names, vec!["a", "b"], "exact members; observed {names:?}");
     assert!(
-        !partial,
+        partial_classes.is_empty(),
         "a single closed alternative is a complete witness — no taint"
     );
 }
@@ -27976,5 +27983,255 @@ fn generic_function_binder_identities_are_stable_across_evaluations() {
         t_constraint, type_parameters[1].param,
         "T's forward constraint IS the sibling binder U — not a shell the \
          fixation substitution cannot reach"
+    );
+}
+
+/// A mapped type over an interface whose heritage clause is a FLOW RETURN
+/// (`interface Props extends ReturnType<typeof f>`) has a CLOSED,
+/// enumerable key domain when the flow return is modelled: the composed
+/// surface is the interface's own members plus the inherited ones, and the
+/// mapped type must enumerate it path-precisely instead of carrier-stopping
+/// into a zero-member surface.
+///
+/// **Discriminating.** The key-domain proof walk judges the heritage arm
+/// `ReturnType<typeof f>` through the builtin registry's per-utility
+/// output-key rule, which makes no closed-key claim for a value-producing
+/// utility; without the bounded one-hop reduction fallback behind that
+/// rule the gate carrier-stops and both publication routes publish the
+/// deferred `Mapped` carrier. The OPEN control (`{ [K in keyof T]: T[K] }`
+/// over an unbound `T`) must still carrier-stop: the fallback proves
+/// closedness from the REDUCED surface, never from the utility's name.
+#[test]
+fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ProjectionMode,
+        ProjectionReductionContext, ReadonlyMod,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/ws.ts",
+        "function makeProps() { return { label: \"x\" } }\n\
+         interface Props extends ReturnType<typeof makeProps> { extra: string }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let props_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/ws.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Props"),
+        },
+    });
+    let k_param = outer_type_param(&graph, "K");
+    let mapper_for = |src: SemanticNodeId| {
+        let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: src });
+        let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object: src,
+            index: IndexKey::Computed(k_param),
+        });
+        MapperKey {
+            parameter_node: k_param,
+            key_space,
+            value_expr,
+            optionality: OptionalityMod::Keep,
+            readonly: ReadonlyMod::Keep,
+            name_remap: None,
+            kind: MapperKind::Computed,
+        }
+    };
+    let member_names = |node: SemanticNodeId| -> Vec<String> {
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => {
+                let mut names: Vec<String> = view
+                    .positive_members()
+                    .iter()
+                    .map(|m| m.string_name().unwrap_or("?").to_string())
+                    .collect();
+                names.sort_unstable();
+                names
+            }
+            other => panic!("expected an enumerated Object surface, got {other:?}"),
+        }
+    };
+
+    let mapper = mapper_for(props_ref);
+    assert!(
+        !super::raise::mapped_type_key_domain_is_open_or_unknown(&dispatch, props_ref, &mapper),
+        "the key domain of a flow-return heritage interface is CLOSED when the flow \
+         return is modelled — carrier-stopping here publishes a zero-member surface \
+         for a fully modelled shape"
+    );
+
+    // The Expanded publication route enumerates the composed surface.
+    let expanded = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source: props_ref,
+        mapper: mapper.clone(),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    assert_eq!(member_names(expanded), vec!["extra", "label"]);
+
+    // The empty-path Shallow walker route (the macro surface demand)
+    // enumerates the same composed surface, complete.
+    let mapped_node = graph.intern_node(SemanticNodeData::Mapped {
+        source: props_ref,
+        mapper,
+    });
+    let shallow = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: mapped_node,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    });
+    let shallow_node = match shallow.value {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    assert_eq!(member_names(shallow_node), vec!["extra", "label"]);
+    assert!(
+        !shallow.result_is_partial,
+        "a fully modelled flow-return heritage source projects COMPLETE"
+    );
+
+    // OPEN control: an unbound outer generic source still carrier-stops —
+    // the reduction fallback proves closedness from the reduced surface,
+    // so an irreducibly-open source keeps the deferred `Mapped` carrier.
+    let t_param = outer_type_param(&graph, "T");
+    let open_mapper = mapper_for(t_param);
+    assert!(
+        super::raise::mapped_type_key_domain_is_open_or_unknown(&dispatch, t_param, &open_mapper),
+        "an unbound-generic source has no enumerable key domain and must still carrier-stop"
+    );
+    let open_result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
+        source: t_param,
+        mapper: open_mapper,
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            graph.node_data(open_result).as_deref(),
+            Some(SemanticNodeData::Mapped { .. })
+        ),
+        "the open control must keep the deferred Mapped carrier"
+    );
+}
+
+/// The DEGRADED twin: the flow return carries a member the substrate cannot
+/// model (`made`, typed marker), so the composed surface is partial — but
+/// the partiality is the POSITIONAL `FLOW_RETURN_UNINFERRED` class, which
+/// every macro codegen lane CONTAINS (the member carrying the marker
+/// degrades member-locally; its exact siblings keep their constructors).
+///
+/// **Discriminating.** The mapped source-member projection collapsed the
+/// underlying `ProjectPath` read's partiality to a bare BOOL; the walker's
+/// own class channel then saw a partial with no class and re-lifted it as
+/// the anonymous `PROPAGATED` bridge — a request-class fault no lane
+/// contains, refusing the runtime module and faulting the TSX projection
+/// for a program the checker types. This test pins the class-preserving
+/// fold: `FLOW_RETURN_UNINFERRED` survives, `PROPAGATED` does not appear.
+#[test]
+fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality_class() {
+    use crate::semantic_query::{
+        DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, PartialReasonSet,
+        ProjectionMode, ProjectionReductionContext, ReadonlyMod,
+    };
+
+    let host = host();
+    upsert_ts(
+        &host,
+        "/ws.ts",
+        "class Box { readonly tag = \"box\" }\n\
+         function makeProps() { const f = () => new Box(); return { label: \"x\", made: f() } }\n\
+         interface Props extends ReturnType<typeof makeProps> { extra: string }",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let props_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: Arc::from("/ws.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from("Props"),
+        },
+    });
+    let k_param = outer_type_param(&graph, "K");
+    let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: props_ref });
+    let value_expr = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: props_ref,
+        index: IndexKey::Computed(k_param),
+    });
+    let mapper = MapperKey {
+        parameter_node: k_param,
+        key_space,
+        value_expr,
+        optionality: OptionalityMod::Keep,
+        readonly: ReadonlyMod::Keep,
+        name_remap: None,
+        kind: MapperKind::Computed,
+    };
+    let mapped_node = graph.intern_node(SemanticNodeData::Mapped {
+        source: props_ref,
+        mapper,
+    });
+    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
+        base: mapped_node,
+        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Shallow),
+    });
+    let node = match read.value {
+        QueryResult::Value(id) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
+    let node_data = graph.node_data(node);
+    let view = match node_data.as_deref() {
+        Some(SemanticNodeData::Object(view)) => view,
+        other => panic!("expected an enumerated Object surface, got {other:?}"),
+    };
+    let mut members: Vec<(String, String)> = view
+        .positive_members()
+        .iter()
+        .map(|m| {
+            let kind = format!(
+                "{}",
+                match graph.node_data(m.value).as_deref() {
+                    Some(SemanticNodeData::Primitive(_)) => "primitive".to_string(),
+                    Some(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::UnmodeledPosition,
+                    )) => "unmodelled-marker".to_string(),
+                    other => format!("other:{other:?}"),
+                }
+            );
+            (m.string_name().unwrap_or("?").to_string(), kind)
+        })
+        .collect();
+    members.sort();
+    let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["extra", "label", "made"],
+        "the composed surface enumerates every member, observed {members:?}"
+    );
+    assert!(
+        read.result_is_partial,
+        "one member's value is unmodelled, so the surface IS partial"
+    );
+    let classes = read.partial_reason_classes();
+    assert!(
+        classes.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED),
+        "the positional class must survive the mapped route, observed {classes:?}"
+    );
+    assert!(
+        !classes.contains(PartialReasonSet::PROPAGATED),
+        "a contained positional class must NOT be re-lifted as the anonymous bridge, \
+         observed {classes:?}"
     );
 }

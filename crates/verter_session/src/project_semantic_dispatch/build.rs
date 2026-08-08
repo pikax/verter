@@ -7486,17 +7486,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// not route through this published-projection helper), so it is
     /// unaffected by this filter.
     /// Returns the source's public members for a published projection,
-    /// PLUS the `result_is_partial` flag of the underlying `ProjectPath`
-    /// read (two-signal fold). A genuinely-incomplete projection (budget /
-    /// recursion / walker-fatal) surfaces a complete-looking member list
-    /// here; the bool carries that partiality so `build_mapped_type` can
-    /// taint its published surface. The fast path over an already-resolved
-    /// `Object` node is always complete (`false`).
+    /// PLUS the partiality CLASSES of the underlying `ProjectPath` read
+    /// (two-signal fold, class-preserving). A genuinely-incomplete
+    /// projection (budget / recursion / walker-fatal) surfaces a
+    /// complete-looking member list here; the typed reason set carries
+    /// that partiality so `build_mapped_type` / the Shallow walker's
+    /// `synthesise_mapped_surface` can taint their surfaces WITHOUT
+    /// collapsing the class to a bare bool — a classless partial re-lifts
+    /// as the anonymous `PROPAGATED` bridge downstream, turning a
+    /// contained positional class (a member-local flow-return marker) into
+    /// a request-class fault no consumer lane contains. The fast path over
+    /// an already-resolved `Object` node is always complete (empty set).
     pub(super) fn source_members_for_published_projection(
         &self,
         source: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<(Vec<SurfaceMember>, bool)> {
+    ) -> Option<(Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet)> {
         fn public_members(members: &[SurfaceMember]) -> Vec<SurfaceMember> {
             members
                 .iter()
@@ -7506,23 +7511,37 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(source).as_deref() {
-            return Some((public_members(view.positive_members()), false));
+            return Some((
+                public_members(view.positive_members()),
+                crate::semantic_query::PartialReasonSet::empty(),
+            ));
         }
 
         // A construction-program source never fabricates a closed `Object`
         // (the walker's open-safe rule): project the correlated spread
         // formula instead. A single CLOSED alternative yields its exact
-        // members (complete, `false`); an open / multi-alternative formula
-        // yields POSITIVE evidence only and always taints (`true`) so the
+        // members (complete, empty set); an open / multi-alternative
+        // formula yields POSITIVE evidence only and always taints so the
         // mapped build never treats the partial member set as the source's
-        // complete domain.
+        // complete domain. The taint is DERIVED (no underlying read
+        // carries classes for it), so it rides the same anonymous
+        // `PROPAGATED` class a classless partial would bridge to.
         if matches!(
             self.graph().node_data(source).as_deref(),
             Some(SemanticNodeData::ObjectSpreadProgram(_))
         ) {
             return self
                 .spread_program_members_for_published_projection(source, caller_context)
-                .map(|(members, partial)| (public_members(&members), partial));
+                .map(|(members, partial)| {
+                    (
+                        public_members(&members),
+                        if partial {
+                            crate::semantic_query::PartialReasonSet::PROPAGATED
+                        } else {
+                            crate::semantic_query::PartialReasonSet::empty()
+                        },
+                    )
+                });
         }
 
         // Mapped/keyof source enumeration retains ordinary TypeScript
@@ -7539,21 +7558,34 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context: source_context,
         });
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
-        let read_is_partial = read.result_is_partial;
+        // `partial_reason_classes` bridges a classless partial to
+        // `PROPAGATED` itself, so the fold below is verdict-identical to
+        // the old bare-bool hand-off whenever the read named no class.
+        let read_partial_classes = read.partial_reason_classes();
         let node = match read.value {
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => {
-                Some((public_members(view.positive_members()), read_is_partial))
-            }
+            Some(SemanticNodeData::Object(view)) => Some((
+                public_members(view.positive_members()),
+                read_partial_classes,
+            )),
             // A carrier that resolved to a construction program (the
             // walker's typed open evidence) degrades through the same
             // correlated-query rule as a direct program source.
             Some(SemanticNodeData::ObjectSpreadProgram(_)) => self
                 .spread_program_members_for_published_projection(node, caller_context)
-                .map(|(members, partial)| (public_members(&members), partial)),
+                .map(|(members, partial)| {
+                    (
+                        public_members(&members),
+                        if partial {
+                            crate::semantic_query::PartialReasonSet::PROPAGATED
+                        } else {
+                            crate::semantic_query::PartialReasonSet::empty()
+                        },
+                    )
+                }),
             _ => None,
         }
     }
@@ -7590,13 +7622,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             source,
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
         )
-        .map(|(members, is_partial)| {
+        .map(|(members, partial_classes)| {
             (
                 members
                     .into_iter()
                     .filter_map(|member| member.key.into_known().ok())
                     .collect(),
-                is_partial,
+                !partial_classes.is_empty(),
             )
         })
     }
@@ -7771,18 +7803,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source directly). If `source` is not an Object we can read
         // member names from, fall back to the keyspace shape — but
         // opaque keyspaces terminate the mapped dispatch cleanly.
-        // Two-signal fold partiality accumulator. Folds the partiality of
-        // every nested subquery this mapped-type build surfaces (the
-        // source-member ProjectPath, the K-independent value hoist's
-        // nested Instantiate) into the published surface so a
-        // genuinely-incomplete (budget / recursion / walker-fatal) input
+        // Two-signal fold partiality accumulator, CLASS-PRESERVING. Folds
+        // the partiality of every nested subquery this mapped-type build
+        // surfaces (the source-member ProjectPath, the K-independent
+        // value hoist's nested Instantiate) into the published surface so
+        // a genuinely-incomplete (budget / recursion / walker-fatal) input
         // taints the mapped result even though it surfaces as a complete
-        // `Value`.
-        let mut mapped_is_partial = false;
-        let (source_members, source_members_partial): (Vec<SurfaceMember>, bool) = self
+        // `Value` — with the reason CLASSES intact, so a contained
+        // positional class (a member-local flow-return marker reached
+        // through the source's heritage) is not re-lifted as the
+        // anonymous `PROPAGATED` bridge downstream.
+        let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
+        let (source_members, source_member_reasons): (
+            Vec<SurfaceMember>,
+            crate::semantic_query::PartialReasonSet,
+        ) = self
             .source_members_for_published_projection(source, context)
-            .unwrap_or_default();
-        mapped_is_partial |= source_members_partial;
+            .unwrap_or_else(|| (Vec::new(), crate::semantic_query::PartialReasonSet::empty()));
+        mapped_partial_reasons = mapped_partial_reasons.union(source_member_reasons);
         let source_member_keys = |members: &[SurfaceMember]| {
             super::enumerate::KeyDomainKey::from_keys(
                 members
@@ -7835,7 +7873,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     fence,
                 ))
                 .with_observed_self_roots(observed_self_roots.clone());
-            deferred_output.result_is_partial = mapped_is_partial;
+            deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
+            deferred_output.partial_reasons = mapped_partial_reasons;
             return deferred_output;
         };
 
@@ -7913,7 +7952,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
                     ));
                     if inst_read.result_is_partial {
-                        mapped_is_partial = true;
+                        mapped_partial_reasons =
+                            mapped_partial_reasons.union(inst_read.partial_reason_classes());
                     }
                     match inst_read.value {
                         QueryResult::Value(id) => id,
@@ -8008,7 +8048,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     mode: ProjectionMode::Navigate,
                 });
                 if read.result_is_partial {
-                    mapped_is_partial = true;
+                    mapped_partial_reasons =
+                        mapped_partial_reasons.union(read.partial_reason_classes());
                 }
                 match read.value {
                     QueryResult::Value(id)
@@ -8136,7 +8177,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     fence,
                 ))
                 .with_observed_self_roots(observed_self_roots);
-            deferred_output.result_is_partial = mapped_is_partial;
+            deferred_output.result_is_partial = !mapped_partial_reasons.is_empty();
+            deferred_output.partial_reasons = mapped_partial_reasons;
             return deferred_output;
         }
 
@@ -8172,7 +8214,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        mapped_output.result_is_partial = mapped_is_partial;
+        mapped_output.result_is_partial = !mapped_partial_reasons.is_empty();
+        mapped_output.partial_reasons = mapped_partial_reasons;
         mapped_output
     }
 
@@ -8577,11 +8620,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         source: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<(Vec<SurfaceMember>, bool)> {
-        // Returns the source surface PLUS the A2 partiality flag of the
+    ) -> Option<(Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet)> {
+        // Returns the source surface PLUS the A2 partiality CLASSES of the
         // underlying ProjectPath read so the Shallow walker's
         // `synthesise_mapped_surface` caller can taint its surface when
-        // the source projection was genuinely incomplete.
+        // the source projection was genuinely incomplete — with the class
+        // preserved, so a contained positional class (a member-local
+        // flow-return marker) is not re-lifted into the anonymous
+        // `PROPAGATED` bridge no consumer lane contains.
         self.source_members_for_published_projection(source, context)
     }
 

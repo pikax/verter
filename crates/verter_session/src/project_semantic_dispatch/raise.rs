@@ -3284,9 +3284,14 @@ pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
     // `items`.
     //
     // The three key-domain operands split BY ROLE. The SOURCE and the key
-    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness (a
-    // value-producing builtin source such as `ReturnType<…>` makes no
-    // closed-key claim and stays OPEN). The `as`-REMAP is
+    // SPACE are [`OpenRole::KeyDomainProof`] — they MUST PROVE finiteness.
+    // A value-producing builtin source (`ReturnType<…>`) makes no
+    // closed-key claim from its argument bindings, so the registry rule
+    // alone cannot prove it; the walk then falls back to a bounded ONE-HOP
+    // reduction of the instantiation and classifies the REDUCED surface
+    // (`OpenWalk::reduced_instantiation_key_domain_is_closed`), staying
+    // OPEN on a partial demand, a no-progress carrier-stop, or an open
+    // reduced surface. The `as`-REMAP is
     // [`OpenRole::MappedNameRemap`] — a K-only transform over the bound
     // binder (`as keyof Foo<T>` over a fixed-key `Foo`, `as Capitalize<K>`)
     // is decidable per key and stays CLOSED, while a direct outer-generic
@@ -3327,9 +3332,12 @@ pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
 ///   question ([`OpenQuestion::KeyDomain`]) and MUST PROVE finiteness: a
 ///   concrete no-open-argument instantiation is NOT taken closed by
 ///   shortcut — it falls through to the builtin registry
-///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, so a
+///   (`builtin_utility_key_domain_is_closed`) / prepared-decl proof, and a
 ///   value-producing builtin (`ReturnType`, `InstanceType`, the string
-///   intrinsics, …) that makes NO closed-key claim stays OPEN. An
+///   intrinsics, …) the registry cannot prove closed is decided by the
+///   bounded one-hop reduction fallback
+///   ([`OpenWalk::reduced_instantiation_key_domain_is_closed`]): CLOSED
+///   only when the REDUCED surface is. An
 ///   instantiation is judged per-argument
 ///   (`per_argument_key_domain = true`): an open argument confined to
 ///   member VALUE positions of a fixed-key body keeps the key domain
@@ -3402,8 +3410,9 @@ impl OpenRole {
     /// set is concrete at build time and the mapped key enumerator owns it
     /// (a `Capitalize<K>` over the bound binder is decidable per key). The
     /// `KeyDomainProof` role must PROVE finiteness — it falls through to the
-    /// builtin registry / prepared-decl proof, which is what keeps a
-    /// value-producing builtin source (`ReturnType<…>`) OPEN.
+    /// builtin registry / prepared-decl proof, and a builtin the registry
+    /// cannot prove closed (a value-producing `ReturnType<…>`) is decided by
+    /// the bounded one-hop reduction fallback, never by this shortcut.
     fn concrete_no_open_arg_is_closed(self) -> bool {
         matches!(self, OpenRole::MappedNameRemap)
     }
@@ -3550,9 +3559,12 @@ impl<'a> OpenWalk<'a> {
     /// the key-space-finiteness question and MUST PROVE finiteness — a
     /// concrete no-open-argument instantiation is NOT taken closed by
     /// shortcut, it falls through to the builtin registry / prepared-decl
-    /// proof, so a value-producing builtin source (`ReturnType<…>`,
-    /// `InstanceType<…>`, the string intrinsics) that makes no closed-key
-    /// claim stays OPEN (and `& T` opens the key domain → carrier-stop). It
+    /// proof; a value-producing builtin source (`ReturnType<…>`,
+    /// `InstanceType<…>`, the string intrinsics) makes no closed-key claim
+    /// from its argument bindings, so it is decided by the bounded one-hop
+    /// reduction fallback (`reduced_instantiation_key_domain_is_closed`) —
+    /// OPEN only when the reduced surface is partial, no-progress, or
+    /// itself open (and `& T` opens the key domain → carrier-stop). It
     /// does NOT descend value surfaces — a member value reaching the outer
     /// generic does not change which KEYS the source exposes
     /// (`{ [K in keyof {a: Foo<T>}]: string }` enumerates `{a}`). A resolved
@@ -4051,10 +4063,29 @@ impl<'a> OpenWalk<'a> {
                     // (`Pick<Pick<{…}, 'a' | 'b'>, 'a'>` or
                     // `Pick<Partial<{…}>, 'a'>`) must NOT be judged
                     // OPEN.
-                    return !builtin_utility_key_domain_is_closed(
-                        base.decl_name.as_ref(),
-                        &arg_bindings,
-                    );
+                    if builtin_utility_key_domain_is_closed(base.decl_name.as_ref(), &arg_bindings)
+                    {
+                        return false;
+                    }
+                    // The registry rule cannot prove the domain closed —
+                    // for a VALUE-PRODUCING utility (`ReturnType`,
+                    // `InstanceType`, `Awaited`, the string intrinsics, …)
+                    // that is not a proof of openness: the produced key set
+                    // derives from argument VALUE structure the
+                    // per-argument binding walk never inspected. A heritage
+                    // clause `extends ReturnType<typeof f>` whose flow
+                    // return is a closed object surface HAS a finite key
+                    // domain; judging it open carrier-stops a mapped type
+                    // over the interface and publishes a zero-member
+                    // surface for a fully modelled shape. Fall back to a
+                    // bounded one-hop reduction of the instantiation and
+                    // classify the REDUCED surface with this same walk.
+                    // Every earlier conservatism is preserved: a partial /
+                    // truncated / faulted read, a stable carrier-stop (no
+                    // progress), and a reduced surface that is itself open
+                    // all keep the OPEN verdict the registry-only rule
+                    // produced.
+                    return !self.reduced_instantiation_key_domain_is_closed(ctx, node);
                 }
                 !prepared_instantiation_key_domain_is_closed(
                     self.dispatch,
@@ -4276,6 +4307,45 @@ impl<'a> OpenWalk<'a> {
             // position — closed for both open-ness questions.
             SemanticNodeData::DeferredCallable(_) => false,
         }
+    }
+
+    /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
+    ///
+    /// Resolves a `__builtin__` instantiation the per-utility output-key
+    /// rule could not prove closed through the ONE shared structural-fact
+    /// demand ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]
+    /// — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// fail-closed, dep-signature facts recorded into the active tracer),
+    /// then classifies the REDUCED node with this same walk at the
+    /// key-domain position. Returns `false` (not provably closed) on a
+    /// partial / truncated / faulted demand, on a no-progress stable
+    /// carrier-stop (classifying the SAME node would read this walk's own
+    /// in-flight back-edge as closed), and on a reduced surface that is
+    /// itself open — exactly the verdict the registry-only rule produced
+    /// for those cases.
+    fn reduced_instantiation_key_domain_is_closed(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+    ) -> bool {
+        if self.budget == 0 {
+            return false;
+        }
+        self.budget -= 1;
+        let Some(reduced) = self
+            .dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::structural_transit(),
+            )
+            .into_complete_node()
+        else {
+            return false;
+        };
+        if reduced == node {
+            return false;
+        }
+        !self.node_is_open_at(ctx, reduced, OperandPosition::KeyDomain)
     }
 
     /// Whether an [`IndexKey`](crate::semantic_query::IndexKey) index
