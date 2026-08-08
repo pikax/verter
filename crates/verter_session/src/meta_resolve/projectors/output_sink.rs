@@ -716,8 +716,8 @@ pub(crate) fn surface_member_to_expanded_field(
     // success, and the recorded published-field edge.
     let member: &SurfaceMember = admitted.member();
     let member_name = member
-        .string_name()
-        .expect("publication authority admits only ordinary string keys");
+        .published_name()
+        .expect("publication authority admits only members with a published name");
     let ctx: &dyn ResolverContext = query_engine.ctx;
     // The publication mode comes from the admitted token's descended member
     // cursor. `Navigate` (carrier) mode means the member's type body is

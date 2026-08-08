@@ -2762,16 +2762,19 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
 }
 
 #[test]
-fn empty_path_shallow_over_correlated_program_returns_open_typed_evidence() {
+fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Correlated program `{ c: number, ...({ a: number } | { b: string }) }`:
-    // two closed alternatives — the construction is `{c, a} | {c, b}`,
-    // which no single closed `Object` can represent (a common-member join
-    // would fabricate absence of `a`/`b`). The terminal must stay open.
+    // two closed alternatives — the construction IS the union
+    // `{c, a} | {c, b}`, and the terminal answers it exactly the way the
+    // plain-union root's own flush does (the common-member surface
+    // `{ c }`): the distributed formula and the plain union are the same
+    // type, so they materialise the same way. An alternative that stays
+    // OPEN keeps the typed open evidence (the sibling tests above).
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
     let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
@@ -2791,15 +2794,23 @@ fn empty_path_shallow_over_correlated_program_returns_open_typed_evidence() {
     let QueryResult::Value(node) = read.value else {
         panic!("expected a terminal value, got {:?}", read.value)
     };
+    let node_data = graph.node_data(node);
+    let Some(SemanticNodeData::Object(view)) = node_data.as_deref() else {
+        panic!(
+            "an all-closed multi-alternative program root materialises the common-member Object; observed {:?}",
+            graph.node_data(node)
+        );
+    };
+    let names: Vec<&str> = view
+        .positive_members()
+        .iter()
+        .filter_map(|member| member.key.as_string())
+        .collect();
+    assert_eq!(names, vec!["c"], "the common member of both alternatives");
     assert!(
-        matches!(
-            graph.node_data(node).as_deref(),
-            Some(SemanticNodeData::ObjectSpreadProgram(_))
-        ),
-        "a multi-alternative program root must NOT materialise a closed Object; observed {:?}",
-        graph.node_data(node)
+        !read.result_is_partial && !read.cache_suppress,
+        "every alternative closed: the merged surface is complete and cacheable"
     );
-    assert!(read.result_is_partial && read.cache_suppress);
 }
 
 /// Nested program arms: a UNION root whose arm is a program projects the

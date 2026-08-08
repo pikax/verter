@@ -24,11 +24,15 @@
 //! throw ends the region; statements after it are unreachable and
 //! dropped), an `if` whose arms both terminate cannot fall through, blocks
 //! nest, return-free loop/labeled constructs are fall-through transparent,
-//! and return-bearing loop/labeled constructs, `switch`, `try`, `with`,
-//! jumps, and module-level statements are UNSUPPORTED — typed,
-//! fail-closed: the region is produced up to the first
-//! [`SliceStatement::Unsupported`] marker and the marker propagates to
-//! the root so the evaluator degrades the whole result.
+//! and `switch` / `try` / return-bearing labeled constructs lower their
+//! clauses as regions whose return contributions the evaluator joins —
+//! a `break` targeting an enclosing `switch` or labeled statement is a
+//! path terminator the lowering absorbs into that construct's
+//! reachability, never a function-level jump. Return-bearing loops,
+//! `with`, cross-function jumps, and module-level statements stay
+//! UNSUPPORTED — typed, fail-closed: the region is produced up to the
+//! first [`SliceStatement::Unsupported`] marker and the marker propagates
+//! to the root so the evaluator degrades the whole result.
 //!
 //! Expression content lowers through the ONE shared shallow-pass
 //! per-expression lowering (`infer_declaration_expression_type`); the
@@ -159,6 +163,27 @@ pub struct SliceParam {
     /// the default initializer's inferred type, else `any` — always
     /// through the frame gate for the signature's scope.
     pub ty: GatedType,
+    /// The modelled elements of a destructured OBJECT-pattern parameter
+    /// (`{ label = "x", n }`, aliases included): identifier bindings
+    /// whose value is the annotation member `key` with the default rule
+    /// applied. Empty for a plain identifier parameter. Nested, computed,
+    /// and rest elements are NOT modelled — a read of one keeps the
+    /// fail-closed classification it has today.
+    pub destructured: Arc<[SliceDestructuredElement]>,
+}
+
+/// One modelled element of a destructured object-pattern parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceDestructuredElement {
+    /// The binding name the body reads.
+    pub name: Arc<str>,
+    /// The annotation member whose value the element binds — equal to
+    /// `name` for a shorthand element, the member's own name for an
+    /// aliased one (`{ b: renamed }` binds `renamed` from member `b`).
+    pub key: Arc<str>,
+    /// Whether the element authored a default initializer (`= "x"`): the
+    /// binding's type drops the member's `undefined` arm.
+    pub has_default: bool,
 }
 
 /// One sequential statement list with its reachability result.
@@ -241,6 +266,41 @@ pub enum SliceStatement {
     },
     /// A nested block, as its own region.
     Block(SliceRegion),
+    /// A `switch` statement. The discriminant lowers no VALUE content (the
+    /// evaluator never consumes it); each case clause's statements lower
+    /// as their own region, in source order. A `break` targeting the
+    /// switch ends that case's path and reaches past the switch — the
+    /// lowering absorbs it into [`SliceSwitchCase::breaks`], so the
+    /// evaluator's after-switch join carries exactly the paths that reach
+    /// it. Discriminant-driven case NARROWING is not modelled here (that
+    /// is the narrowing lane's subject); the case regions share one block
+    /// scope, exactly as the authored switch body does.
+    Switch {
+        /// One lowered clause per case, in source order.
+        cases: Arc<[SliceSwitchCase]>,
+        /// Whether a `default` clause exists. Without one, the
+        /// no-matching-case path reaches past the switch untouched.
+        has_default: bool,
+    },
+    /// A `try` statement. Each clause is its own region; the evaluator
+    /// joins the try/catch return contributions and applies the finally
+    /// clause's override rule (a `finally` that may return replaces the
+    /// pending try/catch contributions on the paths where it does not
+    /// fall through — the checker reads abrupt finally completion the
+    /// same way).
+    Try {
+        /// The try block's region.
+        block: Box<SliceRegion>,
+        /// The catch clause, when authored.
+        catch: Option<Box<SliceCatchClause>>,
+        /// The finally clause's region, when authored.
+        finally: Option<Box<SliceRegion>>,
+    },
+    /// A return-BEARING labeled statement. The label's only flow effect —
+    /// a `break` naming it exits to after the statement — was absorbed by
+    /// the lowering into the statement's reachability, so the body
+    /// evaluates as an ordinary block.
+    Labeled(Box<SliceRegion>),
     /// A `const` / `let` / `var` declarator with an identifier binding.
     Binding {
         /// The binding name.
@@ -272,12 +332,80 @@ pub enum SliceStatement {
     /// A return-free loop or labeled construct: effectful but fall-through
     /// transparent.
     TransparentLoop,
-    /// An unsupported construct (return-bearing loop/labeled, `switch`,
-    /// `try`, `with`, a `break`/`continue` jump, a module-level
-    /// statement). The whole function is unsupported: the region is
-    /// produced up to this marker and the evaluator degrades the whole
-    /// result.
+    /// An unsupported construct (return-bearing loop, `with`, a
+    /// `break`/`continue` jump no enclosing modelled construct absorbs, a
+    /// module-level statement). The whole function is unsupported: the
+    /// region is produced up to this marker and the evaluator degrades
+    /// the whole result.
     Unsupported(SliceUnsupported),
+}
+
+/// One `switch` case clause: its statements as a region, and whether a
+/// path through the clause exits the switch via `break`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceSwitchCase {
+    /// The clause's statements. The region's `can_fall_through` means
+    /// "falls into the NEXT case" here — a `break` terminates the path
+    /// without setting it, exactly like a `return`.
+    pub region: SliceRegion,
+    /// A path through the clause exits the switch via `break` (reaching
+    /// the statement after the switch).
+    pub breaks: bool,
+}
+
+/// One `catch` clause: its parameter binding (a plain identifier only — a
+/// destructured catch parameter binds nothing here) and its body region.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceCatchClause {
+    /// The catch parameter's binding name, when authored as a plain
+    /// identifier.
+    pub param: Option<Arc<str>>,
+    /// The clause body's region.
+    pub region: SliceRegion,
+}
+
+/// Whether any path through the region returns from the frame (a `return`
+/// statement anywhere in its statement tree).
+///
+/// This is the ONE finally-override classifier both halves read: the
+/// lowering consults it to decide whether a `finally` clause absorbs the
+/// try/catch's pending `break` exits, and the evaluator consults it to
+/// decide whether the finally clause's own return contributions replace
+/// the try/catch's pending ones — the two halves can never disagree about
+/// what "the finally may return" means.
+pub(crate) fn slice_region_may_return(region: &SliceRegion) -> bool {
+    region.statements.iter().any(|statement| match statement {
+        SliceStatement::Return { .. } => true,
+        SliceStatement::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            slice_region_may_return(consequent)
+                || alternate.as_deref().is_some_and(slice_region_may_return)
+        }
+        SliceStatement::Block(region) => slice_region_may_return(region),
+        SliceStatement::Labeled(region) => slice_region_may_return(region),
+        SliceStatement::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| slice_region_may_return(&case.region)),
+        SliceStatement::Try {
+            block,
+            catch,
+            finally,
+        } => {
+            slice_region_may_return(block)
+                || catch
+                    .as_deref()
+                    .is_some_and(|catch| slice_region_may_return(&catch.region))
+                || finally.as_deref().is_some_and(slice_region_may_return)
+        }
+        SliceStatement::Binding { .. }
+        | SliceStatement::Assignment { .. }
+        | SliceStatement::Assertion { .. }
+        | SliceStatement::TransparentLoop
+        | SliceStatement::Unsupported(_) => false,
+    })
 }
 
 /// The kind of one local binding declarator.
@@ -1099,14 +1227,8 @@ pub struct SliceObjectMember {
 pub enum SliceUnsupported {
     /// A return-bearing loop.
     Loop,
-    /// A `switch` statement.
-    Switch,
-    /// A `try` statement.
-    Try,
-    /// A return-bearing labeled statement.
-    Labeled,
     /// A `break` / `continue` jump of the current function's statement
-    /// list.
+    /// list that no enclosing modelled construct absorbs.
     Jump,
     /// A `with` statement.
     With,
@@ -1348,6 +1470,7 @@ pub(crate) fn build_flow_slice_content(
         direct_calls: &entry.direct_calls,
         program,
         budget_failure: None,
+        break_targets: Vec::new(),
     };
     let region = if node.is_expression_body() {
         // An expression-bodied arrow's body is one synthesized expression
@@ -1596,6 +1719,53 @@ fn lower_params(
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
         };
+        // The modelled elements of a destructured OBJECT pattern:
+        // identifier bindings (`{ label }` / `{ label = "x" }`, aliases
+        // included) keyed by a static member name. Nested, computed, and
+        // rest elements stay unmodelled — their reads keep the fail-closed
+        // classification they have today.
+        let destructured: Arc<[SliceDestructuredElement]> = match &param.pattern {
+            BindingPattern::ObjectPattern(object) => object
+                .properties
+                .iter()
+                .filter_map(|property| {
+                    if property.computed {
+                        return None;
+                    }
+                    let key = match &property.key {
+                        oxc_ast::ast::PropertyKey::StaticIdentifier(id) => {
+                            Arc::from(id.name.as_str())
+                        }
+                        oxc_ast::ast::PropertyKey::StringLiteral(literal) => {
+                            Arc::from(literal.value.as_str())
+                        }
+                        _ => return None,
+                    };
+                    let (binding, has_default) = match &property.value {
+                        BindingPattern::BindingIdentifier(id) => {
+                            (Arc::from(id.name.as_str()), false)
+                        }
+                        BindingPattern::AssignmentPattern(assignment) => {
+                            match &assignment.left {
+                                BindingPattern::BindingIdentifier(id) => {
+                                    (Arc::from(id.name.as_str()), true)
+                                }
+                                // A default over an ALIASED / nested
+                                // pattern is not modelled.
+                                _ => return None,
+                            }
+                        }
+                        _ => return None,
+                    };
+                    Some(SliceDestructuredElement {
+                        name: binding,
+                        key,
+                        has_default,
+                    })
+                })
+                .collect(),
+            _ => Arc::from(Vec::new().into_boxed_slice()),
+        };
         let (mut ty, visible_before) =
             match (param.type_annotation.as_ref(), param.initializer.as_ref()) {
                 (Some(annotation), _) => (
@@ -1639,6 +1809,7 @@ fn lower_params(
             optional: param.optional || param.initializer.is_some(),
             rest: false,
             ty,
+            destructured,
         });
     }
     if let Some(rest) = &params.rest {
@@ -1659,6 +1830,7 @@ fn lower_params(
             optional: false,
             rest: true,
             ty,
+            destructured: Arc::from(Vec::new().into_boxed_slice()),
         });
     }
     out
@@ -1690,6 +1862,22 @@ enum ExprMode {
 struct LoweredRegion {
     region: SliceRegion,
     hit_unsupported: bool,
+    /// The `break` exits a path through the region may take, not yet
+    /// absorbed by the construct they target. The lowering of the target
+    /// construct (a `switch` case's anonymous exit, a labeled statement's
+    /// named one) absorbs its own entries; every other construct
+    /// propagates them upward untouched.
+    may_break: Vec<SliceBreakTarget>,
+}
+
+/// A `break` target one lowered region's path may exit to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SliceBreakTarget {
+    /// The innermost ANONYMOUS breakable — a `switch` (loop bodies never
+    /// lower, so a loop is never on the target stack).
+    Anonymous,
+    /// A labeled statement, by name.
+    Named(Arc<str>),
 }
 
 /// How the frame's lexical authority classifies one identifier.
@@ -1833,6 +2021,13 @@ struct Lowerer<'a> {
     program: &'a Program<'a>,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
+    /// The stack of breakable constructs whose bodies are currently being
+    /// lowered (innermost last): `None` for a `switch`, `Some(label)` for
+    /// a labeled statement. A `break` resolves against this stack — an
+    /// unlabeled one targets the innermost `None` entry (labels do not
+    /// accept unlabeled breaks), a labeled one the innermost matching
+    /// name. Loop bodies never lower, so a loop is never an entry.
+    break_targets: Vec<Option<Arc<str>>>,
 }
 
 impl Lowerer<'_> {
@@ -1869,6 +2064,21 @@ impl Lowerer<'_> {
             .iter()
             .position(|param| param.name.as_deref() == Some(name))
             .map(|ordinal| ordinal as u32)
+    }
+
+    /// Whether `name` is a modelled destructured object-pattern element of
+    /// one of this frame's parameters. This is the ONE classification both
+    /// halves read: the content side lowers a read of it as an ordinary
+    /// local, and the evaluator seeds the binding lazily on first read —
+    /// from the SAME [`SliceParam`] metadata, so the two can never
+    /// disagree about which destructured names are modelled.
+    fn is_destructured_element(&self, name: &str) -> bool {
+        self.params.iter().any(|param| {
+            param
+                .destructured
+                .iter()
+                .any(|element| element.name.as_ref() == name)
+        })
     }
 
     /// Classify one identifier occurrence through the frame's LEXICAL
@@ -2002,12 +2212,18 @@ impl Lowerer<'_> {
             match self.skeleton.binding(*id).kind {
                 SkeletonBindingKind::Param => {
                     // A destructured parameter has no whole-slot value
-                    // carrier (`lower_params` records no name for it).
+                    // carrier (`lower_params` records no name for it) —
+                    // but a modelled object-pattern ELEMENT binds its
+                    // annotation member, which the evaluator seeds lazily
+                    // on first read.
                     match (
                         self.skeleton.binding(*id).destructured,
                         self.param_ordinal(name),
                     ) {
                         (false, Some(ordinal)) => param = Some(ordinal),
+                        (true, _) if self.is_destructured_element(name) => {
+                            modelable_local = true;
+                        }
                         _ => unmodeled = true,
                     }
                 }
@@ -2174,6 +2390,7 @@ impl Lowerer<'_> {
         let mut out: Vec<SliceStatement> = Vec::new();
         let mut can_fall_through = true;
         let mut hit_unsupported = false;
+        let mut may_break: Vec<SliceBreakTarget> = Vec::new();
         for statement in statements {
             if !can_fall_through {
                 break;
@@ -2198,6 +2415,9 @@ impl Lowerer<'_> {
                     let child = self.lower_region(&block.body);
                     can_fall_through = child.region.can_fall_through;
                     hit_unsupported = child.hit_unsupported;
+                    // A block absorbs no `break` — an exit targeting an
+                    // enclosing switch / labeled statement passes through.
+                    may_break.extend(child.may_break);
                     out.push(SliceStatement::Block(child.region));
                 }
                 Statement::IfStatement(if_stmt) => {
@@ -2220,11 +2440,23 @@ impl Lowerer<'_> {
                         || alternate
                             .as_ref()
                             .is_some_and(|region| region.hit_unsupported);
-                    out.push(SliceStatement::If {
-                        guard,
-                        consequent: Box::new(consequent.region),
-                        alternate: alternate.map(|region| Box::new(region.region)),
-                    });
+                    // An `if` absorbs no `break` either: a conditional exit
+                    // (`if (f) break;`) is still an exit of the region.
+                    may_break.extend(consequent.may_break);
+                    if let Some(alternate) = alternate {
+                        may_break.extend(alternate.may_break);
+                        out.push(SliceStatement::If {
+                            guard,
+                            consequent: Box::new(consequent.region),
+                            alternate: Some(Box::new(alternate.region)),
+                        });
+                    } else {
+                        out.push(SliceStatement::If {
+                            guard,
+                            consequent: Box::new(consequent.region),
+                            alternate: None,
+                        });
+                    }
                 }
                 Statement::VariableDeclaration(decl) => {
                     let kind = match decl.kind {
@@ -2340,10 +2572,29 @@ impl Lowerer<'_> {
                     }
                 }
                 Statement::LabeledStatement(labeled) => {
+                    // The label is a break target for its OWN body in both
+                    // paths: a `break` naming it exits to after the
+                    // statement, which the absorption below folds into the
+                    // statement's reachability.
+                    let label: Arc<str> = Arc::from(labeled.label.name.as_str());
+                    self.break_targets.push(Some(Arc::clone(&label)));
+                    let child = self.lower_arm(&labeled.body);
+                    self.break_targets.pop();
+                    let mut absorbed = false;
+                    for target in child.may_break {
+                        match target {
+                            SliceBreakTarget::Named(name) if name == label => absorbed = true,
+                            other => may_break.push(other),
+                        }
+                    }
                     if self.control_has_return(statement) {
-                        out.push(SliceStatement::Unsupported(SliceUnsupported::Labeled));
-                        hit_unsupported = true;
-                        can_fall_through = false;
+                        // A return-bearing labeled statement: the body
+                        // evaluates as an ordinary block; the absorbed
+                        // `break` is what lets execution reach past the
+                        // statement even when the body itself cannot.
+                        can_fall_through = child.region.can_fall_through || absorbed;
+                        hit_unsupported = child.hit_unsupported;
+                        out.push(SliceStatement::Labeled(Box::new(child.region)));
                     } else {
                         // A return-free label is fall-through transparent,
                         // but its BODY still lowers: the label wraps an
@@ -2353,28 +2604,154 @@ impl Lowerer<'_> {
                         // `switch` / `try` / `with` unsupported). Emitting
                         // a bare transparent marker instead would bypass
                         // EVERY inner rail at once.
-                        let child = self.lower_arm(&labeled.body);
-                        can_fall_through = child.region.can_fall_through;
+                        can_fall_through = child.region.can_fall_through || absorbed;
                         hit_unsupported = child.hit_unsupported;
                         out.push(SliceStatement::Block(child.region));
                     }
                 }
-                Statement::SwitchStatement(_) => {
-                    out.push(SliceStatement::Unsupported(SliceUnsupported::Switch));
-                    hit_unsupported = true;
-                    can_fall_through = false;
+                Statement::SwitchStatement(switch) => {
+                    // Each case clause lowers as its own region with the
+                    // switch on the break-target stack: a `break` ends the
+                    // case's path and is absorbed into the clause's
+                    // `breaks` flag; a `break` naming an OUTER labeled
+                    // statement propagates through the switch untouched.
+                    let has_default = switch.cases.iter().any(|case| case.test.is_none());
+                    self.break_targets.push(None);
+                    let mut cases = Vec::with_capacity(switch.cases.len());
+                    for case in &switch.cases {
+                        let lowered = self.lower_region(&case.consequent);
+                        hit_unsupported |= lowered.hit_unsupported;
+                        let mut breaks = false;
+                        for target in lowered.may_break {
+                            match target {
+                                SliceBreakTarget::Anonymous => breaks = true,
+                                named => may_break.push(named),
+                            }
+                        }
+                        cases.push(SliceSwitchCase {
+                            region: lowered.region,
+                            breaks,
+                        });
+                    }
+                    self.break_targets.pop();
+                    // Past the switch is reachable when no `default`
+                    // exists (a non-matching discriminant skips every
+                    // case), when the LAST clause falls off the end of the
+                    // switch, or when any clause exits via `break`.
+                    can_fall_through = !has_default
+                        || cases
+                            .last()
+                            .is_some_and(|case| case.region.can_fall_through)
+                        || cases.iter().any(|case| case.breaks);
+                    out.push(SliceStatement::Switch {
+                        cases: Arc::from(cases.into_boxed_slice()),
+                        has_default,
+                    });
                 }
-                Statement::TryStatement(_) => {
-                    out.push(SliceStatement::Unsupported(SliceUnsupported::Try));
-                    hit_unsupported = true;
-                    can_fall_through = false;
+                Statement::TryStatement(try_stmt) => {
+                    let block = self.lower_region(&try_stmt.block.body);
+                    hit_unsupported |= block.hit_unsupported;
+                    let mut clause_may_break = block.may_break;
+                    let block = block.region;
+                    let catch = try_stmt.handler.as_ref().map(|handler| {
+                        let param = handler.param.as_ref().and_then(|param| {
+                            match &param.pattern {
+                                BindingPattern::BindingIdentifier(id) => {
+                                    Some(Arc::from(id.name.as_str()))
+                                }
+                                // A destructured catch parameter binds
+                                // nothing this frame can name.
+                                _ => None,
+                            }
+                        });
+                        let region = self.lower_region(&handler.body.body);
+                        hit_unsupported |= region.hit_unsupported;
+                        clause_may_break.extend(region.may_break);
+                        Box::new(SliceCatchClause {
+                            param,
+                            region: region.region,
+                        })
+                    });
+                    let finally = try_stmt.finalizer.as_ref().map(|finalizer| {
+                        let region = self.lower_region(&finalizer.body);
+                        hit_unsupported |= region.hit_unsupported;
+                        (Box::new(region.region), region.may_break)
+                    });
+                    // A `finally` that may RETURN overrides every pending
+                    // abrupt exit of the try/catch — including a `break`
+                    // targeting an enclosing construct — so the try
+                    // propagates its try/catch clauses' break exits only
+                    // when no such finally exists. The finally clause's
+                    // OWN break exits always propagate: they fire after
+                    // every override decision, they are never pending.
+                    let finally_may_return = finally
+                        .as_ref()
+                        .is_some_and(|(region, _)| slice_region_may_return(region));
+                    if !finally_may_return {
+                        may_break.extend(clause_may_break);
+                    }
+                    if let Some((_, finally_may_break)) = &finally {
+                        may_break.extend(finally_may_break.iter().cloned());
+                    }
+                    let pre_finally_fall_through = block.can_fall_through
+                        || catch
+                            .as_ref()
+                            .is_some_and(|catch| catch.region.can_fall_through);
+                    can_fall_through = pre_finally_fall_through
+                        && finally
+                            .as_ref()
+                            .is_none_or(|(region, _)| region.can_fall_through);
+                    out.push(SliceStatement::Try {
+                        block: Box::new(block),
+                        catch,
+                        finally: finally.map(|(region, _)| region),
+                    });
                 }
                 Statement::WithStatement(_) => {
                     out.push(SliceStatement::Unsupported(SliceUnsupported::With));
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
-                Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {
+                Statement::BreakStatement(break_stmt) => {
+                    // A `break` whose target is being lowered ends this
+                    // region's path and records the exit; the target's own
+                    // lowering absorbs it. Any other `break` stays the
+                    // typed jump failure it always was.
+                    let target = match break_stmt.label.as_ref() {
+                        Some(label) => {
+                            let name: Arc<str> = Arc::from(label.name.as_str());
+                            self.break_targets
+                                .iter()
+                                .rev()
+                                .any(|entry| entry.as_ref() == Some(&name))
+                                .then_some(SliceBreakTarget::Named(name))
+                        }
+                        // An unlabeled break targets the innermost
+                        // ANONYMOUS breakable (a switch) — a labeled
+                        // statement does not accept it.
+                        None => self
+                            .break_targets
+                            .iter()
+                            .rev()
+                            .any(|entry| entry.is_none())
+                            .then_some(SliceBreakTarget::Anonymous),
+                    };
+                    match target {
+                        Some(target) => {
+                            may_break.push(target);
+                            can_fall_through = false;
+                        }
+                        None => {
+                            out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
+                            hit_unsupported = true;
+                            can_fall_through = false;
+                        }
+                    }
+                }
+                Statement::ContinueStatement(_) => {
+                    // A `continue` always targets a loop, and a loop body
+                    // never lowers — so no modelled construct can absorb
+                    // one.
                     out.push(SliceStatement::Unsupported(SliceUnsupported::Jump));
                     hit_unsupported = true;
                     can_fall_through = false;
@@ -2414,6 +2791,7 @@ impl Lowerer<'_> {
                 can_fall_through,
             },
             hit_unsupported,
+            may_break,
         }
     }
 
@@ -3300,6 +3678,7 @@ impl Lowerer<'_> {
             direct_calls: self.direct_calls,
             program: self.program,
             budget_failure: None,
+            break_targets: Vec::new(),
         };
         let region = if node.is_expression_body() {
             // An expression-bodied arrow's body is one synthesized

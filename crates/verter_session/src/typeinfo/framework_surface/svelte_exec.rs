@@ -474,7 +474,7 @@ fn resolve_runes_props(
                 .iter()
                 .filter(|member| member.visibility.is_public())
                 .filter_map(|member| {
-                    member.string_name().map(|name| {
+                    member.published_name().map(|name| {
                         (
                             name.to_string(),
                             classify_svelte_callable_role(
@@ -580,7 +580,7 @@ fn prop_origins_from_surface(
         if !member.visibility.is_public() {
             continue;
         }
-        let Some(prop_name) = member.string_name() else {
+        let Some(prop_name) = member.published_name() else {
             continue;
         };
         let Some(origin) = member_declaration_origin(owner, member) else {
@@ -612,7 +612,7 @@ fn member_declaration_origin(
 
     let canonical_file = member.origin.canonical_file.as_ref()?;
     let canonical_source = canonical_file.as_ref().to_string();
-    let member_name = member.string_name()?.to_string();
+    let member_name = member.published_name()?.to_string();
     let span = member
         .origin
         .declaration_span
@@ -858,7 +858,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
         .iter()
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            let name = member.string_name()?.to_string();
+            let name = member.published_name()?.to_string();
             // The validated-snippet positional binding NODES, decided ENTIRELY in
             // the node domain through the shared `CallableNodeView` (which
             // carrier-preserving-peels the `Snippet<Params>` carrier and reads its
@@ -1049,12 +1049,16 @@ fn retain_svelte_snippet_members(
                 verter_type_expr::PropCallableRole::SvelteSnippet { .. }
             )
         })
-        .filter_map(|member| member.string_name().map(str::to_string))
+        .filter_map(|member| member.published_name().map(|name| name.to_string()))
         .collect::<std::collections::HashSet<_>>();
     let members: Vec<_> = surface
         .members
         .iter()
-        .filter(|member| member.string_name().is_some_and(|name| keep.contains(name)))
+        .filter(|member| {
+            member
+                .published_name()
+                .is_some_and(|name| keep.contains(name.as_ref()))
+        })
         .cloned()
         .collect();
     TypeInfoSurface {
@@ -1062,9 +1066,9 @@ fn retain_svelte_snippet_members(
             .entries
             .iter()
             .filter(|entry| match entry {
-                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => {
-                    member.string_name().is_some_and(|name| keep.contains(name))
-                }
+                crate::typeinfo::surface::TypeInfoSurfaceEntry::Member(member) => member
+                    .published_name()
+                    .is_some_and(|name| keep.contains(name.as_ref())),
                 _ => true,
             })
             .cloned()
@@ -1395,7 +1399,7 @@ fn callback_events_from_props_surface(
         }
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
         // suffix. The suffix is the event name (NO strip applied to the payload).
-        let Some(member_name) = member.string_name() else {
+        let Some(member_name) = member.published_name() else {
             continue;
         };
         let Some(event_name) = member_name.strip_prefix("on") else {

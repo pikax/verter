@@ -61,7 +61,7 @@ pub(crate) fn slots_from_typeinfo_surface(
         // NOT leak as a published slot.
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            let member_name = member.string_name()?.to_string();
+            let member_name = member.published_name()?.to_string();
             // Merged-contributor fail-close: a slot member value that does
             // NOT demand-validate through the shared structural-fact
             // primitive (an unresolvable contributor — alone, or merged

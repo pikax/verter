@@ -447,7 +447,11 @@ pub(crate) fn admit_published_member<'a>(
     if !candidate.member.visibility.is_public() {
         return None;
     }
-    let member_name: Arc<str> = Arc::from(candidate.member.string_name()?);
+    // The published surface is string-NAMED: an ordinary string key
+    // publishes verbatim, a numeric literal key publishes under its
+    // canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
+    // and a symbol / computed key has no published name — not admitted.
+    let member_name: Arc<str> = candidate.member.published_name()?;
     // (2) Derived-kind / cursor match: the descending cursor must address the
     // SAME published surface the candidate was enumerated from. The cursor
     // carries `surface: &PublishedSurfaceKind`; compare it against the
@@ -458,6 +462,9 @@ pub(crate) fn admit_published_member<'a>(
     }
     // (3) Descend into the published member. `None` ⇒ the member is out of the
     // demanded surface (a narrowed projection that does not admit this name).
+    // The descent key is the PUBLISHED name: the publication surface is
+    // string-named, and member lookup coerces the numeric spelling to the
+    // same property by JS property identity.
     let member_key = crate::semantic_query::PropertyKey::identifier(Arc::clone(&member_name));
     let member_cursor = cursor.descend_published_member(&member_key)?;
     // (4) Record the published-field origin edge BEFORE the mint. This is the

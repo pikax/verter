@@ -5,9 +5,10 @@
 //! - Un-ignored `flow_surface_*` / characterization rows pin the
 //!   observable FlowReturn surface: symbolic call returns resolve, the
 //!   `this`-call fallback yields `any`, return-free loops stay fall-through
-//!   transparent, return-bearing loop/switch/try stay degraded, an empty
-//!   recursive cycle degrades without collapsing to `never`, and complete
-//!   unannotated functions never surface a semantic miss.
+//!   transparent, return-bearing loops stay degraded, switch/try clause
+//!   returns join, an empty recursive cycle degrades without collapsing
+//!   to `never`, and complete unannotated functions never surface a
+//!   semantic miss.
 //!
 //! - `flow_return_substrate_*` rows are the producer-routing contracts:
 //!   each asserts the pinned surface AND that the demand was served by a
@@ -180,20 +181,32 @@ fn flow_surface_return_bearing_loop_is_degraded_not_narrowed() {
 }
 
 #[test]
-fn flow_surface_switch_return_is_degraded_not_narrowed() {
+fn flow_surface_switch_return_resolves_the_arm_join() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubSwitchReturn");
-    assert_semantic_miss(&expr);
+    // tsgo 7.0.0-dev.20260526.1: `"a" | "b"` — the multi-contributor
+    // join keeps both fresh literals.
+    let TypeExpr::Union(members) = &expr else {
+        panic!("the switch arm join is a literal union, got {expr:?}");
+    };
+    assert_eq!(
+        members.as_ref(),
+        &[
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
+            TypeExpr::Literal(LiteralValue::String("b".to_string())),
+        ]
+    );
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
 #[test]
-fn flow_surface_try_return_is_degraded_not_narrowed() {
+fn flow_surface_try_return_resolves_widened() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubTryReturn");
-    assert_semantic_miss(&expr);
+    // tsgo: `string` — the lone fresh literal contributor widens.
+    assert_primitive(&expr, PrimitiveName::String);
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
@@ -304,20 +317,29 @@ fn flow_return_substrate_keeps_return_bearing_loop_degraded() {
 }
 
 #[test]
-fn flow_return_substrate_keeps_switch_degraded() {
+fn flow_return_substrate_serves_switch_arm_join() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubSwitchReturn");
-    assert_semantic_miss(&expr);
+    let TypeExpr::Union(members) = &expr else {
+        panic!("the switch arm join is a literal union, got {expr:?}");
+    };
+    assert_eq!(
+        members.as_ref(),
+        &[
+            TypeExpr::Literal(LiteralValue::String("a".to_string())),
+            TypeExpr::Literal(LiteralValue::String("b".to_string())),
+        ]
+    );
     assert_flow_return_dispatched(&record, "SubSwitchReturn");
 }
 
 #[test]
-fn flow_return_substrate_keeps_try_degraded() {
+fn flow_return_substrate_serves_try_return_widened() {
     let host = make_host_with_footprint();
     upsert_substrate_fixture(&host);
     let (expr, record) = resolve_substrate_alias(&host, "SubTryReturn");
-    assert_semantic_miss(&expr);
+    assert_primitive(&expr, PrimitiveName::String);
     assert_flow_return_dispatched(&record, "SubTryReturn");
 }
 

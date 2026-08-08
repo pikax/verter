@@ -457,13 +457,13 @@ pub(super) fn emit_rows(
         .iter()
         .filter(|member| member.visibility.is_public())
     {
-        let Some(name) = member.string_name() else {
+        let Some(name) = member.published_name() else {
             continue;
         };
         push_emit(
             &mut rows,
-            name,
-            authored_emit_anchor(mac, payload_index, effective_index, name),
+            name.as_ref(),
+            authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
         );
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));

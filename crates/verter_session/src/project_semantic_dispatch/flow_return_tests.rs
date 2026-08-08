@@ -102,12 +102,12 @@ export function subNonCallableCall() {
 }
 
 export function subObservesBrokenInit() {
-  const x = subSwitchReturn(1);
+  const x = subLoopReturn(1);
   return x;
 }
 
 export function subIgnoresBrokenInit() {
-  const x = subSwitchReturn(1);
+  const x = subLoopReturn(1);
   return 2;
 }
 
@@ -539,10 +539,12 @@ fn flow_return_return_free_loop_stays_transparent() {
 }
 
 #[test]
-fn flow_return_return_bearing_loop_switch_try_are_degraded() {
+fn flow_return_return_bearing_loop_stays_degraded_switch_and_try_resolve() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        for name in ["subLoopReturn", "subSwitchReturn", "subTryReturn"] {
+        // A return-bearing LOOP stays the unmodelled control surface:
+        // typed miss, nothing admitted — a repeat demand runs cold again.
+        for name in ["subLoopReturn"] {
             assert!(
                 flow_is_miss(
                     dispatch,
@@ -550,7 +552,6 @@ fn flow_return_return_bearing_loop_switch_try_are_degraded() {
                 ),
                 "{name} must stay degraded"
             );
-            // Nothing admitted: a repeat demand runs cold again.
             assert!(
                 flow_is_miss(
                     dispatch,
@@ -559,6 +560,48 @@ fn flow_return_return_bearing_loop_switch_try_are_degraded() {
                 "{name} must not admit a warm entry"
             );
         }
+        // A `switch` joins its arms' returns; both fresh literals stay
+        // pinned (the multi-contributor join widens nothing). tsgo
+        // 7.0.0-dev.20260526.1: `"a" | "b"`.
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subSwitchReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::union(vec![
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                    "a".to_string()
+                )),
+                verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                    "b".to_string()
+                )),
+            ])
+        );
+        assert!(!fallthrough);
+        // A `try` whose block returns contributes the lone fresh literal,
+        // which widens to its primitive. tsgo: `string`.
+        let (expr, fallthrough) = flow_result(
+            dispatch,
+            &host,
+            flow_key(
+                dispatch,
+                "subTryReturn",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+        );
+        assert_eq!(
+            expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        );
+        assert!(!fallthrough);
     });
 }
 
@@ -2010,10 +2053,10 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
             0
         );
 
-        // NO-VALUE failure: an unsupported `switch` body.
+        // NO-VALUE failure: an unsupported return-bearing `loop` body.
         let failure_key = flow_key(
             dispatch,
-            "subSwitchReturn",
+            "subLoopReturn",
             FunctionPartIdentity::DeclarationBody,
             0,
         );

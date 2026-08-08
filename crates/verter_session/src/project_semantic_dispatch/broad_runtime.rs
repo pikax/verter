@@ -571,7 +571,18 @@ impl ProjectSemanticDispatch<'_> {
                         }
                         Some(data) => match data.as_ref() {
                             SemanticNodeData::Object(surface) => {
-                                match surface.project_string_key(name.as_ref()) {
+                                // The member was ADMITTED under its
+                                // published name, and a numeric literal key
+                                // publishes under its canonical ECMAScript
+                                // string spelling — so the selection reads
+                                // the coercing known-key projection (JS
+                                // property identity: `"1"` and `1` are the
+                                // same property), never the non-coercing
+                                // string-key one, which misses exactly the
+                                // members the boundary just named.
+                                let key =
+                                    crate::semantic_query::PropertyKey::identifier(name.as_ref());
+                                match surface.project_known_key(&key) {
                                     crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
                                         node = member.value;
                                     }

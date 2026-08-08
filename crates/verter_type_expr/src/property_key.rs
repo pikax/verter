@@ -285,6 +285,25 @@ impl<C, I> AuthoredPropertyKey<C, I> {
         }
     }
 
+    /// The PUBLISHED name for string-named publication surfaces: an
+    /// ordinary string key verbatim, and a numeric literal key by its
+    /// canonical ECMAScript spelling — `{ 1: x }` IS the property `"1"`
+    /// (JS property identity coerces the numeric key), so a string-named
+    /// surface carries it under that spelling. `None` for symbol /
+    /// computed keys, which no string-named surface can carry.
+    ///
+    /// This is the ONE derivation every publication boundary reads — a
+    /// site that re-derives a published name on its own can disagree with
+    /// the rest of the boundary about which members the surface declares.
+    #[must_use]
+    pub fn published_name(&self) -> Option<Arc<str>> {
+        match self {
+            Self::String(value) => Some(Arc::clone(value)),
+            Self::Number(value) => Some(Arc::from(value.get().to_string())),
+            Self::UniqueSymbol(_) | Self::Computed(_) => None,
+        }
+    }
+
     /// Translate the computed-child and nominal-identity payloads without
     /// changing the authored key form.
     pub fn map<D, J>(

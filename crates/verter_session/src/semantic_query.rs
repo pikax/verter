@@ -1649,9 +1649,9 @@ pub enum FlowReturnFailure {
     /// The function position has no served body (missing declaration,
     /// bodiless overload, anonymous / computed-name position).
     Missing,
-    /// The body's control surface is not modeled: a return-bearing loop
-    /// or labeled construct, a `switch`, a `try`, `with`, an abrupt
-    /// cross-function jump, or a module-level statement in the body.
+    /// The body's control surface is not modeled: a return-bearing loop,
+    /// `with`, an abrupt cross-function jump, or a module-level statement
+    /// in the body.
     Unsupported(FlowReturnUnsupported),
     /// An in-flight dependency could not be decided (a torn view, a
     /// missing non-cycle edge, or a nonconverging recursive component).
@@ -1680,12 +1680,6 @@ pub enum FlowReturnFailure {
 pub enum FlowReturnUnsupported {
     /// A loop whose statement subtree contains a `return`.
     Loop,
-    /// Any `switch` statement.
-    Switch,
-    /// Any `try` statement.
-    Try,
-    /// A labeled statement whose subtree contains a `return`.
-    Labeled,
     /// A `break` / `continue` crossing the modeled region.
     Jump,
     /// A `with` statement.
@@ -3693,6 +3687,17 @@ impl SurfaceMember {
     #[must_use]
     pub fn string_name(&self) -> Option<&str> {
         self.key.as_string()
+    }
+
+    /// The member's PUBLISHED name, derived by the shared key authority
+    /// ([`verter_type_expr::AuthoredPropertyKey::published_name`]): an
+    /// ordinary string key verbatim, a numeric literal key by its
+    /// canonical ECMAScript spelling, `None` for symbol / computed keys.
+    /// The admission gate and the terminal sink both read this — never a
+    /// site-local derivation.
+    #[must_use]
+    pub fn published_name(&self) -> Option<Arc<str>> {
+        self.key.published_name()
     }
 }
 

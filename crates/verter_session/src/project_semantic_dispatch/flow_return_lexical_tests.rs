@@ -59,6 +59,14 @@ export function r5DestructuredParam({ b }: { b: number }) {
   return b;
 }
 
+export function r5DestructuredParamAliased({ b: renamed }: { b: number }) {
+  return renamed;
+}
+
+export function r5DestructuredParamNested({ b: { c } }: { b: { c: number } }) {
+  return c;
+}
+
 export function r5CaptureParam(n: number) {
   return () => n;
 }
@@ -172,17 +180,15 @@ export function r5CallOnConditionalVar(flag: boolean, cb: () => 1 | 2) {
   return cb();
 }
 
-export function r5SwitchHelper(value: number) {
-  switch (value) {
-    case 1:
-      return "a";
-    default:
-      return "b";
+export function r5LoopHelper(value: number) {
+  while (value > 0) {
+    return "a";
   }
+  return "b";
 }
 
 export function r5CallOnFailedInit(v: number) {
-  const q = r5SwitchHelper(v);
+  const q = r5LoopHelper(v);
   return q();
 }
 
@@ -2024,8 +2030,10 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     for name in [
         // A destructuring declarator element (`const { a } = …`).
         "r5DestructuredConst",
-        // A destructured formal parameter (`({ b }: …)`).
-        "r5DestructuredParam",
+        // A NESTED destructured formal parameter (`({ b: { c } }: …)`)
+        // — plain and aliased object-pattern elements are modelled,
+        // nested patterns are not.
+        "r5DestructuredParamNested",
         // A local `class` declaration's name.
         "r5LocalClass",
         // A hoisted nested function declaration's name read as a value.
@@ -2037,6 +2045,16 @@ fn flow_return_unmodelable_local_binding_never_falls_through_to_file_scope() {
     ] {
         assert_fails_closed(&host, name);
     }
+}
+
+/// A destructured object-pattern parameter element binds its annotation
+/// member — plain (`{ b }`) and aliased (`{ b: renamed }`) spellings
+/// alike. tsgo 7.0.0-dev.20260526.1: both are `number`.
+#[test]
+fn flow_return_destructured_param_element_binds_the_annotation_member() {
+    let host = make_r5_host();
+    assert_clean_warm(&host, "r5DestructuredParam", number());
+    assert_clean_warm(&host, "r5DestructuredParamAliased", number());
 }
 
 /// The cross-file proof: a local `class importedValue {}` shadows the
@@ -2098,14 +2116,14 @@ fn flow_return_block_local_shadows_a_same_named_parameter() {
 /// A return-free LABELED statement is fall-through transparent but its
 /// body still lowers: every inner rail (hoisted `var` scoping, the
 /// return-free-loop `var` fail-close, the conditional-`var` degradation,
-/// `switch` / `try` / `with`) applies exactly as it does for the
+/// the `switch` / `try` clause joins) applies exactly as it does for the
 /// unlabeled twin. Before the fix the labeled arm emitted a bare
 /// `TransparentLoop` and NEVER lowered its body, so every construct
 /// nested under a label bypassed all of them.
 ///
 /// tsgo 7.0.0-dev.20260526.1 (`--strict`): each of these is `number` (the loop / if /
-/// switch shapes additionally report "used before being assigned"),
-/// which is exactly what each unlabeled twin already fails closed on.
+/// switch shapes additionally report "used before being assigned" — the
+/// conditional-definition degradation is the substrate's twin of it).
 #[test]
 fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     let host = make_r5_host();
@@ -2122,9 +2140,17 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
         "r5LabeledIfVar",
         crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
-    // `switch` / `try` stay unsupported under a label.
-    assert_fails_closed(&host, "r5LabeledSwitchVar");
-    assert_fails_closed(&host, "r5LabeledTryVar");
+    // A `switch` declaring a `var` in one clause: the binding has no
+    // reaching definition on the paths that skip the clause — the
+    // conditional-`var` degradation, exactly like the `if` twin.
+    assert_degraded(
+        &host,
+        "r5LabeledSwitchVar",
+        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+    );
+    // A `try` whose block binds the `var` unconditionally reaches the
+    // function scope clean — tsgo types `r5LabeledTryVar(): number`.
+    assert_clean_warm(&host, "r5LabeledTryVar", number());
 }
 
 // ──────────────────────────────────────────────────────────────────────

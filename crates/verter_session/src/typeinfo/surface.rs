@@ -169,6 +169,16 @@ impl TypeInfoSurfaceMember {
     pub fn string_name(&self) -> Option<&str> {
         self.key.as_string()
     }
+
+    /// The member's PUBLISHED name, derived by the shared key authority
+    /// ([`verter_type_expr::AuthoredPropertyKey::published_name`]): an
+    /// ordinary string key verbatim, a numeric literal key by its
+    /// canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
+    /// `None` for symbol / computed keys.
+    #[must_use]
+    pub fn published_name(&self) -> Option<Arc<str>> {
+        self.key.published_name()
+    }
 }
 
 /// One call (`(args): ret`) or construct (`new (args): ret`) signature on a

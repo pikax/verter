@@ -1164,15 +1164,15 @@ pub(super) fn tsc_emit_rows(
         .iter()
         .filter(|member| member.visibility.is_public())
     {
-        let Some(name) = member.string_name() else {
+        let Some(name) = member.published_name() else {
             continue;
         };
         let parameters = render_emit_payload_parameters(ctx, dispatch, member.value, counters)?;
         push_tsc_emit(
             &mut rows,
-            name,
+            name.as_ref(),
             parameters,
-            authored_emit_anchor(mac, payload_index, effective_index, name),
+            authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
         );
     }
 

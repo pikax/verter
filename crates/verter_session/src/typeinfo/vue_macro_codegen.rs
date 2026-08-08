@@ -1099,7 +1099,7 @@ impl VerterHost {
                     .iter()
                     .filter(|member| member.visibility.is_public())
                 {
-                    let Some(member_name) = member.string_name() else {
+                    let Some(member_name) = member.published_name() else {
                         continue;
                     };
                     let type_text = if let Some(import_form) = cross_file_namespace_import_type(
@@ -1117,10 +1117,10 @@ impl VerterHost {
                         }
                     };
                     testing_rows.push(TscPropRow {
-                        name: member_name.to_owned(),
+                        name: member_name.to_string(),
                         optional: member.optional,
                         type_text,
-                        anchor: member_anchor(mac, payload_index, member_name),
+                        anchor: member_anchor(mac, payload_index, member_name.as_ref()),
                     });
                 }
                 let scope = match tsc_scope_requirements(
@@ -1310,7 +1310,7 @@ impl VerterHost {
             .iter()
             .filter(|member| member.visibility.is_public())
         {
-            let Some(member_name) = member.string_name() else {
+            let Some(member_name) = member.published_name() else {
                 continue;
             };
             // A demand that never renders the runtime `props` option object
@@ -1331,7 +1331,7 @@ impl VerterHost {
             } else {
                 match classify_runtime(
                     dispatch,
-                    runtime_subject.member(Arc::from(member_name)),
+                    runtime_subject.member(Arc::clone(&member_name)),
                     counters,
                 ) {
                     Ok(classification) => RuntimePropType::Resolved {
@@ -1344,10 +1344,10 @@ impl VerterHost {
                 }
             };
             props.push(RuntimeProp {
-                name: member_name.to_owned(),
+                name: member_name.to_string(),
                 optional: member.optional,
                 type_shape,
-                anchor: member_anchor(mac, payload_index, member_name),
+                anchor: member_anchor(mac, payload_index, member_name.as_ref()),
             });
         }
 

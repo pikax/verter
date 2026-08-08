@@ -2306,16 +2306,6 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
             "{ label: string }",
         ),
         (
-            "/src/U1Switch.vue",
-            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
-            "{ label: string }",
-        ),
-        (
-            "/src/U1Try.vue",
-            "function makeProps() { try { return { label: \"x\" } } catch { return { label: \"y\" } } }",
-            "{ label: string }",
-        ),
-        (
             "/src/U1LoopArrow.vue",
             "function makeProps() { return { label: \"x\", go: (n: number) => { while (n > 0) { return n } return 0 } } }",
             "{ label: string; go: (n: number) => number }",
@@ -2410,6 +2400,58 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
         hits_before + 1,
         "the clean control WARMS on replay (hits_before={hits_before}, hits_after={hits_after})"
     );
+
+    // The switch / try statement-position return shapes the no-answer set
+    // lost: both now publish the checker's surface, COMPLETE and warm.
+    for (canonical, script) in [
+        (
+            "/src/U1Switch.vue",
+            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+        ),
+        (
+            "/src/U1Try.vue",
+            "function makeProps() { try { return { label: \"x\" } } catch { return { label: \"y\" } } }",
+        ),
+    ] {
+        let project = make_project();
+        project
+            .upsert_base(
+                canonical,
+                &format!(
+                    "<script setup lang=\"ts\">\n{script}\ndefineProps<ReturnType<typeof makeProps>>()\n</script>\n<template><div /></template>"
+                ),
+            )
+            .unwrap();
+        let host = project.host();
+        let meta = get_meta(&project, canonical);
+        let names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["label"],
+            "{canonical}: the statement-position return join publishes the checker's member set"
+        );
+        let (_, resolved) = host
+            .get_component_meta_with_resolution(canonical)
+            .expect("the resolve must still return metadata");
+        assert!(
+            !resolved.synthesis_should_suppress,
+            "{canonical}: the switch / try return now HAS an answer — the surface is complete"
+        );
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = get_meta(&project, canonical);
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after,
+            hits_before + 1,
+            "{canonical}: a clean statement-position return WARMS on replay"
+        );
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2855,8 +2897,8 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 /// The fixtures ride COMPOUND assignments (`+=`): a plain `=` write at
 /// statement position is applied by the evaluator and verified, so the
 /// unverified class is exercised through the operator form nobody applies
-/// (and the destructured-parameter row through a binding the content half
-/// never models).
+/// (the destructured-parameter row included — its plain element binding
+/// is modelled, so it too needs the compound form to stay unverified).
 ///
 /// The degradation is a property of the FRAME (it is seeded from the lowered
 /// slice's effect list before any member is evaluated), so it applies to
@@ -2890,7 +2932,7 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
         ),
         (
             "/src/W3Destructure.vue",
-            "function makeProps({ seed }: {seed: string}) { seed = \"y\"; return { label: seed, n: 1 } }",
+            "function makeProps({ seed }: {seed: string}) { seed += \"y\"; return { label: seed, n: 1 } }",
             &["label", "n"],
         ),
     ];

@@ -4200,11 +4200,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
     }
 
     /// Empty-path Shallow terminal over an `ObjectSpreadProgram` root.
-    /// `SurfaceView::closed()` is total, so only a single CLOSED
-    /// alternative may materialise a closed `Object` (the exact complete
-    /// surface). An open residual, a correlated multi-branch formula, or
-    /// a projection failure returns the construction program itself as
-    /// the typed open evidence with `result_is_partial` +
+    /// `SurfaceView::closed()` is total, so a single CLOSED alternative
+    /// materialises a closed `Object` (the exact complete surface), and a
+    /// correlated multi-alternative formula takes the ONE shared
+    /// closed-domain disposition ([`Self::closed_merge_of_formula`]):
+    /// with every alternative closed, the demand's own union rule merges
+    /// the alternatives exactly the way the plain-union flush does.
+    /// Any other shape — an open residual, an alternative that does not
+    /// close, a projection failure — returns the construction program
+    /// itself as the typed open evidence with `result_is_partial` +
     /// `cache_suppress` set and the `OpenSpreadProgram` diagnostic —
     /// mirroring the open-safe Key path; consumers that need positive
     /// member names go through the correlated spread query.
@@ -4213,9 +4217,18 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             ProgramShallowProjection::SingleClosed(view) => {
                 self.graph().intern_node(SemanticNodeData::Object(view))
             }
-            ProgramShallowProjection::OpenOrCorrelated(_)
-            | ProgramShallowProjection::Recursive
-            | ProgramShallowProjection::Failed => {
+            ProgramShallowProjection::OpenOrCorrelated(formula) => {
+                match self.closed_merge_of_formula(&formula) {
+                    Some(merged) => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged))),
+                    None => {
+                        self.mark_open_spread_partial(node);
+                        node
+                    }
+                }
+            }
+            ProgramShallowProjection::Recursive | ProgramShallowProjection::Failed => {
                 self.mark_open_spread_partial(node);
                 node
             }
@@ -4244,6 +4257,50 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             QueryResult::Recursive(_) => ProgramShallowProjection::Recursive,
             QueryResult::Error(_) => ProgramShallowProjection::Failed,
         }
+    }
+
+    /// The ONE closed-domain disposition of a correlated multi-alternative
+    /// spread formula, shared by the program-root terminal and the
+    /// nested-program arm so the two halves can never disagree about
+    /// whether the formula is open.
+    ///
+    /// When EVERY alternative closes, each branch's key set is proven, so
+    /// the formula is exactly the distributed union of its alternatives —
+    /// the same fact a plain `A | B` object union presents, which this
+    /// walker already merges WITHOUT a partial flag. The merge therefore
+    /// rides the demand's own union rule: the Vue macro union-of-members
+    /// rule under a macro object-surface demand
+    /// (`merge_union_surfaces_for_macro` — `defineProps<A | B>()` declares
+    /// every arm's members), the common-member rule otherwise
+    /// (`merge_union_surfaces` — the plain-union flush's own). `None`
+    /// only when some alternative stays open — the merged surface can
+    /// never claim a closed domain for an open branch.
+    fn closed_merge_of_formula(
+        &self,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+    ) -> Option<ShallowSurface> {
+        let arms: Option<Vec<ShallowSurface>> = formula
+            .alternatives()
+            .iter()
+            .map(|alternative| {
+                // The alternative is closed, so every member's evidence is
+                // Proven and the conversion is lossless.
+                alternative
+                    .closed()
+                    .and_then(|closed| closed.to_closed_surface_view())
+                    .map(|_view| {
+                        shallow_surface_from_projection_alternative(self.graph(), alternative)
+                    })
+            })
+            .collect();
+        arms.and_then(|arms| {
+            let arms = arms.into_iter().map(Some).collect::<Vec<_>>();
+            if self.context.is_macro_object_surface() {
+                merge_union_surfaces_for_macro(self.graph(), &arms)
+            } else {
+                merge_union_surfaces(self.graph(), &arms)
+            }
+        })
     }
 
     /// Flag the read partial + uncacheable and record the explicit
@@ -4995,8 +5052,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // arm contributes its exact projected surface; an open /
             // multi-alternative arm contributes its positive join but
             // flags the whole read partial + uncacheable (the merged
-            // surface can never claim a closed domain for it); a failed
-            // projection contributes nothing and flags partiality.
+            // surface can never claim a closed domain for it) — UNLESS the
+            // ONE shared closed-domain disposition
+            // (`closed_merge_of_formula`) proves every alternative closed,
+            // in which case the demand's own union merge is the exact
+            // surface and nothing is partial; a failed projection
+            // contributes nothing and flags partiality.
             SemanticNodeData::ObjectSpreadProgram(_) => {
                 drop(data);
                 match self.project_program_for_shallow(cur) {
@@ -5011,6 +5072,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         );
                     }
                     ProgramShallowProjection::OpenOrCorrelated(formula) => {
+                        if let Some(closed_merge) = self.closed_merge_of_formula(&formula) {
+                            self.contribute_surface(
+                                target,
+                                root_contribution,
+                                intersection_buffers,
+                                union_buffers,
+                                Some(closed_merge),
+                            );
+                            return;
+                        }
                         self.mark_open_spread_partial(cur);
                         let arm_surfaces: Vec<Option<ShallowSurface>> = formula
                             .alternatives()

@@ -1881,12 +1881,6 @@ const FRAMEWORK_ONLY_WORKLIST: &[&str] = &[
 #[cfg(test)]
 const OPEN_DEBTS: &[&str] = &[
     // ── TypeScript semantics: flow-return substrate ──────────────────────
-    // A NUMERIC literal key is silently dropped from the published surface —
-    // identically whether the sibling spread is CALL-sourced or
-    // IDENTIFIER-sourced, so what remains owed is the numeric-key spelling
-    // and not the callee source.
-    "B02_numeric_key_after_call",
-    "B09_numeric_key_ident",
     // An intersection / heritage arm whose flow return is WHOLLY unmodelled is
     // silently DROPPED instead of failing closed. This is the family the 15
     // existing `ReturnType<typeof …>` tests structurally could not reach:
@@ -1897,10 +1891,6 @@ const OPEN_DEBTS: &[&str] = &[
     // A mapped type over a flow-return heritage clause publishes ZERO members.
     "C09_heritage_members_clean",
     "C10_heritage_members_degraded",
-    // Multi-return join: `switch` / `try` arms that each return an object
-    // literal produce NO VALUE.
-    "D06_switch_return",
-    "D07_try_return",
     // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
     // The file loses its whole type-check surface for programs the checker
     // types without difficulty.
@@ -1909,7 +1899,6 @@ const OPEN_DEBTS: &[&str] = &[
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
-    "H02_union_spread_source",
     // ── NARROWING ────────────────────────────────────────────────────
     // The narrowing blocks landed: every seeded narrowing row now matches
     // the checker except N09_narrow_then_write, whose remaining debt is
@@ -1925,16 +1914,6 @@ const OPEN_DEBTS: &[&str] = &[
     // the row flips the moment the annotation's union reaches the member.
     "CC02_annotated_return_literal_union",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
-    // Conditional spread source whose arms share a key set: refused, and the
-    // TSX lane faults.
-    "X01_spread_narrow_arm_source",
-    // try/catch and labelled/fallthrough control-flow joins with object-literal
-    // returns produce NO VALUE — the D06_switch_return / D07_try_return family
-    // extended to catch arms, labelled blocks, and switch fallthrough.
-    "X04_try_catch_join",
-    "X05_catch_return_fallthrough",
-    "X15_labelled_block_return",
-    "X16_switch_fallthrough",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // Async return wrapping is unmodelled: the Promise is silently unwrapped
@@ -1966,15 +1945,15 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 2, 0, 2),
     (Owner::U6CallResolve, 4, 4, 0),
-    (Owner::U6ValueInference, 18, 8, 9),
+    (Owner::U6ValueInference, 18, 18, 0),
     (Owner::U6ContextualCore, 9, 8, 1),
-    (Owner::U6FlowReturnSubstrate, 44, 35, 2),
+    (Owner::U6FlowReturnSubstrate, 44, 36, 2),
     (Owner::U6NarrowTypeof, 9, 9, 0),
     (Owner::U6NarrowLattice, 3, 3, 0),
     (Owner::U6NarrowSubstitution, 2, 2, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
-    (Owner::SharedCompilePipeline, 7, 0, 7),
+    (Owner::SharedCompilePipeline, 7, 1, 6),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];
 
@@ -2096,7 +2075,6 @@ const UNASSIGNED_PARKED_ROWS: &[&str] = &[
     "E01_spread_any",
     "E02_spread_index_signature",
     "E03_spread_array",
-    "H02_union_spread_source",
     // The generator-return shape: the macro lane's rejection is correct, the
     // TSX lane fault is not.
     "X19_generator_yield",

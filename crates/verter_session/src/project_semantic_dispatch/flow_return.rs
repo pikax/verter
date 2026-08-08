@@ -2524,6 +2524,27 @@ fn collect_assignment_spans(
             crate::flow_slice_content::SliceStatement::Block(block) => {
                 collect_assignment_spans(block, out);
             }
+            crate::flow_slice_content::SliceStatement::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_assignment_spans(&case.region, out);
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Try {
+                block,
+                catch,
+                finally,
+            } => {
+                collect_assignment_spans(block, out);
+                if let Some(catch) = catch {
+                    collect_assignment_spans(&catch.region, out);
+                }
+                if let Some(finally) = finally {
+                    collect_assignment_spans(finally, out);
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Labeled(body) => {
+                collect_assignment_spans(body, out);
+            }
             crate::flow_slice_content::SliceStatement::Return { .. }
             | crate::flow_slice_content::SliceStatement::Binding { .. }
             | crate::flow_slice_content::SliceStatement::Assertion { .. }
@@ -2795,6 +2816,21 @@ struct FlowContribution {
     node: SemanticNodeId,
     /// The contributor is a fresh (widening) literal source.
     fresh_literal: bool,
+}
+
+/// One point-in-time snapshot of the evaluator's binding layers — the
+/// reaching-definitions state a multi-path construct (`switch` dispatch
+/// and fall-through, `try` / `catch` / `finally`) joins over.
+#[derive(Clone)]
+struct FlowLayerState {
+    locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    degraded_locals: rustc_hash::FxHashSet<String>,
+    widening_locals: rustc_hash::FxHashSet<String>,
+    var_locals: rustc_hash::FxHashMap<String, SemanticNodeId>,
+    var_degraded_locals: rustc_hash::FxHashSet<String>,
+    var_widening_locals: rustc_hash::FxHashSet<String>,
+    var_conditional_locals: rustc_hash::FxHashSet<String>,
+    param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
 }
 
 /// The outcome of evaluating ONE POSITION — a sub-expression, or one call
@@ -3355,6 +3391,176 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Snapshot the live binding layers.
+    fn layer_state(&self) -> FlowLayerState {
+        FlowLayerState {
+            locals: self.locals.clone(),
+            degraded_locals: self.degraded_locals.clone(),
+            widening_locals: self.widening_locals.clone(),
+            var_locals: self.var_locals.clone(),
+            var_degraded_locals: self.var_degraded_locals.clone(),
+            var_widening_locals: self.var_widening_locals.clone(),
+            var_conditional_locals: self.var_conditional_locals.clone(),
+            param_writes: self.param_writes.clone(),
+        }
+    }
+
+    /// Restore a snapshot into the live layers.
+    fn restore_layer_state(&mut self, state: FlowLayerState) {
+        self.locals = state.locals;
+        self.degraded_locals = state.degraded_locals;
+        self.widening_locals = state.widening_locals;
+        self.var_locals = state.var_locals;
+        self.var_degraded_locals = state.var_degraded_locals;
+        self.var_widening_locals = state.var_widening_locals;
+        self.var_conditional_locals = state.var_conditional_locals;
+        self.param_writes = state.param_writes;
+    }
+
+    /// Complete a snapshot's parameter-write layer with the signature's
+    /// own parameter nodes, so a pointwise join over snapshots reads "no
+    /// write on this path" as the parameter's declared value instead of
+    /// dropping the ordinal. Reads are unchanged — every consumer already
+    /// falls back to `params[ordinal]` for a missing write.
+    fn complete_param_writes(&self, state: &mut FlowLayerState) {
+        for ordinal in 0..self.params.len() {
+            let ordinal = ordinal as u32;
+            if !state.param_writes.contains_key(&ordinal) {
+                if let Some(node) = self.params.get(ordinal as usize) {
+                    state.param_writes.insert(ordinal, *node);
+                }
+            }
+        }
+    }
+
+    /// The pointwise join of two reaching-definition states: a binding
+    /// both states carry holds the normalized union of its two values; a
+    /// binding only one carries keeps that value. Membership flags union
+    /// (a binding degraded / widening / conditional on ANY reaching path
+    /// keeps the flag) — the honest direction for a joined answer.
+    fn join_layer_states(&self, a: &FlowLayerState, b: &FlowLayerState) -> FlowLayerState {
+        let join_values =
+            |from: &rustc_hash::FxHashMap<String, SemanticNodeId>,
+             into: &mut rustc_hash::FxHashMap<String, SemanticNodeId>| {
+                for (name, node) in from.iter() {
+                    match into.entry(name.clone()) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            let existing = *entry.get();
+                            if existing != *node {
+                                entry.insert(
+                                    self.dispatch.intern_normalized_union_or_intersection(
+                                        &[existing, *node],
+                                        true,
+                                    ),
+                                );
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(*node);
+                        }
+                    }
+                }
+            };
+        let mut joined = a.clone();
+        join_values(&b.locals, &mut joined.locals);
+        join_values(&b.var_locals, &mut joined.var_locals);
+        joined
+            .degraded_locals
+            .extend(b.degraded_locals.iter().cloned());
+        joined
+            .widening_locals
+            .extend(b.widening_locals.iter().cloned());
+        joined
+            .var_degraded_locals
+            .extend(b.var_degraded_locals.iter().cloned());
+        joined
+            .var_widening_locals
+            .extend(b.var_widening_locals.iter().cloned());
+        joined
+            .var_conditional_locals
+            .extend(b.var_conditional_locals.iter().cloned());
+        for (ordinal, node) in b.param_writes.iter() {
+            match joined.param_writes.entry(*ordinal) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let existing = *entry.get();
+                    if existing != *node {
+                        entry.insert(
+                            self.dispatch
+                                .intern_normalized_union_or_intersection(&[existing, *node], true),
+                        );
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(*node);
+                }
+            }
+        }
+        joined
+    }
+
+    /// Flag the `var` bindings of a joined state that some normal-exit
+    /// path never defined: their surviving value has no reaching
+    /// definition on that path, which is exactly what the
+    /// conditional-definition membership fails closed on at a read.
+    fn flag_conditionally_defined_vars(
+        &self,
+        joined: &mut FlowLayerState,
+        exit_states: &[FlowLayerState],
+    ) {
+        let conditionally_defined: Vec<String> = joined
+            .var_locals
+            .keys()
+            .filter(|name| {
+                exit_states
+                    .iter()
+                    .any(|state| !state.var_locals.contains_key(*name))
+            })
+            .cloned()
+            .collect();
+        joined.var_conditional_locals.extend(conditionally_defined);
+    }
+
+    /// Evaluate one clause region of a `try` statement in its own block
+    /// scope, starting from `start`: lexical bindings declared inside do
+    /// not escape (the catch parameter included); function-scoped `var`
+    /// and parameter writes do. Returns the clause's return contributions
+    /// and the end-of-clause state (parameter writes completed).
+    fn eval_try_clause(
+        &mut self,
+        start: &FlowLayerState,
+        region: &crate::flow_slice_content::SliceRegion,
+        catch_param: Option<&Arc<str>>,
+    ) -> Result<(Vec<FlowContribution>, FlowLayerState), FlowReturnFailure> {
+        self.restore_layer_state(start.clone());
+        let saved_locals = self.locals.clone();
+        let saved_degraded = self.degraded_locals.clone();
+        let saved_widening = self.widening_locals.clone();
+        if let Some(param) = catch_param {
+            // The catch parameter is `unknown` under the checker's strict
+            // default (`useUnknownInCatchVariables`): bound so a read
+            // resolves to the honest primitive instead of a free-name miss.
+            let unknown = self
+                .dispatch
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
+            self.bind_local(
+                param.as_ref(),
+                crate::flow_slice_content::SliceBindingKind::Const,
+                unknown,
+                false,
+                false,
+            );
+        }
+        let (result, _) = self.eval_region(region);
+        let contributions = result?;
+        self.locals = saved_locals;
+        self.degraded_locals = saved_degraded;
+        self.widening_locals = saved_widening;
+        let mut end = self.layer_state();
+        self.complete_param_writes(&mut end);
+        Ok((contributions, end))
+    }
+
     /// READ one local across the two scope layers — the ONLY way to take
     /// a local's bound node. The lexical layer shadows the function-scoped
     /// `var` layer while its block is live, and the read FOLDS the
@@ -3367,6 +3573,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// every observation of a degraded binding degrades the result, by
     /// construction rather than by per-site discipline.
     fn read_local(&mut self, name: &str) -> Option<SemanticNodeId> {
+        // A destructured object-pattern parameter element binds its
+        // annotation member LAZILY, on first read: an element the demand
+        // never reads stays cold (no projection, no degradation), and an
+        // element whose member cannot be projected binds the typed
+        // unmodelled-position marker with the failed-initializer
+        // membership — exactly like an unmodelled declarator initializer,
+        // so observing it degrades and never observing it is free.
+        if !self.locals.contains_key(name) && !self.var_locals.contains_key(name) {
+            self.seed_destructured_param_element(name);
+        }
         // The lexical layer's conditional flag is always false: a
         // block-scoped conditional binding never escapes its arm.
         let (node, degraded, conditional) = if let Some(node) = self.locals.get(name) {
@@ -3399,6 +3615,72 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
         }
         Some(node)
+    }
+
+    /// Seed one destructured object-pattern parameter element into the
+    /// lexical layer on its first read: the element binds the annotation's
+    /// same-named member — `T | undefined` when the member is optional and
+    /// the element authored no default, the member's value otherwise (a
+    /// default removes the `undefined` arm). An element whose annotation
+    /// is not an object surface, or names no such member, binds the typed
+    /// unmodelled-position marker with the failed-initializer membership:
+    /// the fail-closed answer the position had before, now positional.
+    fn seed_destructured_param_element(&mut self, name: &str) {
+        let Some((ordinal, key, has_default)) =
+            self.param_names
+                .iter()
+                .enumerate()
+                .find_map(|(ordinal, param)| {
+                    param
+                        .destructured
+                        .iter()
+                        .find(|element| element.name.as_ref() == name)
+                        .map(|element| (ordinal, Arc::clone(&element.key), element.has_default))
+                })
+        else {
+            return;
+        };
+        let base = self.params.get(ordinal).copied();
+        let member = base.and_then(|base| {
+            let data = self.dispatch.graph().node_data(base);
+            let view = match data.as_deref() {
+                Some(SemanticNodeData::Object(view)) => view,
+                _ => return None,
+            };
+            match view.project_known_key(&crate::semantic_query::PropertyKey::identifier(
+                Arc::clone(&key),
+            )) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                    Some((member.value, member.optional))
+                }
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+            }
+        });
+        let (node, degraded) = match member {
+            Some((value, optional)) => {
+                if optional && !has_default {
+                    let undefined = self
+                        .dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                    (
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&[value, undefined], true),
+                        false,
+                    )
+                } else {
+                    (value, false)
+                }
+            }
+            None => (self.unmodeled_position(), true),
+        };
+        self.bind_local(
+            name,
+            crate::flow_slice_content::SliceBindingKind::Const,
+            node,
+            false,
+            degraded,
+        );
     }
 
     /// Project a frame-rooted `typeof` path leaf: `x.a.b` whose root `x`
@@ -4405,6 +4687,173 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         alternate_param_writes,
                     );
                 }
+                crate::flow_slice_content::SliceStatement::Switch { cases, has_default } => {
+                    // tsc's switch flow: a case clause is entered by the
+                    // dispatch edge (the state at the switch) AND, for
+                    // every clause after the first, by the previous
+                    // clause's fall-through edge — so each clause starts
+                    // from the JOIN of those two states. The state past
+                    // the switch joins every path that leaves it normally:
+                    // a `break`, falling off the last clause, and the
+                    // no-matching-case path when no `default` exists. The
+                    // clauses share ONE block scope, exactly as the
+                    // authored switch body does.
+                    let mut entry = self.layer_state();
+                    self.complete_param_writes(&mut entry);
+                    let mut chain_end: Option<FlowLayerState> = None;
+                    let mut case_ends: Vec<FlowLayerState> = Vec::with_capacity(cases.len());
+                    for case in cases.iter() {
+                        let start = match &chain_end {
+                            None => entry.clone(),
+                            Some(end) => self.join_layer_states(&entry, end),
+                        };
+                        self.restore_layer_state(start);
+                        let (case_result, _) = self.eval_region(&case.region);
+                        match case_result {
+                            Ok(case_contributors) => contributors.extend(case_contributors),
+                            Err(failure) => return (Err(failure), region.can_fall_through),
+                        }
+                        let end = self.layer_state();
+                        chain_end = Some(end.clone());
+                        case_ends.push(end);
+                    }
+                    let mut exit_states: Vec<FlowLayerState> = Vec::new();
+                    if !has_default {
+                        exit_states.push(entry.clone());
+                    }
+                    for (case, end) in cases.iter().zip(case_ends.iter()) {
+                        if case.breaks {
+                            exit_states.push(end.clone());
+                        }
+                    }
+                    if let Some((case, end)) = cases.last().zip(case_ends.last()) {
+                        if case.region.can_fall_through {
+                            exit_states.push(end.clone());
+                        }
+                    }
+                    let mut joined = match exit_states.split_first() {
+                        Some((first, rest)) => {
+                            let mut joined = first.clone();
+                            for state in rest {
+                                joined = self.join_layer_states(&joined, state);
+                            }
+                            joined
+                        }
+                        // No path leaves the switch normally: the
+                        // post-switch state is unreachable (the lowering
+                        // dropped it); restore the entry to keep the
+                        // layers sane.
+                        None => entry.clone(),
+                    };
+                    // Lexical bindings declared inside a clause are scoped
+                    // to the switch body: they do not escape it.
+                    joined
+                        .locals
+                        .retain(|name, _| entry.locals.contains_key(name));
+                    joined
+                        .degraded_locals
+                        .retain(|name| entry.locals.contains_key(name));
+                    joined
+                        .widening_locals
+                        .retain(|name| entry.locals.contains_key(name));
+                    if !exit_states.is_empty() {
+                        self.flag_conditionally_defined_vars(&mut joined, &exit_states);
+                    }
+                    self.restore_layer_state(joined);
+                }
+                crate::flow_slice_content::SliceStatement::Try {
+                    block,
+                    catch,
+                    finally,
+                } => {
+                    // The catch clause is entered from any throw point of
+                    // the try block; this model enters it from the try's
+                    // ENTRY state — assignments inside the try are not
+                    // visible in the catch. The finally clause runs on
+                    // every completion path; a finally that may RETURN
+                    // overrides the pending try/catch contributions on the
+                    // paths where it does not fall through (abrupt finally
+                    // completion discards a pending return — the checker's
+                    // own rule), and joins them where it does.
+                    let mut entry = self.layer_state();
+                    self.complete_param_writes(&mut entry);
+                    let mut own: Vec<FlowContribution> = Vec::new();
+                    let mut exit_states: Vec<FlowLayerState> = Vec::new();
+                    let (try_contributors, try_end) =
+                        match self.eval_try_clause(&entry, block, None) {
+                            Ok(clause) => clause,
+                            Err(failure) => return (Err(failure), region.can_fall_through),
+                        };
+                    own.extend(try_contributors);
+                    if block.can_fall_through {
+                        exit_states.push(try_end);
+                    }
+                    if let Some(catch) = catch {
+                        let (catch_contributors, catch_end) =
+                            match self.eval_try_clause(&entry, &catch.region, catch.param.as_ref())
+                            {
+                                Ok(clause) => clause,
+                                Err(failure) => return (Err(failure), region.can_fall_through),
+                            };
+                        own.extend(catch_contributors);
+                        if catch.region.can_fall_through {
+                            exit_states.push(catch_end);
+                        }
+                    }
+                    // The pre-finally state joins every NORMAL completion
+                    // of the try/catch. With none, no state reaches past
+                    // the try — the entry stands in only to keep the
+                    // finally clause's own evaluation well-formed.
+                    let mut pre_finally = match exit_states.split_first() {
+                        Some((first, rest)) => {
+                            let mut joined = first.clone();
+                            for state in rest {
+                                joined = self.join_layer_states(&joined, state);
+                            }
+                            joined
+                        }
+                        None => entry.clone(),
+                    };
+                    if !exit_states.is_empty() {
+                        self.flag_conditionally_defined_vars(&mut pre_finally, &exit_states);
+                    }
+                    match finally {
+                        Some(finally) => {
+                            let (finally_contributors, _finally_end) =
+                                match self.eval_try_clause(&pre_finally, finally, None) {
+                                    Ok(clause) => clause,
+                                    Err(failure) => return (Err(failure), region.can_fall_through),
+                                };
+                            if finally.can_fall_through {
+                                own.extend(finally_contributors);
+                            } else if crate::flow_slice_content::slice_region_may_return(finally) {
+                                own = finally_contributors;
+                            } else {
+                                own = Vec::new();
+                            }
+                        }
+                        None => self.restore_layer_state(pre_finally),
+                    }
+                    contributors.extend(own);
+                }
+                crate::flow_slice_content::SliceStatement::Labeled(body) => {
+                    // The label's only flow effect — a `break` naming it —
+                    // was absorbed into the statement's reachability at
+                    // lowering, so the body evaluates as an ordinary
+                    // block.
+                    let saved = self.locals.clone();
+                    let saved_degraded = self.degraded_locals.clone();
+                    let saved_widening = self.widening_locals.clone();
+                    let (result, _) = self.eval_region(body);
+                    let body_contributors = match result {
+                        Ok(contributors) => contributors,
+                        Err(failure) => return (Err(failure), region.can_fall_through),
+                    };
+                    contributors.extend(body_contributors);
+                    self.locals = saved;
+                    self.degraded_locals = saved_degraded;
+                    self.widening_locals = saved_widening;
+                }
                 crate::flow_slice_content::SliceStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
                     // never escapes it.
@@ -4569,15 +5018,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Err(FlowReturnFailure::Unsupported(match kind {
                             crate::flow_slice_content::SliceUnsupported::Loop => {
                                 FlowReturnUnsupported::Loop
-                            }
-                            crate::flow_slice_content::SliceUnsupported::Switch => {
-                                FlowReturnUnsupported::Switch
-                            }
-                            crate::flow_slice_content::SliceUnsupported::Try => {
-                                FlowReturnUnsupported::Try
-                            }
-                            crate::flow_slice_content::SliceUnsupported::Labeled => {
-                                FlowReturnUnsupported::Labeled
                             }
                             crate::flow_slice_content::SliceUnsupported::Jump => {
                                 FlowReturnUnsupported::Jump

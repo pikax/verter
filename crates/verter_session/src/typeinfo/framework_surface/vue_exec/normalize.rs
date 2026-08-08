@@ -113,7 +113,7 @@ pub(crate) fn props_from_typeinfo_surface(
         // `protected` class fields as props.
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            let member_name = member.string_name()?.to_string();
+            let member_name = member.published_name()?.to_string();
             // Display-only render of the member's one-level value, minted ONCE
             // at this terminal sink (the by-name `.and_then` form — no decision
             // on the materialized value).
@@ -350,7 +350,7 @@ pub(crate) fn object_members_from_typeinfo_surface(
         .filter(|member| member.visibility.is_public())
         .filter_map(
             |member| Some(crate::typeinfo::framework_surface::results::NamedTypeMember {
-                name: member.string_name()?.to_string(),
+                name: member.published_name()?.to_string(),
                 is_optional: member.optional,
                 value: raise_member_value(ctx, member).map(|raised| {
                     crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::classify_shallow(&raised)
@@ -407,7 +407,7 @@ pub(crate) fn exposed_from_typeinfo_surface(
         .iter()
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            let member_name = member.string_name()?.to_string();
+            let member_name = member.published_name()?.to_string();
             let (description, tags) = member_jsdoc_from_spans(host, member);
             // The published member-value SOURCE POSITION: the graph-native
             // closed / shallow-ref / projected member-path source. An
@@ -1030,7 +1030,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
         .unwrap_or(&[]);
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
     {
-        let member_name = member.string_name()?.to_string();
+        let member_name = member.published_name()?.to_string();
         let raised = raise_member_value(ctx, member);
         let payload_type = raised.as_ref().and_then(render_type_expr_display);
         // LOCAL authored position candidates: analyzer emit fields

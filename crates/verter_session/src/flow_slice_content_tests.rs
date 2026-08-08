@@ -251,9 +251,9 @@ fn return_bearing_loop_is_unsupported() {
     assert!(!node.can_fall_through);
 }
 
-/// @ai-generated - switch is typed-unsupported
+/// @ai-generated - a switch lowers each case clause as its own region
 #[test]
-fn switch_is_unsupported() {
+fn switch_lowers_case_regions() {
     let node = content_for(
         "function pick(x: number) {\n\
          \x20 switch (x) {\n\
@@ -264,15 +264,36 @@ fn switch_is_unsupported() {
          }\n",
         "pick",
     );
-    assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Unsupported(SliceUnsupported::Switch)],
-    );
+    // No `default` and no `break`: the no-matching-case path reaches the
+    // trailing return, so the body still falls through the switch.
+    let [SliceStatement::Switch { cases, has_default }, trailing] = node.body.statements.as_ref()
+    else {
+        panic!("expected a Switch statement followed by the trailing return");
+    };
+    assert!(!has_default);
+    assert_eq!(cases.len(), 1);
+    assert!(!cases[0].breaks);
+    assert!(!cases[0].region.can_fall_through);
+    assert!(matches!(
+        cases[0].region.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        trailing,
+        SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }
+    ));
+    assert!(!node.can_fall_through);
 }
 
-/// @ai-generated - try is typed-unsupported
+/// @ai-generated - a try lowers each clause as its own region
 #[test]
-fn try_is_unsupported() {
+fn try_lowers_clause_regions() {
     let node = content_for(
         "function attempt() {\n\
          \x20 try {\n\
@@ -282,10 +303,30 @@ fn try_is_unsupported() {
          }\n",
         "attempt",
     );
-    assert_eq!(
-        node.body.statements.as_ref(),
-        &[SliceStatement::Unsupported(SliceUnsupported::Try)],
-    );
+    let [SliceStatement::Try {
+        block,
+        catch,
+        finally,
+    }] = node.body.statements.as_ref()
+    else {
+        panic!("expected a single Try statement");
+    };
+    assert!(!block.can_fall_through);
+    assert!(matches!(
+        block.statements.as_ref(),
+        [SliceStatement::Return {
+            argument: Some(_),
+            ..
+        }]
+    ));
+    let catch = catch.as_ref().expect("the catch clause lowers");
+    assert!(catch.param.is_none());
+    assert!(catch.region.can_fall_through);
+    assert!(catch.region.statements.is_empty());
+    assert!(finally.is_none());
+    // The catch falls through, so the try does — and the body has no
+    // trailing return.
+    assert!(node.can_fall_through);
 }
 
 /// @ai-generated - return of a parameter lowers to the Param carrier with its annotation
