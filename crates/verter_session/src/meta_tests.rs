@@ -2177,13 +2177,16 @@ import { obj } from './obj'
 /// PUBLIC BOUNDARY — a DEGRADED SUCCESS whose value is fully usable still
 /// gates the ENCLOSING result: partial, and nothing warms.
 ///
-/// This is the arm the marker cannot cover. `makeProps` assigns to its
-/// own parameter before returning, so the evaluation carries the typed
-/// `UnappliedWriteEffect` degradation — but its VALUE is a perfectly
-/// ordinary `{ label: string }` with no miss carrier anywhere in it. So
-/// every downstream "is this value known" test passes, the props surface
-/// publishes `label: string`, and the ONLY thing that says the answer is
-/// not complete is the degradation channel itself.
+/// This is the arm the marker cannot cover. `makeProps` compound-assigns
+/// to its own parameter before returning — a plain `=` write at
+/// statement position is APPLIED by the evaluator and stays clean, so
+/// the degradation fixture rides the operator form nobody applies —
+/// so the evaluation carries the typed `UnappliedWriteEffect` degradation
+/// — but its VALUE is a perfectly ordinary `{ label: string }` with no
+/// miss carrier anywhere in it. So every downstream "is this value
+/// known" test passes, the props surface publishes `label: string`, and
+/// the ONLY thing that says the answer is not complete is the
+/// degradation channel itself.
 ///
 /// The sealed consumer entry
 /// (`ProjectSemanticDispatch::execute_function_return_source`) is what
@@ -2207,7 +2210,7 @@ fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
             "/src/C2.vue",
             r#"<script setup lang="ts">
 function makeProps(seed: string) {
-  seed = "y"
+  seed += "y"
   return { label: seed }
 }
 defineProps<ReturnType<typeof makeProps>>()
@@ -2849,6 +2852,12 @@ fn a_root_position_flow_degradation_refuses_instead_of_publishing_empty_props() 
 /// are ordinary TypeScript that the previous implementation compiled
 /// correctly.
 ///
+/// The fixtures ride COMPOUND assignments (`+=`): a plain `=` write at
+/// statement position is applied by the evaluator and verified, so the
+/// unverified class is exercised through the operator form nobody applies
+/// (and the destructured-parameter row through a binding the content half
+/// never models).
+///
 /// The degradation is a property of the FRAME (it is seeded from the lowered
 /// slice's effect list before any member is evaluated), so it applies to
 /// every member. Attributing it per member by intersecting each member
@@ -2871,12 +2880,12 @@ fn an_unverified_flow_return_publishes_its_member_set_with_validation_off() {
     const ROWS: &[(&str, &str, &[&str])] = &[
         (
             "/src/W1Param.vue",
-            "function makeProps(seed: string) { seed = \"y\"; return { label: seed } }",
+            "function makeProps(seed: string) { seed += \"y\"; return { label: seed } }",
             &["label"],
         ),
         (
             "/src/W2CondVar.vue",
-            "function makeProps(k: boolean) { var v = 1; if (k) { v = 2 } return { label: \"x\", n: v } }",
+            "function makeProps(k: boolean) { var v = 1; if (k) { v += 2 } return { label: \"x\", n: v } }",
             &["label", "n"],
         ),
         (

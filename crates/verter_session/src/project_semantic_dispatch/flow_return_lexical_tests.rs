@@ -328,7 +328,7 @@ export function r5MutualA(c: boolean) {
 
 export function r5MutualB(c: boolean) {
   let z = 1;
-  z = 2;
+  z += 2;
   return r5MutualA(!!z);
 }
 
@@ -5336,11 +5336,13 @@ fn flow_return_conditional_branches_are_planned_and_lowered_by_one_descent() {
         ("ctObjMethod", "2|{m():number}"),
         ("ctObjNested", "2|{a:{b:number}}"),
         // A branch join reached as an object MEMBER value, through the
-        // member's own path-write edge.
-        ("ctObjInObj", "{a:2|{b:number}}"),
-        // The recorded nesting divergence: the checker flattens to
-        // `2 | 3 | { a: number }`.
-        ("ctNestedTernary", "(2|{a:number})|3"),
+        // member's own path-write edge. The member slot widens the join's
+        // fresh literal arm exactly like a direct literal member (the
+        // checker's `{ a: number | { b: number } }`).
+        ("ctObjInObj", "{a:number|{b:number}}"),
+        // A nested branch join FLATTENS at union construction, exactly
+        // like the checker's own `2 | 3 | { a: number }`.
+        ("ctNestedTernary", "2|{a:number}|3"),
         // CONTROLS — rows that were already green must be unchanged, so
         // the new descent is proven not to have moved them.
         ("ctObjEmpty", "2|{}"),

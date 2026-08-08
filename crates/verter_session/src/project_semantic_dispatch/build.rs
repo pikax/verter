@@ -10014,7 +10014,53 @@ impl<'a> ProjectSemanticDispatch<'a> {
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
-        let mut sorted: Vec<SemanticNodeId> = members.to_vec();
+        // Union CONSTRUCTION normalizes two ways, both mirroring the
+        // checker's own `getUnionType`: member unions FLATTEN (a union is
+        // never an arm of a union), and a literal arm whose primitive the
+        // union already carries is SUBSUMED (`string | "a"` is `string`
+        // — the literal adds no inhabitant). Intersections intern as
+        // given.
+        let mut sorted: Vec<SemanticNodeId> = if is_union {
+            let mut flat: Vec<SemanticNodeId> = Vec::with_capacity(members.len());
+            for member in members {
+                match self.graph().node_data(*member).as_deref() {
+                    Some(SemanticNodeData::Union(nested)) => flat.extend(nested.iter().copied()),
+                    _ => flat.push(*member),
+                }
+            }
+            let carries_primitive = |kind: PrimitiveKind, flat: &[SemanticNodeId]| {
+                flat.iter().any(|member| {
+                    matches!(
+                        self.graph().node_data(*member).as_deref(),
+                        Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
+                    )
+                })
+            };
+            let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(flat.len());
+            for member in flat.iter().copied() {
+                let literal_primitive = match self.graph().node_data(member).as_deref() {
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::String(_),
+                    )) => Some(PrimitiveKind::String),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Number(_),
+                    )) => Some(PrimitiveKind::Number),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::BigInt(_),
+                    )) => Some(PrimitiveKind::BigInt),
+                    Some(SemanticNodeData::Literal(
+                        crate::semantic_query::LiteralValue::Boolean(_),
+                    )) => Some(PrimitiveKind::Boolean),
+                    _ => None,
+                };
+                if !literal_primitive.is_some_and(|kind| carries_primitive(kind, &flat)) {
+                    kept.push(member);
+                }
+            }
+            kept
+        } else {
+            members.to_vec()
+        };
         sorted.sort_by_key(|id| id.0);
         sorted.dedup();
         if sorted.is_empty() {

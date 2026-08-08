@@ -2089,50 +2089,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             demanded_member.as_ref().map(|member| MemberDemandFilter {
                 member: Arc::clone(member),
             });
-        // Unapplied write effects fail CLOSED as a degraded success. The
-        // slice contract (`FlowSliceIR.effects`) says the solver applies
-        // write retypes / widenings before evaluating the value providers
-        // that read the affected slots — that application is future
-        // NARROW_SUBSTITUTION / VALUE_INFERENCE work on this same graph,
-        // and THIS evaluator does not perform it (locals rebuild from
-        // `Binding` statements only; parameters never update). A
-        // whole-slot write targeting a parameter or a value-selected slot
-        // can therefore change the demanded value's type (assignment
-        // narrowing; object members evaluate left-to-right), so
-        // evaluating past it may produce a WRONG type. Seed the typed
-        // `UnappliedWriteEffect` degradation: the evaluation still
-        // returns its usable value, but the result is a DEGRADED SUCCESS
-        // — `ReturnOnly`, never warm-admitted. A projection-path write
-        // (`x.a = v`) never retypes the binding itself and stays clean;
-        // a write whose target slot is neither a parameter nor
-        // value-selected cannot be observed by the demanded value.
-        let unapplied_write_effect = {
-            use verter_semantic::analysis::flow::flow_ir::{FlowEffect, FlowEffectTarget};
-            let retypes_slot = |slot: &verter_semantic::analysis::flow::flow_ir::FlowSlot| {
-                slot.value_selected
-                    || slot.kind == verter_semantic::analysis::flow::SkeletonBindingKind::Param
-            };
-            lowered.effects.iter().any(|effect| {
-                let FlowEffect::Write { target, path, .. } = effect else {
-                    return false;
-                };
-                if !path.is_empty() {
-                    return false;
-                }
-                match target {
-                    FlowEffectTarget::Slot(id) => retypes_slot(lowered.slot(*id)),
-                    // A named root outside the slot table is unselected or
-                    // shadow-ambiguous: degrade only when SOME slot of that
-                    // name could be retyped (the ambiguous arm), never for
-                    // a free / unselected name.
-                    FlowEffectTarget::Named(name) => lowered
-                        .slots
-                        .iter()
-                        .any(|slot| slot.name == *name && retypes_slot(slot)),
-                    FlowEffectTarget::Opaque => false,
-                }
-            })
-        };
         // The demand selection IS the lowered slice: only slice-selected
         // expression content and value-selected slots lower — an
         // unselected binding initializer, sibling member value, or
@@ -2164,6 +2120,75 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if member_filter.is_some() && ir.can_fall_through {
             return degraded(FlowReturnFailure::UnmodeledDemandPoint, self_roots);
         }
+        // The writes the content half lowered as applicable assignments —
+        // the scan below subtracts exactly these from the unapplied-write
+        // degradation, by the span identity both halves inherit from the
+        // skeleton.
+        let applied_write_spans = {
+            let mut spans = rustc_hash::FxHashSet::default();
+            collect_assignment_spans(&ir.body, &mut spans);
+            spans
+        };
+        // Unapplied write effects fail CLOSED as a degraded success. The
+        // slice contract (`FlowSliceIR.effects`) says the solver applies
+        // write retypes / widenings before evaluating the value providers
+        // that read the affected slots — that application is future
+        // NARROW_SUBSTITUTION / VALUE_INFERENCE work on this same graph,
+        // and THIS evaluator does not perform it (locals rebuild from
+        // `Binding` statements only; parameters never update). A
+        // whole-slot write targeting a parameter or a value-selected slot
+        // can therefore change the demanded value's type (assignment
+        // narrowing; object members evaluate left-to-right), so
+        // evaluating past it may produce a WRONG type. Seed the typed
+        // `UnappliedWriteEffect` degradation: the evaluation still
+        // returns its usable value, but the result is a DEGRADED SUCCESS
+        // — `ReturnOnly`, never warm-admitted. A projection-path write
+        // (`x.a = v`) never retypes the binding itself and stays clean;
+        // a write whose target slot is neither a parameter nor
+        // value-selected cannot be observed by the demanded value.
+        //
+        // A whole-binding `=` write at STATEMENT position the content
+        // half lowered as an assignment is APPLIED by the evaluator in
+        // source order — it retypes the binding exactly where the
+        // degradation feared — so it is subtracted here by span identity
+        // (the same span the skeleton recorded for the effect), and the
+        // scan keeps only the writes nobody applies: expression-position
+        // writes, compound operators, and writes whose value the slice
+        // did not select. The scan runs AFTER the content build for
+        // exactly that subtraction.
+        let unapplied_write_effect = {
+            use verter_semantic::analysis::flow::flow_ir::{FlowEffect, FlowEffectTarget};
+            let retypes_slot = |slot: &verter_semantic::analysis::flow::flow_ir::FlowSlot| {
+                slot.value_selected
+                    || slot.kind == verter_semantic::analysis::flow::SkeletonBindingKind::Param
+            };
+            lowered.effects.iter().any(|effect| {
+                let FlowEffect::Write {
+                    target, path, span, ..
+                } = effect
+                else {
+                    return false;
+                };
+                if !path.is_empty() {
+                    return false;
+                }
+                if applied_write_spans.contains(span) {
+                    return false;
+                }
+                match target {
+                    FlowEffectTarget::Slot(id) => retypes_slot(lowered.slot(*id)),
+                    // A named root outside the slot table is unselected or
+                    // shadow-ambiguous: degrade only when SOME slot of that
+                    // name could be retyped (the ambiguous arm), never for
+                    // a free / unselected name.
+                    FlowEffectTarget::Named(name) => lowered
+                        .slots
+                        .iter()
+                        .any(|slot| slot.name == *name && retypes_slot(slot)),
+                    FlowEffectTarget::Opaque => false,
+                }
+            })
+        };
         // The ONE binder environment: the function's OWN type parameters
         // are binders in scope for the parameter and body-leaf lowering (a
         // root `<T extends string>(x: T)` keeps the binder `T`, never the
@@ -2262,6 +2287,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             var_degraded_locals: rustc_hash::FxHashSet::default(),
             var_conditional_locals: rustc_hash::FxHashSet::default(),
             conditional_arm_nesting: 0,
+            narrowings: Vec::new(),
+            param_writes: rustc_hash::FxHashMap::default(),
             call_fresh_literal_returns: Vec::new(),
         };
         let holds;
@@ -2472,6 +2499,40 @@ struct MemberDemandFilter {
 /// The single supported narrow projection point: a one-segment path of a
 /// statically-named member (`['b']`). Returns the member name, or `None`
 /// for any other non-whole-return point (fail closed at the caller).
+/// Collect the spans of every assignment statement in a region tree —
+/// the writes the evaluator APPLIES, which the unapplied-write
+/// degradation subtracts by span identity.
+fn collect_assignment_spans(
+    region: &crate::flow_slice_content::SliceRegion,
+    out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
+) {
+    for statement in region.statements.iter() {
+        match statement {
+            crate::flow_slice_content::SliceStatement::Assignment { span, .. } => {
+                out.insert(*span);
+            }
+            crate::flow_slice_content::SliceStatement::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_assignment_spans(consequent, out);
+                if let Some(alternate) = alternate {
+                    collect_assignment_spans(alternate, out);
+                }
+            }
+            crate::flow_slice_content::SliceStatement::Block(block) => {
+                collect_assignment_spans(block, out);
+            }
+            crate::flow_slice_content::SliceStatement::Return { .. }
+            | crate::flow_slice_content::SliceStatement::Binding { .. }
+            | crate::flow_slice_content::SliceStatement::Assertion { .. }
+            | crate::flow_slice_content::SliceStatement::TransparentLoop
+            | crate::flow_slice_content::SliceStatement::Unsupported(_) => {}
+        }
+    }
+}
+
 fn flow_demanded_member_name(
     demand: &crate::semantic_query::ReturnProjectionDemand,
 ) -> Option<Arc<str>> {
@@ -2685,15 +2746,32 @@ struct FlowEvaluator<'d, 'b> {
     /// function scope).
     var_degraded_locals: rustc_hash::FxHashSet<String>,
     /// The `var`-layer CONDITIONAL-definition membership: names whose
-    /// surviving reaching definition was recorded while
-    /// [`Self::conditional_arm_nesting`] was non-zero. The function-scoped
-    /// layer survives the arm restore by design, but no branch-join
-    /// algebra folds the arms, so observing such a binding fails closed.
+    /// surviving reaching definition was recorded inside a conditional
+    /// arm and never folded by the branch join (`if`-arm writes to
+    /// bindings that predate the `if` ARE folded — the join clears the
+    /// flag; a binding DECLARED inside an arm keeps it). Observing a
+    /// still-flagged binding fails closed: its value is one arm's, not
+    /// the join of every arm (and of the never-assigned path).
     var_conditional_locals: rustc_hash::FxHashSet<String>,
     /// How many `if` arms enclose the statement being evaluated. A plain
     /// block NEVER increments it — a block executes unconditionally, so a
     /// `var` it declares has exactly one reaching definition.
     conditional_arm_nesting: u32,
+    /// The narrowing overlay: a scoped stack of positional substitutions
+    /// a guard establishes (`(root, path) → narrowed node`). A read of a
+    /// narrowed reference resolves through the NEWEST matching entry;
+    /// arm evaluation records the stack length on entry and truncates on
+    /// exit, so a narrow can never leak out of the arm it was established
+    /// in, and a write deletes every fact about the value it replaced.
+    narrowings: Vec<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )>,
+    /// Whole-slot writes to formal parameters, by ordinal. Parameters
+    /// live in the shared `params` slice (the signature's own array), so
+    /// an applied write rides this map instead — same reaching-definition
+    /// rule as the local layers, separate only because the storage is.
+    param_writes: rustc_hash::FxHashMap<u32, SemanticNodeId>,
     /// Return nodes a COMPLETED call in this frame marked
     /// `fresh_literal_return` (a generic callee whose naked-binder return
     /// fixed to a fresh-preserved literal). The call executor records the
@@ -3092,6 +3170,189 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             widening_set.remove(name);
         }
         locals.insert(name.to_string(), node);
+        // A (re)binding replaces the binding's value: every narrow fact a
+        // guard established about the OLD value — at the root or under
+        // any member path — dies with it.
+        let root = crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name));
+        self.narrowings.retain(|(subject, _)| subject.root != root);
+    }
+
+    /// Read the newest narrow fact for exactly `subject`, if a guard
+    /// established one.
+    fn narrowed_read(
+        &self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> Option<SemanticNodeId> {
+        self.narrowings
+            .iter()
+            .rev()
+            .find(|(candidate, _)| candidate == subject)
+            .map(|(_, node)| *node)
+    }
+
+    /// Apply one evaluated write to its target: a parameter write rides
+    /// `param_writes` (the shared `params` slice is the signature's own),
+    /// a local write rebinds in the layer the binding already lives in.
+    /// The write RETYPES the binding, so every narrow fact about the
+    /// value it replaces dies first — including the one the enclosing
+    /// guard just established (`if (typeof v === "string") { v = … }`
+    /// reads the WRITTEN value after the statement, not the narrow).
+    fn apply_write(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        node: SemanticNodeId,
+        degraded: bool,
+    ) {
+        match &target.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+                let ordinal = *ordinal;
+                self.narrowings
+                    .retain(|(subject, _)| subject.root != target.root);
+                self.param_writes.insert(ordinal, node);
+                if degraded {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+                    );
+                }
+            }
+            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                let kind = if self.locals.contains_key(name.as_ref()) {
+                    crate::flow_slice_content::SliceBindingKind::Let
+                } else {
+                    crate::flow_slice_content::SliceBindingKind::Var
+                };
+                // `bind_local` itself clears the narrow facts about the
+                // replaced value (the invalidation cannot be forgotten at
+                // one of the two write sites).
+                self.bind_local(name, kind, node, false, degraded);
+            }
+        }
+    }
+
+    /// Join the reaching definitions two conditional arms wrote, into the
+    /// RESTORED layers: a binding an arm rebound holds, after the `if`,
+    /// the union of its arm value and the value it had on the paths that
+    /// never took that arm (with no `else`, the fall-through path is one
+    /// of them). Bindings an arm DECLARED stay out of the join — the
+    /// layer restore already scoped them, except the hoisted `var`s,
+    /// which survive by construction and keep the conditional-definition
+    /// membership.
+    ///
+    /// Rebinding at nesting 0 through [`Self::bind_local`] is what clears
+    /// the conditional-definition flag for a joined name: the join IS
+    /// both arms' values folded, so observing it afterwards is no longer
+    /// the one-arm answer the flag exists to fail closed on.
+    fn join_arm_writes(
+        &mut self,
+        consequent_locals: &rustc_hash::FxHashMap<String, SemanticNodeId>,
+        alternate_locals: Option<&rustc_hash::FxHashMap<String, SemanticNodeId>>,
+        consequent_var: &rustc_hash::FxHashMap<String, SemanticNodeId>,
+        alternate_var: Option<&rustc_hash::FxHashMap<String, SemanticNodeId>>,
+        saved_var_conditional: &rustc_hash::FxHashSet<String>,
+        consequent_param_writes: &rustc_hash::FxHashMap<u32, SemanticNodeId>,
+        alternate_param_writes: Option<&rustc_hash::FxHashMap<u32, SemanticNodeId>>,
+    ) {
+        // The pre-`if` layers are the LIVE ones again (the caller
+        // restored them); each arm's contribution defaults to that.
+        for (name, before) in self.locals.clone().iter() {
+            let consequent_node = consequent_locals.get(name).copied().unwrap_or(*before);
+            let alternate_node = alternate_locals
+                .and_then(|locals| locals.get(name).copied())
+                .unwrap_or(*before);
+            if consequent_node == *before && alternate_node == *before {
+                continue;
+            }
+            let joined = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+            self.bind_local(
+                name,
+                crate::flow_slice_content::SliceBindingKind::Let,
+                joined,
+                false,
+                false,
+            );
+        }
+        for (name, before) in self.var_locals.clone().iter() {
+            let consequent_node = consequent_var.get(name).copied().unwrap_or(*before);
+            let alternate_node = alternate_var
+                .and_then(|locals| locals.get(name).copied())
+                .unwrap_or(*before);
+            // An arm WROTE the binding when its value moved OR the write
+            // raised the conditional-definition flag during an arm (an
+            // unchanged value still went through the write). The join
+            // folds both, so the flag must not survive either way.
+            let written_in_arm =
+                !saved_var_conditional.contains(name) && self.var_conditional_locals.contains(name);
+            if consequent_node == *before && alternate_node == *before && !written_in_arm {
+                continue;
+            }
+            let joined = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+            self.bind_local(
+                name,
+                crate::flow_slice_content::SliceBindingKind::Var,
+                joined,
+                false,
+                false,
+            );
+        }
+        // Hoisted `var`s DECLARED inside an arm: the layer restore scopes
+        // them away, but `var` hoisting means the binding itself survives
+        // the `if`. Merge them back with the conditional-definition flag
+        // INTACT — on the paths that never took the arm the binding has
+        // no reaching definition, which is exactly what the flag fails
+        // closed on at a read.
+        let mut declared_in_arm: Vec<String> = consequent_var
+            .keys()
+            .chain(alternate_var.into_iter().flat_map(|locals| locals.keys()))
+            .filter(|name| !self.var_locals.contains_key(*name))
+            .cloned()
+            .collect();
+        declared_in_arm.sort();
+        declared_in_arm.dedup();
+        for name in declared_in_arm {
+            let consequent_node = consequent_var.get(&name).copied();
+            let alternate_node = alternate_var.and_then(|locals| locals.get(&name).copied());
+            let node = match (consequent_node, alternate_node) {
+                (Some(consequent), Some(alternate)) => self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&[consequent, alternate], true),
+                (Some(consequent), None) => consequent,
+                (None, Some(alternate)) => alternate,
+                (None, None) => continue,
+            };
+            self.var_locals.insert(name.clone(), node);
+            self.var_conditional_locals.insert(name);
+        }
+        let mut param_ordinals: Vec<u32> = consequent_param_writes.keys().copied().collect();
+        if let Some(alternate) = alternate_param_writes {
+            param_ordinals.extend(alternate.keys().copied());
+        }
+        param_ordinals.sort_unstable();
+        param_ordinals.dedup();
+        for ordinal in param_ordinals {
+            let before = self.param_writes.get(&ordinal).copied();
+            let fallback = before.or_else(|| self.params.get(ordinal as usize).copied());
+            let Some(fallback) = fallback else {
+                continue;
+            };
+            let consequent_node = consequent_param_writes
+                .get(&ordinal)
+                .copied()
+                .unwrap_or(fallback);
+            let alternate_node = alternate_param_writes
+                .and_then(|writes| writes.get(&ordinal).copied())
+                .unwrap_or(fallback);
+            if consequent_node == fallback && alternate_node == fallback {
+                continue;
+            }
+            let joined = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+            self.param_writes.insert(ordinal, joined);
+        }
     }
 
     /// READ one local across the two scope layers — the ONLY way to take
@@ -3180,12 +3441,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         // A parameter is addressed BY NAME here (the leaf carries no
         // ordinal); a local resolves through the same two-layer read every
         // other local reference takes, flags folded by construction.
-        let root = if let Some(ordinal) = self
+        let param_ordinal = self
             .param_names
             .iter()
             .position(|param| param.name.as_deref() == Some(head))
-        {
-            self.params.get(ordinal).copied()
+            .map(|ordinal| ordinal as u32);
+        // THE narrowing overlay: a narrowed reference — at this exact
+        // path, or at any PREFIX of it (a discriminant narrowed the root)
+        // — substitutes the narrow's node and projects the remaining
+        // segments from it, so a guarded member read can never see the
+        // pre-narrow union.
+        let overlay_root = param_ordinal
+            .map(crate::flow_slice_content::SliceNarrowRoot::Param)
+            .or_else(|| {
+                (self.locals.contains_key(head) || self.var_locals.contains_key(head))
+                    .then(|| crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(head)))
+            });
+        if let Some(root) = overlay_root {
+            let segments: Vec<Arc<str>> = value_ref.path[1..]
+                .iter()
+                .map(|segment| Arc::from(segment.as_str()))
+                .collect();
+            for prefix_len in (0..=segments.len()).rev() {
+                let subject = crate::flow_slice_content::SliceNarrowSubject {
+                    root: root.clone(),
+                    path: Arc::from(segments[..prefix_len].to_vec().into_boxed_slice()),
+                };
+                if let Some(base) = self.narrowed_read(&subject) {
+                    return self.project_segments_navigate(base, &segments[prefix_len..]);
+                }
+            }
+        }
+        let root = if let Some(ordinal) = param_ordinal {
+            self.param_writes
+                .get(&ordinal)
+                .copied()
+                .or_else(|| self.params.get(ordinal as usize).copied())
         } else {
             self.read_local(head)
         }?;
@@ -3259,6 +3550,546 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
         self.dispatch
             .intern_normalized_union_or_intersection(&survivors, true)
+    }
+
+    // ── Guard narrowing ─────────────────────────────────────────────
+
+    /// The union arms of `node`, or `node` itself when it is not a
+    /// union — the iteration domain every narrow filters.
+    fn union_arms_or_self(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        match self.dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.to_vec(),
+            _ => vec![node],
+        }
+    }
+
+    /// The CURRENT node of a narrowable reference: the binding's reaching
+    /// definition (parameters consult applied writes, locals the scoped
+    /// layers), then the static member path walked through the one shared
+    /// path projection. `None` when the reference cannot be resolved —
+    /// the guard then establishes nothing, exactly the pre-guard
+    /// behaviour for that reference.
+    fn subject_current_node(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+    ) -> Option<SemanticNodeId> {
+        // A narrow on the ROOT is visible from a member-path fact too:
+        // `u.kind === "a"` narrows `u`, and a later `typeof u.v` reads
+        // the narrowed root before projecting.
+        let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+            root: subject.root.clone(),
+            path: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let root = if let Some(node) = self.narrowed_read(&root_subject) {
+            node
+        } else {
+            match &subject.root {
+                crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => self
+                    .param_writes
+                    .get(ordinal)
+                    .copied()
+                    .or_else(|| self.params.get(*ordinal as usize).copied())?,
+                crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                    self.read_local(name.as_ref())?
+                }
+            }
+        };
+        if subject.path.is_empty() {
+            return Some(root);
+        }
+        self.project_segments_navigate(root, &subject.path)
+    }
+
+    /// Walk a static member path from `base` through the ONE shared
+    /// `ProjectPath { mode: Navigate }` walk — the same authority the
+    /// frame-rooted `typeof` leaf uses, so a guard's subject resolution
+    /// and a member read can never disagree about what a path projects
+    /// to. `None` on any projection miss (the narrow then does not
+    /// establish).
+    fn project_segments_navigate(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
+        if segments.is_empty() {
+            return Some(base);
+        }
+        let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
+            segments
+                .iter()
+                .map(|segment| {
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(Arc::from(segment.as_ref())),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        // The member walk may widen a ROOTLESS callable (a function-typed
+        // parameter's signature) to its ambient apparent surface; that
+        // widening scopes its registry lookup by the lexical demand site,
+        // which rides this guard (see `apparent_type.rs`).
+        let _demand_scope = super::LexicalDemandScopeGuard::push(
+            &self.dispatch.lexical_demand_scope,
+            Arc::from(self.canonical),
+        );
+        match self.dispatch.execute_type_node(
+            crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            },
+        ) {
+            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
+            _ => None,
+        }
+    }
+
+    /// `a` is assignable to `b`, through the crate's SOLE relation
+    /// authority. `None` when the relation is UNDECIDED — the caller
+    /// treats an undecided fact as "the narrow cannot establish", never
+    /// as either answer.
+    fn assignable(&self, source: SemanticNodeId, target: SemanticNodeId) -> Option<bool> {
+        match self.dispatch.execute_relate_pair(source, target) {
+            super::dispatch_txn::RelationStep::Assignable { .. } => Some(true),
+            super::dispatch_txn::RelationStep::NotAssignable => Some(false),
+            super::dispatch_txn::RelationStep::Unknown
+            | super::dispatch_txn::RelationStep::BudgetExceeded(_)
+            | super::dispatch_txn::RelationStep::Assumed(_) => None,
+        }
+    }
+
+    /// Apply a guard's facts for one branch (`positive` = the branch the
+    /// test's positive reading guards), pushing the established narrows
+    /// onto the overlay. The CALLER owns the scope: it records the
+    /// overlay length before and truncates after the arm — application
+    /// never pops anything itself.
+    fn apply_guard_scoped(
+        &mut self,
+        guard: &crate::flow_slice_content::SliceGuard,
+        positive: bool,
+    ) {
+        use crate::flow_slice_content::SliceGuard;
+        match guard {
+            SliceGuard::None => {}
+            SliceGuard::Typeof {
+                subject,
+                kind,
+                negated,
+            } => {
+                if let Some(entry) = self.narrow_typeof(subject, *kind, *negated == positive) {
+                    self.narrowings.push(entry);
+                }
+            }
+            SliceGuard::Truthy { subject, negated } => {
+                if let Some(entry) = self.narrow_truthy(subject, *negated == positive) {
+                    self.narrowings.push(entry);
+                }
+            }
+            SliceGuard::EqLiteral {
+                subject,
+                literal,
+                negated,
+            } => {
+                if let Some(entry) = self.narrow_eq_literal(subject, literal, *negated == positive)
+                {
+                    self.narrowings.push(entry);
+                }
+            }
+            SliceGuard::Instanceof {
+                subject,
+                ctor,
+                negated,
+            } => {
+                if let Some(entry) = self.narrow_instanceof(subject, ctor, *negated == positive) {
+                    self.narrowings.push(entry);
+                }
+            }
+            SliceGuard::In {
+                key,
+                subject,
+                negated,
+            } => {
+                if let Some(entry) = self.narrow_in(key, subject, *negated == positive) {
+                    self.narrowings.push(entry);
+                }
+            }
+            SliceGuard::TypePredicate { subject, target } => {
+                if let Some(entry) = self.narrow_to_predicate_target(subject, target, !positive) {
+                    self.narrowings.push(entry);
+                }
+            }
+            // A conjunction applies every fact at once; its NEGATION is
+            // the disjunction of the negated facts (De Morgan — the same
+            // symmetry the lowering's `!` uses).
+            SliceGuard::And(parts) => {
+                if positive {
+                    for part in parts.iter() {
+                        self.apply_guard_scoped(part, true);
+                    }
+                } else {
+                    self.apply_guard_union(parts, false);
+                }
+            }
+            SliceGuard::Or(parts) => {
+                if positive {
+                    self.apply_guard_union(parts, true);
+                } else {
+                    for part in parts.iter() {
+                        self.apply_guard_scoped(part, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The union-of-facts reading of a disjunction: each disjunct's
+    /// narrow is computed against the SAME starting overlay, and a
+    /// subject narrowed by every disjunct lands the union of the
+    /// per-disjunct narrows. A subject some disjunct leaves unnarrowed
+    /// contributes its ORIGINAL type to that union — which is the
+    /// original type, so no narrow is established for it.
+    fn apply_guard_union(
+        &mut self,
+        parts: &[crate::flow_slice_content::SliceGuard],
+        positive: bool,
+    ) {
+        let mut alternatives: Vec<
+            Vec<(
+                crate::flow_slice_content::SliceNarrowSubject,
+                SemanticNodeId,
+            )>,
+        > = Vec::with_capacity(parts.len());
+        for part in parts.iter() {
+            let base = self.narrowings.len();
+            self.apply_guard_scoped(part, positive);
+            alternatives.push(self.narrowings.split_off(base));
+        }
+        let mut subjects: Vec<crate::flow_slice_content::SliceNarrowSubject> = Vec::new();
+        for alternative in &alternatives {
+            for (subject, _) in alternative {
+                if !subjects.contains(subject) {
+                    subjects.push(subject.clone());
+                }
+            }
+        }
+        for subject in subjects {
+            let narrowed_in_all = alternatives.iter().all(|alternative| {
+                alternative
+                    .iter()
+                    .any(|(candidate, _)| *candidate == subject)
+            });
+            if !narrowed_in_all {
+                continue;
+            }
+            let nodes: Vec<SemanticNodeId> = alternatives
+                .iter()
+                .flat_map(|alternative| {
+                    alternative
+                        .iter()
+                        .filter(|(candidate, _)| *candidate == subject)
+                        .map(|(_, node)| *node)
+                })
+                .collect();
+            let node = self
+                .dispatch
+                .intern_normalized_union_or_intersection(&nodes, true);
+            self.narrowings.push((subject, node));
+        }
+    }
+
+    /// Filter `subject`'s arms by a per-arm predicate, joining the
+    /// survivors back into the narrow's node. `None` — the guard
+    /// establishes nothing — when the filter keeps everything (no fact),
+    /// drops everything (the branch is dead; publishing the unnarrowed
+    /// type stays the conservative pre-guard answer rather than a
+    /// fabricated `never` the union join would keep as a visible arm),
+    /// or the filter itself cannot decide (an undecided relation, a
+    /// failed projection).
+    fn narrow_arms_by(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        entry_subject: &crate::flow_slice_content::SliceNarrowSubject,
+        mut keep: impl FnMut(&mut Self, SemanticNodeId) -> Option<bool>,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        let current = self.subject_current_node(subject)?;
+        let arms = self.union_arms_or_self(current);
+        let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        for arm in &arms {
+            match keep(self, *arm) {
+                Some(true) => survivors.push(*arm),
+                Some(false) => {}
+                None => return None,
+            }
+        }
+        if survivors.len() == arms.len() || survivors.is_empty() {
+            return None;
+        }
+        let node = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&survivors, true);
+        Some((entry_subject.clone(), node))
+    }
+
+    /// `typeof subject === "kind"`: keep the arms whose runtime type the
+    /// comparison names; negation drops them.
+    fn narrow_typeof(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        kind: crate::flow_slice_content::SliceTypeofKind,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(this.arm_typeof_matches(arm, kind) != negated)
+        })
+    }
+
+    /// Whether one union arm's runtime type is the one a `typeof`
+    /// comparison names. A primitive is its own kind (`null` is the
+    /// operator's `"object"` quirk); a literal its primitive's; objects,
+    /// arrays, tuples and spread programs are `"object"`, signatures
+    /// `"function"`. Anything the graph cannot classify — an unresolved
+    /// reference, `any`, `unknown` — matches NEITHER reading, so the
+    /// positive filter drops it and the negated one keeps it.
+    fn arm_typeof_matches(
+        &self,
+        arm: SemanticNodeId,
+        kind: crate::flow_slice_content::SliceTypeofKind,
+    ) -> bool {
+        use crate::flow_slice_content::SliceTypeofKind;
+        let primitive = match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(primitive)) => match primitive {
+                PrimitiveKind::String => Some(SliceTypeofKind::String),
+                PrimitiveKind::Number => Some(SliceTypeofKind::Number),
+                PrimitiveKind::BigInt => Some(SliceTypeofKind::BigInt),
+                PrimitiveKind::Boolean => Some(SliceTypeofKind::Boolean),
+                PrimitiveKind::Symbol => Some(SliceTypeofKind::Symbol),
+                PrimitiveKind::Undefined => Some(SliceTypeofKind::Undefined),
+                PrimitiveKind::Null | PrimitiveKind::Object => Some(SliceTypeofKind::Object),
+                _ => None,
+            },
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                crate::semantic_query::LiteralValue::String(_) => Some(SliceTypeofKind::String),
+                crate::semantic_query::LiteralValue::Number(_) => Some(SliceTypeofKind::Number),
+                crate::semantic_query::LiteralValue::BigInt(_) => Some(SliceTypeofKind::BigInt),
+                crate::semantic_query::LiteralValue::Boolean(_) => Some(SliceTypeofKind::Boolean),
+            },
+            Some(SemanticNodeData::Object(_))
+            | Some(SemanticNodeData::ObjectSpreadProgram(_))
+            | Some(SemanticNodeData::Array { .. })
+            | Some(SemanticNodeData::Tuple { .. }) => Some(SliceTypeofKind::Object),
+            Some(SemanticNodeData::Signature { .. }) => Some(SliceTypeofKind::Function),
+            _ => None,
+        };
+        primitive == Some(kind)
+    }
+
+    /// A bare truthiness test: the positive reading keeps the arms that
+    /// are not DEFINITELY falsy (a possibly-falsy primitive like `string`
+    /// stays, exactly as the checker keeps it), the negated reading keeps
+    /// only the definitely-falsy ones.
+    fn narrow_truthy(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(this.arm_is_definitely_falsy(arm) == negated)
+        })
+    }
+
+    /// Whether one union arm is DEFINITELY falsy: `undefined`, `null`,
+    /// `void`, and the falsy literals (`false`, `""`, `0`, `-0`, `0n`).
+    fn arm_is_definitely_falsy(&self, arm: SemanticNodeId) -> bool {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Undefined | PrimitiveKind::Null | PrimitiveKind::Void,
+            )) => true,
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                crate::semantic_query::LiteralValue::Boolean(value) => !value,
+                crate::semantic_query::LiteralValue::String(value) => value.is_empty(),
+                crate::semantic_query::LiteralValue::Number(value) => *value == 0.0,
+                crate::semantic_query::LiteralValue::BigInt(value) => {
+                    value.trim_start_matches('-').chars().all(|c| c == '0')
+                }
+            },
+            _ => false,
+        }
+    }
+
+    /// `subject === literal`. An EMPTY subject path filters the binding's
+    /// own arms by overlap with the literal (either assignability
+    /// direction — the two spellings of "the same literal"); a non-empty
+    /// path is a DISCRIMINANT, filtering the ROOT's arms by whether the
+    /// literal is assignable to the arm's member type at the path.
+    fn narrow_eq_literal(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        literal: &crate::flow_slice_content::SliceGuardLiteral,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        use crate::flow_slice_content::SliceGuardLiteral;
+        let literal_ty = match literal {
+            SliceGuardLiteral::String(value) => {
+                verter_type_expr::TypeExpr::string_literal(value.as_ref())
+            }
+            SliceGuardLiteral::Number(text) => {
+                verter_type_expr::TypeExpr::number_literal(text.parse::<f64>().ok()?)
+            }
+            SliceGuardLiteral::Boolean(value) => {
+                verter_type_expr::TypeExpr::boolean_literal(*value)
+            }
+            SliceGuardLiteral::Null => {
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Null)
+            }
+            SliceGuardLiteral::Undefined => {
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined)
+            }
+        };
+        let literal_node = self.lower_body_type(&literal_ty);
+        if subject.path.is_empty() {
+            self.narrow_arms_by(subject, subject, |this, arm| {
+                let forward = this.assignable(arm, literal_node)?;
+                let backward = this.assignable(literal_node, arm)?;
+                Some((forward || backward) != negated)
+            })
+        } else {
+            // The discriminant narrows the ROOT, so the fact lands at the
+            // root subject: a later read of ANY member of the binding
+            // resolves against the surviving arms.
+            let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            let path = subject.path.clone();
+            self.narrow_arms_by(&root_subject, &root_subject, |this, arm| {
+                let member = this.project_segments_navigate(arm, &path)?;
+                Some(this.assignable(literal_node, member)? != negated)
+            })
+        }
+    }
+
+    /// `subject instanceof Ctor`: keep the arms assignable to the
+    /// constructor's instance type (resolved as a bare type reference in
+    /// owner scope — the same lowering any authored annotation of that
+    /// name takes).
+    fn narrow_instanceof(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        ctor: &Arc<str>,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        let ctor_ty = verter_type_expr::TypeExpr::Ref {
+            name: Arc::clone(ctor),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let instance = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &ctor_ty,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )?;
+        self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(this.assignable(arm, instance)? != negated)
+        })
+    }
+
+    /// `"key" in subject`: keep the arms that CARRY the member; negation
+    /// keeps the ones that do not. The projection answers a miss as an
+    /// Opaque MARKER NODE, not as a walk failure — "carries the member"
+    /// is decided by the node being a real value, never an Opaque one.
+    fn narrow_in(
+        &mut self,
+        key: &Arc<str>,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        let segments: [Arc<str>; 1] = [Arc::clone(key)];
+        self.narrow_arms_by(subject, subject, |this, arm| {
+            let carries = this
+                .project_segments_navigate(arm, &segments)
+                .is_some_and(|node| {
+                    !matches!(
+                        this.dispatch.graph().node_data(node).as_deref(),
+                        Some(SemanticNodeData::Opaque(_))
+                    )
+                });
+            Some(carries != negated)
+        })
+    }
+
+    /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
+    /// keep the subject's arms assignable to the predicate's target type.
+    /// When NO arm survives but the target is itself assignable to the
+    /// subject's type, the target IS the narrow (the checker's own rule
+    /// for a predicate whose target is a strict subtype of the declared
+    /// type). The target lowers like a declarator annotation — a
+    /// frame-shadowed answer establishes nothing.
+    fn narrow_to_predicate_target(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &crate::flow_slice_content::GatedType,
+        negated: bool,
+    ) -> Option<(
+        crate::flow_slice_content::SliceNarrowSubject,
+        SemanticNodeId,
+    )> {
+        if target
+            .shadowed()
+            .iter()
+            .any(|name| self.owner_scope_answers_name(name))
+        {
+            return None;
+        }
+        let target_node = self.lower_body_type(target.ty());
+        let current = self.subject_current_node(subject)?;
+        if !negated {
+            let arms = self.union_arms_or_self(current);
+            let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+            for arm in &arms {
+                match self.assignable(*arm, target_node) {
+                    Some(true) => survivors.push(*arm),
+                    Some(false) => {}
+                    None => return None,
+                }
+            }
+            if !survivors.is_empty() {
+                if survivors.len() == arms.len() {
+                    return None;
+                }
+                let node = self
+                    .dispatch
+                    .intern_normalized_union_or_intersection(&survivors, true);
+                return Some((subject.clone(), node));
+            }
+            if self.assignable(target_node, current) == Some(true) {
+                return Some((subject.clone(), target_node));
+            }
+            return None;
+        }
+        self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(this.assignable(arm, target_node)? == negated)
+        })
     }
 
     /// Whether one local carries a WIDENING literal, in the layer that
@@ -3482,23 +4313,43 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                 }
                 crate::flow_slice_content::SliceStatement::If {
+                    guard,
                     consequent,
                     alternate,
-                    ..
                 } => {
                     // Bindings are block-scoped: each `if` arm evaluates
-                    // under its own local scope (the reaching definitions
-                    // of a `const` inside an arm never escape it). The
-                    // function-scoped `var` layer DOES survive the
-                    // restore, so the arms raise the conditional-arm
-                    // nesting: a `var` bound here has no single reaching
-                    // definition at the join, and observing it afterwards
-                    // fails closed.
+                    // under its own local scope, and the consequent reads
+                    // the test's POSITIVE narrow, the alternate its
+                    // NEGATED one. Both overlays are arm-scoped — a narrow
+                    // never leaks out of the arm it was established in.
+                    //
+                    // A WHOLE-BINDING WRITE inside an arm does escape —
+                    // through the branch JOIN, never the raw arm value:
+                    // after the `if`, a rebound binding holds the union of
+                    // its arm value and the value it had on the paths that
+                    // never took that arm (tsc's own join of reaching
+                    // definitions). The lexical layer restores; the
+                    // function-scoped `var` layer (and parameter writes)
+                    // join by the same rule.
                     let saved = self.locals.clone();
                     let saved_degraded = self.degraded_locals.clone();
                     let saved_widening = self.widening_locals.clone();
+                    let saved_var = self.var_locals.clone();
+                    let saved_var_conditional = self.var_conditional_locals.clone();
+                    let saved_param_writes = self.param_writes.clone();
+                    let narrow_len = self.narrowings.len();
                     self.conditional_arm_nesting += 1;
+                    self.apply_guard_scoped(guard, true);
                     let (consequent_result, _) = self.eval_region(consequent);
+                    let consequent_locals = self.locals.clone();
+                    let consequent_var = self.var_locals.clone();
+                    let consequent_param_writes = self.param_writes.clone();
+                    self.narrowings.truncate(narrow_len);
+                    self.locals = saved.clone();
+                    self.degraded_locals = saved_degraded.clone();
+                    self.widening_locals = saved_widening.clone();
+                    self.var_locals = saved_var.clone();
+                    self.param_writes = saved_param_writes.clone();
                     let consequent_contributors = match consequent_result {
                         Ok(contributors) => contributors,
                         Err(failure) => {
@@ -3507,11 +4358,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     };
                     contributors.extend(consequent_contributors);
-                    self.locals = saved.clone();
-                    self.degraded_locals = saved_degraded.clone();
-                    self.widening_locals = saved_widening.clone();
-                    if let Some(alternate) = alternate {
+                    let alternate_layers = if let Some(alternate) = alternate {
+                        self.apply_guard_scoped(guard, false);
                         let (alternate_result, _) = self.eval_region(alternate);
+                        let alternate_locals = self.locals.clone();
+                        let alternate_var = self.var_locals.clone();
+                        let alternate_param_writes = self.param_writes.clone();
+                        self.narrowings.truncate(narrow_len);
+                        self.locals = saved.clone();
+                        self.degraded_locals = saved_degraded.clone();
+                        self.widening_locals = saved_widening.clone();
+                        self.var_locals = saved_var.clone();
+                        self.param_writes = saved_param_writes.clone();
                         let alternate_contributors = match alternate_result {
                             Ok(contributors) => contributors,
                             Err(failure) => {
@@ -3520,11 +4378,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         };
                         contributors.extend(alternate_contributors);
-                    }
+                        Some((alternate_locals, alternate_var, alternate_param_writes))
+                    } else {
+                        None
+                    };
                     self.conditional_arm_nesting -= 1;
                     self.locals = saved;
                     self.degraded_locals = saved_degraded;
                     self.widening_locals = saved_widening;
+                    self.var_locals = saved_var;
+                    self.param_writes = saved_param_writes;
+                    let (alternate_locals, alternate_var, alternate_param_writes) =
+                        match &alternate_layers {
+                            Some((locals, var, param_writes)) => {
+                                (Some(locals), Some(var), Some(param_writes))
+                            }
+                            None => (None, None, None),
+                        };
+                    self.join_arm_writes(
+                        &consequent_locals,
+                        alternate_locals,
+                        &consequent_var,
+                        alternate_var,
+                        &saved_var_conditional,
+                        &consequent_param_writes,
+                        alternate_param_writes,
+                    );
                 }
                 crate::flow_slice_content::SliceStatement::Block(block) => {
                     // Bindings are block-scoped: a `const` inside a block
@@ -3646,6 +4525,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 self.bind_local(name, *kind, marker, false, true);
                             }
                         }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Assignment { target, value, .. } => {
+                    // THE applied write: a whole-binding `=` at statement
+                    // position retypes the binding IN SOURCE ORDER, so the
+                    // reads after it see the written value and the typed
+                    // unapplied-write degradation never seeds. An
+                    // unmodelled right-hand side binds the typed marker
+                    // with the failed-initializer membership, exactly like
+                    // an unmodelled declarator initializer.
+                    let holds_before = self.holds.len();
+                    let outcome = self.eval_expr(value);
+                    match outcome {
+                        Positional::Value(node) => {
+                            self.holds.truncate(holds_before);
+                            self.apply_write(target, node, false);
+                        }
+                        Positional::Hold => {
+                            self.holds.truncate(holds_before);
+                        }
+                        Positional::Unmodeled => {
+                            self.holds.truncate(holds_before);
+                            let marker =
+                                super::flow_return_callee::unmodeled_position_marker(self.dispatch);
+                            self.apply_write(target, marker, true);
+                        }
+                    }
+                }
+                crate::flow_slice_content::SliceStatement::Assertion { subject, target } => {
+                    // A same-file assertion call: the narrowing fact lives
+                    // in the callee's declared return, and it PERSISTS for
+                    // the rest of the region (there is no arm scope to
+                    // truncate it — the assertion is unconditional the
+                    // moment the statement evaluates).
+                    if let Some(entry) = self.narrow_to_predicate_target(subject, target, false) {
+                        self.narrowings.push(entry);
                     }
                 }
                 crate::flow_slice_content::SliceStatement::TransparentLoop => {}
@@ -3867,6 +4782,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 var_degraded_locals: self.var_degraded_locals.clone(),
                 var_conditional_locals: self.var_conditional_locals.clone(),
                 conditional_arm_nesting: 0,
+                // The nested frame captures the enclosing layers' VALUES
+                // by name, not their flow facts: a guard narrow lives and
+                // dies with the arm that established it, and the checker
+                // itself does not honour a narrowing of a mutable binding
+                // across a closure boundary.
+                narrowings: Vec::new(),
+                param_writes: rustc_hash::FxHashMap::default(),
                 call_fresh_literal_returns: Vec::new(),
             };
             let outcome = nested_evaluator.eval_region(body);
@@ -4129,6 +5051,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // frame's arity. That is a fact about this REFERENCE, not
             // about the body around it.
             crate::flow_slice_content::SliceExpr::Param { ordinal } => {
+                // A guard narrow (or an applied write) substitutes the
+                // parameter's CURRENT value positionally.
+                let subject = crate::flow_slice_content::SliceNarrowSubject {
+                    root: crate::flow_slice_content::SliceNarrowRoot::Param(*ordinal),
+                    path: Arc::from(Vec::new().into_boxed_slice()),
+                };
+                if let Some(node) = self.narrowed_read(&subject) {
+                    return Positional::Value(node);
+                }
+                if let Some(node) = self.param_writes.get(ordinal).copied() {
+                    return Positional::Value(node);
+                }
                 match self.params.get(*ordinal as usize).copied() {
                     Some(node) => Positional::Value(node),
                     None => Positional::Unmodeled,
@@ -4145,6 +5079,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // reference) stays the undegraded implicit-`any`, EXCEPT
                 // when the binding redeclares a parameter — then the
                 // parameter is still the reaching value.
+                if !captured {
+                    let subject = crate::flow_slice_content::SliceNarrowSubject {
+                        root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(
+                            name.as_ref(),
+                        )),
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    };
+                    if let Some(node) = self.narrowed_read(&subject) {
+                        return Positional::Value(node);
+                    }
+                }
                 match self.read_local(name.as_ref()) {
                     Some(node) => Positional::Value(node),
                     // A CAPTURED binding the seeded snapshot does not
@@ -4212,17 +5157,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // took the one call sink above — the union here only joins
             // the results, through the same normalizing interner the
             // `if` / `return` twin's contributor join uses, so the two
-            // spellings of one branch answer alike.
-            crate::flow_slice_content::SliceExpr::Union { arms } => {
+            // spellings of one branch answer alike. The consequent
+            // evaluates under the test's POSITIVE narrow, the alternate
+            // under its NEGATED one — the same overlay the `if` twin
+            // applies, arm-scoped.
+            crate::flow_slice_content::SliceExpr::Union { arms, guard } => {
                 let mut nodes = Vec::with_capacity(arms.len());
-                for arm in arms.iter() {
+                for (index, arm) in arms.iter().enumerate() {
                     // A coinductive HOLD inside a branch cannot be
                     // represented as a partial union arm — the SCC
                     // discharge joins whole contributions, not fragments
                     // of one. The ARM is the unmodelled position; the rest
                     // of the union survives, degraded.
                     let holds_before = self.holds.len();
+                    let narrow_len = self.narrowings.len();
+                    self.apply_guard_scoped(guard, index == 0);
                     let outcome = self.eval_expr(arm);
+                    self.narrowings.truncate(narrow_len);
                     nodes.push(self.settle_composite_part(outcome, holds_before));
                 }
                 Positional::Value(
@@ -4268,15 +5219,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             _ => None,
         };
         if let Some(name) = bare_name {
-            if let Some(node) = self.read_local(name) {
-                return Some(node);
-            }
-            if let Some(ordinal) = self
+            // The narrowing overlay answers a bare-argument read exactly
+            // like the frame's own `Param` / `Local` carriers do.
+            let param_ordinal = self
                 .param_names
                 .iter()
                 .position(|param| param.name.as_deref() == Some(name))
-            {
-                if let Some(node) = self.params.get(ordinal) {
+                .map(|ordinal| ordinal as u32);
+            let local_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: crate::flow_slice_content::SliceNarrowRoot::Local(Arc::from(name)),
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            };
+            if let Some(node) = self.narrowed_read(&local_subject) {
+                return Some(node);
+            }
+            if let Some(node) = param_ordinal.and_then(|ordinal| {
+                self.narrowed_read(&crate::flow_slice_content::SliceNarrowSubject {
+                    root: crate::flow_slice_content::SliceNarrowRoot::Param(ordinal),
+                    path: Arc::from(Vec::new().into_boxed_slice()),
+                })
+            }) {
+                return Some(node);
+            }
+            if let Some(node) = self.read_local(name) {
+                return Some(node);
+            }
+            if let Some(ordinal) = param_ordinal {
+                if let Some(node) = self
+                    .param_writes
+                    .get(&ordinal)
+                    .or_else(|| self.params.get(ordinal as usize))
+                {
                     return Some(*node);
                 }
             }

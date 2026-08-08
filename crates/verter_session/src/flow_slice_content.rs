@@ -13,8 +13,12 @@
 //! Content OUTSIDE the selection never lowers: an unselected binding
 //! initializer is omitted, an unselected object member value and any
 //! unselected root expression ride the typed [`SliceExpr::Elided`]
-//! carrier, and `if`-test / expression-statement positions carry no
-//! content at all (the evaluator never consumes their values).
+//! carrier, and an `if`-test / expression-statement position carries no
+//! VALUE content at all (the evaluator never consumes their values). A
+//! test DOES lower its narrowing facts ([`SliceGuard`]), and an
+//! expression statement lowers the two value-neutral effects the
+//! evaluator can apply in source order — a whole-binding `=` write and a
+//! same-file assertion call.
 //!
 //! Control semantics: sequential region evaluation (a terminal return or
 //! throw ends the region; statements after it are unreachable and
@@ -45,7 +49,8 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{
-    BindingPattern, Expression, FormalParameters, Program, Statement, VariableDeclarationKind,
+    BindingPattern, Expression, FormalParameters, LogicalOperator, Program, Statement, TSType,
+    UnaryOperator, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -182,14 +187,57 @@ pub enum SliceStatement {
         /// to this position.
         widening_literal: bool,
     },
-    /// An `if` statement. No guard narrowing: each arm is its own region;
-    /// the test's value is never consumed by the evaluator, so no test
-    /// content is carried.
+    /// An `if` statement. Each arm is its own region; the test lowers to
+    /// a [`SliceGuard`] — never to value content, since the evaluator
+    /// never consumes the test's value, only its narrowing facts.
     If {
+        /// The narrowing facts the test establishes (its positive reading
+        /// applies to the consequent, its negated reading to the
+        /// alternate and to fall-through after a consequent that
+        /// terminates).
+        guard: SliceGuard,
         /// The consequent region.
         consequent: Box<SliceRegion>,
         /// The alternate region, when an `else` exists.
         alternate: Option<Box<SliceRegion>>,
+    },
+    /// A whole-binding write (`x = v`, never `x.a = v` and never a
+    /// compound operator) at statement position, targeting a formal
+    /// parameter or a modelable same-frame local, whose right-hand side
+    /// the demand slice value-selected. This is the ONE statement form
+    /// through which a write re-enters evaluation: the evaluator applies
+    /// it (retyping the binding in source order), so the write-effect
+    /// ledger no longer has to degrade on sight of it.
+    ///
+    /// Every other write shape stays out of the content tree exactly as
+    /// before and keeps the typed unapplied-write degradation: a
+    /// projection-path write (`x.a = v`) never retypes the binding, and a
+    /// write in expression position (`return (x = 1, x)`) has no
+    /// evaluation-order guarantee against the reads around it.
+    Assignment {
+        /// The write target (a binding root; the path is always empty for
+        /// this variant — a member-path write never lowers).
+        target: SliceNarrowSubject,
+        /// The write expression's span, in this frame's coordinates — the
+        /// identity the evaluator's write-effect ledger matches against,
+        /// so a lowered write and a degraded write are the same fact seen
+        /// by the two halves, never two independent verdicts.
+        span: FrameSpan,
+        /// The lowered right-hand side.
+        value: Box<SliceExpr>,
+    },
+    /// A same-file assertion call at statement position
+    /// (`assertStr(u);`): the callee's declared return is
+    /// `asserts x is T`, so the call narrows its argument for the rest of
+    /// the region. There is no syntactic guard at the use site — the
+    /// narrowing fact lives entirely in the callee's signature, which the
+    /// content half reads from the same parse snapshot.
+    Assertion {
+        /// The argument the predicate talks about.
+        subject: SliceNarrowSubject,
+        /// The predicate's target type, lowered through the frame gate
+        /// exactly like a declarator annotation.
+        target: GatedType,
     },
     /// A nested block, as its own region.
     Block(SliceRegion),
@@ -241,6 +289,161 @@ pub enum SliceBindingKind {
     Let,
     /// A `var` declarator.
     Var,
+}
+
+// ---------------------------------------------------------------------------
+// Guards — the narrowing facts a conditional test establishes
+// ---------------------------------------------------------------------------
+
+/// The root of a narrowable reference: a binding THIS frame owns.
+///
+/// A guard only ever narrows a frame-owned binding — a free (module- /
+/// outer-scope) name is never a narrowable root, because the evaluator
+/// cannot substitute it positionally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SliceNarrowRoot {
+    /// A simple formal parameter, by ordinal in source order.
+    Param(u32),
+    /// A modelable same-frame local (`const` / `let` / `var`), by name.
+    Local(Arc<str>),
+}
+
+/// A narrowable reference: a binding root plus a static member path under
+/// it (`u.v` carries `[v]`; the empty path is the binding itself).
+///
+/// Which position a fact narrows is the guard variant's call, not this
+/// type's: a `typeof u.v === "string"` narrows the type AT the path,
+/// while `u.kind === "a"` narrows the ROOT (the discriminant selects
+/// which of the root's union arms survives).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SliceNarrowSubject {
+    /// The binding the reference is rooted at.
+    pub root: SliceNarrowRoot,
+    /// The static member segments under the root, outermost first.
+    pub path: Arc<[Arc<str>]>,
+}
+
+/// The string literal of a `typeof` comparison, closed over the values
+/// the operator can return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceTypeofKind {
+    /// `"string"`.
+    String,
+    /// `"number"`.
+    Number,
+    /// `"bigint"`.
+    BigInt,
+    /// `"boolean"`.
+    Boolean,
+    /// `"symbol"`.
+    Symbol,
+    /// `"undefined"`.
+    Undefined,
+    /// `"object"` (including `null` — the operator's own quirk).
+    Object,
+    /// `"function"`.
+    Function,
+}
+
+/// The literal operand of an equality guard (`u === 1`,
+/// `u.kind === "a"`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceGuardLiteral {
+    /// A string literal.
+    String(Arc<str>),
+    /// A numeric literal, as authored text (parsed evaluator-side).
+    Number(Arc<str>),
+    /// A boolean literal.
+    Boolean(bool),
+    /// `null`.
+    Null,
+    /// `undefined`.
+    Undefined,
+}
+
+/// The narrowing facts ONE conditional test establishes, lowered once and
+/// shared by the ternary's branch join and the `if` statement's arms —
+/// the single authority over test-expression forms, so the two control
+/// spellings of one guard can never disagree about what it narrows.
+///
+/// This is a structural description only: it carries no evaluated types
+/// (the content half has no resolver), so a consumer can never inherit a
+/// narrow the evaluator did not itself compute. A test form this
+/// vocabulary cannot express lowers to [`SliceGuard::None`] — the arms
+/// evaluate unnarrowed, exactly as they did before guards existed.
+///
+/// Composition is De Morgan-complete at LOWERING time (`!` flips leaf
+/// `negated` flags and swaps `And`/`Or`), so the evaluator's branch
+/// application only ever asks "the positive reading" or "the negated
+/// reading" of one tree — there is no third combination to drift.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceGuard {
+    /// No narrowing derivable from the test.
+    None,
+    /// `typeof subject === "<kind>"` (`!==` negates).
+    Typeof {
+        /// The reference whose type the guard tests (the narrow lands AT
+        /// this path).
+        subject: SliceNarrowSubject,
+        /// The compared `typeof` string.
+        kind: SliceTypeofKind,
+        /// Whether the comparison is negated (`!==`).
+        negated: bool,
+    },
+    /// The subject used as a bare truthiness test (`!subject` negates).
+    Truthy {
+        /// The tested reference.
+        subject: SliceNarrowSubject,
+        /// Whether the test is negated.
+        negated: bool,
+    },
+    /// `subject === <literal>` (`!==` negates). An EMPTY subject path is
+    /// a literal-equality narrow of the binding itself; a non-empty path
+    /// is a DISCRIMINANT — the narrow selects the root's union arms by
+    /// the member's type.
+    EqLiteral {
+        /// The compared reference.
+        subject: SliceNarrowSubject,
+        /// The literal operand.
+        literal: SliceGuardLiteral,
+        /// Whether the comparison is negated.
+        negated: bool,
+    },
+    /// `subject instanceof Ctor`, the constructor named by a bare
+    /// identifier (resolved evaluator-side, in owner scope).
+    Instanceof {
+        /// The tested reference (its root narrows).
+        subject: SliceNarrowSubject,
+        /// The constructor name.
+        ctor: Arc<str>,
+        /// Whether the test is negated.
+        negated: bool,
+    },
+    /// `"key" in subject`: the root's union arms are selected by whether
+    /// they carry the member.
+    In {
+        /// The member key.
+        key: Arc<str>,
+        /// The tested reference (its root narrows).
+        subject: SliceNarrowSubject,
+        /// Whether the test is negated.
+        negated: bool,
+    },
+    /// `predicate(subject)` — a same-file function whose declared return
+    /// is `x is T`. The target type lowers through the frame gate exactly
+    /// like a declarator annotation; a cross-file callee or a callee
+    /// without the predicate spelling lowers to [`SliceGuard::None`].
+    TypePredicate {
+        /// The argument the predicate talks about.
+        subject: SliceNarrowSubject,
+        /// The predicate's target type.
+        target: GatedType,
+    },
+    /// A conjunction: every fact applies at once.
+    And(Arc<[SliceGuard]>),
+    /// A disjunction: the positive reading unions each disjunct's
+    /// positive narrow; the negated reading applies every negation.
+    Or(Arc<[SliceGuard]>),
 }
 
 /// A leaf `TypeExpr` that has PASSED the frame gate.
@@ -413,9 +616,15 @@ pub enum SliceExpr {
     /// the `if` / `return` twin's does. Folding the ternary through the
     /// shared shallow-pass leaf lowering instead published the callee's
     /// UNREDUCED return carrier — binders and overload group intact.
+    ///
+    /// `arms[0]` is the consequent and evaluates under the guard's
+    /// POSITIVE reading, `arms[1]` the alternate under its NEGATED one.
     Union {
         /// The branch values in source order.
         arms: Arc<[SliceExpr]>,
+        /// The narrowing facts the test establishes ([`SliceGuard::None`]
+        /// when the test has no expressible narrowing).
+        guard: SliceGuard,
     },
     /// An expression whose leaf answer EMBEDS an unreduced call-return
     /// carrier: a call reached through a form with no structural arm.
@@ -1137,6 +1346,7 @@ pub(crate) fn build_flow_slice_content(
         captures: &captures,
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
+        program,
         budget_failure: None,
     };
     let region = if node.is_expression_body() {
@@ -1614,6 +1824,13 @@ struct Lowerer<'a> {
     /// The function's exact direct local call targets (from the per-file
     /// function index), keyed by call span.
     direct_calls: &'a [verter_semantic::analysis::function_program::FunctionDirectCall],
+    /// The whole retained parse snapshot this frame's function lives in.
+    /// The guard lowering reads SAME-FILE predicate / assertion
+    /// signatures from it (`isStr(u)` / `assertStr(u);` carry their
+    /// narrowing fact in the callee's declared return, not at the use
+    /// site); a cross-file callee is beyond this channel and lowers to
+    /// [`SliceGuard::None`].
+    program: &'a Program<'a>,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
 }
@@ -1984,9 +2201,11 @@ impl Lowerer<'_> {
                     out.push(SliceStatement::Block(child.region));
                 }
                 Statement::IfStatement(if_stmt) => {
-                    // The evaluator never consumes the test's value, so no
-                    // test content lowers (guard narrowing is a later
-                    // edge-class block on the same graph).
+                    // The evaluator never consumes the test's VALUE, so no
+                    // test content lowers — but its narrowing facts do,
+                    // through the ONE guard authority both control
+                    // spellings share.
+                    let guard = self.lower_guard(&if_stmt.test);
                     let consequent = self.lower_arm(&if_stmt.consequent);
                     let alternate = if_stmt
                         .alternate
@@ -2002,6 +2221,7 @@ impl Lowerer<'_> {
                             .as_ref()
                             .is_some_and(|region| region.hit_unsupported);
                     out.push(SliceStatement::If {
+                        guard,
                         consequent: Box::new(consequent.region),
                         alternate: alternate.map(|region| Box::new(region.region)),
                     });
@@ -2084,8 +2304,16 @@ impl Lowerer<'_> {
                 }
                 // An expression statement's value is never consumed by the
                 // evaluator; its evaluation effects ride the slice's typed
-                // effect obligations, not this content tree.
-                Statement::ExpressionStatement(_) => {}
+                // effect obligations, not this content tree — EXCEPT the
+                // two value-neutral forms whose effect IS the point: a
+                // whole-binding `=` write the evaluator can apply in
+                // source order, and a same-file assertion call whose
+                // narrowing persists.
+                Statement::ExpressionStatement(expression) => {
+                    if let Some(statement) = self.lower_effect_statement(&expression.expression) {
+                        out.push(statement);
+                    }
+                }
                 // A `throw` terminates the region path without contributing
                 // a return arm.
                 Statement::ThrowStatement(_) => {
@@ -2195,6 +2423,335 @@ impl Lowerer<'_> {
         match statement {
             Statement::BlockStatement(block) => self.lower_region(&block.body),
             _ => self.lower_region(std::slice::from_ref(statement)),
+        }
+    }
+
+    // ── Guards ──────────────────────────────────────────────────────
+
+    /// THE guard lowering — the single authority over conditional-test
+    /// forms, shared by the ternary's branch join and the `if`
+    /// statement's arms.
+    ///
+    /// The output is a structural description of the narrowing facts the
+    /// test establishes; it evaluates nothing (this half has no
+    /// resolver). A form the [`SliceGuard`] vocabulary cannot express
+    /// lowers to [`SliceGuard::None`], which applies no narrow at all —
+    /// the exact behaviour the arms had before guards existed. Negation
+    /// is pushed to the leaves at lowering time (De Morgan), so the
+    /// evaluator only ever asks a guard for its positive or its negated
+    /// reading.
+    fn lower_guard(&mut self, test: &Expression<'_>) -> SliceGuard {
+        match unwrap_parenthesized(test) {
+            Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+                let inner = self.lower_guard(&unary.argument);
+                negate_guard(inner)
+            }
+            Expression::LogicalExpression(logical) => {
+                let left = self.lower_guard(&logical.left);
+                let right = self.lower_guard(&logical.right);
+                match logical.operator {
+                    LogicalOperator::And => and_guard(left, right),
+                    LogicalOperator::Or => or_guard(left, right),
+                    // `a ?? b` tests nullishness of `a`, but its result is
+                    // the OPERAND's value, not a boolean fact over the
+                    // branch arms — a narrow from it would apply to the
+                    // wrong reference. No guard.
+                    LogicalOperator::Coalesce => SliceGuard::None,
+                }
+            }
+            Expression::BinaryExpression(binary) => self.lower_binary_guard(binary),
+            Expression::CallExpression(call) => self.lower_predicate_guard(call),
+            other => self
+                .narrow_subject_of(other)
+                .map(|subject| SliceGuard::Truthy {
+                    subject,
+                    negated: false,
+                })
+                .unwrap_or(SliceGuard::None),
+        }
+    }
+
+    /// The binary-operator guard forms: strict (in)equality — including
+    /// the `typeof x === "kind"` spelling — `instanceof`, and `in`.
+    fn lower_binary_guard(&mut self, binary: &oxc_ast::ast::BinaryExpression<'_>) -> SliceGuard {
+        use oxc_ast::ast::BinaryOperator;
+        match binary.operator {
+            BinaryOperator::StrictEquality | BinaryOperator::StrictInequality => {
+                let negated = matches!(binary.operator, BinaryOperator::StrictInequality);
+                // `typeof x === "string"` (either operand order).
+                if let Some(guard) = self.typeof_guard(&binary.left, &binary.right, negated) {
+                    return guard;
+                }
+                if let Some(guard) = self.typeof_guard(&binary.right, &binary.left, negated) {
+                    return guard;
+                }
+                // `subject === literal` (either operand order).
+                for (subject_side, literal_side) in
+                    [(&binary.left, &binary.right), (&binary.right, &binary.left)]
+                {
+                    let Some(subject) = self.narrow_subject_of(subject_side) else {
+                        continue;
+                    };
+                    let Some(literal) = guard_literal_of(literal_side, self.source) else {
+                        continue;
+                    };
+                    return SliceGuard::EqLiteral {
+                        subject,
+                        literal,
+                        negated,
+                    };
+                }
+                SliceGuard::None
+            }
+            BinaryOperator::Instanceof => {
+                let Some(subject) = self.narrow_subject_of(&binary.left) else {
+                    return SliceGuard::None;
+                };
+                match unwrap_parenthesized(&binary.right) {
+                    Expression::Identifier(ctor) => SliceGuard::Instanceof {
+                        subject,
+                        ctor: Arc::from(ctor.name.as_str()),
+                        negated: false,
+                    },
+                    _ => SliceGuard::None,
+                }
+            }
+            BinaryOperator::In => {
+                let Expression::StringLiteral(key) = unwrap_parenthesized(&binary.left) else {
+                    return SliceGuard::None;
+                };
+                let Some(subject) = self.narrow_subject_of(&binary.right) else {
+                    return SliceGuard::None;
+                };
+                SliceGuard::In {
+                    key: Arc::from(key.value.as_str()),
+                    subject,
+                    negated: false,
+                }
+            }
+            _ => SliceGuard::None,
+        }
+    }
+
+    /// The `typeof subject === "kind"` form: `side` is the `typeof …`
+    /// unary, `other` the compared string literal.
+    fn typeof_guard(
+        &self,
+        side: &Expression<'_>,
+        other: &Expression<'_>,
+        negated: bool,
+    ) -> Option<SliceGuard> {
+        let Expression::UnaryExpression(unary) = unwrap_parenthesized(side) else {
+            return None;
+        };
+        if unary.operator != UnaryOperator::Typeof {
+            return None;
+        }
+        let Expression::StringLiteral(literal) = unwrap_parenthesized(other) else {
+            return None;
+        };
+        let kind = match literal.value.as_str() {
+            "string" => SliceTypeofKind::String,
+            "number" => SliceTypeofKind::Number,
+            "bigint" => SliceTypeofKind::BigInt,
+            "boolean" => SliceTypeofKind::Boolean,
+            "symbol" => SliceTypeofKind::Symbol,
+            "undefined" => SliceTypeofKind::Undefined,
+            "object" => SliceTypeofKind::Object,
+            "function" => SliceTypeofKind::Function,
+            _ => return None,
+        };
+        let subject = self.narrow_subject_of(&unary.argument)?;
+        Some(SliceGuard::Typeof {
+            subject,
+            kind,
+            negated,
+        })
+    }
+
+    /// The user-defined type predicate form: `isStr(u)`, where the
+    /// narrowing fact lives in the CALLEE's declared return (`x is T`),
+    /// not at the use site. Only a same-file function declaration carries
+    /// its authored signature through this channel — a frame-local shadow
+    /// names a different function, and a cross-file callee's annotation
+    /// is beyond the retained snapshot this half reads.
+    fn lower_predicate_guard(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> SliceGuard {
+        let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
+            return SliceGuard::None;
+        };
+        let name = callee.name.as_str();
+        if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
+            return SliceGuard::None;
+        }
+        let Some((ordinal, target)) = self.same_file_predicate(name, false) else {
+            return SliceGuard::None;
+        };
+        let Some(argument) = call
+            .arguments
+            .get(ordinal)
+            .and_then(|argument| argument.as_expression())
+        else {
+            return SliceGuard::None;
+        };
+        let Some(subject) = self.narrow_subject_of(argument) else {
+            return SliceGuard::None;
+        };
+        SliceGuard::TypePredicate { subject, target }
+    }
+
+    /// Read a SAME-FILE function declaration's return-type predicate:
+    /// `x is T` (`asserts` false) or `asserts x is T` (`asserts` true).
+    /// Returns the ordinal of the parameter the predicate talks about
+    /// and the target type lowered through the frame gate (a BODY
+    /// position — the frame's own type declarations are in scope there,
+    /// exactly like a declarator annotation). `None` for any other
+    /// signature spelling.
+    fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, GatedType)> {
+        for statement in &self.program.body {
+            let Statement::FunctionDeclaration(function) = statement else {
+                continue;
+            };
+            if function.id.as_ref().map(|id| id.name.as_str()) != Some(name) {
+                continue;
+            }
+            let annotation = function.return_type.as_ref()?;
+            let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
+                return None;
+            };
+            if predicate.asserts != asserts {
+                return None;
+            }
+            let target = predicate.type_annotation.as_ref()?;
+            let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) =
+                &predicate.parameter_name
+            else {
+                return None;
+            };
+            let ordinal = function.params.items.iter().position(|param| {
+                matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
+                    if id.name.as_str() == parameter.name.as_str())
+            })?;
+            let gated = self.gate(
+                lower_ts_type(&target.type_annotation, self.source),
+                annotation.span,
+                &[],
+            );
+            return Some((ordinal, gated));
+        }
+        None
+    }
+
+    /// The narrowable reference an expression NAMES: a static member
+    /// chain rooted at an identifier the frame's lexical authority
+    /// resolves to a simple parameter or a modelable same-frame local.
+    /// Anything else — a call result, a computed member, a captured or
+    /// free root — is not positionally substitutable, so no narrow can
+    /// land on it.
+    fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
+        let mut segments: Vec<Arc<str>> = Vec::new();
+        let mut current = unwrap_parenthesized(expression);
+        let identifier = loop {
+            match current {
+                Expression::StaticMemberExpression(member) => {
+                    segments.push(Arc::from(member.property.name.as_str()));
+                    current = unwrap_parenthesized(&member.object);
+                }
+                Expression::Identifier(identifier) => break identifier,
+                _ => return None,
+            }
+        };
+        segments.reverse();
+        let path: Arc<[Arc<str>]> = Arc::from(segments.into_boxed_slice());
+        let name = identifier.name.as_str();
+        match self.resolve_name(name, identifier.span) {
+            NameBinding::Param(ordinal) => Some(SliceNarrowSubject {
+                root: SliceNarrowRoot::Param(ordinal),
+                path,
+            }),
+            NameBinding::Local(_) => Some(SliceNarrowSubject {
+                root: SliceNarrowRoot::Local(Arc::from(name)),
+                path,
+            }),
+            NameBinding::Free
+            | NameBinding::Captured
+            | NameBinding::NestedFunction
+            | NameBinding::Unmodeled => None,
+        }
+    }
+
+    /// Lower one expression statement's VALUE-NEUTRAL effects into
+    /// content: a whole-binding `=` write to a parameter or modelable
+    /// local (whose right-hand side the slice value-selected) becomes a
+    /// [`SliceStatement::Assignment`] the evaluator APPLIES, and a
+    /// same-file assertion call becomes a [`SliceStatement::Assertion`]
+    /// whose narrowing persists for the rest of the region.
+    ///
+    /// Every other expression statement lowers to nothing, exactly as
+    /// before: its value is never consumed and its evaluation effects
+    /// ride the slice's typed effect obligations — a compound-operator
+    /// write, a member-path write, and a write whose value the slice did
+    /// not select all keep the typed unapplied-write degradation rather
+    /// than acquiring a second, divergent verdict here.
+    fn lower_effect_statement(&mut self, expression: &Expression<'_>) -> Option<SliceStatement> {
+        match unwrap_parenthesized(expression) {
+            Expression::AssignmentExpression(assignment)
+                if matches!(
+                    assignment.operator,
+                    oxc_ast::ast::AssignmentOperator::Assign
+                ) =>
+            {
+                let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                    &assignment.left
+                else {
+                    return None;
+                };
+                let name = identifier.name.as_str();
+                let root = match self.resolve_name(name, identifier.span) {
+                    NameBinding::Param(ordinal) => SliceNarrowRoot::Param(ordinal),
+                    NameBinding::Local(_) => SliceNarrowRoot::Local(Arc::from(name)),
+                    NameBinding::Free
+                    | NameBinding::Captured
+                    | NameBinding::NestedFunction
+                    | NameBinding::Unmodeled => return None,
+                };
+                if !self.value_span_selected(assignment.right.span()) {
+                    return None;
+                }
+                let value = self.lower_expr(
+                    &assignment.right,
+                    ExprMode::BindingInit {
+                        preserve_literal: false,
+                    },
+                );
+                Some(SliceStatement::Assignment {
+                    target: SliceNarrowSubject {
+                        root,
+                        path: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    // The span identity matches the slice's typed write
+                    // effect, which the skeleton records at the TARGET
+                    // IDENTIFIER — never the whole assignment expression.
+                    span: self.rebase(identifier.span),
+                    value: Box::new(value),
+                })
+            }
+            Expression::CallExpression(call) => {
+                let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
+                    return None;
+                };
+                let name = callee.name.as_str();
+                if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
+                    return None;
+                }
+                let (ordinal, target) = self.same_file_predicate(name, true)?;
+                let argument = call
+                    .arguments
+                    .get(ordinal)
+                    .and_then(|argument| argument.as_expression())?;
+                let subject = self.narrow_subject_of(argument)?;
+                Some(SliceStatement::Assertion { subject, target })
+            }
+            _ => None,
         }
     }
 
@@ -2356,6 +2913,27 @@ impl Lowerer<'_> {
                     },
                 }
             }
+            // A sequence whose LAST operand is a narrowable reference
+            // (`(touch(), u)`): the sequence's VALUE is that operand —
+            // the earlier operands' evaluation effects ride the slice's
+            // typed effect obligations regardless. Lowering it as the
+            // reference keeps the frame's substitutions (the narrowing
+            // overlay above all) visible at the read; folding the whole
+            // sequence through the leaf lowering answered a fabricated
+            // `any` for it, clean and warm. Any other sequence keeps the
+            // leaf lowering.
+            Expression::SequenceExpression(sequence)
+                if sequence
+                    .expressions
+                    .last()
+                    .is_some_and(|last| self.narrow_subject_of(last).is_some()) =>
+            {
+                let last = sequence
+                    .expressions
+                    .last()
+                    .expect("the guard proved a last operand");
+                self.lower_expr(last, mode)
+            }
             // ── THE shared value-structural descent ──────────────────
             //
             // Every remaining form takes the disposition the ONE shared
@@ -2416,10 +2994,12 @@ impl Lowerer<'_> {
                 // own binders intact, its overload group unconsulted,
                 // warm.
                 ValueDescent::Branches(conditional) => {
+                    let guard = self.lower_guard(&conditional.test);
                     let consequent = self.lower_expr(&conditional.consequent, mode);
                     let alternate = self.lower_expr(&conditional.alternate, mode);
                     SliceExpr::Union {
                         arms: Arc::from(vec![consequent, alternate].into_boxed_slice()),
+                        guard,
                     }
                 }
                 // A CALL POSITION with no structural arm (`new f()`,
@@ -2593,6 +3173,27 @@ impl Lowerer<'_> {
                 (true, SliceExpr::Type(leaf)) => SliceExpr::Type(
                     leaf.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal),
                 ),
+                // The member slot's widening reaches INTO a branch join:
+                // a ternary member's fresh literal arm is the member's
+                // fresh literal, and tsc widens it at the property
+                // exactly like a direct literal member. A narrowed
+                // reference arm is NOT fresh (the checker's own
+                // early-return-guard shapes keep their literal unions),
+                // so only leaf arms widen here.
+                (true, SliceExpr::Union { arms, guard }) => SliceExpr::Union {
+                    arms: Arc::from(
+                        arms.iter()
+                            .map(|arm| match arm {
+                                SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
+                                    verter_semantic::analysis::type_eval_build::widen_shallow_literal,
+                                )),
+                                other => other.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    ),
+                    guard,
+                },
                 (_, value) => value,
             };
             entries.push(SliceObjectEntry::Member(SliceObjectMember {
@@ -2697,6 +3298,7 @@ impl Lowerer<'_> {
             captures: &captures,
             control,
             direct_calls: self.direct_calls,
+            program: self.program,
             budget_failure: None,
         };
         let region = if node.is_expression_body() {
@@ -2951,6 +3553,140 @@ enum LeafLowering {
 
 fn is_any(ty: &TypeExpr) -> bool {
     matches!(ty, TypeExpr::Primitive(PrimitiveName::Any))
+}
+
+/// Negate a lowered guard, De Morgan-complete: leaf `negated` flags
+/// flip and `And` / `Or` swap, so the evaluator never meets a third
+/// composition rule.
+fn negate_guard(guard: SliceGuard) -> SliceGuard {
+    match guard {
+        SliceGuard::None => SliceGuard::None,
+        SliceGuard::Typeof {
+            subject,
+            kind,
+            negated,
+        } => SliceGuard::Typeof {
+            subject,
+            kind,
+            negated: !negated,
+        },
+        SliceGuard::Truthy { subject, negated } => SliceGuard::Truthy {
+            subject,
+            negated: !negated,
+        },
+        SliceGuard::EqLiteral {
+            subject,
+            literal,
+            negated,
+        } => SliceGuard::EqLiteral {
+            subject,
+            literal,
+            negated: !negated,
+        },
+        SliceGuard::Instanceof {
+            subject,
+            ctor,
+            negated,
+        } => SliceGuard::Instanceof {
+            subject,
+            ctor,
+            negated: !negated,
+        },
+        SliceGuard::In {
+            key,
+            subject,
+            negated,
+        } => SliceGuard::In {
+            key,
+            subject,
+            negated: !negated,
+        },
+        // A user-defined predicate has no reliable NEGATED reading
+        // (`!isStr(u)` does not subtract `string` in general — tsc does
+        // subtract for single-argument `x is T` predicates, but the
+        // positive form is the one the corpus measures).
+        SliceGuard::TypePredicate { .. } => SliceGuard::None,
+        SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
+            parts
+                .iter()
+                .map(|part| negate_guard(part.clone()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+        SliceGuard::Or(parts) => SliceGuard::And(Arc::from(
+            parts
+                .iter()
+                .map(|part| negate_guard(part.clone()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )),
+    }
+}
+
+/// Conjoin two guards: a [`SliceGuard::None`] conjunct contributes no
+/// fact and drops out; the rest flatten into one conjunction.
+fn and_guard(left: SliceGuard, right: SliceGuard) -> SliceGuard {
+    let mut parts: Vec<SliceGuard> = Vec::new();
+    for guard in [left, right] {
+        match guard {
+            SliceGuard::None => {}
+            SliceGuard::And(nested) => parts.extend(nested.iter().cloned()),
+            other => parts.push(other),
+        }
+    }
+    match parts.len() {
+        0 => SliceGuard::None,
+        1 => parts.pop().unwrap_or(SliceGuard::None),
+        _ => SliceGuard::And(Arc::from(parts.into_boxed_slice())),
+    }
+}
+
+/// Disjoin two guards: an unnarrowable disjunct makes the whole
+/// disjunction's positive reading the identity (the union of "narrowed"
+/// and "unnarrowed" is unnarrowed), so the honest guard is none.
+fn or_guard(left: SliceGuard, right: SliceGuard) -> SliceGuard {
+    let mut parts: Vec<SliceGuard> = Vec::new();
+    for guard in [left, right] {
+        match guard {
+            SliceGuard::None => return SliceGuard::None,
+            SliceGuard::Or(nested) => parts.extend(nested.iter().cloned()),
+            other => parts.push(other),
+        }
+    }
+    match parts.len() {
+        0 => SliceGuard::None,
+        1 => parts.pop().unwrap_or(SliceGuard::None),
+        _ => SliceGuard::Or(Arc::from(parts.into_boxed_slice())),
+    }
+}
+
+/// The literal operand of an equality guard, if the expression IS one.
+fn guard_literal_of(expression: &Expression<'_>, source: &str) -> Option<SliceGuardLiteral> {
+    match unwrap_parenthesized(expression) {
+        Expression::StringLiteral(literal) => {
+            Some(SliceGuardLiteral::String(Arc::from(literal.value.as_str())))
+        }
+        Expression::NumericLiteral(literal) => Some(SliceGuardLiteral::Number(Arc::from(
+            &source[literal.span.start as usize..literal.span.end as usize],
+        ))),
+        Expression::BooleanLiteral(literal) => Some(SliceGuardLiteral::Boolean(literal.value)),
+        Expression::NullLiteral(_) => Some(SliceGuardLiteral::Null),
+        Expression::Identifier(identifier) if identifier.name.as_str() == "undefined" => {
+            Some(SliceGuardLiteral::Undefined)
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator == UnaryOperator::UnaryNegation
+                && matches!(
+                    unwrap_parenthesized(&unary.argument),
+                    Expression::NumericLiteral(_)
+                ) =>
+        {
+            Some(SliceGuardLiteral::Number(Arc::from(
+                &source[unary.span.start as usize..unary.span.end as usize],
+            )))
+        }
+        _ => None,
+    }
 }
 
 /// Whether a leaf ANSWER contains a value the shared shallow pass

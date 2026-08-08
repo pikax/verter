@@ -124,6 +124,7 @@ fn if_else_returns_build_region_tree_without_fallthrough() {
     let SliceStatement::If {
         consequent,
         alternate,
+        ..
     } = &node.body.statements[0]
     else {
         panic!("the single statement must be an if");
@@ -173,6 +174,7 @@ fn if_without_else_falls_through() {
     let SliceStatement::If {
         consequent,
         alternate,
+        ..
     } = &node.body.statements[0]
     else {
         panic!("the single statement must be an if");

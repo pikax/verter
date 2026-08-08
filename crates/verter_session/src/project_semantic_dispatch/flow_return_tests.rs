@@ -2176,16 +2176,16 @@ fn flow_return_write_to_unread_slot_stays_clean() {
 }
 
 /// R1 — a STANDALONE preceding whole-slot write (`x = "s"; return x`)
-/// reaches the lowered slice's effect obligations exactly like a write
-/// embedded in the returned expression: the slot hub's reverse
-/// eval-effect edge selects the write site, so the unapplied-write rail
-/// degrades (fail closed, ReturnOnly). Before the fix the write site's
-/// only edge ran INTO the hub, the effect frontier (out-edges only)
-/// never selected it, `lower_slice_plan` silently dropped the write
-/// (`effects=[]`), and `string | number` published as COMPLETE +
-/// warm-admitted where tsc narrows to `string`.
+/// is APPLIED by the evaluator in source order: the parameter's read
+/// after the statement resolves to the written value, so the result is
+/// the checker's own `string`, clean and warm-admissible. The planner
+/// half of this row is unchanged: the slot hub's reverse eval-effect
+/// edge still selects the write site (before it, the write site's only
+/// edge ran INTO the hub and `lower_slice_plan` silently dropped the
+/// write), which is what lets the content half lower the assignment at
+/// all.
 #[test]
-fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
+fn flow_return_standalone_preceding_write_applies_and_publishes_clean() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let key = flow_key(
@@ -2197,9 +2197,17 @@ fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
-            "a preceding whole-slot parameter write is an unapplied effect: \
-             evaluating past it would publish a type tsc narrows (oracle: `string`)"
+            None,
+            "the applied statement-position write retypes the parameter exactly where the \
+             unapplied-write rail once refused: tsc's own answer (`string`), no degradation"
+        );
+        let projected = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("the clean result projects");
+        assert_eq!(
+            projected,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "oracle: `string`"
         );
         assert_eq!(
             dispatch
@@ -2207,13 +2215,9 @@ fn flow_return_standalone_preceding_write_degrades_and_admits_nothing() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
                     key.clone()
                 ))),
-            0,
-            "the degraded success is ReturnOnly: zero memo entries"
+            1,
+            "the clean result admits warm"
         );
-        // Still a USABLE degraded value, not a no-value failure.
-        assert!(host
-            .project_node_to_type_expr_for_test(result.return_type())
-            .is_some());
     });
 }
 
@@ -3132,7 +3136,10 @@ const SCC_CANONICAL: &str = "/ws/flow-scc.ts";
 /// Two mutual components. `scCleanA`/`scCleanB` close cleanly (both
 /// members admit warm); `scDegradedA`/`scDegradedB` carry an unapplied
 /// write effect, so the whole component is a degraded success —
-/// `ReturnOnly`, never warm.
+/// `ReturnOnly`, never warm. The write is a COMPOUND assignment: a plain
+/// `=` write at statement position is applied by the evaluator and stays
+/// clean, so the degradation fixture rides the operator form nobody
+/// applies.
 const SCC_FIXTURE: &str = r#"
 export function scCleanA(c: boolean) {
   if (c) return 1;
@@ -3151,7 +3158,7 @@ export function scDegradedA(c: boolean) {
 
 export function scDegradedB(c: boolean) {
   let z = 1;
-  z = 2;
+  z += 2;
   return scDegradedA(!!z);
 }
 

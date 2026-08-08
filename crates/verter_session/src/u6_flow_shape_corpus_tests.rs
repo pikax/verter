@@ -1910,24 +1910,15 @@ const OPEN_DEBTS: &[&str] = &[
     "E02_spread_index_signature",
     "E03_spread_array",
     "H02_union_spread_source",
-    // ── NARROWING — seeded before the owning blocks exist ─────────────────
-    // Every one of these fails today by design. When its block lands and the
-    // row starts MATCHING the checker, the corpus fails and forces the row to
-    // be reclassified. `N07_branch_join_widens` is deliberately ABSENT: it is
-    // the over-narrow control and already agrees with the checker.
-    "N01_typeof_guard_ternary",
-    "N02_typeof_guard_block",
-    "N03_truthiness_guard",
-    "N04_discriminated_union",
-    "N05_in_operator_guard",
-    "N06_instanceof_guard",
-    "N08_predicate_across_call",
+    // ── NARROWING ────────────────────────────────────────────────────
+    // The narrowing blocks landed: every seeded narrowing row now matches
+    // the checker except N09_narrow_then_write, whose remaining debt is
+    // not the narrowing — `v.trim()` is a call to a string-intrinsic
+    // method and the walk authority has no lib/intrinsic member surface
+    // for a primitive base (`UnrepresentableCallee`, ReturnOnly).
+    // `N07_branch_join_widens` was always absent here: it is the
+    // over-narrow control and agreed with the checker from day one.
     "N09_narrow_then_write",
-    "N10_assertion_signature",
-    "N11_narrow_survives_call",
-    "N12_literal_union_narrow",
-    "N13_nested_property_guard",
-    "N14_negated_typeof_guard",
     // ── CONTEXTUAL — seeded before the owning block exists ──────────────
     // A declared return annotation's member union is collapsed to a lone
     // Primitive where the checker keeps `"a" | "b"`. Fails today by design;
@@ -1937,10 +1928,6 @@ const OPEN_DEBTS: &[&str] = &[
     // Conditional spread source whose arms share a key set: refused, and the
     // TSX lane faults.
     "X01_spread_narrow_arm_source",
-    // A narrowed member beside / above a spread publishes WIDER than the
-    // checker (`[String, Number]` for `string`).
-    "X02_spread_with_narrow_member",
-    "X03_narrow_member_spread_sibling",
     // try/catch and labelled/fallthrough control-flow joins with object-literal
     // returns produce NO VALUE — the D06_switch_return / D07_try_return family
     // extended to catch arms, labelled blocks, and switch fallthrough.
@@ -1981,11 +1968,11 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6CallResolve, 4, 4, 0),
     (Owner::U6ValueInference, 18, 8, 9),
     (Owner::U6ContextualCore, 9, 8, 1),
-    (Owner::U6FlowReturnSubstrate, 44, 33, 2),
-    (Owner::U6NarrowTypeof, 9, 0, 9),
-    (Owner::U6NarrowLattice, 3, 1, 2),
-    (Owner::U6NarrowSubstitution, 2, 0, 2),
-    (Owner::U6NarrowInvalidation, 2, 0, 2),
+    (Owner::U6FlowReturnSubstrate, 44, 35, 2),
+    (Owner::U6NarrowTypeof, 9, 9, 0),
+    (Owner::U6NarrowLattice, 3, 3, 0),
+    (Owner::U6NarrowSubstitution, 2, 2, 0),
+    (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
     (Owner::SharedCompilePipeline, 7, 0, 7),
     (Owner::FrameworkOnly, 7, 5, 0),
