@@ -226,8 +226,8 @@ pub(crate) const CORPUS: &[Row] = &[
     Row { id: "X15_labelled_block_return", script: "function makeProps(f: boolean) { blk: { if (f) { break blk } return { label: \"a\" } } return { label: \"b\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // Switch FALLTHROUGH (empty `case 1` falls into `case 2`) with object-literal returns: the shared continuation evaluates once — case 2's start joins the dispatch edge with case 1's fall-through edge — and the two return sites union exactly as D06_switch_return's per-arm shape does.
     Row { id: "X16_switch_fallthrough", script: "function makeProps(v: number) { switch (v) { case 1: case 2: return { label: \"a\" }; default: return { label: \"b\" } } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
-    // Self-recursion where the function's OWN annotated return feeds itself through a spread. The runtime lane publishes the exact surface; the flow lane conservatively reports an unreduced Union with UnmodeledPosition and nothing warms — pinned as measured; a lane-consistency fix re-pins this row.
-    Row { id: "X17_self_recursive_spread", script: "function makeProps(d: number): { label: string } { if (d > 0) { return { ...makeProps(d - 1) } } return { label: \"y\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; }", runtime: Runtime::Emitted { has: &["label: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::UnmodeledPosition, candidates: 0 }, svelte: Svelte::Props(&["label"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // Self-recursion where the function's OWN annotated return feeds itself through a spread. The authored annotation routes the return to the DECLARED rail: the composed answer is the annotation's closed surface, and the runtime lane publishes it exactly.
+    Row { id: "X17_self_recursive_spread", script: "function makeProps(d: number): { label: string } { if (d > 0) { return { ...makeProps(d - 1) } } return { label: \"y\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; }", runtime: Runtime::Emitted { has: &["label: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Declared { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive)] }, svelte: Svelte::Props(&["label"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // KNOWN OWED — an async function's return is `Promise<{ label: string }>` to the checker; the substrate silently UNWRAPS it and publishes the inner object as props — a fabricated surface for a type that is not object-like. The pin fails the moment the lane starts refusing or models the wrapper.
     Row { id: "X18_async_return", script: "async function makeProps() { return { label: \"x\" } }", probe: "ReturnType<typeof makeProps>", checker: "Promise<{ label: string; }>", runtime: Runtime::Emitted { has: &["label: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label"]), verdict: Verdict::KnownOwed { owed_absent: &[], note: "Async return wrapping is not modelled: the flow lane unwraps the `Promise` and the macro lane publishes the inner object as a props surface, where the checker types the return as `Promise<{ label: string }>` — not an object-like props type. The designed answer is a refusal; today the surface is fabricated relative to the checker." }, ..Row::BLANK },
     // KNOWN OWED — a generator return is correctly rejected by the macro lane (XInvalidMacroType, no props option), but the TSX lane FAULTS and deletes the file's whole type-check surface. Same consumer-reach debt class as E01_spread_any.
@@ -261,15 +261,16 @@ pub(crate) const CORPUS: &[Row] = &[
     // A DECLARED return annotation wins over the body join, full stop: the
     // checker checks the body AGAINST the annotation, so the signature's
     // return IS the annotation. The plainest contextual shape there is.
-    Row { id: "CC01_annotated_return_object", script: "function makeProps(): { label: string; n: number } { return { label: \"x\", n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive), ("n", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
-    // KNOWN OWED — annotation-directed literal WIDENING: the body returns the
-    // literal `"a"`, and the declared return position contextually types it
-    // into the union `"a" | "b"` — but the substrate COLLAPSES the annotated
-    // member to a single `Primitive` where the checker keeps the union. The
-    // member SET is right; the member TYPE is erased. The pinned `Primitive`
-    // member shape is the tripwire: when the annotation's union reaches the
-    // member, this row fails and is reclassified.
-    Row { id: "CC02_annotated_return_literal_union", script: "function makeProps(): { mode: \"a\" | \"b\" } { return { mode: \"a\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ mode: \"a\" | \"b\"; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("mode", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::KnownOwed { owed_absent: &[], note: "The declared return annotation's member union `\"a\" | \"b\"` is collapsed to a lone `Primitive` — the checker keeps the union. The correct member shape is `Union` (two literal arms); the runtime lane emits `type: String` either way, so the graph-node member shape is the only lane that can see this." }, ..Row::BLANK },
+    Row { id: "CC01_annotated_return_object", script: "function makeProps(): { label: string; n: number } { return { label: \"x\", n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Declared { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive), ("n", NodeShape::Primitive)] }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // Annotation-directed literal WIDENING, resolved: the authored return
+    // annotation routes to the DECLARED rail (the authorship gate never
+    // sends an annotated return to the body-derived producer), and the
+    // composed answer keeps the checker's `"a" | "b"` union at the member.
+    // The body-only evaluation widens the fresh literal to a lone
+    // `Primitive`, but no consumer ever demands it for an annotated
+    // function — the member-visible twin CC08_contextual_through_call_return
+    // measures the same rail through a call boundary and agrees.
+    Row { id: "CC02_annotated_return_literal_union", script: "function makeProps(): { mode: \"a\" | \"b\" } { return { mode: \"a\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ mode: \"a\" | \"b\"; }", owner: Owner::U6ContextualCore, flow: Flow::Declared { function: "makeProps", node: NodeShape::Object, members: &[("mode", NodeShape::Union)] }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // A const-assertion context on a PLAIN return (no spread — the B family
     // covers `as const` over spread-sourced literals). No lane in this corpus
     // observes `readonly` or literal preservation, so agreement is over the
@@ -285,10 +286,24 @@ pub(crate) const CORPUS: &[Row] = &[
     // of the widening targets X21_satisfies_plain_return and
     // CC09_satisfies_widening_target measure.
     Row { id: "CC05_satisfies_literal_union", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies { label: \"x\" | \"y\"; n: 1 | 2 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\"; n: 1; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
-    // Parameter-to-argument contextual flow: the arrow `(v) => v.length` has
-    // NO parameter annotation — `v: string` is contextually typed by `apply`'s
-    // parameter, and the call's return feeds member `n`.
-    Row { id: "CC06_contextual_arrow_param", script: "function apply(cb: (v: string) => number) { return cb(\"x\") }\nfunction makeProps() { return { n: apply((v) => v.length) } }", probe: "ReturnType<typeof makeProps>", checker: "{ n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("n", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // Parameter-to-argument contextual flow: the arrow `(v) => v` has NO
+    // parameter annotation — `v: "a" | "b"` is contextually typed by
+    // `apply`'s parameter, and `T` infers from the arrow's return, so the
+    // union member EXISTS only if the contextual param type reached the
+    // arrow. (The non-generic spelling is not a probe: `apply`'s return is
+    // `number` from `cb`'s declared signature whether or not the arrow was
+    // ever typed; and a `string`/`number` answer is one `Primitive`
+    // graph-node shape either way.) Negative controls, measured against the
+    // pinned checker: `(v: any) => T` (no contextual type to flow) answers
+    // `{ mode: any; }`, and a `"x" | "y"` context answers
+    // `{ mode: "x" | "y"; }` — the probe discriminates in both directions.
+    // KNOWN OWED — measured: the member is `unknown` for BOTH spellings.
+    // Context-sensitive arguments are withheld from the first inference
+    // pass and never re-typed under the fixed substitution, so `T` gets no
+    // candidate from the callback's return and defaults to `unknown`. The
+    // pinned `Primitive` member shape is the tripwire: when the second
+    // pass lands, the member flips to `Union` and this row fails.
+    Row { id: "CC06_contextual_arrow_param", script: "function apply<T>(cb: (v: \"a\" | \"b\") => T) { return cb(\"a\") }\nfunction makeProps() { return { mode: apply((v) => v) } }", probe: "ReturnType<typeof makeProps>", checker: "{ mode: \"a\" | \"b\"; }", owner: Owner::U6CallResolve, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("mode", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::KnownOwed { owed_absent: &[], note: "Context-sensitive callback arguments are never contextually typed: the arrow's un-annotated parameter lowers to `any`, the argument is withheld from the first inference pass, and no second pass re-types it under the fixed substitution — so `T` infers no candidate from the callback's return and defaults to `unknown` where the checker computes `\"a\" | \"b\"`. The repair is the inference pass's contextual half: mint the callback's contextual input at the call seam (the FlowReturnKey input axis — every production construction is the canonical empty point today), let the evaluator bind un-annotated parameters from it (non-empty inputs fail closed as UnmodeledDemandPoint today), and deposit the re-typed return as the covariant candidate." }, ..Row::BLANK },
     // An annotation on the SPREAD SOURCE's binding: `cfg`'s declared type is
     // the union-bearing annotation, and the contextual union must reach the
     // return THROUGH the spread. BLIND SPOT: a spread-program node has no

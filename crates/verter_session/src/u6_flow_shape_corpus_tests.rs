@@ -25,8 +25,12 @@
 //!   for the row's `probe`. Verified live by
 //!   [`oracle::corpus_checker_column_matches_tsgo`] whenever the pinned binary
 //!   is resolvable, so it is never a guess.
-//! * `flow` — the flow-return GRAPH NODE, its per-MEMBER node shapes, the
-//!   typed `degradation`, and the `slot_candidate_count`.
+//! * `flow` — the row's function return as PRODUCTION composes it: the
+//!   graph node and its per-MEMBER node shapes, plus (on the body-derived
+//!   rail) the typed `degradation` and the `slot_candidate_count`. A
+//!   function with an AUTHORED return annotation is served from the
+//!   declared locator rail — pin [`Flow::Declared`]; the body-derived
+//!   producer's answer for it is a measurement no consumer ever makes.
 //! * `owner` — the block the row is attributed to ([`Owner`]). Drives the
 //!   per-owner conformance number, which is the merge go/no-go.
 //! * `subject` — [`Subject::TypeScript`] or [`Subject::FrameworkOnly`].
@@ -139,7 +143,6 @@ use crate::semantic_query::{
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::{FileLanguage, VerterHost};
 use verter_compiler::compile::CompileTarget;
-use verter_type_expr::facts::FunctionPartIdentity;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Row vocabulary
@@ -238,8 +241,11 @@ pub(crate) enum Degr {
 pub(crate) enum Flow {
     /// The row does not drive the flow lane.
     Skip,
-    /// `FlowReturn` on `fn` produced a complete result with this node shape,
-    /// this degradation, and this warm-candidate count.
+    /// `fn`'s return is BODY-DERIVED, and the `FlowReturn` producer —
+    /// reached through the ONE sealed function-return consumer entry, which
+    /// the driver asserts really is the rail the served signature fact
+    /// selects — produced a complete result with this node shape, this
+    /// degradation, and this warm-candidate count.
     Result {
         function: &'static str,
         node: NodeShape,
@@ -262,6 +268,22 @@ pub(crate) enum Flow {
         /// A DEGRADED success is `ReturnOnly` — nothing warms — so this is
         /// `0` for every degraded row and non-zero only for clean ones.
         candidates: usize,
+    },
+    /// `fn`'s return is DECLARED (an authored annotation): the authorship
+    /// gate routes it to the memoized locator rail and the body-derived
+    /// producer never runs for it, so the lane asserts the composed
+    /// answer's node and member shapes through the same sealed
+    /// function-return consumer entry. Pinning [`Flow::Result`] for an
+    /// annotated function measures a body-only evaluation NO consumer ever
+    /// demands (fresh literals widen where the annotation holds them) —
+    /// the driver fails such a row, so the off-contract measurement is
+    /// unspellable. The declared rail carries no `FlowReturnDegradation`
+    /// and no flow slot, so the variant pins neither.
+    Declared {
+        function: &'static str,
+        node: NodeShape,
+        /// Same GRAPH-NODE member semantics as [`Flow::Result::members`].
+        members: &'static [(&'static str, NodeShape)],
     },
     /// `FlowReturn` answered with a typed non-value (a `Miss`, a `ReturnOnly`
     /// with no value). The row pins the refusal, not a fabricated shape.
@@ -792,9 +814,38 @@ fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
     }
 }
 
-/// Drive the FLOW lane: demand `FlowReturn` on the row's named function and
-/// read back the GRAPH NODE, the typed degradation, and the warm-candidate
-/// count for that key.
+/// The GRAPH-NODE member shapes of one returned surface. Shared by both
+/// rails: only a closed `Object` surface has named members; a spread
+/// PROGRAM is a construction plan and reports none.
+fn member_shapes(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: crate::semantic_query::SemanticNodeId,
+) -> Vec<(String, NodeShape)> {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Object(surface)) => surface
+            .positive_members()
+            .iter()
+            .filter_map(|member| {
+                let name = member.key.as_string()?.to_owned();
+                let value = dispatch.graph().node_data(member.value);
+                Some((name, node_shape(value.as_deref())))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Drive the FLOW lane: demand the row's named function's return the way
+/// PRODUCTION composes it — through the ONE sealed function-return
+/// consumer entry ([`ProjectSemanticDispatch::execute_function_return_source`]),
+/// with the served signature fact's `return_source` picking the rail. An
+/// authored return annotation selects the DECLARED locator rail (the
+/// body-derived producer never runs for an annotated function — the
+/// authorship gate routes it); anything else selects the `FlowReturn`
+/// producer. A row's [`Flow`] variant declares which rail it expects, and
+/// the lane fails a row whose pin names the other rail — the off-contract
+/// measurement (the body-only evaluation of an annotated function) is
+/// unspellable here.
 fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
     let host = make_host();
     let dir = "/ws";
@@ -814,53 +865,65 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
-    let key = crate::semantic_query::FlowReturnKey {
-        function: dispatch.flow_function_slot_for(
-            Arc::from(canonical.as_str()),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(function),
-            FunctionPartIdentity::DeclarationBody,
-            0,
-        ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: dispatch.flow_return_context_for(&canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let mut source = match host.prepared_value_decl_in(&canonical, owner, function) {
+        Some(prepared) => match prepared.signatures.as_slice() {
+            [signature] => signature.return_source.clone(),
+            _ => return MeasuredFlow::NoSignature,
+        },
+        None => return MeasuredFlow::NoSignature,
     };
-    let outcome = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-    let candidates = dispatch
-        .graph()
-        .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
-    match outcome {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
-            ..
-        }) => {
-            let data = dispatch.graph().node_data(result.return_type());
-            // The MEMBER shapes are the row's primary semantic evidence for
-            // anything that depends on a computed member type. Only a closed
-            // `Object` surface has named members; a spread PROGRAM is a
-            // construction plan and reports none.
-            let members: Vec<(String, NodeShape)> = match data.as_deref() {
-                Some(SemanticNodeData::Object(surface)) => surface
-                    .positive_members()
-                    .iter()
-                    .filter_map(|member| {
-                        let name = member.key.as_string()?.to_owned();
-                        let value = dispatch.graph().node_data(member.value);
-                        Some((name, node_shape(value.as_deref())))
-                    })
-                    .collect(),
-                _ => Vec::new(),
+    // Anchor fill mirrors the signature-composition consumers: the
+    // extractor stamps the declaration name; canonical / owner come from
+    // the serving scope.
+    match &mut source {
+        verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
+            let slot = match locator {
+                verter_type_expr::locators::FunctionReturnLocator::Authored(slot)
+                | verter_type_expr::locators::FunctionReturnLocator::Jsdoc(slot) => slot,
             };
+            slot.anchor.canonical_id = Arc::from(canonical.as_str());
+            slot.anchor.owner = owner;
+        }
+        verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+            identity.anchor.canonical_id = Arc::from(canonical.as_str());
+            identity.anchor.owner = owner;
+        }
+        verter_type_expr::facts::FunctionReturnSource::Absent => {}
+    }
+    let flow_identity = match &source {
+        verter_type_expr::facts::FunctionReturnSource::Flow(identity) => Some(identity.clone()),
+        _ => None,
+    };
+    match dispatch.execute_function_return_source(&source, &canonical) {
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Declared(hot) => {
+            MeasuredFlow::Declared {
+                node: node_shape(dispatch.graph().node_data(hot.node()).as_deref()),
+                members: member_shapes(&dispatch, hot.node()),
+            }
+        }
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+            let identity = flow_identity.expect("the Flow arm carries the identity");
+            let candidates =
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                        dispatch.flow_return_key_for(&identity),
+                    )));
             MeasuredFlow::Result {
-                node: node_shape(data.as_deref()),
-                members,
+                node: node_shape(dispatch.graph().node_data(result.return_type()).as_deref()),
+                members: member_shapes(&dispatch, result.return_type()),
                 degradation: degr_of(result.degradation()),
                 candidates,
             }
         }
-        _ => MeasuredFlow::NoValue,
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::DeclaredMiss => {
+            MeasuredFlow::DeclaredMiss
+        }
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(_)
+        | crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Absent => {
+            MeasuredFlow::NoValue
+        }
     }
 }
 
@@ -874,6 +937,16 @@ enum MeasuredFlow {
         degradation: Degr,
         candidates: usize,
     },
+    /// The DECLARED locator rail's answer (an annotated function's return):
+    /// node + member shapes, no degradation axis, no flow slot.
+    Declared {
+        node: NodeShape,
+        members: Vec<(String, NodeShape)>,
+    },
+    /// A DECLARED locator whose raise missed.
+    DeclaredMiss,
+    /// The function has no served single-signature return carrier at all.
+    NoSignature,
     NoValue,
 }
 
@@ -1333,7 +1406,7 @@ mod corpus_suite {
         for row in CORPUS {
             let function = match row.flow {
                 Flow::Skip if !dump => continue,
-                Flow::Result { function, .. } => function,
+                Flow::Result { function, .. } | Flow::Declared { function, .. } => function,
                 _ => "makeProps",
             };
             let measured = drive_flow(row, function);
@@ -1341,37 +1414,27 @@ mod corpus_suite {
                 println!("FLOW {} [{function}] => {measured:?}", row.id);
                 continue;
             }
-            match (row.flow, &measured) {
-                (
-                    Flow::Result {
-                        node,
-                        members,
-                        degradation,
-                        candidates,
-                        ..
-                    },
-                    MeasuredFlow::Result {
-                        node: got_node,
-                        members: got_members,
-                        degradation: got_degr,
-                        candidates: got_candidates,
-                    },
-                ) => {
+            // The PRIMARY semantic assertion, shared by both rails: each
+            // named member's own graph-node shape. A narrowing that stopped
+            // applying is visible ONLY here — the enclosing node is `Object`
+            // whether or not the guard was honoured.
+            let mut check_surface =
+                |node: NodeShape,
+                 got_node: &NodeShape,
+                 members: &[(&str, NodeShape)],
+                 got_members: &[(String, NodeShape)],
+                 failures: &mut Vec<String>| {
                     if node != *got_node {
                         failures.push(report(
                             row,
                             &format!("flow GRAPH NODE of `{function}`"),
                             &format!("{node:?}"),
                             &format!("{got_node:?}"),
-                            "the flow return's SemanticNodeData discriminant changed. This is \
+                            "the return's SemanticNodeData discriminant changed. This is \
                              asserted on the GRAPH NODE, never the projected TypeExpr, because \
                              TypeParam / DeclRef / BareRef all project to `Ref { name }`.",
                         ));
                     }
-                    // The PRIMARY semantic assertion: each named member's own
-                    // graph-node shape. A narrowing that stopped applying is
-                    // visible ONLY here — the enclosing node is `Object`
-                    // whether or not the guard was honoured.
                     for (name, want) in members {
                         match got_members.iter().find(|(got, _)| got == name) {
                             Some((_, got)) if got == want => {}
@@ -1394,6 +1457,24 @@ mod corpus_suite {
                             )),
                         }
                     }
+                };
+            match (row.flow, &measured) {
+                (
+                    Flow::Result {
+                        node,
+                        members,
+                        degradation,
+                        candidates,
+                        ..
+                    },
+                    MeasuredFlow::Result {
+                        node: got_node,
+                        members: got_members,
+                        degradation: got_degr,
+                        candidates: got_candidates,
+                    },
+                ) => {
+                    check_surface(node, got_node, members, got_members, &mut failures);
                     if degradation != *got_degr {
                         failures.push(report(
                             row,
@@ -1414,6 +1495,33 @@ mod corpus_suite {
                         ));
                     }
                 }
+                (
+                    Flow::Declared { node, members, .. },
+                    MeasuredFlow::Declared {
+                        node: got_node,
+                        members: got_members,
+                    },
+                ) => {
+                    check_surface(node, got_node, members, got_members, &mut failures);
+                }
+                (Flow::Result { .. }, MeasuredFlow::Declared { .. }) => failures.push(report(
+                    row,
+                    &format!("flow lane of `{function}`"),
+                    "Flow::Result (a body-derived return)",
+                    "the DECLARED rail",
+                    "the function's return carries an AUTHORED ANNOTATION, so production serves \
+                     it from the declared locator rail and the body-derived producer never runs \
+                     for it. Re-pin the row as `Flow::Declared` — a `Flow::Result` pin here \
+                     measures a body-only evaluation no consumer ever demands.",
+                )),
+                (Flow::Declared { .. }, MeasuredFlow::Result { .. }) => failures.push(report(
+                    row,
+                    &format!("flow lane of `{function}`"),
+                    "Flow::Declared (an authored-annotation return)",
+                    "the body-derived FlowReturn producer",
+                    "the function's return is BODY-DERIVED, not annotated. Re-pin the row as \
+                     `Flow::Result`.",
+                )),
                 (Flow::NoValue, MeasuredFlow::NoValue) => {}
                 (expected, got) => failures.push(report(
                     row,
@@ -1693,7 +1801,8 @@ mod verdict_consistency {
                     // A narrowing row carries no framework column at all; its
                     // tripwire is the pinned MEMBER shape, which flips the
                     // moment the owning block starts narrowing correctly.
-                    let pins_members = matches!(row.flow, Flow::Result { members, .. }
+                    let pins_members = matches!(row.flow,
+                        Flow::Result { members, .. } | Flow::Declared { members, .. }
                         if !members.is_empty());
                     let observable = matches!(row.runtime, Runtime::Refused)
                         || matches!(row.tsx, Tsx::Faults(_))
@@ -1905,11 +2014,13 @@ const OPEN_DEBTS: &[&str] = &[
     // `N07_branch_join_widens` was always absent here: it is the
     // over-narrow control and agreed with the checker from day one.
     "N09_narrow_then_write",
-    // ── CONTEXTUAL — seeded before the owning block exists ──────────────
-    // A declared return annotation's member union is collapsed to a lone
-    // Primitive where the checker keeps `"a" | "b"`. Fails today by design;
-    // the row flips the moment the annotation's union reaches the member.
-    "CC02_annotated_return_literal_union",
+    // ── CALL RESOLUTION — context-sensitive callback inference ──────────
+    // A callback argument's un-annotated parameter is never contextually
+    // typed: withheld from the first inference pass and never re-typed
+    // under the fixed substitution, so a type parameter inferable ONLY
+    // from the callback's return binds `unknown` where the checker
+    // computes the contextual union.
+    "CC06_contextual_arrow_param",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // A whole-binding write to an annotated literal-union binding binds the
     // RHS widened where the checker assignment-reduces to the declared
@@ -1956,9 +2067,9 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 4, 1, 2),
-    (Owner::U6CallResolve, 4, 4, 0),
+    (Owner::U6CallResolve, 5, 4, 1),
     (Owner::U6ValueInference, 26, 23, 1),
-    (Owner::U6ContextualCore, 9, 8, 1),
+    (Owner::U6ContextualCore, 8, 8, 0),
     (Owner::U6FlowReturnSubstrate, 44, 36, 2),
     (Owner::U6NarrowTypeof, 9, 9, 0),
     (Owner::U6NarrowLattice, 3, 3, 0),

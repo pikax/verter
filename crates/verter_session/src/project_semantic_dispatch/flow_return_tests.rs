@@ -999,6 +999,104 @@ fn function_return_helper_declared_arm_raises_authored_and_jsdoc() {
     });
 }
 
+/// The DECLARED rail keeps an authored literal-union member INTACT. An
+/// annotated function's return is served from the authored-annotation
+/// locator rail — the authorship gate (`type_eval_build`) never routes an
+/// annotated return to the body-derived producer — and the union the
+/// checker keeps reaches every consumer of the sealed entry. The negative
+/// control is the same body WITHOUT the annotation: it routes `Flow` and
+/// the fresh literal widens to its primitive, so the rail selection, not
+/// the body evaluation, is what carries the union.
+#[test]
+fn function_return_declared_rail_keeps_the_literal_union_member() {
+    const UNION_CANONICAL: &str = "/ws/declared-union-member.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(UNION_CANONICAL.to_string()),
+        input_id: UNION_CANONICAL.to_string(),
+        source: Arc::from(
+            "function ccAnnotated(): { mode: \"a\" | \"b\" } { return { mode: \"a\" } }\n\
+             function ccPlain() { return { mode: \"a\" } }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(UNION_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let member_node = |node: SemanticNodeId, name: &str| {
+            let data = dispatch.graph().node_data(node);
+            let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+                panic!("the return node is an Object, got {data:?}");
+            };
+            let member = surface
+                .positive_members()
+                .iter()
+                .find(|m| m.key.as_string() == Some(name))
+                .unwrap_or_else(|| panic!("member `{name}` is present"));
+            dispatch.graph().node_data(member.value)
+        };
+        let anchor = |symbol: &str| verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: Arc::from(UNION_CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from(symbol),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        };
+
+        let declared = verter_type_expr::facts::FunctionReturnSource::Declared(
+            verter_type_expr::locators::FunctionReturnLocator::Authored(
+                verter_type_expr::locators::TypeBodySlot {
+                    anchor: anchor("ccAnnotated"),
+                    path: Arc::from(
+                        vec![
+                            verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
+                                ordinal: 0,
+                            },
+                            verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                },
+            ),
+        );
+        let super::flow_return::FunctionReturnNode::Declared(hot) =
+            dispatch.execute_function_return_source(&declared, UNION_CANONICAL)
+        else {
+            panic!("an authored return lowers through the locator rail");
+        };
+        assert!(
+            matches!(
+                member_node(hot.node(), "mode").as_deref(),
+                Some(SemanticNodeData::Union(_))
+            ),
+            "the declared rail keeps the checker's `\"a\" | \"b\"` union at the member"
+        );
+
+        // NEGATIVE CONTROL: the same body with no annotation routes Flow,
+        // and the fresh literal widens to its primitive — the union above
+        // came from the rail selection, not from the body evaluation.
+        let plain = verter_type_expr::facts::FunctionReturnSource::Flow(
+            verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: anchor("ccPlain"),
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+        );
+        let super::flow_return::FunctionReturnNode::Flow(result) =
+            dispatch.execute_function_return_source(&plain, UNION_CANONICAL)
+        else {
+            panic!("an unannotated return is served by the FlowReturn producer");
+        };
+        assert!(
+            matches!(
+                member_node(result.return_type(), "mode").as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "the unannotated twin widens the fresh literal to `string`"
+        );
+    });
+}
+
 /// A degraded Flow evaluation surfaces the typed failure (never the
 /// absent arm, never a fabricated node); `Absent` reports the absent
 /// carrier.
