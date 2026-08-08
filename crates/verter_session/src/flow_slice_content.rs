@@ -2491,6 +2491,13 @@ impl Lowerer<'_> {
                     // An `if` absorbs no `break` either: a conditional exit
                     // (`if (f) break;`) is still an exit of the region.
                     may_break.extend(consequent.may_break);
+                    // A call in the TEST is a throw point BEFORE either
+                    // arm — the test lowers to guard facts only, so the
+                    // marker carries the point (ahead of the `if`, where
+                    // the test evaluates).
+                    if verter_semantic::analysis::flow::expression_contains_call(&if_stmt.test) {
+                        out.push(SliceStatement::ThrowPoint);
+                    }
                     if let Some(alternate) = alternate {
                         may_break.extend(alternate.may_break);
                         out.push(SliceStatement::If {
@@ -3214,7 +3221,14 @@ impl Lowerer<'_> {
                 })();
                 Some(assertion.unwrap_or(SliceStatement::ThrowPoint))
             }
-            _ => None,
+            // Every other value-neutral statement still carries its throw
+            // points: a `new`, and a call nested anywhere the value
+            // descent never reaches (a template literal's interpolation,
+            // a sequence's operand, a conditional's arm, a member chain)
+            // executes — and can throw — whether or not its value is
+            // consumed. The ONE shared scanner answers for every form.
+            other => verter_semantic::analysis::flow::expression_contains_call(other)
+                .then_some(SliceStatement::ThrowPoint),
         }
     }
 

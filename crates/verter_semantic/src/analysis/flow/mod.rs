@@ -47,7 +47,7 @@ pub mod peeker;
 pub mod value_descent;
 
 pub use value_descent::{
-    object_entry_descent, object_entry_key, static_property_key_text,
+    expression_contains_call, object_entry_descent, object_entry_key, static_property_key_text,
     value_composes_unmodeled_call, value_descent, value_is_unmodeled_call, ObjectEntryDescent,
     ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };

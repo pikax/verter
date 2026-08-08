@@ -2099,7 +2099,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 40, 36, 2),
+    (Owner::U6ValueInference, 50, 45, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 44, 36, 2),
     (Owner::U6NarrowTypeof, 10, 10, 0),

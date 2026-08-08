@@ -604,3 +604,111 @@ fn chain_is_call_valued(element: &ChainElement<'_>) -> bool {
         | ChainElement::PrivateFieldExpression(_) => false,
     }
 }
+
+/// Whether `expression` contains a call or `new` ANYWHERE — including the
+/// positions the value descent never reaches (a template literal's
+/// interpolations, a sequence's earlier operands, a conditional's test, a
+/// member expression's object or computed key). This is the THROW-POINT
+/// question, not the value question: a call that EXECUTES can throw, so a
+/// statement or test whose expression contains one is a point an
+/// enclosing `try`'s `catch` / `finally` can be entered from — whether or
+/// not the call's value is ever consumed. A nested function / class body
+/// is its own frame and answers false.
+#[must_use]
+pub fn expression_contains_call(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::CallExpression(_)
+        | Expression::NewExpression(_)
+        | Expression::TaggedTemplateExpression(_) => true,
+        Expression::ParenthesizedExpression(paren) => expression_contains_call(&paren.expression),
+        Expression::TSAsExpression(inner) => expression_contains_call(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => expression_contains_call(&inner.expression),
+        Expression::TSNonNullExpression(inner) => expression_contains_call(&inner.expression),
+        Expression::TSTypeAssertion(inner) => expression_contains_call(&inner.expression),
+        Expression::TSInstantiationExpression(inner) => expression_contains_call(&inner.expression),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(_) => true,
+            ChainElement::TSNonNullExpression(inner) => expression_contains_call(&inner.expression),
+            ChainElement::ComputedMemberExpression(member) => {
+                expression_contains_call(&member.object)
+                    || expression_contains_call(&member.expression)
+            }
+            ChainElement::StaticMemberExpression(member) => {
+                expression_contains_call(&member.object)
+            }
+            ChainElement::PrivateFieldExpression(member) => {
+                expression_contains_call(&member.object)
+            }
+        },
+        Expression::AwaitExpression(inner) => expression_contains_call(&inner.argument),
+        Expression::YieldExpression(inner) => inner
+            .argument
+            .as_ref()
+            .is_some_and(expression_contains_call),
+        Expression::SequenceExpression(sequence) => {
+            sequence.expressions.iter().any(expression_contains_call)
+        }
+        Expression::TemplateLiteral(template) => {
+            template.expressions.iter().any(expression_contains_call)
+        }
+        Expression::ConditionalExpression(conditional) => {
+            expression_contains_call(&conditional.test)
+                || expression_contains_call(&conditional.consequent)
+                || expression_contains_call(&conditional.alternate)
+        }
+        Expression::AssignmentExpression(assign) => expression_contains_call(&assign.right),
+        Expression::BinaryExpression(binary) => {
+            expression_contains_call(&binary.left) || expression_contains_call(&binary.right)
+        }
+        Expression::LogicalExpression(logical) => {
+            expression_contains_call(&logical.left) || expression_contains_call(&logical.right)
+        }
+        Expression::UnaryExpression(unary) => expression_contains_call(&unary.argument),
+        Expression::ComputedMemberExpression(member) => {
+            expression_contains_call(&member.object) || expression_contains_call(&member.expression)
+        }
+        Expression::StaticMemberExpression(member) => expression_contains_call(&member.object),
+        Expression::PrivateFieldExpression(member) => expression_contains_call(&member.object),
+        Expression::ArrayExpression(array) => array.elements.iter().any(|element| match element {
+            oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) => {
+                expression_contains_call(&spread.argument)
+            }
+            oxc_ast::ast::ArrayExpressionElement::Elision(_) => false,
+            other => other.as_expression().is_some_and(expression_contains_call),
+        }),
+        Expression::ObjectExpression(object) => {
+            object.properties.iter().any(|property| match property {
+                oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) => {
+                    expression_contains_call(&prop.value)
+                        || (prop.computed
+                            && prop
+                                .key
+                                .as_expression()
+                                .is_some_and(expression_contains_call))
+                }
+                oxc_ast::ast::ObjectPropertyKind::SpreadProperty(spread) => {
+                    expression_contains_call(&spread.argument)
+                }
+            })
+        }
+        Expression::UpdateExpression(_)
+        | Expression::PrivateInExpression(_)
+        | Expression::Identifier(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::ClassExpression(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::MetaProperty(_)
+        | Expression::Super(_)
+        | Expression::ImportExpression(_)
+        | Expression::ThisExpression(_)
+        | Expression::JSXElement(_)
+        | Expression::JSXFragment(_)
+        | Expression::V8IntrinsicExpression(_) => false,
+    }
+}

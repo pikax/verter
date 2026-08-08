@@ -6423,3 +6423,266 @@ fn flow_return_destructured_default_strips_aliased_undefined() {
     let host = make_r1_host();
     assert_r1_clean_warm(&host, "r1DestructuredAliasUndefined", number());
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// adversarial review, second pass — edge-state follow-ups
+// ──────────────────────────────────────────────────────────────────────
+//
+// Oracle-anchored against tsgo `7.0.0-dev.20260526.1` (`--noEmit --strict
+// --ignoreConfig`, checker only). The corpus rows X44 through X53 pin the
+// member-level spellings; these probes pin the raw-value answers the
+// corpus's graph-node granularity cannot see (the literal-level chain
+// narrowing above all).
+
+const R2_CANONICAL: &str = "/ws/flow-r2fix.ts";
+const R2_FIXTURE: &str = r#"
+export declare function mayThrow(): void;
+export declare function maybeOk(): boolean;
+
+export function r2SwitchFallthroughChain(x: "a" | "b" | "c") {
+  switch (x) { case "a": case "b": return x; default: return "z" }
+}
+
+export function r2SwitchExhaustiveBoolean(x: boolean) {
+  switch (x) { case true: return 1; case false: return 2 }
+}
+
+export function r2TemplateThrowPoint(s: string) {
+  let x: string | number = 0;
+  try { x = s; `${mayThrow()}`; x = 0 } catch { return x }
+  return x
+}
+
+export function r2IfGuardThrowPoint(s: string) {
+  let x: string | number = 0;
+  try { x = s; if (maybeOk()) { } x = 0 } catch { return x }
+  return x
+}
+
+export function r2NewCalleeThrowPoint(s: string) {
+  let x: string | number = 0;
+  try { x = s; new Date(); x = 0 } catch { return x }
+  return x
+}
+
+export function r2FinallySideThrowPoint(s: string) {
+  let x: string | number = 0;
+  try { x = s; `${mayThrow()}` } finally { return x }
+}
+
+export function r2BreakExitScopeClose(v: number) {
+  let z: string | number = 0;
+  let y: string | number = 0;
+  switch (v) { case 0: { let z = "s"; y = z; break } default: }
+  return { w: z, n: y }
+}
+
+export function r2FinallyWriteNotOnAbruptEdge(v: number, s: string) {
+  let x: string | number = 0;
+  switch (v) { case 0: try { break } finally { x = s } default: }
+  return x
+}
+
+export function r2TerminatedArmContributesNothing(flag: boolean) {
+  let x: string | number = "s";
+  if (flag) throw 0; else x = 42;
+  return x
+}
+"#;
+
+fn make_r2_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(R2_CANONICAL.to_string()),
+        input_id: R2_CANONICAL.to_string(),
+        source: Arc::from(R2_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(R2_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
+    with_dispatch(host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(R2_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(R2_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+        };
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            return None;
+        };
+        let ty = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("a flow return value projects");
+        let candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+        Some(R5Outcome {
+            ty,
+            degradation: result.degradation(),
+            candidates,
+        })
+    })
+}
+
+/// Assert one function evaluates CLEAN (no degradation), warm-admissible
+/// (one candidate), and to exactly `expected`.
+#[track_caller]
+fn assert_r2_clean_warm(host: &Arc<VerterHost>, name: &str, expected: TypeExpr) {
+    let outcome = r2_eval(host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
+    assert_eq!(outcome.degradation, None, "{name} must evaluate clean");
+    assert_eq!(outcome.ty, expected, "{name} return type");
+    assert_eq!(
+        outcome.candidates, 1,
+        "{name} must warm-admit exactly one candidate"
+    );
+}
+
+/// A fall-through-joined case start narrows the discriminant by the UNION
+/// of the chain's tests: the dispatch edge into `case "b"` tested
+/// positive, the fall-through edge out of `case "a"` carries `"a"`.
+/// Mutation recipe: serving the raw dispatch type at the joined start
+/// publishes `"a" | "b" | "c" | "z"`. Oracle: `"a" | "b" | "z"`.
+#[test]
+fn flow_return_fallthrough_case_start_unions_the_chain_tests() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(
+        &host,
+        "r2SwitchFallthroughChain",
+        union(vec![string_lit("a"), string_lit("b"), string_lit("z")]),
+    );
+}
+
+/// The exhaustive boolean switch: `boolean` decomposes into `true |
+/// false` before the coverage test, so no implicit `undefined` arm joins.
+/// Oracle: `1 | 2`.
+#[test]
+fn flow_return_exhaustive_boolean_switch_drops_the_no_match_path() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(
+        &host,
+        "r2SwitchExhaustiveBoolean",
+        union(vec![number_lit(1.0), number_lit(2.0)]),
+    );
+}
+
+/// The template-literal throw point, raw. Oracle: `string | number`.
+#[test]
+fn flow_return_template_literal_call_is_a_throw_point() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(
+        &host,
+        "r2TemplateThrowPoint",
+        union(vec![string(), number()]),
+    );
+}
+
+/// The if-test throw point, raw. Oracle: `string | number`.
+#[test]
+fn flow_return_if_test_call_is_a_throw_point() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(
+        &host,
+        "r2IfGuardThrowPoint",
+        union(vec![string(), number()]),
+    );
+}
+
+/// The `new`-callee throw point, raw. Oracle: `string | number`.
+#[test]
+fn flow_return_new_expression_is_a_throw_point() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(
+        &host,
+        "r2NewCalleeThrowPoint",
+        union(vec![string(), number()]),
+    );
+}
+
+/// The finally-side twin: the finally entry joins the throw point, the
+/// try-write flag keeps the read honestly degraded. Oracle: `string |
+/// number` (the model carries the join, degraded — never the clean
+/// one-path answer).
+#[test]
+fn flow_return_finally_entry_joins_the_template_throw_point() {
+    let host = make_r2_host();
+    let outcome = r2_eval(&host, "r2FinallySideThrowPoint").expect("evaluates");
+    assert_eq!(
+        outcome.degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+        "the read past the try stays fail-closed"
+    );
+    assert_eq!(
+        outcome.ty,
+        union(vec![string(), number()]),
+        "the finally entry carries the throw-point join"
+    );
+    assert_eq!(outcome.candidates, 0, "a degraded success is ReturnOnly");
+}
+
+/// A pending break exit replays the lexical scope closes it crossed: the
+//  block's shadowed `z` restores the OUTER binding on the exit, so the
+/// post-switch read of `w` is `number`. Oracle: `{ w: number; n: string
+/// | number; }` — and `n` pins the inner shadow's value reaching its own
+/// write, so the probe discriminates the shadow from a dropped block.
+#[test]
+fn flow_return_break_exit_replays_the_crossed_scope_close() {
+    let host = make_r2_host();
+    let outcome = r2_eval(&host, "r2BreakExitScopeClose").expect("evaluates");
+    assert_eq!(outcome.degradation, None, "must evaluate clean");
+    let TypeExpr::Object(object) = &outcome.ty else {
+        panic!("expected an object type, got {:?}", outcome.ty);
+    };
+    let member = |name: &str| {
+        object
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                verter_type_expr::ObjectMember::Property(prop)
+                    if prop.key.as_string().as_deref() == Some(name) =>
+                {
+                    Some(prop.ty.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("member {name} missing from {object:?}"))
+    };
+    assert_eq!(member("w"), number(), "the outer z on the break edge");
+    assert_eq!(
+        member("n"),
+        union(vec![number(), string()]),
+        "the inner shadow reached its own write"
+    );
+}
+
+/// A `finally` write never merges into a pending abrupt edge's
+/// continuation: the break path keeps the value its point captured.
+/// Oracle: `number`.
+#[test]
+fn flow_return_finally_write_stays_off_the_abrupt_edge() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(&host, "r2FinallyWriteNotOnAbruptEdge", number());
+}
+
+/// A terminated `if` arm contributes nothing to the post-`if` join — not
+/// even the pre-`if` value. Oracle: `number`.
+#[test]
+fn flow_return_terminated_if_arm_contributes_nothing() {
+    let host = make_r2_host();
+    assert_r2_clean_warm(&host, "r2TerminatedArmContributesNothing", number());
+}

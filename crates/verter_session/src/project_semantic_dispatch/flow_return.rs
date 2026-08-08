@@ -3404,26 +3404,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         alternate_param_writes: Option<&rustc_hash::FxHashMap<u32, SemanticNodeId>>,
     ) {
         // The pre-`if` layers are the LIVE ones again (the caller
-        // restored them); each arm's contribution defaults to that.
+        // restored them). Each SURVIVING arm contributes its end value
+        // (or the pre-`if` value when it never wrote the binding); a
+        // TERMINATED arm contributes NOTHING — with an explicit `else`,
+        // every path past the `if` took the surviving arm. A missing
+        // `else` is the implicit alternate: it always survives, with the
+        // pre-`if` value.
         for (name, before) in self.locals.clone().iter() {
-            let consequent_node = if consequent_falls {
-                consequent_locals.get(name).copied().unwrap_or(*before)
-            } else {
-                *before
-            };
-            let alternate_node = if alternate_falls {
-                alternate_locals
-                    .and_then(|locals| locals.get(name).copied())
-                    .unwrap_or(*before)
-            } else {
-                *before
-            };
-            if consequent_node == *before && alternate_node == *before {
+            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
+            if consequent_falls {
+                contributors.push(consequent_locals.get(name).copied().unwrap_or(*before));
+            }
+            match alternate_locals {
+                Some(alternate) if alternate_falls => {
+                    contributors.push(alternate.get(name).copied().unwrap_or(*before));
+                }
+                None => contributors.push(*before),
+                _ => {}
+            }
+            if contributors.is_empty() || contributors.iter().all(|node| node == before) {
                 continue;
             }
             let joined = self
                 .dispatch
-                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+                .intern_normalized_union_or_intersection(&contributors, true);
             self.bind_local(
                 name,
                 crate::flow_slice_content::SliceBindingKind::Let,
@@ -3433,18 +3437,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             );
         }
         for (name, before) in self.var_locals.clone().iter() {
-            let consequent_node = if consequent_falls {
-                consequent_var.get(name).copied().unwrap_or(*before)
-            } else {
-                *before
-            };
-            let alternate_node = if alternate_falls {
-                alternate_var
-                    .and_then(|locals| locals.get(name).copied())
-                    .unwrap_or(*before)
-            } else {
-                *before
-            };
+            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
+            if consequent_falls {
+                contributors.push(consequent_var.get(name).copied().unwrap_or(*before));
+            }
+            match alternate_var {
+                Some(alternate) if alternate_falls => {
+                    contributors.push(alternate.get(name).copied().unwrap_or(*before));
+                }
+                None => contributors.push(*before),
+                _ => {}
+            }
             // An arm WROTE the binding when its value moved OR the write
             // raised the conditional-definition flag during an arm (an
             // unchanged value still went through the write) — on an arm
@@ -3455,12 +3458,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let written_in_arm = (consequent_falls || alternate_falls)
                 && !saved_var_conditional.contains(name)
                 && self.var_conditional_locals.contains(name);
-            if consequent_node == *before && alternate_node == *before && !written_in_arm {
+            if contributors.is_empty()
+                || (contributors.iter().all(|node| node == before) && !written_in_arm)
+            {
                 continue;
             }
             let joined = self
                 .dispatch
-                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+                .intern_normalized_union_or_intersection(&contributors, true);
             self.bind_local(
                 name,
                 crate::flow_slice_content::SliceBindingKind::Var,
@@ -3510,27 +3515,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let Some(fallback) = fallback else {
                 continue;
             };
-            let consequent_node = if consequent_falls {
-                consequent_param_writes
-                    .get(&ordinal)
-                    .copied()
-                    .unwrap_or(fallback)
-            } else {
-                fallback
-            };
-            let alternate_node = if alternate_falls {
-                alternate_param_writes
-                    .and_then(|writes| writes.get(&ordinal).copied())
-                    .unwrap_or(fallback)
-            } else {
-                fallback
-            };
-            if consequent_node == fallback && alternate_node == fallback {
+            let mut contributors: Vec<SemanticNodeId> = Vec::with_capacity(2);
+            if consequent_falls {
+                contributors.push(
+                    consequent_param_writes
+                        .get(&ordinal)
+                        .copied()
+                        .unwrap_or(fallback),
+                );
+            }
+            match alternate_param_writes {
+                Some(alternate) if alternate_falls => {
+                    contributors.push(alternate.get(&ordinal).copied().unwrap_or(fallback));
+                }
+                None => contributors.push(fallback),
+                _ => {}
+            }
+            if contributors.is_empty() || contributors.iter().all(|node| *node == fallback) {
                 continue;
             }
             let joined = self
                 .dispatch
-                .intern_normalized_union_or_intersection(&[consequent_node, alternate_node], true);
+                .intern_normalized_union_or_intersection(&contributors, true);
             self.param_writes.insert(ordinal, joined);
         }
     }
@@ -3639,6 +3645,27 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             .partition(|exit| exit.target.as_ref() == target);
         self.break_exits.extend(rest);
         mine.into_iter().map(|exit| exit.state).collect()
+    }
+
+    /// Split off one block scope's declaration records and replay the
+    /// close over every PENDING break exit the scope's evaluation
+    /// captured: an exit rides its captured bindings across the scope
+    /// boundary, so the close must apply to it exactly as to the
+    /// fall-through end state — a declaration must not leak out on that
+    /// edge, and a shadowed outer binding must be restored there. The
+    /// caller applies the returned records to its own end / exit states
+    /// BEFORE joining them, so a shadowed value cannot be unioned into
+    /// the join first.
+    fn split_scope_shadows_close_exits(
+        &mut self,
+        shadow_base: usize,
+        break_base: usize,
+    ) -> Vec<ScopeShadow> {
+        let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
+        for exit in &mut self.break_exits[break_base..] {
+            Self::close_lexical_scope(&mut exit.state, &shadows);
+        }
+        shadows
     }
 
     /// Snapshot the complete state at a throw point (a call or a
@@ -3870,6 +3897,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         self.restore_layer_state(start.clone());
         let shadow_base = self.scope_shadows.len();
         let throw_base = self.throw_points.len();
+        let break_base = self.break_exits.len();
         let saved_collect = self.collect_throw_points;
         self.collect_throw_points = collect_throws;
         if let Some(param) = catch_param {
@@ -3895,7 +3923,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let written = self.written_between(start, &self.layer_state());
         let mut end = self.layer_state();
         self.complete_param_writes(&mut end);
-        let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
+        // The scope close replays on every state the clause's evaluation
+        // produced: the end state, the throw points, and the pending
+        // break exits that crossed the clause's scope.
+        let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
         Self::close_lexical_scope(&mut end, &shadows);
         for state in &mut self.throw_points[throw_base..] {
             Self::close_lexical_scope(state, &shadows);
@@ -4668,6 +4699,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
+    /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition
+    /// layer, so the binding reads the narrowed node on that edge. Used
+    /// where two differently-narrowed edges JOIN: the overlay intersection
+    /// would erase both facts (they differ), while the
+    /// reaching-definition join unions the two narrowed values — the
+    /// checker's own rule for a fall-through-joined switch case start.
+    fn bake_narrow_into_state(
+        state: &mut FlowLayerState,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        node: SemanticNodeId,
+    ) {
+        match &subject.root {
+            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
+                state.param_writes.insert(*ordinal, node);
+            }
+            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
+                if let Some(slot) = state.locals.get_mut(name.as_ref()) {
+                    *slot = node;
+                } else if let Some(slot) = state.var_locals.get_mut(name.as_ref()) {
+                    *slot = node;
+                }
+            }
+        }
+    }
+
     /// The switch discriminant's arms that NO case test covers: the
     /// remainder the default clause's dispatch edge narrows to, and —
     /// when empty with no default authored — the proof the
@@ -4713,6 +4769,30 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
         };
         let arms = self.union_arms_or_self(root);
+        // `boolean` decomposes into its two literal arms for coverage —
+        // the checker's own reading of `case true:` / `case false:` over
+        // a boolean discriminant.
+        let arms: Vec<SemanticNodeId> = arms
+            .into_iter()
+            .flat_map(|arm| {
+                if matches!(
+                    self.dispatch.graph().node_data(arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) {
+                    let graph = self.dispatch.graph();
+                    vec![
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(true),
+                        )),
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(false),
+                        )),
+                    ]
+                } else {
+                    vec![arm]
+                }
+            })
+            .collect();
         // A test that cannot lower makes coverage undecidable — dropping
         // it could manufacture an empty remainder (a false exhaustiveness
         // verdict), so the whole probe declines.
@@ -5113,6 +5193,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let saved_param_writes = self.param_writes.clone();
                     let narrow_len = self.narrowings.len();
                     let shadow_base = self.scope_shadows.len();
+                    let break_base = self.break_exits.len();
                     self.conditional_arm_nesting += 1;
                     self.apply_guard_scoped(guard, true);
                     let (consequent_result, consequent_falls) = self.eval_region(consequent);
@@ -5120,7 +5201,10 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let consequent_var = self.var_locals.clone();
                     let consequent_param_writes = self.param_writes.clone();
                     self.narrowings.truncate(narrow_len);
-                    self.scope_shadows.truncate(shadow_base);
+                    // The arm's scope close replays on any break exit the
+                    // arm captured — the exit rides its captured bindings
+                    // past the arm's boundary.
+                    let _ = self.split_scope_shadows_close_exits(shadow_base, break_base);
                     self.locals = saved.clone();
                     self.degraded_locals = saved_degraded.clone();
                     self.widening_locals = saved_widening.clone();
@@ -5141,7 +5225,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         let alternate_var = self.var_locals.clone();
                         let alternate_param_writes = self.param_writes.clone();
                         self.narrowings.truncate(narrow_len);
-                        self.scope_shadows.truncate(shadow_base);
+                        let _ = self.split_scope_shadows_close_exits(shadow_base, break_base);
                         self.locals = saved.clone();
                         self.degraded_locals = saved_degraded.clone();
                         self.widening_locals = saved_widening.clone();
@@ -5213,22 +5297,26 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // dispatch edge (the state at the switch) AND, for
                     // every clause after the first, by the previous
                     // clause's fall-through edge — so each clause starts
-                    // from the JOIN of those two states. The dispatch edge
-                    // narrows the discriminant by the clause's test (the
-                    // default clause by the negation of every test) — but
-                    // only when NO fall-through edge joins the clause's
-                    // start: the join intersects the overlay, and applying
-                    // the test to the joined state would over-narrow the
-                    // fall-through edge's component. The state past the
-                    // switch joins every path that leaves it normally: the
-                    // state AT each `break` (never the end state of the
-                    // clause the break sits in — a write after the break
-                    // is not on the break's edge), falling off the last
-                    // clause, and the no-matching-case path when no
-                    // `default` exists AND the tests do not cover the
-                    // discriminant's every arm. The clauses share ONE
-                    // block scope, exactly as the authored switch body
-                    // does.
+                    // from the JOIN of those two states. Each component
+                    // carries its OWN reading of the discriminant, baked
+                    // into the reaching-definition layer before the join:
+                    // the dispatch edge into a clause tested positive for
+                    // the clause's test (the default clause's edge is the
+                    // discriminant minus every test), and the fall-through
+                    // edge out of a clause carries that clause's narrow
+                    // with it — so a fall-through-joined start unions the
+                    // chain's tests, exactly the checker's flow. (The
+                    // narrowing OVERLAY cannot carry this: the join
+                    // intersects it, and the two edges' facts differ.)
+                    // The state past the switch joins every path that
+                    // leaves it normally: the state AT each `break`
+                    // (never the end state of the clause the break sits
+                    // in — a write after the break is not on the break's
+                    // edge), falling off the last clause, and the
+                    // no-matching-case path when no `default` exists AND
+                    // the tests do not cover the discriminant's every
+                    // arm. The clauses share ONE block scope, exactly as
+                    // the authored switch body does.
                     let mut entry = self.layer_state();
                     self.complete_param_writes(&mut entry);
                     let break_base = self.break_exits.len();
@@ -5250,10 +5338,68 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let mut last_end: Option<FlowLayerState> = None;
                     let mut last_falls = false;
                     for case in cases.iter() {
+                        // The dispatch component of this clause's start.
+                        let mut dispatch = entry.clone();
+                        let mut dead_dispatch = false;
+                        if let Some(subject) = discriminant {
+                            self.restore_layer_state(entry.clone());
+                            match &case.test {
+                                // The dispatch edge: the discriminant IS
+                                // this test.
+                                Some(test) => {
+                                    if let Some((fact_subject, node)) =
+                                        self.narrow_eq_literal(subject, test, false)
+                                    {
+                                        Self::bake_narrow_into_state(
+                                            &mut dispatch,
+                                            &fact_subject,
+                                            node,
+                                        );
+                                    }
+                                }
+                                // The default clause's dispatch edge: the
+                                // discriminant minus every test.
+                                None => {
+                                    if let Some((remainder, total)) =
+                                        self.switch_discriminant_remainder(subject, &tests)
+                                    {
+                                        if remainder.is_empty() {
+                                            // Every arm is covered: the
+                                            // clause is DEAD on this edge
+                                            // — it contributes nothing and
+                                            // falls through nowhere.
+                                            dead_dispatch = true;
+                                        } else if remainder.len() < total {
+                                            let node = self
+                                                .dispatch
+                                                .intern_normalized_union_or_intersection(
+                                                    &remainder, true,
+                                                );
+                                            let root_subject =
+                                                crate::flow_slice_content::SliceNarrowSubject {
+                                                    root: subject.root.clone(),
+                                                    path: Arc::from(Vec::new().into_boxed_slice()),
+                                                };
+                                            Self::bake_narrow_into_state(
+                                                &mut dispatch,
+                                                &root_subject,
+                                                node,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if dead_dispatch {
+                            chain_end = None;
+                            last_end = None;
+                            last_falls = false;
+                            continue;
+                        }
                         let start = match &chain_end {
-                            None => entry.clone(),
+                            None => dispatch,
                             Some(end) => {
-                                let mut start = self.join_layer_states(&entry, end);
+                                let mut start = self.join_layer_states(&dispatch, end);
                                 // A `var` the fall-through edge first
                                 // defines has no reaching definition on the
                                 // dispatch edge: flag it so a read fails
@@ -5264,63 +5410,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             }
                         };
                         self.restore_layer_state(start);
-                        let narrow_len = self.narrowings.len();
-                        if chain_end.is_none() {
-                            if let Some(subject) = discriminant {
-                                match &case.test {
-                                    // The dispatch edge: the discriminant
-                                    // IS this test.
-                                    Some(test) => {
-                                        if let Some(fact) =
-                                            self.narrow_eq_literal(subject, test, false)
-                                        {
-                                            self.narrowings.push(fact);
-                                        }
-                                    }
-                                    // The default clause's dispatch edge:
-                                    // the discriminant minus every test.
-                                    None => {
-                                        if let Some((remainder, total)) =
-                                            self.switch_discriminant_remainder(subject, &tests)
-                                        {
-                                            if remainder.is_empty() {
-                                                // Every arm is covered:
-                                                // the clause is DEAD on
-                                                // this edge — it
-                                                // contributes nothing and
-                                                // falls through nowhere.
-                                                self.narrowings.truncate(narrow_len);
-                                                chain_end = None;
-                                                last_end = None;
-                                                last_falls = false;
-                                                continue;
-                                            }
-                                            if remainder.len() < total {
-                                                let node = self
-                                                    .dispatch
-                                                    .intern_normalized_union_or_intersection(
-                                                        &remainder, true,
-                                                    );
-                                                let root_subject =
-                                                    crate::flow_slice_content::SliceNarrowSubject {
-                                                        root: subject.root.clone(),
-                                                        path: Arc::from(
-                                                            Vec::new().into_boxed_slice(),
-                                                        ),
-                                                    };
-                                                self.narrowings.push((root_subject, node));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         let (case_result, _) = self.eval_region(&case.region);
                         match case_result {
                             Ok(case_contributors) => contributors.extend(case_contributors),
                             Err(failure) => return (Err(failure), region.can_fall_through),
                         }
-                        self.narrowings.truncate(narrow_len);
                         let end = self.layer_state();
                         // Only a clause whose path FALLS THROUGH passes its
                         // end state to the next clause's start: a `break` /
@@ -5336,11 +5430,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     if !has_default && !covered {
                         exit_states.push(entry.clone());
                     }
+                    // Lexical bindings declared inside a clause are scoped
+                    // to the switch body: the close replays on every state
+                    // the clauses produced — each pending break exit
+                    // included — BEFORE the join, so a shadowed or
+                    // clause-declared binding cannot be unioned into the
+                    // post-switch state, and the clauses' writes to
+                    // bindings that PREDATE the switch survive.
+                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
                     // The `break` exits, with the state each captured at
-                    // its own point.
+                    // its own point (scope-closed above, like every state
+                    // that crossed the switch body's scope).
                     exit_states.extend(self.drain_break_exits(break_base, None));
                     if last_falls {
-                        if let Some(end) = last_end {
+                        if let Some(mut end) = last_end {
+                            Self::close_lexical_scope(&mut end, &shadows);
                             exit_states.push(end);
                         }
                     }
@@ -5358,12 +5462,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         // entry to keep the layers sane.
                         None => entry.clone(),
                     };
-                    // Lexical bindings declared inside a clause are scoped
-                    // to the switch body: they do not escape it — and the
-                    // clauses' writes to bindings that PREDATE the switch
-                    // survive, through the one scope-close authority.
-                    let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
-                    Self::close_lexical_scope(&mut joined, &shadows);
                     if reaches {
                         self.flag_conditionally_defined_vars(&mut joined, &exit_states);
                     }
@@ -5470,16 +5568,37 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     match finally {
                         Some(finally) => {
-                            // The finally body runs on abrupt completions
-                            // too: its start joins the normal completions
-                            // with every throw point of the clauses, and
-                            // its overlay is the ENTRY's, whatever the
-                            // clauses established (tsgo: a narrow from the
-                            // try does not apply inside the finally).
-                            let mut finally_start = pre_finally.clone();
+                            // The finally BODY runs on every completion:
+                            // its start joins the normal completions with
+                            // the try's ENTRY (a throw can precede every
+                            // try-internal write — the checker reads the
+                            // pre-try value inside the finally too), every
+                            // throw point of the clauses, and every
+                            // pending abrupt edge's pre-state (a `break`
+                            // crosses the finally — the finally runs
+                            // before the edge proceeds). Its overlay is
+                            // the ENTRY's, whatever the clauses
+                            // established (tsgo: a narrow from the try
+                            // does not apply inside the finally). The
+                            // dual does NOT hold: the finally's own
+                            // writes never merge into a pending abrupt
+                            // edge's continuation — the edge keeps the
+                            // value its point captured (tsgo, measured).
+                            // And the state PAST the statement is not the
+                            // finally body's wide start either: only the
+                            // normal completions reach it, plus the
+                            // finally's own writes.
+                            let mut finally_start = self.join_layer_states(&pre_finally, &entry);
                             finally_start.narrowings = entry.narrowings.clone();
                             let clause_throws = self.throw_points[throw_base..].to_vec();
                             for state in block_throws.iter().chain(clause_throws.iter()) {
+                                finally_start = self.join_layer_states(&finally_start, state);
+                            }
+                            let pending_exits: Vec<FlowLayerState> = self.break_exits[break_base..]
+                                .iter()
+                                .map(|exit| exit.state.clone())
+                                .collect();
+                            for state in &pending_exits {
                                 finally_start = self.join_layer_states(&finally_start, state);
                             }
                             let (finally_contributors, finally_end, finally_written) =
@@ -5487,6 +5606,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                     Ok(clause) => clause,
                                     Err(failure) => return (Err(failure), region.can_fall_through),
                                 };
+                            // The post-statement state: the normal
+                            // completions (pre_finally, with its flags and
+                            // the entry's overlay) plus exactly the
+                            // finally's own writes.
+                            let mut post = pre_finally.clone();
+                            post.narrowings = entry.narrowings.clone();
+                            for name in &finally_written.0 {
+                                if let Some(node) = finally_end.locals.get(name) {
+                                    post.locals.insert(name.clone(), *node);
+                                }
+                            }
+                            for name in &finally_written.1 {
+                                if let Some(node) = finally_end.var_locals.get(name) {
+                                    post.var_locals.insert(name.clone(), *node);
+                                }
+                            }
+                            for ordinal in &finally_written.2 {
+                                if let Some(node) = finally_end.param_writes.get(ordinal) {
+                                    post.param_writes.insert(*ordinal, *node);
+                                }
+                            }
+                            self.restore_layer_state(post);
                             if catch.is_none() {
                                 // No catch: the abrupt paths leave the
                                 // frame, so past the statement the
@@ -5538,28 +5679,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                 }
                             }
                             if finally.can_fall_through {
-                                // A pending `break` crosses the finally:
-                                // the finally's own writes join its edge.
-                                let written_locals = finally_written.0.clone();
-                                let written_vars = finally_written.1.clone();
-                                let written_params = finally_written.2.clone();
-                                for exit in &mut self.break_exits[break_base..] {
-                                    for name in &written_locals {
-                                        if let Some(node) = finally_end.locals.get(name) {
-                                            exit.state.locals.insert(name.clone(), *node);
-                                        }
-                                    }
-                                    for name in &written_vars {
-                                        if let Some(node) = finally_end.var_locals.get(name) {
-                                            exit.state.var_locals.insert(name.clone(), *node);
-                                        }
-                                    }
-                                    for ordinal in &written_params {
-                                        if let Some(node) = finally_end.param_writes.get(ordinal) {
-                                            exit.state.param_writes.insert(*ordinal, *node);
-                                        }
-                                    }
-                                }
                                 own.extend(finally_contributors);
                             } else {
                                 // An abrupt finally discards every pending
@@ -5609,9 +5728,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         Err(failure) => return (Err(failure), region.can_fall_through),
                     };
                     contributors.extend(body_contributors);
-                    let end = self.layer_state();
+                    let mut end = self.layer_state();
+                    // The body's scope close replays on every state the
+                    // body produced — each pending break exit included —
+                    // BEFORE the join, so a shadowed or body-declared
+                    // binding cannot be unioned into the post-statement
+                    // state.
+                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
                     let mut exits: Vec<FlowLayerState> =
                         self.drain_break_exits(break_base, Some(label));
+                    Self::close_lexical_scope(&mut end, &shadows);
                     if body_falls {
                         exits.push(end);
                     }
@@ -5629,8 +5755,6 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         // the layers sane.
                         None => entry.clone(),
                     };
-                    let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
-                    Self::close_lexical_scope(&mut joined, &shadows);
                     if reaches {
                         // A `var` the body first defines has no reaching
                         // definition on an edge that skips the definition
@@ -5647,8 +5771,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // PREDATES the block survives it, because the block
                     // executes unconditionally on every path that reaches
                     // it. The scope close, not a layer restore, expresses
-                    // both halves at once.
+                    // both halves at once — and it replays on every
+                    // pending break exit the block's evaluation captured,
+                    // since an exit rides its captured bindings across the
+                    // block's boundary.
                     let shadow_base = self.scope_shadows.len();
+                    let break_base = self.break_exits.len();
                     let (result, block_falls) = self.eval_region(block);
                     let block_contributors = match result {
                         Ok(contributors) => contributors,
@@ -5656,7 +5784,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     };
                     contributors.extend(block_contributors);
                     let mut end = self.layer_state();
-                    let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
+                    let shadows = self.split_scope_shadows_close_exits(shadow_base, break_base);
                     Self::close_lexical_scope(&mut end, &shadows);
                     self.restore_layer_state(end);
                     path_alive = block_falls;

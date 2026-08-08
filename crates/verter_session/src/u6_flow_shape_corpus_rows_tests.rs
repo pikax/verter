@@ -437,4 +437,62 @@ pub(crate) const CORPUS: &[Row] = &[
     // dropping the write — the same restore the labeled / try-clause arms
     // shared, closed by the one scope-close authority.
     Row { id: "X43_plain_block_write_survives", script: "function makeProps(s: string) { let x: string | number = 0; { x = s } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+
+    // ── adversarial review, second pass: edge-state follow-ups ────────
+    // Every row below was measured red against the pinned checker before the
+    // fix landed; each comment names the broken answer it pinned against.
+    // An exhaustive `boolean` switch: the coverage test decomposes `boolean`
+    // into `true | false` before relating the tests. Red: the primitive
+    // never matched a literal test, the no-match path stayed live, and the
+    // implicit `undefined` arm reached the emitted surface as an optional
+    // prop — the runtime `required` flag is the tripwire.
+    Row { id: "X44_switch_exhaustive_boolean", script: "function makeProps(x: boolean) { switch (x) { case true: return { v: 1 }; case false: return { v: 2 } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: Number, required: true"], hasnt: &["required: false", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A fall-through-joined case start narrows the discriminant by the
+    // UNION of the chain's tests: the dispatch edge into `case \"b\"`
+    // tested positive for `\"b\"`, the fall-through edge out of `case
+    // \"a\"` carries `\"a\"`. Red: the joined start served the raw
+    // dispatch type, so the member union kept `1` and the runtime
+    // constructor list grew a `Number`.
+    Row { id: "X45_switch_fallthrough_case_narrows_by_chain_tests", script: "function makeProps(x: \"a\" | \"b\" | 1) { switch (x) { case \"a\": case \"b\": return { v: x }; case 1: return { v: \"z\" } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: String, required: true"], hasnt: &["Number", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A call inside a template-literal statement is a throw point the
+    // catch is entered from — value-neutral content, but the marker must
+    // descend into the template's expressions. Red: no marker, so the
+    // catch read published the pre-try `number` clean (warm and wrong).
+    Row { id: "X46_try_catch_template_throw_point", script: "declare function mayThrow(): void\nfunction makeProps(s: string) { let x: string | number = 0; try { x = s; `${mayThrow()}`; x = 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The sequence-expression spelling of X46_try_catch_template_throw_point.
+    Row { id: "X47_try_catch_sequence_throw_point", script: "declare function mayThrow(): void\nfunction makeProps(s: string) { let x: string | number = 0; try { x = s; (mayThrow(), mayThrow()); x = 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A call in an `if` TEST is a throw point before either arm: the
+    // marker is emitted ahead of the `if`, where the test evaluates.
+    // Red: the test lowered to guard facts only, so no throw point
+    // existed and the catch read published `number` clean.
+    Row { id: "X48_try_catch_if_guard_throw_point", script: "declare function maybeOk(): boolean\nfunction makeProps(s: string) { let x: string | number = 0; try { x = s; if (maybeOk()) { } x = 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A `new` expression statement is a throw point exactly like a call.
+    Row { id: "X49_try_catch_new_callee_throw_point", script: "declare function mayThrow(): void\nclass Foo { }\nfunction makeProps(s: string) { let x: string | number = 0; try { x = s; new Foo(); x = 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A pending break exit crosses the lexical scopes between the break
+    // and its target: the scope closes must replay on the captured state
+    // — here the block's `let z` shadowed the outer binding, and the exit
+    // must restore the OUTER value, not ride the inner one past the
+    // switch. (The inner `z` is read by the `y = z` write so the demand
+    // slice lowers the shadow at all.) Red: the drained exit carried the
+    // shadow's `string`, so the post-switch read of `w` unioned it in.
+    Row { id: "X50_switch_break_exit_closes_crossed_scope", script: "function makeProps(v: number) { let z: string | number = 0; let y: string | number = 0; switch (v) { case 0: { let z = \"s\"; y = z; break } default: } return { w: z, n: y } }", probe: "ReturnType<typeof makeProps>", checker: "{ w: number; n: string | number; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("w", NodeShape::Primitive), ("n", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A `finally` write does NOT merge into a pending abrupt edge's
+    // continuation: the checker runs the finally on the break path but
+    // the edge past the switch keeps the break point's own value. Red:
+    // the finally's write was applied onto the pending exit, so the read
+    // unioned `string` in where the checker has `number` only.
+    Row { id: "X51_finally_write_not_on_abrupt_edge", script: "function makeProps(v: number, s: string) { let x: string | number = 0; switch (v) { case 0: try { break } finally { x = s } default: } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The dual of X51_finally_write_not_on_abrupt_edge at the same join:
+    // the pending break's PRE-STATE feeds the finally's ENTRY — the
+    // finally runs on the break path, so its return reads the joined
+    // `\"a\" | \"b\"`. Still honestly degraded (the try-write flag keeps
+    // the fail-closed net), but the member now carries both arms. Red:
+    // the finally start joined only the normal completions, so the read
+    // published the pre-try `\"a\"` alone.
+    Row { id: "X52_finally_entry_joins_pending_break", script: "function makeProps() { let x: \"a\" | \"b\" = \"a\"; L: { try { x = \"b\"; break L } finally { return { v: x } } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"a\" | \"b\"; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: null"], hasnt: &[] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::ConditionalVarDefinition, candidates: 0 }, verdict: Verdict::Degraded("the finally entry now joins the pending break's pre-state, so the member carries the try's write joined with the pre-try value — widened to `string` under the write-widening debt X29_write_annotated_union_write_widens records, where the checker keeps `\"a\" | \"b\"`. The try-write flag still degrades the read (ConditionalVarDefinition, ReturnOnly) — the fail-closed net for throw points the model cannot capture. The tripwire is the member shape: before the join it pinned `Literal` (the pre-try `\"a\"` alone)"), ..Row::BLANK },
+    // A TERMINATED `if` arm contributes nothing to the post-`if` join —
+    // not even the pre-`if` value: with an explicit `else`, every path
+    // past the `if` took the surviving arm. Red: the terminated arm
+    // contributed the pre-`if` `string`, unioning it into the read.
+    Row { id: "X53_terminated_if_arm_contributes_nothing", script: "function makeProps(flag: boolean) { let x: string | number = \"s\"; if (flag) throw 0; else x = 42; return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
 ];
