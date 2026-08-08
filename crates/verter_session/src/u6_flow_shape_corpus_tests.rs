@@ -1924,6 +1924,16 @@ const OPEN_DEBTS: &[&str] = &[
     // The macro lane correctly rejects a generator return, but the TSX lane
     // faults with the same code — the consumer-reach debt class.
     "X19_generator_yield",
+    // ── TypeScript semantics: mapped heritage (index signature, nested builtin) ──
+    // The mapped route over an index-signature heritage interface drops the
+    // index signature and publishes complete; the direct-alias route drops it
+    // byte-identically — a pre-existing mapped source-member enumeration
+    // defect whose reach the heritage work extended.
+    "C14_mapped_heritage_drops_index_signature",
+    // A nested builtin in the heritage clause's key domain is not reduced by
+    // the one-hop fallback — a conservative zero-member publication where the
+    // checker computes the closed surface.
+    "C15_heritage_nested_builtin_open",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1945,7 +1955,7 @@ const OPEN_DEBTS: &[&str] = &[
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
-    (Owner::U2MappedTemplate, 2, 1, 0),
+    (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 4, 4, 0),
     (Owner::U6ValueInference, 26, 23, 1),
     (Owner::U6ContextualCore, 9, 8, 1),
