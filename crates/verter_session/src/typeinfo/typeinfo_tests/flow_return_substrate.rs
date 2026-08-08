@@ -261,6 +261,19 @@ fn flow_return_substrate_serves_symbolic_call_return_complete() {
     assert_flow_return_dispatched(&record, "SubCallReturn");
 }
 
+/// The `FlowReturn` family owns the class-method demand even when the
+/// receiver is the in-flight class surface: the family is dispatched and
+/// the undecidable receiver surfaces as a typed miss, never admitted.
+///
+/// The class-surface-reentrant `this` call fails closed with the typed
+/// `unmodeledPosition` marker: `this` is not modeled as a receiver (the
+/// receiver capability is separate work — see the fail-closed contract on
+/// `flow_surface_this_call_return_fails_closed`), so the member call has
+/// no structural arm. tsgo types the same fixture `number`; until the
+/// receiver capability lands, the substrate's fail-closed marker is the
+/// honest answer, and it is ONE answer — the merge's duplicate
+/// `semantic_miss` twin of this row was removed in favour of the
+/// HEAD-established pin.
 #[test]
 fn flow_return_substrate_fails_closed_on_a_this_call() {
     let host = make_host_with_footprint();

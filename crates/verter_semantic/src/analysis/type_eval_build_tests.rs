@@ -14,7 +14,7 @@ use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, ClosedTypeFact, EnumPrimitiveDomain,
     EnumScalar, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
     InferenceUnavailableReason, LeafTypeFact, ObjectMemberFact, ObjectShapeFact,
-    SemanticTypeSource, ValueAnnotationClass,
+    SemanticExpressionSource, SemanticTypeSource, ValueAnnotationClass,
 };
 use verter_type_expr::locators::{
     AuthoredBodyLocator, FunctionReturnLocator, LocatorSymbolSpace, TypeBodyPathStep,
@@ -2766,22 +2766,140 @@ fn member_on_call_expression_degrades_to_any() {
 // =============================================================================
 
 #[test]
-fn simple_call_expression_does_not_degrade_to_any() {
+fn call_bearing_initializer_uses_an_indexed_semantic_expression_source() {
     let parts = lowered(r#"const result = someFunction()"#);
     let decl = parts.value_decl("result").expect("lowered result");
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        Some(15),
+        "the initializer root is the indexed program identity"
+    );
 
-    // For unknown function calls, should produce ReturnType<typeof someFunction>
-    // rather than degrading to Any
-    assert_ne!(
+    let env = parse_and_build_env(r#"const result = someFunction()"#);
+    let fact = &env.value_symbols["result"].primary().type_annotation;
+    assert!(matches!(
+        fact.expression_source,
+        Some(SemanticExpressionSource::ProgramExpression(ref point))
+            if point.canonical_id.as_ref() == FIXTURE_CANONICAL && point.offset == 15
+    ));
+    assert_eq!(fact.annotation, None);
+}
+
+#[test]
+fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
+    let source = "make(id())";
+    let allocator = oxc_allocator::Allocator::default();
+    let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
+    let mut indexed =
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source);
+    crate::analysis::type_eval_build::offset_indexed_value_expression(&mut indexed, 40);
+    let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) = indexed else {
+        panic!("direct call must stay explicit indexed call IR");
+    };
+    assert_eq!(call.point, 40);
+    assert_eq!(call.args[0].point, 45);
+    assert!(matches!(
+        &call.args[0].expression,
+        crate::analysis::type_eval_build::IndexedValueExpression::Call(nested)
+            if nested.point == 45
+    ));
+}
+
+/// Value-expression inference never FABRICATES a call's answer: a bare
+/// call and a call nested inside a compound produce only the honest
+/// `ReturnType<typeof …>` carrier (re-resolved later through the shared
+/// engine, and refused closed by the flow content's carrier reader) —
+/// never a guessed concrete type. An indexed record is how a call reaches
+/// the resolver with its arguments intact.
+#[test]
+fn value_expression_inference_carries_calls_as_the_honest_carrier() {
+    fn inferred(source: &str) -> TypeExpr {
+        let allocator = oxc_allocator::Allocator::default();
+        let expression = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+            .parse_expression()
+            .expect("fixture expression");
+        crate::analysis::type_eval_build::infer_declaration_expression_type(
+            &expression,
+            source,
+            crate::analysis::type_eval_build::TopLevelLiteralPolicy::Preserve,
+        )
+        .expect("inference stays within budget")
+    }
+
+    fn mentions_ref(ty: &TypeExpr, name: &str) -> bool {
+        match ty {
+            TypeExpr::Ref {
+                name: candidate,
+                type_arguments,
+            } => {
+                candidate.as_ref() == name
+                    || type_arguments.iter().any(|arg| mentions_ref(arg, name))
+            }
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                arms.iter().any(|arm| mentions_ref(arm, name))
+            }
+            TypeExpr::Array { element, .. } => mentions_ref(element, name),
+            TypeExpr::Object(object) => object.properties.iter().any(|member| match member {
+                ObjectMember::Property(property) => mentions_ref(&property.ty, name),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
+    // A bare call is the carrier, never a fabricated `any` and never a
+    // guessed concrete return type.
+    let bare = inferred("fn()");
+    assert_eq!(
+        bare,
+        TypeExpr::Ref {
+            name: std::sync::Arc::from("ReturnType"),
+            type_arguments: std::sync::Arc::from(vec![TypeExpr::TypeOf(
+                verter_type_expr::ValueRef {
+                    path: vec!["fn".to_string()],
+                    type_args: Vec::new(),
+                },
+            )]),
+        }
+    );
+
+    // A call in any nested value position — object member, array element,
+    // conditional arm — embeds the same honest carrier and nothing else:
+    // the carrier is the ONLY call content, so a consumer that cannot
+    // resolve it fails closed instead of publishing a fabricated value.
+    for source in ["{ a: fn() }", "[fn()]", "flag ? fn() : other()"] {
+        let ty = inferred(source);
+        assert!(
+            mentions_ref(&ty, "ReturnType"),
+            "`{source}` must carry the honest ReturnType carrier, got {ty:?}"
+        );
+    }
+
+    // The indexed lowering is where a call goes: a direct call is an explicit
+    // record, and a call-bearing compound is a TYPED unsupported carrier —
+    // never a fabricated value.
+    let allocator = oxc_allocator::Allocator::default();
+    let compound = oxc_parser::Parser::new(&allocator, "{ a: fn() }", oxc_span::SourceType::ts())
+        .parse_expression()
+        .expect("fixture expression");
+    assert!(matches!(
+        crate::analysis::type_eval_build::lower_indexed_value_expression(&compound, "{ a: fn() }"),
+        crate::analysis::type_eval_build::IndexedValueExpression::UnsupportedCall { .. }
+    ));
+}
+
+#[test]
+fn call_result_assertion_remains_authoritative() {
+    let parts = lowered("const result = someFunction() as string");
+    let decl = parts.value_decl("result").expect("lowered result");
+    assert_eq!(
         decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Any)),
-        "call expression should not degrade to any — should produce ReturnType<typeof fn>"
+        Some(TypeExpr::Primitive(PrimitiveName::String))
     );
-    // Should be some kind of structured type reference
-    assert!(
-        decl.type_annotation.is_some(),
-        "call expression should produce a type annotation"
-    );
+    assert_eq!(decl.expression_source_offset, None);
 }
 
 #[test]
@@ -2830,48 +2948,54 @@ fn svelte_runes_explicit_state_type_argument_is_authoritative() {
 }
 
 #[test]
-fn standard_lowering_does_not_reinterpret_a_user_function_named_state() {
-    let parts = lowered("declare function $state<T>(value: T): boolean; let value = $state(0)");
-    let decl = parts.value_decl("value").expect("lowered value");
-    assert!(
-        matches!(
-            decl.type_annotation,
-            Some(TypeExpr::Ref { ref name, .. }) if name.as_ref() == "ReturnType"
-        ),
-        "plain TypeScript retains ordinary call semantics: {:?}",
-        decl.type_annotation
+fn svelte_rune_nested_call_keeps_the_indexed_initializer_source() {
+    let source = "let item = $state(load())";
+    let parts = svelte_runes_statement(source);
+    let decl = parts
+        .value_decls
+        .iter()
+        .find(|decl| decl.name == "item")
+        .expect("lowered item");
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        source.find("$state").map(|offset| offset as u32)
     );
 }
 
 #[test]
-fn svelte_runes_derived_by_uses_the_callback_return_type() {
-    let parts = svelte_runes_statement("let doubled = $derived.by(() => 2)");
+fn ordinary_call_named_state_still_uses_the_indexed_call_source() {
+    let parts = lowered("declare function $state<T>(value: T): boolean; let value = $state(0)");
+    let decl = parts.value_decl("value").expect("lowered value");
+    assert_eq!(decl.type_annotation, None);
+    assert!(decl.expression_source_offset.is_some());
+}
+
+#[test]
+fn svelte_runes_derived_by_uses_the_indexed_callback_return_source() {
+    let source = "let doubled = $derived.by(() => id(2))";
+    let parts = svelte_runes_statement(source);
     let decl = parts
         .value_decls
         .iter()
         .find(|decl| decl.name == "doubled")
         .expect("lowered doubled");
+    assert_eq!(decl.type_annotation, None);
     assert_eq!(
-        decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Number))
+        decl.expression_source_offset,
+        source.find("() =>").map(|offset| offset as u32),
+        "$derived.by consumes the callback position, not a direct return projection"
     );
 }
 
 #[test]
-fn method_call_expression_does_not_degrade_to_any() {
+fn method_call_initializer_uses_the_indexed_semantic_expression_source() {
     let source = r#"const result = obj.create()"#;
     let parts = lowered(source);
     let decl = parts.value_decl("result").expect("lowered result");
 
-    assert!(
-        decl.type_annotation.is_some(),
-        "method call expression should produce a type, not None (filtered-out Any)"
-    );
-    assert_ne!(
-        decl.type_annotation,
-        Some(TypeExpr::Primitive(PrimitiveName::Any)),
-        "method call expression should not degrade to any"
-    );
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(decl.expression_source_offset, Some(15));
 
     // STORED fact: a non-leaf inferred annotation stays classification-only
     // (Direct, no source) — never a fabricated authored locator for a type
@@ -2881,6 +3005,10 @@ fn method_call_expression_does_not_degrade_to_any() {
     let fact = &env.value_symbols["result"].primary().type_annotation;
     assert_eq!(fact.classification, ValueAnnotationClass::Direct);
     assert_eq!(fact.annotation, None);
+    assert!(matches!(
+        fact.expression_source,
+        Some(SemanticExpressionSource::ProgramExpression(ref point)) if point.offset == 15
+    ));
 }
 
 // =============================================================================

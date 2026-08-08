@@ -373,7 +373,7 @@ const BLOCK_PREREQS = new Map([
       "U2ModuleAugmentation",
     ],
   ],
-  ["U6FlowReturnSubstrate", ["U2QueryValueDomain", "U2RelationInfer"]],
+  ["U6FlowReturnSubstrate", ["U2QueryValueDomain", "U2RelationInfer", "U2IndexedAccess"]],
   ["U6NarrowTypeof", ["U6FlowReturnSubstrate"]],
   ["U6NarrowEquality", ["U6FlowReturnSubstrate"]],
   ["U6NarrowTruthiness", ["U6FlowReturnSubstrate"]],
@@ -1279,6 +1279,20 @@ const SPLIT_CAPABILITIES = new Set([
 
 // Per-`(file, function)` mechanism for every row of a split capability.
 const ROW_MECHANISM_OVERRIDE = new Map([
+  [
+    tkey(
+      "call_resolution.rs",
+      "call_resolution_class_this_member_call_returns_declared_return",
+    ),
+    "ResolveCallDispatch",
+  ],
+  [
+    tkey(
+      "call_resolution.rs",
+      "call_resolution_this_receiver_method_call_returns_declared_return",
+    ),
+    "ReturnPathPeekerTwoFrontier",
+  ],
   [
     tkey("modern_ts_features.rs", "satisfies_array_literal_widens_to_primitive_array"),
     "RelateCoinductiveScc",
@@ -2222,6 +2236,436 @@ function proofForCapability(cap) {
 //    in the row partition: the mechanism / proof / unblocker prose + the execution-true
 //    `semantic_queries` / `consumed_mechanisms`. --
 const LIFTED_ROW_OVERRIDES = new Map([
+
+  [
+    tkey("call_resolution.rs", "call_resolution_optional_overload_picks_first_arity_matching_signature"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the 1-arg `call(\"x\")` site picks the single-required-arg `(a: string): \"with-a\"` overload ahead of its optional and rest siblings through the shared `ResolveCall` dispatch, so `CallOptional1Result` projects `\"with-a\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_optional_overload_picks_two_arg_signature_when_required"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the 2-arg `call(\"x\", 1)` site selects the `(a: string, b?: number): \"with-b\"` overload \u2014 the 1-arg arm is under-arity and the `...rest: string[]` arm rejects the numeric argument \u2014 so `CallOptional2Result` projects `\"with-b\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_rest_overload_picks_rest_signature_when_required"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the 3-arg `call(\"x\", \"y\", \"z\")` site selects the `(...rest: string[]): \"rest\"` overload by argument arity and assignability over the retained overload set (no last-wins collapse), so `CallOptional3Result` projects `\"rest\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_union_argument_picks_union_compatible_overload"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the union-keyed `lookup(key)` site selects the single union-accepting overload rather than distributing the union across the literal-key arms, so `LookupUnionResult` projects `\"value-a\" | \"value-b\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_specific_literal_argument_picks_matching_overload_first"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the `lookup(\"a\")` site picks the literal-specific first overload ahead of its union-accepting sibling, so `LookupSpecificAResult` projects `\"value-a\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_specific_literal_argument_skips_non_matching_first_overload"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the `lookup(\"b\")` site skips the non-matching first overload and picks the matching second one, so `LookupSpecificBResult` projects `\"value-b\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_generic_infers_from_positional_argument_through_callback_signature"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: `withCallback((item) => item, \"literal\" as const)` infers `T` from the positional argument even though the same parameter also appears contextually in the callback, so `CallbackParamInfer` projects the literal `\"literal\"`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_generic_infers_from_callback_return_type"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: `lift(() => 42 as const)` infers `T` from the callback's own return type, so `CallbackReturnInfer` projects `{ value: 42 }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_generic_infers_object_literal_including_excess_properties"),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: `configure({ mode: \"active\", debug: true })` infers `T` as the object literal's inferred shape INCLUDING the excess `debug` property, so `ObjectLiteralInfer` projects `{ mode: string; debug: boolean }`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey("call_resolution.rs", "call_resolution_this_receiver_method_call_returns_declared_return"),
+    {
+      mech: "ReturnPathPeekerTwoFrontier",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ProjectPath",
+        "LowerLocator",
+        "FlowReturn",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "IndexedAccessUnionDistribution",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the `this: { data: string }` parameter binds implicitly at the `receiverObj.greet(\"!\")` method-access call site and the call publishes its declared `string` return, so `ThisReceiverResult` projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "call_resolution.rs",
+      "call_resolution_extracted_prototype_method_call_returns_declared_return",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ProjectPath",
+        "ResolveClassSurface",
+        "ResolveOverloadSet",
+        "ApparentType",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "IndexedAccessUnionDistribution",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE over the U2.CLASS_SURFACES apparent-callable surface: projecting `.call` off the extracted `Greeter.prototype.greet` callable widens the receiver through the `ApparentType` producer to the project's registered ambient `Function`, so `prove_prototype_call` reaches its ambient occurrence and the rebased call publishes the declared `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "const_type_param.rs",
+      "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the `<const T extends readonly { path: string }[]>` modifier preserves the call-site array argument as a readonly tuple of readonly object literals with literal `path` values, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "const_type_param.rs",
+      "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the `<const T extends readonly string[]>` modifier preserves the call-site array argument as the readonly literal tuple `readonly [\"a\", \"b\", \"c\"]` without an explicit `as const`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "function_advanced.rs",
+      "function_advanced_constrained_generic_infers_literal_under_as_const",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: `constrainedIdentity<T extends string>` called with `\"constrained\" as const` infers `T` as the literal rather than widening it to the `string` bound, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "function_advanced.rs",
+      "function_advanced_overload_call_picks_matching_signature_return",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: `LookupCountResult = ReturnType<typeof callLookupCount>` resolves the wrapper's `lookup(\"count\")` call site to the matching `(key: \"count\"): number` overload \u2014 the bodied implementation signature stays invisible to selection \u2014 so the projected return is `number`, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "function_advanced.rs",
+      "function_advanced_overload_generic_first_binds_to_literal_argument",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the numeric call site binds the FIRST declared `<T>(x: T): T` overload ahead of its string-specific sibling and infers `T` from the argument, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "function_advanced.rs",
+      "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+    ),
+    {
+      mech: "ResolveCallDispatch",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: [
+        "ResolveDecl",
+        "Instantiate",
+        "TypeOf",
+        "ResolveOverloadSet",
+        "LowerLocator",
+        "FlowReturn",
+        "ResolveCall",
+      ],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
+      unblocker:
+        "lifted by U6.CALL_RESOLVE: the non-const string call site picks the FIRST declared generic overload (declaration order, not specificity) and widens `T` from the literal to the `string` primitive, proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+  [
+    tkey(
+      "function_advanced.rs",
+      "function_advanced_void_callback_return_preserves_void",
+    ),
+    {
+      mech: "QueryValueDomainFoundation",
+      proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
+      semantic_queries: ["ResolveDecl", "Instantiate", "TypeOf", "LowerLocator"],
+      consumed_mechanisms: [],
+      unblocker:
+        "lifted by U2.QUERY_VALUE_DOMAIN: `ReturnType<typeof voidCallback>` preserves the declared `void` return of the `() => void` function-type alias; the measured dispatch trace is a pure decl/typeof projection with no call-site resolution, so the row is re-homed off U6.CALL_RESOLVE onto the value-domain foundation that produces it. Proven against the checked-in tsgo oracle snapshot via oracle::run_row",
+    },
+  ],
+
   [
     tkey("utility_top_bottom.rs", "utility_top_bottom_utb15_awaited_unknown_is_unknown"),
     {
@@ -3062,6 +3506,7 @@ const KEY_OWNING_BLOCK = new Map([
   ["ResolveAmbientNamespace", "U2ModuleAugmentation"],
   ["FlowNarrowingAt", "U6FlowReturnSubstrate"],
   ["FlowReturn", "U6FlowReturnSubstrate"],
+  ["ResolveCall", "U6CallResolve"],
   ["ContextualTypeAt", "U6ContextualCallback"],
   ["ResolveMacroPayload", "U14MacroAdapter"],
 ]);

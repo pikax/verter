@@ -397,7 +397,7 @@ fn direct_self_call_is_recursion_hold() {
         &[SliceStatement::Return {
             argument: Some(SliceExpr::Call(
                 SliceCall::DirectSelf,
-                SliceCallSite::new(0, false, false),
+                SliceCallSite::new(0, false, false, verter_span::Span::new(26, 33)),
             )),
             widening_literal: false,
         }],

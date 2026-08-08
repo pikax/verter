@@ -21,7 +21,7 @@
 // cleanly into the `tests/` guard — an inner doc comment is illegal in an
 // `include!`d position.)
 //
-// The registry seats the 46 lifted rows; the authoritative enumeration lives
+// The registry seats the lifted rows; the authoritative enumeration lives
 // on `ORACLE_QUERY_SPECS`' doc comment and is pinned exactly by
 // `oracle_query_specs_registry_holds_the_lifted_rows_and_is_well_formed`. The
 // types + validation are additionally exercised with synthetic specs by the
@@ -1152,7 +1152,7 @@ const fn value_inference_spec(row_function: &'static str, symbol: &'static str) 
     }
 }
 
-/// The closed registry table. Holds the 49 lifted rows — the two
+/// The closed registry table. Holds the lifted rows — the two
 /// index-signature publication queries, the two built-in modifier-utility
 /// queries, the three U2 IndexedAccess-reduction carve-out queries (two
 /// terminal indexed-access projections + one wide/deep literal-union
@@ -1179,7 +1179,11 @@ const fn value_inference_spec(row_function: &'static str, symbol: &'static str) 
 /// value-inference queries (the `ReturnType<typeof bodyReturn>`
 /// per-return-site union row + the two `ReturnType<typeof directArrow>`
 /// arrow-body rows, all solved through the demand-sliced `FlowReturn`
-/// substrate)
+/// substrate), and the eighteen `U6.CALL_RESOLVE`-era queries (the ten
+/// `call_resolution.rs` overload-picking / generic-inference /
+/// `this`-receiver rows, the `U6.FLOW_RETURN_SUBSTRATE` block-callback
+/// `ComputedBlockValue` value-inference lift, and the seven sibling
+/// call-site lifts in `function_advanced.rs` / `const_type_param.rs`)
 /// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
@@ -1586,7 +1590,136 @@ pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
         "value_inference_arrow_expression_body_substitutes_parameter_references",
         "DirectArrowReturn",
     ),
+    // U6.CALL_RESOLVE-era lifts. Every row's probe surface is the same shape —
+    // `ReturnType<typeof <wrapper>>` over a same-file wrapper whose body issues
+    // ONE call — so each one is the `Util<typeof root>` carve-out the source-side
+    // walk admits as a single contributor, and tsgo prints the wrapper's inferred
+    // return. The rows cover overload picking by arity / literal specificity /
+    // union compatibility, generic inference from a positional argument and from
+    // a callback return, object-literal inference including excess properties,
+    // and `this`-receiver binding at a method-access call site.
+    call_resolution_spec(
+        "call_resolution_optional_overload_picks_first_arity_matching_signature",
+        "CallOptional1Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_optional_overload_picks_two_arg_signature_when_required",
+        "CallOptional2Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_rest_overload_picks_rest_signature_when_required",
+        "CallOptional3Result",
+    ),
+    call_resolution_spec(
+        "call_resolution_union_argument_picks_union_compatible_overload",
+        "LookupUnionResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_specific_literal_argument_picks_matching_overload_first",
+        "LookupSpecificAResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
+        "LookupSpecificBResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
+        "CallbackParamInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_from_callback_return_type",
+        "CallbackReturnInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_generic_infers_object_literal_including_excess_properties",
+        "ObjectLiteralInfer",
+    ),
+    call_resolution_spec(
+        "call_resolution_this_receiver_method_call_returns_declared_return",
+        "ThisReceiverResult",
+    ),
+    call_resolution_spec(
+        "call_resolution_extracted_prototype_method_call_returns_declared_return",
+        "ExtractedMethodResult",
+    ),
+    // U6.CALL_RESOLVE-era call-site lifts in the sibling function-shape and
+    // const-type-parameter families: overload picking at a concrete call site,
+    // the `this`-parameter utilities over a declared receiver annotation, the
+    // declared `void` callback return, generic-first overload ordering with and
+    // without `as const`, and the `<const T>` modifier preserving readonly
+    // literal tuples inferred from a call-site array.
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_call_picks_matching_signature_return",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "LookupCountResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_void_callback_return_preserves_void",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "VoidCallbackReturn",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_generic_first_binds_to_literal_argument",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "OverloadedGenericResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "OverloadedStringResult",
+    ),
+    carve_out_spec(
+        "function_advanced.rs",
+        "function_advanced_constrained_generic_infers_literal_under_as_const",
+        "function_advanced",
+        FUNCTION_ADVANCED_FILES,
+        "/fixtures/function_advanced.ts",
+        "ConstrainedIdentityResult",
+    ),
+    carve_out_spec(
+        "const_type_param.rs",
+        "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+        "const_type_param",
+        CONST_TYPE_PARAM_FILES,
+        "/fixtures/const_type_param.ts",
+        "ConstRouteResult",
+    ),
+    carve_out_spec(
+        "const_type_param.rs",
+        "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+        "const_type_param",
+        CONST_TYPE_PARAM_FILES,
+        "/fixtures/const_type_param.ts",
+        "ConstStringsResult",
+    ),
 ];
+
+/// One `ResolveExpr`/`Expanded` query spec for a `call_resolution.rs` row. Every
+/// row in the family shares the single `/fixtures/call_resolution.ts` workspace
+/// and resolves one `ReturnType<typeof …>` alias in the row's original
+/// `Expanded` projection mode.
+const fn call_resolution_spec(row_function: &'static str, symbol: &'static str) -> QuerySpec {
+    carve_out_spec(
+        "call_resolution.rs",
+        row_function,
+        "call_resolution",
+        CALL_RESOLUTION_FILES,
+        "/fixtures/call_resolution.ts",
+        symbol,
+    )
+}
 
 /// Why the registry is malformed. Pure value type (no external dependency) so
 /// the validation is shareable into both consumers.
@@ -1669,7 +1802,10 @@ pub(crate) fn registry_well_formed(specs: &[QuerySpec]) -> Result<(), RegistryEr
 // comment-free, path-const-folded) `syn::Block` token stream — the EXACT bytes
 // the extractor reads — so `original_extraction_input_auditable` re-derives the
 // fingerprint from this table alone, with NO VCS archaeology. NOT a `snapshot_id`
-// input. Generated by the audited lift command; never hand-edited.
+// input. Generated by the audited lift command (`cargo run -p verter_session
+// --features oracle-lift --bin oracle_lift -- --row <file.rs>::<fn>`, whose
+// `--check` mode re-validates every row and the table's byte-stability); never
+// hand-edited.
 
 /// One lifted row's retained migration provenance.
 #[allow(dead_code)]
@@ -1719,6 +1855,105 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/branded_types.ts\" , \"UserIdBrandTag\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"UserId\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_extracted_prototype_method_call_returns_declared_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:95f572f2196a1cefedd1ce697e49f82b2e77faebf2204c8b052f98ddcbf8e61e",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ExtractedMethodResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_from_callback_return_type",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:70aae868023c2f1b221b02e0073c3b2a0dfefd2743d4239f6374a09544385c88",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallbackReturnInfer\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"value\"]) ; assert_number_literal (& props [\"value\"] . ty , 42.0) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:b9e8fd6e8d584ccce4713cdc6da4bb1a1368bfebbf71931cde16cd1070a10f44",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallbackParamInfer\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"literal\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_generic_infers_object_literal_including_excess_properties",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:99bc85ddcacdfb75af4c61a2dd6236ba6c89113bcb5edee8226cab627473a215",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ObjectLiteralInfer\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"debug\" , \"mode\"]) ; assert_primitive (& props [\"mode\"] . ty , PrimitiveName :: String) ; assert_primitive (& props [\"debug\"] . ty , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_optional_overload_picks_first_arity_matching_signature",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:18df9e2a64276ee3a4a0e3c897844ad577d764855c3186feec27e19af11c1adc",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional1Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"with-a\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_optional_overload_picks_two_arg_signature_when_required",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:ca5793d611eebbf76760945f7fef2a9c9014f79ebc1f999b45d161095eb441db",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional2Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"with-b\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_rest_overload_picks_rest_signature_when_required",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:8e21830e13446fd0f0b8f33ad4eed3ab390bcbe9d371d045d5372f7c76e45ac9",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"CallOptional3Result\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"rest\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_specific_literal_argument_picks_matching_overload_first",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:64b48c78b35c1c1721c0323a012642725070f73a228d845dd761408c9c3d000b",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupSpecificAResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"value-a\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:99634bcb937cb1d35072dbfa8c0f8caa19f327119ff082d38e0c74f19f6249b2",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupSpecificBResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"value-b\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_this_receiver_method_call_returns_declared_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:54bb842569b43584be336279a8092ed4bf7d28894ba977a8df52fd360ebe24fb",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"ThisReceiverResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "call_resolution.rs",
+        row_function: "call_resolution_union_argument_picks_union_compatible_overload",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:913a7833532dd3e8bcf77c617f433739a522eda447bd48b27957dc1ea1967554",
+        workspace_files: &[("/fixtures/call_resolution.ts", "sha256:5168ead32a0c0fa4b41a376088d07eb6c1255da70c053947dd95793c8ed37116")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/call_resolution.ts\" , \"LookupUnionResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_literal_union (& expr , & [\"value-a\" , \"value-b\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
         row_file: "class_features.rs",
         row_function: "class_features_static_generic_method_instantiation_projects_return_with_substitution",
         oracle_query_ordinals: 1,
@@ -1744,6 +1979,24 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:fe1ccef3736d08d80d7b87ec40d262694fe53f28b6cd8c58a76252fcd3921a61",
         workspace_files: &[("/fixtures/class_features.ts", "sha256:72b7927d9a0d5c3d197227b5bf874a6a8594963ccab65fd8531ad0e8c4554ebb")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/class_features.ts\" , \"StepCounterDescribeReturn\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "const_type_param.rs",
+        row_function: "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:c4922f1aaaef6e8d7490bb1bd8e7ba17a73e43f049bd2393c3897ac0981f51ba",
+        workspace_files: &[("/fixtures/const_type_param.ts", "sha256:dea67e539c1ad868c8bc030b3b6d146cf8df99e33bf25abf1487058c8d2d25ea")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/const_type_param.ts\" , \"ConstRouteResult\" , & [] , ProjectionMode :: Expanded ,) ; let TypeExpr :: Tuple { elements , readonly } = & expr else { panic ! (\"expected readonly tuple, got {expr:?}\") ; } ; assert ! (readonly) ; assert_eq ! (elements . len () , 2) ; let first = object_props (& elements [0] . ty) ; assert_eq ! (prop_names (& first) , vec ! [\"path\"]) ; assert ! (first [\"path\"] . readonly) ; assert_string_literal (& first [\"path\"] . ty , \"/home\") ; let second = object_props (& elements [1] . ty) ; assert_eq ! (prop_names (& second) , vec ! [\"path\"]) ; assert ! (second [\"path\"] . readonly) ; assert_string_literal (& second [\"path\"] . ty , \"/about\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "const_type_param.rs",
+        row_function: "const_type_param_string_call_preserves_readonly_literal_string_tuple",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:eefbd7098393320ccd6b79a1035d8848fb46b444d0bcf2718023807fcaf9ecf5",
+        workspace_files: &[("/fixtures/const_type_param.ts", "sha256:dea67e539c1ad868c8bc030b3b6d146cf8df99e33bf25abf1487058c8d2d25ea")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/const_type_param.ts\" , \"ConstStringsResult\" , & [] , ProjectionMode :: Expanded ,) ; let TypeExpr :: Tuple { elements , readonly } = & expr else { panic ! (\"expected readonly tuple, got {expr:?}\") ; } ; assert ! (readonly) ; assert_eq ! (elements . len () , 3) ; assert_string_literal (& elements [0] . ty , \"a\") ; assert_string_literal (& elements [1] . ty , \"b\") ; assert_string_literal (& elements [2] . ty , \"c\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "decorators.rs",
@@ -1828,6 +2081,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
     },
     LiftMigrationProvenance {
         row_file: "function_advanced.rs",
+        row_function: "function_advanced_constrained_generic_infers_literal_under_as_const",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:fb5c7bc1925f2ce6e116b21b33b5cbfb94dddec4da022368332d19c832e3ec53",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"ConstrainedIdentityResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_string_literal (& expr , \"constrained\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
         row_function: "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
         oracle_query_ordinals: 1,
         migration_fingerprint_version: 1,
@@ -1846,12 +2108,48 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
     },
     LiftMigrationProvenance {
         row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_call_picks_matching_signature_return",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:9bf2e3773ce4c72fba3d5bd7e1fdf8abdfce2a1f9e3a310af5eb0ed2a3c6f02c",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"LookupCountResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Number) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_generic_first_binds_to_literal_argument",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:d1916beb45eb8fdfb63d30763bd72369d568c012609376ce591e1824b16e965d",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"OverloadedGenericResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_number_literal (& expr , 42.0) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:afec540a147a3b4769feb9b965a4523de6b7dcb07c65fb7435340417fedfd114",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"OverloadedStringResult\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: String) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
         row_function: "function_advanced_return_type_of_overloaded_function_uses_last_overload",
         oracle_query_ordinals: 1,
         migration_fingerprint_version: 1,
         migration_fingerprint: "blake3:e05273507835885d31a4f2d86e59ed363f26e79f86d68f61b34eaefb6402c56f",
         workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"LookupReturnType\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Boolean) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "function_advanced.rs",
+        row_function: "function_advanced_void_callback_return_preserves_void",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:757836ce59a732c1cc2ba663297741243212ea84846e7b89ef4b7d8aabdbe5f5",
+        workspace_files: &[("/fixtures/function_advanced.ts", "sha256:8e0e2b23c6f07b63f4864f4fc4c4799d658e2d2188c71e67e72ee15b90cf354c")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/function_advanced.ts\" , \"VoidCallbackReturn\" , & [] , ProjectionMode :: Expanded ,) ; assert_primitive (& expr , PrimitiveName :: Void) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "index_signatures.rs",
@@ -1897,6 +2195,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:53f7f3d3041b9a920fc879ff726709a2a09393b9a21bb3a25c2a3601d135fb6e",
         workspace_files: &[("/fixtures/mapped_modifiers.ts", "sha256:a82df02cf44225bfe2b470ac7d6ad401eebca75e32a00033fc7855d054314b1b")],
         original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/mapped_modifiers.ts\" , \"RemoveOptionalResult\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"a\" , \"b\"]) ; assert ! (! props [\"a\"] . optional) ; assert ! (! props [\"b\"] . optional) ; assert_primitive (& props [\"a\"] . ty , PrimitiveName :: String) ; assert_primitive (& props [\"b\"] . ty , PrimitiveName :: Number) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "mapped_template.rs",
+        row_function: "record_with_template_literal_key_union_projects_root_slot",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:f8c259acdc518799ba6dfdbf6598ac3a9e3fac3dab7c265d22d4d0ef9d3c1d47",
+        workspace_files: &[("/fixtures/mapped-template.ts", "sha256:68b1c5433dd696540382c2d22f1a491e6bc355c9a73652eb6bc7ebc8923c65cf")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert_ts (& host , \"/fixtures/mapped-template.ts\" , MAPPED_TEMPLATE) ; let (expr , record) = resolve_expr (& host , \"/fixtures/mapped-template.ts\" , \"RecordTemplateRootSlot\" , & [] , ProjectionMode :: Expanded ,) ; let slot = function_type (& expr) ; assert_eq ! (slot . parameters . len () , 1) ; let payload = object_props (& slot . parameters [0] . ty) ; assert_literal_union (& payload [\"name\"] . ty , & [\"item\" , \"root\"]) ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "mode_boundary_invariants.rs",
@@ -1951,6 +2258,15 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
         migration_fingerprint: "blake3:3f8399fadab2394c803926fa5b0db6dd0411265d3410e694fd5b58b28bbad46e",
         workspace_files: &[("/fixtures/substitution_types.ts", "sha256:41a41aabe8dc03c8de662058d952b7e131b42f59ca0cb23fd4a17f6ef634cb4b")],
         original_body_tokens: "{ let expr = { let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/substitution_types.ts\" , \"Sb15Result\" , & [] , ProjectionMode :: Expanded) ; expr } ; assert_primitive (& expr , PrimitiveName :: Unknown) ; }",
+    },
+    LiftMigrationProvenance {
+        row_file: "template_literal_inference.rs",
+        row_function: "template_literal_key_remap_capitalises_each_event_key",
+        oracle_query_ordinals: 1,
+        migration_fingerprint_version: 1,
+        migration_fingerprint: "blake3:4376ec8e27b02314d0af94a7d6de18c2a6a468d1090dc236b2216096c43305bc",
+        workspace_files: &[("/fixtures/template_literal_inference.ts", "sha256:383c4fdd04efadb1f7344d3b8518313172211f86e2e712e570e82d25d8b8fb44")],
+        original_body_tokens: "{ let host = make_host_with_footprint () ; upsert (& host) ; let (expr , record) = resolve_expr (& host , \"/fixtures/template_literal_inference.ts\" , \"CounterHandlers\" , & [] , ProjectionMode :: Expanded ,) ; let props = object_props (& expr) ; assert_eq ! (prop_names (& props) , vec ! [\"onDec\" , \"onInc\"]) ; let on_inc = function_type (& props [\"onInc\"] . ty) ; assert_eq ! (on_inc . parameters . len () , 1) ; assert_string_literal (& on_inc . parameters [0] . ty , \"inc\") ; let on_dec = function_type (& props [\"onDec\"] . ty) ; assert_eq ! (on_dec . parameters . len () , 1) ; assert_string_literal (& on_dec . parameters [0] . ty , \"dec\") ; assert_query_mode (& record , ProjectionModeTag :: Expanded) ; }",
     },
     LiftMigrationProvenance {
         row_file: "typescript_rules.rs",
@@ -2430,18 +2746,15 @@ pub(crate) const RELATION_QUERY_SPECS: &[RelationQuerySpec] = &[
         &["relation_mutable_property_assignable_to_readonly"],
         None,
     ),
-    // LEDGER (source-proven): the engine answers `not_assignable` today
-    // (`relation_readonly_property_assignable_to_mutable` is `#[ignore]`d);
-    // the oracle captures `assignable` (readonly is not enforced on the
-    // producer side).
+    // Parity-enforced: a property `readonly` modifier is not part of
+    // assignability in either direction, so the relation authority answers
+    // `assignable`, matching the oracle.
     relation_spec(
         "relation_readonly_to_mutable",
         "{ readonly a: string }",
         "{ a: string }",
         &["relation_readonly_property_assignable_to_mutable"],
-        Some(EngineObservationPin::MismatchedVerdict(
-            RelationEngineVerdict::NotAssignable,
-        )),
+        None,
     ),
     // -- Row 4: function variance (×2) ---------------------------------------
     relation_spec(

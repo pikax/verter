@@ -450,6 +450,7 @@ semantic_query_names! {
     ClassifyBroadRuntime,
     ClassifyMaterializationCycleGate,
     FlowReturn,
+    ResolveCall,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -729,6 +730,7 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         ResolveAmbientNamespace => U2ModuleAugmentation,
         FlowNarrowingAt => U6FlowReturnSubstrate,
         FlowReturn => U6FlowReturnSubstrate,
+        ResolveCall => U6CallResolve,
         ContextualTypeAt => U6ContextualCallback,
         // The terminal broad-runtime-kind classifier is macro-adapter
         // work: it exists to give the Vue macro runtime-shape projection
@@ -2039,6 +2041,9 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         // The whole-function return producer on the flow substrate at
         // U6.FLOW_RETURN_SUBSTRATE.
         (FlowReturn, U6FlowReturnSubstrate),
+        // The call-resolution family: applicability execution with
+        // evidence-carrying sessions, owned by U6.CALL_RESOLVE.
+        (ResolveCall, U6CallResolve),
         // Contextual typing at U6.CONTEXTUAL_CALLBACK.
         (ContextualTypeAt, U6ContextualCallback),
         // Macro payload at U14.MACRO_ADAPTER.
@@ -4177,8 +4182,8 @@ fn lifted_row_audit_query_mode_matches_spec() {
         .filter(|s| matches!(spec_mode(&s.query_helper), ProjectionModeSpec::Expanded))
         .count();
     assert_eq!(
-        expanded, 49,
-        "all forty-nine seated lifted rows must be Expanded-mode oracle identities",
+        expanded, 67,
+        "all sixty-seven seated lifted rows must be Expanded-mode oracle identities",
     );
 }
 

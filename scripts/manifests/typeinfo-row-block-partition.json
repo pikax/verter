@@ -1945,98 +1945,98 @@
       "function": "call_resolution_extracted_prototype_method_call_returns_declared_return",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_generic_infers_from_callback_return_type",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_generic_infers_from_positional_argument_through_callback_signature",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_generic_infers_object_literal_including_excess_properties",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_optional_overload_picks_first_arity_matching_signature",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_optional_overload_picks_two_arg_signature_when_required",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_rest_overload_picks_rest_signature_when_required",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_union_argument_picks_union_compatible_overload",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_specific_literal_argument_picks_matching_overload_first",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_specific_literal_argument_skips_non_matching_first_overload",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_this_receiver_method_call_returns_declared_return",
-      "block": "U6.CALL_RESOLVE",
+      "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "const_type_param.rs",
       "function": "const_type_param_route_call_preserves_readonly_tuple_with_literal_paths",
       "block": "U6.CALL_RESOLVE",
       "capability": "TypeParameterFeatures",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "const_type_param.rs",
       "function": "const_type_param_string_call_preserves_readonly_literal_string_tuple",
       "block": "U6.CALL_RESOLVE",
       "capability": "TypeParameterFeatures",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "function_advanced.rs",
       "function": "function_advanced_constrained_generic_infers_literal_under_as_const",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "function_advanced.rs",
@@ -2057,21 +2057,21 @@
       "function": "function_advanced_overload_call_picks_matching_signature_return",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "function_advanced.rs",
       "function": "function_advanced_overload_generic_first_binds_to_literal_argument",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "function_advanced.rs",
       "function": "function_advanced_overload_generic_first_widens_t_to_string_for_string_argument",
       "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "function_advanced.rs",
@@ -2083,9 +2083,9 @@
     {
       "file": "function_advanced.rs",
       "function": "function_advanced_void_callback_return_preserves_void",
-      "block": "U6.CALL_RESOLVE",
+      "block": "U2.QUERY_VALUE_DOMAIN",
       "capability": "CallResolution",
-      "status": "ignored"
+      "status": "lifted"
     },
     {
       "file": "call_resolution.rs",
@@ -2548,6 +2548,13 @@
       "block": "U6.FLOW_RETURN_SUBSTRATE",
       "capability": "ValueInference",
       "status": "lifted"
+    },
+    {
+      "file": "call_resolution.rs",
+      "function": "call_resolution_class_this_member_call_returns_declared_return",
+      "block": "U6.CALL_RESOLVE",
+      "capability": "CallResolution",
+      "status": "ignored"
     }
   ]
 }

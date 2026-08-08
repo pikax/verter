@@ -616,7 +616,7 @@ struct RowRegistryCounts {
 }
 
 #[rustfmt::skip]
-const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 364, ignored: 301, running_unratified: 14, lifted: 49, superseded: 0 };
+const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 365, ignored: 284, running_unratified: 14, lifted: 67, superseded: 0 };
 
 /// Per-block row-registry counts (same derivation; every block appears,
 /// zero-row blocks included).
@@ -634,7 +634,7 @@ struct RowRegistryBlockCounts {
 #[rustfmt::skip]
 const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U0ManifestSubstrate, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2QueryValueDomain, total: 21, ignored: 0, running_unratified: 0, lifted: 21, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2QueryValueDomain, total: 22, ignored: 0, running_unratified: 0, lifted: 22, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2BinderIdentityFacts, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U8WireSurfaceClosure, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U12Exporter, total: 0, ignored: 0, running_unratified: 0, lifted: 0, superseded: 0 },
@@ -647,7 +647,7 @@ const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Enums, total: 7, ignored: 7, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ModuleAugmentation, total: 4, ignored: 4, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2JsxFoundations, total: 7, ignored: 7, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, total: 7, ignored: 3, running_unratified: 1, lifted: 3, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6FlowReturnSubstrate, total: 8, ignored: 3, running_unratified: 1, lifted: 4, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowTypeof, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowEquality, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowTruthiness, total: 15, ignored: 15, running_unratified: 0, lifted: 0, superseded: 0 },
@@ -657,7 +657,7 @@ const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowSubstitution, total: 11, ignored: 11, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6NarrowInvalidation, total: 5, ignored: 5, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6PredicateAssertion, total: 3, ignored: 3, running_unratified: 0, lifted: 0, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6CallResolve, total: 21, ignored: 21, running_unratified: 0, lifted: 0, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6CallResolve, total: 20, ignored: 4, running_unratified: 0, lifted: 16, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6ContextualCallback, total: 17, ignored: 15, running_unratified: 2, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6ValueInference, total: 1, ignored: 1, running_unratified: 0, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U6AsyncGenerator, total: 1, ignored: 1, running_unratified: 0, lifted: 0, superseded: 0 },

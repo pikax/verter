@@ -1901,11 +1901,6 @@ const OPEN_DEBTS: &[&str] = &[
     // literal produce NO VALUE.
     "D06_switch_return",
     "D07_try_return",
-    // Overloaded callee: refused at runtime AND the TSX lane faults.
-    "D08_overloaded_callee",
-    // A GENERIC callee's type argument is not substituted into the spread
-    // source, so the instantiated member is erased.
-    "H01_generic_callee_spread",
     // ── Consumer reach: the TSX lane FAULTS ──────────────────────────────
     // The file loses its whole type-check surface for programs the checker
     // types without difficulty.
@@ -1948,11 +1943,6 @@ const OPEN_DEBTS: &[&str] = &[
     "X05_catch_return_fallthrough",
     "X15_labelled_block_return",
     "X16_switch_fallthrough",
-    // Generic callee: the instantiation is not substituted at three sites, and
-    // a whole generic result the flow lane types exactly is still erased on
-    // the way to the consumer.
-    "X08_generic_two_instantiations",
-    "X09_generic_wrap_return",
     // A get/set pair surfaces as a duplicate member key: refused, TSX faults.
     "X14_accessor_pair",
     // Async return wrapping is unmodelled: the Promise is silently unwrapped
@@ -1983,7 +1973,7 @@ const OPEN_DEBTS: &[&str] = &[
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 2, 0, 2),
-    (Owner::U6CallResolve, 4, 0, 4),
+    (Owner::U6CallResolve, 4, 4, 0),
     (Owner::U6ValueInference, 18, 8, 9),
     (Owner::U6ContextualCore, 0, 0, 0),
     (Owner::U6FlowReturnSubstrate, 44, 33, 2),

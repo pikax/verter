@@ -210,7 +210,7 @@ fn value_inference_flow_variables_narrow_return_value_by_branch() {
 }
 
 #[test]
-#[ignore = "typeinfo currently does not infer generic call-site type arguments from callback return bodies for computed<T>(() => ...); keep as the future callback-driven generic call inference contract"]
+#[ignore = "`computed<T>(() => ...)` infers `T` from the callback's return body and the published shape carries the asserted `id`/`count`/`nested.ready` slots; the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.FLOW_RETURN_SUBSTRATE when the row is seated"]
 fn value_inference_computed_callback_object_value_resolves_from_callback_body() {
     // TS7 contract: ComputedObjectValue =
     //   { id: "computed"; count: number; nested: { ready: boolean } }
@@ -240,8 +240,18 @@ fn value_inference_computed_callback_object_value_resolves_from_callback_body() 
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// TS7 contract: ComputedBlockValue = { state: true; count: number }.
+// The callback body declares `const local = { ready: true as const, count: 3 }`.
+//   - `local.ready` keeps the literal `true` because of `as const`.
+//   - `local.count` widens to `number` (no `as const`, the `const` binding
+//     does NOT make nested properties literal).
+// The callback returns `{ state: local.ready, count: local.count }`, which
+// therefore has type `{ state: true; count: number }`. T is inferred from
+// that, so the final published shape preserves `state: true` and widens
+// `count` to the primitive `number`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not carry block-bodied callback local variables and return object inference through computed<T>; keep as the future block-callback generic inference contract"]
+#[ignore = "the flow lane does not yet carry block-bodied callback local bindings through the generic computed<T> helper (the block-callback family belongs to the value-inference lane); the carve-out row fails closed with an unknown node where tsgo publishes `{ state: true; count: number }`"]
 fn value_inference_computed_block_callback_value_resolves_local_return_shape() {
     // TS7 contract: ComputedBlockValue = { state: true; count: number }.
     // The callback body declares `const local = { ready: true as const, count: 3 }`.

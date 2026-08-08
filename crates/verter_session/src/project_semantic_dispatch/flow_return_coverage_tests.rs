@@ -1824,38 +1824,48 @@ fn call_apply_bind_and_this_parameter_callees_degrade_as_unrepresentable() {
     }
 }
 
-/// An AMBIENT OVERLOAD GROUP callee degrades as an unrepresentable callee
-/// and admits nothing. The declaration index keeps one entry per name
-/// while the language picks the first MATCHING signature, so the
-/// substrate declines rather than publishing whichever entry the index
-/// happens to hold.
+/// An AMBIENT OVERLOAD GROUP callee resolves to the FIRST APPLICABLE
+/// signature. The declaration index keeps one entry per name while the
+/// language picks the first MATCHING signature — the executor picks it
+/// too, never whichever entry the index happens to hold.
 ///
-/// Oracle (for the record): `ReturnType<typeof callAmbientOverload>` is
-/// `"S"`.
+/// Oracle: `ReturnType<typeof callAmbientOverload>` is `"S"`.
 #[test]
-fn ambient_overload_group_callee_degrades_rather_than_guessing_a_signature() {
+fn ambient_overload_group_callee_resolves_the_first_applicable_signature() {
     let host = ts_host();
-    assert_degraded(
-        &host,
-        CALLS,
-        "callAmbientOverload",
-        FlowReturnDegradation::UnrepresentableCallee,
-    );
+    assert_clean_warm(&host, CALLS, "callAmbientOverload", string_lit("S"));
 }
 
-/// A GENERIC overload group callee degrades identically — the pair
-/// `<T>(a: T)` / `<T, U>(a: T, b: U)` is not resolved by arity.
+/// A GENERIC overload group callee resolves by arity and argument
+/// inference — the pair `<T>(a: T)` / `<T, U>(a: T, b: U)` IS resolved by
+/// the supplied arguments, and the picked signature's clause instantiates
+/// from them. The member values are the un-widened literals of the
+/// checker's widened answer.
 ///
-/// Oracle (for the record): `ReturnType<typeof tlCallOvlGen>` is
-/// `{ g: string; h: number; }`.
+/// Oracle: `ReturnType<typeof tlCallOvlGen>` is `{ g: string; h: number; }`.
 #[test]
-fn generic_overload_group_callee_degrades_as_unrepresentable() {
+fn generic_overload_group_callee_resolves_by_arity_and_inference() {
     let host = ts_host();
-    assert_degraded(
-        &host,
-        TL,
-        "tlCallOvlGen",
-        FlowReturnDegradation::UnrepresentableCallee,
+    let Outcome::Value {
+        ty,
+        degradation,
+        candidates,
+    } = eval(&host, TL, "tlCallOvlGen")
+    else {
+        panic!("tlCallOvlGen must produce a value");
+    };
+    assert_eq!(degradation, None, "tlCallOvlGen must evaluate clean");
+    assert_eq!(candidates, 1, "tlCallOvlGen must warm-admit");
+    assert_eq!(
+        projected_member(&ty, "g"),
+        &string_lit("a"),
+        "the picked overload's `g` infers from the first argument"
+    );
+    assert_eq!(
+        projected_member(&ty, "h"),
+        &TypeExpr::Literal(LiteralValue::Number(1.0)),
+        "the second overload's `h` — arity picked it — infers from the \
+         second argument"
     );
 }
 
@@ -2387,10 +2397,43 @@ fn symbol_keyed_member_call_resolves_to_the_member_return() {
 /// interior. That admission half is fixed and separately guarded; what
 /// this canary still owns is the missing member projection itself.
 #[test]
-#[ignore = "a member read off an annotated parameter evaluates to Opaque(Miss) (ReturnOnly): the flow evaluator has no member projection over a frame-bound leaf root"]
 fn member_read_off_an_annotated_parameter_resolves_to_the_member_type() {
     let host = ts_host();
     assert_clean_warm(&host, TL, "tlPlainMember", string());
+    // The same read at the nesting depths the evaluation composes as
+    // FLOW expressions: an object-literal member value and a nested
+    // function's return. Each resolves through the parameter's
+    // annotation — clean, warm, the checker's own answer (`{ q: string }`,
+    // `() => string`). (An ARRAY element rides inside the array literal's
+    // single composite leaf — a different ingress, still declined; see
+    // `a_value_reaching_a_miss_carrier_is_never_admitted_warm`.)
+    let assert_clean = |name: &str| -> TypeExpr {
+        match eval(&host, TL, name) {
+            Outcome::Value {
+                ty,
+                degradation,
+                candidates,
+            } => {
+                assert_eq!(
+                    (degradation, candidates),
+                    (None, 1),
+                    "{name} must resolve clean and warm"
+                );
+                ty
+            }
+            other => panic!("{name} must produce a value, got {other:?}"),
+        }
+    };
+    let object = assert_clean("tlMissCarrierInObjectMember");
+    assert_eq!(
+        projected_member(&object, "q"),
+        &TypeExpr::Primitive(PrimitiveName::String)
+    );
+    let nested = assert_clean("tlMissCarrierInNestedFunction");
+    assert_eq!(
+        projected_function_return(&nested),
+        &TypeExpr::Primitive(PrimitiveName::String)
+    );
 }
 
 /// CANARY — a member read off a CONSTRAINED clause parameter resolves
@@ -2932,67 +2975,46 @@ fn assert_unresolved_value(
 /// channel exists to prevent, and `CLAUDE.md`'s Stub Prevention section
 /// names the shape ("an always-`Opaque(Miss)` resolve is a nop").
 ///
-/// The rows below are FOUR DIFFERENT INGRESS PATHS, which is the point:
-/// a per-arm fix closes one and leaves the rest.
+/// Four member-path rows once lived here (`tlPlainMember` and its three
+/// nesting depths — an object member value, an array element, a nested
+/// function's return): each declined a frame-rooted `x.q` read as a
+/// miss-carrier value. The frame-rooted member-path projection now
+/// resolves the reads the evaluation composes as FLOW expressions (the
+/// plain read, the object member, the nested-function return — clean,
+/// warm, the checker's own `string`), so those moved to the canary
+/// `member_read_off_an_annotated_parameter_resolves_to_the_member_type`.
+/// What remains is the genuinely unresolvable read and the
+/// composite-leaf interior the projection never sees:
 ///
 /// ```text
-/// tlPlainMember                  the FrameShadowed arm (`x.q`, owner
-///                                scope answers nothing, leaf evaluates
-///                                unchanged to a miss)
 /// tlFreeUnresolvedRead           the FREE-leaf arm — no FrameShadowed
 ///                                carrier is involved at all
-/// tlMissCarrierInObjectMember    nested one level down, in an object
-///                                member value the evaluator composed
 /// tlMissCarrierInArray           nested inside ONE leaf lowering's own
 ///                                answer (`Array{element}`), which no
 ///                                shallow ingress check could see
-/// tlMissCarrierInNestedFunction  nested in a composed signature's
-///                                return position
 /// ```
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
-/// --ignoreConfig`) — the answers the substrate declines to produce:
-/// `string` for `tlPlainMember`, `{ q: string }` for the object row,
-/// `string[]` for the array row, `() => string` for the nested-function
-/// row. `tlFreeUnresolvedRead` is a program tsgo REJECTS
+/// --ignoreConfig`): `tlFreeUnresolvedRead` is a program tsgo REJECTS
 /// (`Cannot find name 'noSuchGlobalValue'.`), so there is no honest value
-/// to publish for it at all.
+/// to publish for it at all. The array row's `string[]` is the answer
+/// the composite-leaf ingress still declines to produce.
 ///
 /// Mutation recipe: returning `false` unconditionally from
-/// `flow_return_value_is_unresolved` flips every row to a warm
-/// `candidates: 1`; dropping any one of the `Object` / `Array` /
-/// `Signature` descent arms flips exactly its own row.
+/// `flow_return_value_is_unresolved` flips each row to a warm
+/// `candidates: 1`.
 #[test]
 fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
     let host = ts_host();
 
-    // Top-level miss, reached through the FrameShadowed arm.
-    assert_unresolved_value(&host, TL, "tlPlainMember", |dispatch, node| {
-        assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
-    });
     // Top-level miss, reached through the FREE-leaf arm.
     assert_unresolved_value(&host, TL, "tlFreeUnresolvedRead", |dispatch, node| {
         assert_eq!(node_shape(dispatch, node), NodeShape::Opaque);
     });
-    // Nested in an object member value the evaluator composed.
-    assert_unresolved_value(
-        &host,
-        TL,
-        "tlMissCarrierInObjectMember",
-        |dispatch, node| {
-            let data = dispatch.graph().node_data(node);
-            let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
-                panic!("the object row must still produce an Object node");
-            };
-            let [member] = surface.positive_members() else {
-                panic!("exactly one member");
-            };
-            let value = member.value;
-            drop(data);
-            assert_eq!(node_shape(dispatch, value), NodeShape::Opaque);
-        },
-    );
-    // Nested inside ONE leaf lowering's own composite answer.
+    // Nested inside ONE leaf lowering's own composite answer: the array
+    // literal lowers as ONE leaf (`Array{element: typeof x.q}`), so the
+    // frame-rooted member path never reaches the evaluator's projection
+    // — a composite-leaf interior is a distinct, still-declined ingress.
     assert_unresolved_value(&host, TL, "tlMissCarrierInArray", |dispatch, node| {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Array { element, .. }) = data.as_deref() else {
@@ -3002,21 +3024,6 @@ fn a_value_reaching_a_miss_carrier_is_never_admitted_warm() {
         drop(data);
         assert_eq!(node_shape(dispatch, element), NodeShape::Opaque);
     });
-    // Nested in a composed signature's return position.
-    assert_unresolved_value(
-        &host,
-        TL,
-        "tlMissCarrierInNestedFunction",
-        |dispatch, node| {
-            let data = dispatch.graph().node_data(node);
-            let Some(SemanticNodeData::Signature { return_type, .. }) = data.as_deref() else {
-                panic!("the nested-function row must still produce a Signature node");
-            };
-            let return_type = *return_type;
-            drop(data);
-            assert_eq!(node_shape(dispatch, return_type), NodeShape::Opaque);
-        },
-    );
 }
 
 /// The DISCRIMINATOR for the row above: a deferred CARRIER is not a miss,

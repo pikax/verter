@@ -3065,6 +3065,39 @@ fn r5_node<R>(
     })
 }
 
+/// Evaluate one function under the CLEAN + UNADMITTED contract: the value
+/// is served (no degradation) but the slot is NEVER warm-admitted — the
+/// answer completes transaction-locally. That is the shape of a ROOTLESS
+/// winner (a callee with no authored occurrence, like a local arrow) and
+/// of a provisional SCC fixed-point join.
+#[track_caller]
+fn r5_node_unadmitted<R>(
+    host: &Arc<VerterHost>,
+    name: &str,
+    part: FunctionPartIdentity,
+    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+) -> R {
+    with_dispatch(host, |dispatch| {
+        let key = r5_key_part(dispatch, name, part);
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            panic!("{name} must produce a value");
+        };
+        assert_eq!(result.degradation(), None, "{name} must evaluate clean");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "{name}'s answer completes transaction-locally and is never warm-admitted"
+        );
+        pick(dispatch, result.return_type())
+    })
+}
+
 /// A NESTED function value's signature is composed under the ENCLOSING
 /// frames' binder environment, not the file's owner scope.
 ///
@@ -3675,14 +3708,16 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// instantiation. `new GcHolder<number>().viaCall()` would answer
 /// `number` for a member whose value has nothing to do with `GH`.
 ///
-/// The rule applied instead is sb15 — the callee's own type parameters
-/// instantiate at `unknown` — which is exactly what the sibling
-/// callee-TYPE path (`call_return_of_callee_node`) already applies, so
-/// every route to one callee answers alike: the flow-derived return, the
-/// DECLARED return, and the annotated-alias value type. Call-site
-/// instantiation proper (explicit type arguments AND argument inference)
-/// is `U6.CALL_RESOLVE`'s; this is the interim HONEST answer, and it is
-/// EXACT for the one shape TypeScript itself cannot infer.
+/// The call-resolution executor now answers most of these routes: an
+/// explicit type argument instantiates the clause exactly, and argument
+/// inference from a literal publishes the un-widened literal of the
+/// checker's widened answer. What remains is the shape TypeScript itself
+/// cannot infer (`gcBareInferred`, where `unknown` IS the checker's
+/// answer) and the routes the executor does not read: the annotated-alias
+/// value type (`gcViaAnnotated`) keeps the sb15 interim `unknown`, and a
+/// NAMESPACE-scoped callee (`GcNs.nsCall`) is outside the executor's
+/// reach — it refuses, and the position degrades as an unrepresentable
+/// callee rather than guessing.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -3695,10 +3730,12 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 /// new GcHolder<number>().ownT():   number
 /// ```
 ///
-/// The seven `unknown` rows are the recorded interim: TypeScript
-/// instantiates from the call's explicit type arguments and its argument
-/// inference, and neither is modeled here. `gcBareInferred` is the row
-/// where sb15 IS the checker's answer.
+/// The `Literal(String("a"))` rows are the un-widened literals of the
+/// checker's widened `string`. `gcBareInferred` stays `unknown` — it is
+/// the row where sb15 IS the checker's answer. `gcViaAnnotated` keeps the
+/// interim (the annotated-alias route is not call-resolved), and
+/// `GcNs.nsCall` degrades (a namespace-scoped callee is outside the
+/// executor's reach).
 ///
 /// Mutation recipes:
 ///
@@ -3728,19 +3765,9 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
 fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
     let host = make_r5_host();
 
-    // Every generic-callee route — flow-derived return, DECLARED return,
-    // a bare-`T` return with nothing to infer from, and the annotated
-    // alias value type — instantiates the callee's clause at `unknown`.
-    for name in [
-        "gcDeclExplicit",
-        "gcDeclInferred",
-        "gcFlowExplicit",
-        "gcFlowInferred",
-        "gcBareExplicit",
-        "gcBareInferred",
-        "gcViaAnnotated",
-        "GcNs.nsCall",
-    ] {
+    // Explicit type arguments instantiate the callee's clause EXACTLY —
+    // and never publish the callee's binder.
+    for name in ["gcDeclExplicit", "gcFlowExplicit", "gcBareExplicit"] {
         r5_node(
             &host,
             name,
@@ -3748,7 +3775,7 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
             |dispatch, node| {
                 assert_eq!(
                     node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    NodeShape::Primitive(PrimitiveKind::String),
                     "{name} must instantiate the callee's own type parameter, \
                      never publish the callee's binder"
                 );
@@ -3756,12 +3783,73 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         );
     }
 
+    // Argument inference from a literal instantiates the clause; the
+    // fresh-literal return widens at the caller's return join for the
+    // DECLARED-carrier callee, while the body-derived carrier keeps the
+    // bare literal today (its freshness does not yet reach the join) —
+    // the un-widened literal of the checker's `string`, never the
+    // callee's binder either way.
+    for name in ["gcDeclInferred"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::String),
+                    "{name} must instantiate the callee's own type parameter, \
+                     never publish the callee's binder"
+                );
+            },
+        );
+    }
+
+    // A bare-`T` return with nothing to infer from keeps `unknown` — the
+    // checker's own answer for this shape.
+    r5_node(
+        &host,
+        "gcBareInferred",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "gcBareInferred has no inference candidate: `unknown` is the \
+                 checker's answer"
+            );
+        },
+    );
+
+    // The annotated-alias route is not call-resolved: the sb15 interim
+    // `unknown` stands — never the callee's binder.
+    r5_node(
+        &host,
+        "gcViaAnnotated",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "gcViaAnnotated keeps the interim: the annotated-alias route \
+                 is not call-resolved"
+            );
+        },
+    );
+
+    // A NAMESPACE-scoped generic callee is outside the executor's reach:
+    // it refuses, and the position degrades as an unrepresentable callee
+    // rather than guessing from a clause it cannot read.
+    assert_degraded(
+        &host,
+        "GcNs.nsCall",
+        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+    );
+
     // CONTROLS — a NON-generic direct callee is untouched: the rule fires
-    // on the callee's declared clause, not on "any direct call". The
-    // namespace pair is the one that pins the CLAUSE AUTHORITY: a
-    // namespace-scoped function has no prepared value declaration at all,
-    // so reading the clause off the value registry leaves `GcNs.nsCall`
-    // leaking `TypeParam(GN)` while every file-scope row is already green.
+    // on the callee's declared clause, not on "any direct call".
+    // `GcNs.nsPlainCall` is the namespace control: non-generic, so the
+    // executor's reach gap on namespace-scoped callees does not fire.
     for name in ["gcNonGeneric", "GcNs.nsPlainCall"] {
         assert_clean_warm(&host, name, TypeExpr::Primitive(PrimitiveName::String));
     }
@@ -3780,8 +3868,9 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "GcHolder::viaCall must not publish a binder"
+                NodeShape::Primitive(PrimitiveKind::String),
+                "GcHolder::viaCall instantiates the callee's clause from the \
+                 explicit type argument — it must not publish a binder"
             );
             node
         },
@@ -3874,10 +3963,14 @@ fn reachable_type_param_names(
 /// new RvHolder<number>().ownRL(): RL
 /// ```
 ///
-/// The `unknown` rows are the recorded interim: TypeScript instantiates
-/// these clauses from ARGUMENT INFERENCE, which is `U6.CALL_RESOLVE`'s.
-/// `unknown` is not the checker's answer here — a leaked binder is not
-/// either, and it is the answer that cannot be substituted into.
+/// The local-binding and parameter routes now resolve through argument
+/// inference: the published value is the un-widened literal of the
+/// checker's widened `string`. Both callees are ROOTLESS — a local arrow
+/// and a parameter's function type have no authored function occurrence —
+/// so the value is served but the slot is never warm-admitted. The IIFE
+/// route is not call-resolved: `unknown` is the recorded interim there —
+/// not the checker's answer, but a leaked binder is not either, and it is
+/// the answer that cannot be substituted into.
 ///
 /// Mutation recipes (each verified to flip exactly these rows):
 ///
@@ -3891,15 +3984,18 @@ fn reachable_type_param_names(
 fn flow_return_every_call_route_instantiates_the_callees_clause() {
     let host = make_r5_host();
 
-    for name in ["rvLocalLambdaCall", "rvIife", "rvParamCall"] {
-        r5_node(
+    // The ROOTLESS routes: a local arrow and a generic function-typed
+    // parameter resolve from the literal argument, complete
+    // transaction-locally, and are never warm-admitted.
+    for name in ["rvLocalLambdaCall", "rvParamCall"] {
+        r5_node_unadmitted(
             &host,
             name,
             FunctionPartIdentity::DeclarationBody,
             |dispatch, node| {
                 assert_eq!(
                     node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    NodeShape::Primitive(PrimitiveKind::String),
                     "{name} must instantiate the callee's own clause, never publish \
                      the callee's binder"
                 );
@@ -3907,10 +4003,24 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
         );
     }
 
+    // The IIFE route is not call-resolved: the recorded interim stands.
+    r5_node(
+        &host,
+        "rvIife",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "rvIife keeps the interim: the IIFE route is not call-resolved"
+            );
+        },
+    );
+
     // The MEMBER-ALIASING pair: the local lambda's clause is spelled
     // `RL`, exactly the enclosing class's, so before the fix both members
     // published ONE node.
-    let via_local = r5_node(
+    let via_local = r5_node_unadmitted(
         &host,
         "RvHolder",
         FunctionPartIdentity::Member {
@@ -3919,7 +4029,7 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
+                NodeShape::Primitive(PrimitiveKind::String),
                 "RvHolder::viaLocal must not publish a binder"
             );
             node
@@ -3966,7 +4076,8 @@ fn flow_return_every_call_route_instantiates_the_callees_clause() {
 /// directly or indirectly in one of its return expressions`), so
 /// TypeScript declines to type them at all. The substrate's coinductive
 /// answer is the component's own union — which must contain each
-/// member's OWN binder and no other member's.
+/// member's OWN binder and no other member's. The provisional join
+/// completes transaction-locally and is never warm-admitted.
 ///
 /// Mutation recipe: joining `result.return_type()` instead of
 /// `hold.discharged(...)` restores `CT` to `cgOne` (and `CO` to
@@ -3991,7 +4102,7 @@ fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
         },
     );
 
-    r5_node(
+    r5_node_unadmitted(
         &host,
         "cgOne",
         FunctionPartIdentity::DeclarationBody,
@@ -4023,7 +4134,7 @@ fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
         },
     );
 
-    r5_node(
+    r5_node_unadmitted(
         &host,
         "cgTwo",
         FunctionPartIdentity::DeclarationBody,
@@ -4066,8 +4177,11 @@ fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
 /// shPlainItem():        ShItem      shUsePlainItem():          ShItem
 /// ```
 ///
-/// The two `unknown` rows are the recorded interim (argument inference is
-/// `U6.CALL_RESOLVE`'s); the CONTROL pair is exact and is what keeps the
+/// `callsShDecl` now resolves through argument inference — the
+/// un-widened literal of the checker's `string`. `shUseFirst` keeps the
+/// recorded interim: its argument is a parameter reference, not a
+/// literal, so the executor is undecidable and the pre-existing read
+/// stands. The CONTROL pair is exact and is what keeps the
 /// claim clause-scoped rather than name-scoped: `shUsePlainItem` reaches
 /// the same `ShItem` interface through a NON-generic callee, which
 /// declares no clause, so its `DeclRef` must survive untouched.
@@ -4080,22 +4194,53 @@ fn flow_return_scc_fixed_point_never_republishes_a_foreign_callee_binder() {
 fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiates() {
     let host = make_r5_host();
 
-    for name in ["shUseFirst", "callsShDecl"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                assert_eq!(
-                    node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
-                    "{name}'s callee clause SHADOWS the same-named file-scope \
-                     declaration, so the resolved head is the clause parameter — \
-                     publishing the declaration is publishing an unrelated symbol"
-                );
-            },
-        );
-    }
+    // `shUseFirst`'s argument is a parameter reference: the executor is
+    // undecidable and the pre-existing interim stands — the resolved head
+    // is claimed as the clause parameter, never the shadowed interface.
+    r5_node(
+        &host,
+        "shUseFirst",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Number),
+                "shUseFirst's callee clause SHADOWS the same-named file-scope \
+                 declaration, so the resolved head is the clause parameter — \
+                 publishing the declaration is publishing an unrelated symbol"
+            );
+        },
+    );
+
+    // `callsShDecl` supplies a literal: the executor infers the clause
+    // and the answer is the un-widened literal of the checker's `string`.
+    r5_node(
+        &host,
+        "callsShDecl",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "callsShDecl's callee clause SHADOWS the same-named file-scope \
+                 declaration — the inferred literal, never the shadowed \
+                 interface and never the callee's binder"
+            );
+        },
+    );
+
+    r5_node(
+        &host,
+        "gcFlowInferred",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Other("Literal(String(\"a\"))".to_string()),
+                "the body-derived carrier keeps the bare literal today (its                  freshness does not yet reach the join) — never the binder"
+            );
+        },
+    );
 
     // ROUTE AGREEMENT — the callee's own body-derived answer keeps its
     // clause binder; the CALLER's route instantiates it. The two must not
@@ -4154,10 +4299,11 @@ fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiat
 /// bodiless overloads in source order and hides the trailing
 /// implementation.
 ///
-/// Picking the right overload needs argument-driven overload resolution.
-/// Until then the answer is the `UnrepresentableCallee` DEGRADATION the
-/// rail already defines: the typed unresolved MARKER at that position,
-/// `ReturnOnly` by contract — never warm-admitted.
+/// The call-resolution executor now picks the FIRST APPLICABLE signature
+/// in declaration order and instantiates its clause from the arguments:
+/// `ovX("a")` answers the first visible overload's inferred `OA` — the
+/// un-widened literal of the checker's `string`. The answer is never the
+/// implementation's `any` and never the LAST overload's return.
 ///
 /// Oracle (tsgo checker, `--strict --declaration`):
 ///
@@ -4169,23 +4315,29 @@ fn flow_return_callee_clause_shadowing_a_file_scope_declaration_still_instantiat
 /// Mutation recipes:
 ///
 /// - removing the overload gate republishes `Primitive(Any)` for
-///   `ovXCall` with NO degradation and ONE warm candidate — the exact
-///   pre-fix shape;
-/// - widening the gate to "any signature with an implementation body"
-///   flips the CONTROL `ovSingleCall`, a lone generic signature that is
-///   bodied and fully visible, from `unknown` to a degraded `any`.
+///   `ovXCall` with NO degradation — the exact pre-fix shape;
+/// - reading the LAST declaration of the group flips `ovXCall` to the
+///   implementation's `any`.
 #[test]
 fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
     let host = make_r5_host();
 
-    assert_degraded(
+    r5_node(
         &host,
         "ovXCall",
-        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "ovXCall resolves to the FIRST APPLICABLE overload — never the \
+                 hidden implementation's `any`, never the last declaration"
+            );
+        },
     );
 
-    // CONTROL — a LONE signature is untouched, bodied or not: the rule is
-    // overload VISIBILITY, not "any function with a body".
+    // CONTROL — a LONE signature resolves the same way, bodied or not:
+    // the rule is overload VISIBILITY, not "any function with a body".
     r5_node(
         &host,
         "ovSingleCall",
@@ -4193,70 +4345,65 @@ fn flow_return_overloaded_callee_never_publishes_the_hidden_implementation() {
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "a lone visible signature still instantiates its clause"
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a lone visible signature instantiates its clause from the \
+                 argument"
             );
         },
     );
 }
 
-/// GRAPH NODE — an `UnrepresentableCallee` contributes the typed
-/// positional MARKER, never a fabricated `any`.
+/// A RESOLVED overload group publishes the FIRST APPLICABLE signature's
+/// return — never a fabricated `any`, never the hidden implementation,
+/// never the LAST declaration.
 ///
-/// The class this degradation rides
-/// (`PartialReasonSet::FLOW_RETURN_UNINFERRED`) makes exactly one claim:
-/// the position the substrate could not type SAYS SO in the graph, so a
-/// per-position consumer can degrade that position and leave its exact
-/// siblings alone. A fabricated `Primitive(Any)` breaks the claim in both
-/// directions at once — it is indistinguishable from an authored `any` at
-/// every downstream gate (an overloaded callee published a prop as `any`
-/// where the checker says `boolean`), and it is indistinguishable from an
-/// exactly-typed sibling to any consumer reading the position.
+/// A fabricated `Primitive(Any)` is bidirectionally assignable, so it is
+/// indistinguishable from an authored `any` at every downstream gate (an
+/// overloaded callee published a prop as `any` where the checker says
+/// `boolean`), and it is indistinguishable from an exactly-typed sibling
+/// to any consumer reading the position. The executor resolves all three
+/// group shapes below — a bodied group, an AMBIENT group, and a group
+/// reached through a composite expression — so the value is the picked
+/// overload's own return.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
-/// `ovXCall()` is `string` — the FIRST visible overload. The substrate
-/// cannot select it without argument-driven overload resolution, so the
-/// honest published node is the marker; the WRONG answers it must not
-/// publish are the implementation's `any` and the last overload's return.
 ///
-/// Discrimination: restoring `CallValue::modeled_any` in
-/// `degraded_unrepresentable_callee` publishes `Primitive(Any)` and fails
-/// the node assertion while leaving the degradation assertion green — which
-/// is precisely why the degradation alone was not enough. The CONTROL is a
-/// LONE signature, whose clause still instantiates to `unknown`: a change
-/// that mints the marker for every call fails it.
+/// ```text
+/// ovXCall():   string   ← the FIRST visible overload, inferred
+/// amb3Call():  "A"      ← the FIRST matching ambient declaration
+/// tnAmbBare(): "TA"
+/// ```
+///
+/// The `Literal(String("a"))` row is the un-widened literal of the
+/// checker's widened `string`.
+///
+/// Discrimination: reading the LAST declaration of the group flips
+/// `amb3Call` to `Literal(String("C"))` and `ovXCall` to the
+/// implementation's `any`; fabricating `any` at the position fails the
+/// node assertion for all three. The CONTROL is a LONE signature: a
+/// change that routes every call through overload resolution's refusal
+/// path fails it.
 #[test]
-fn flow_return_unrepresentable_callee_publishes_the_marker_not_a_fabricated_any() {
+fn flow_return_resolved_overload_never_publishes_a_fabricated_any() {
     let host = make_r5_host();
 
-    for name in ["ovXCall", "amb3Call", "tnAmbBare"] {
-        with_dispatch(&host, |dispatch| {
-            let key = r5_key(dispatch, name);
-            let QueryResult::Value(SemanticQueryOutput {
-                value: SemanticQueryValue::FlowReturn(result),
-                ..
-            }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
-            else {
-                panic!("{name} must produce a value");
-            };
-            assert_eq!(
-                result.degradation(),
-                Some(crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee),
-                "{name} must carry the typed degradation"
-            );
-            let data = dispatch.graph().node_data(result.return_type());
-            assert!(
-                matches!(
-                    data.as_deref(),
-                    Some(SemanticNodeData::Opaque(QueryError::UnmodeledPosition))
-                ),
-                "{name} must publish the typed positional marker, got {data:?}"
-            );
-        });
+    for name in ["ovXCall"] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Primitive(PrimitiveKind::String),
+                    "{name} resolves to the first applicable overload's own \
+                     return — never a fabricated `any`"
+                );
+            },
+        );
     }
 
-    // CONTROL — a LONE signature is untouched: it instantiates its clause
-    // to the recorded `unknown` interim, not the marker.
+    // CONTROL — a LONE signature resolves identically.
     r5_node(
         &host,
         "ovSingleCall",
@@ -4264,8 +4411,9 @@ fn flow_return_unrepresentable_callee_publishes_the_marker_not_a_fabricated_any(
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "a lone visible signature still instantiates its clause"
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a lone visible signature instantiates its clause from the \
+                 argument"
             );
         },
     );
@@ -4282,17 +4430,18 @@ fn flow_return_unrepresentable_callee_publishes_the_marker_not_a_fabricated_any(
 /// concrete type, warm-admitted — strictly worse than the interim it
 /// replaced.
 ///
-/// The rule shipped here is TypeScript's, expressed on the two facts the
-/// call carrier now widened to carry (an argument count and an
-/// explicit-type-arguments flag):
+/// The rule, now with the executor resolving what the call site offers:
 ///
-/// - explicit type arguments present ⇒ this substrate cannot resolve
-///   them yet ⇒ `unknown` (the recorded interim, unchanged);
+/// - explicit type arguments present ⇒ they instantiate the clause
+///   EXACTLY (`zpExplicitCall` answers `string`);
 /// - otherwise, a parameter that occurs in a parameter type at an
 ///   ordinal the call actually SUPPLIES ⇒ inference has a candidate ⇒
-///   `unknown` (the interim);
+///   the inferred type (the un-widened literal, for a literal argument);
 /// - otherwise (no candidate is possible at all) ⇒ its declared default
 ///   when it has one, else `unknown`.
+///
+/// Where the executor cannot read the candidate (a non-literal argument)
+/// the pre-existing interim `unknown` stands — still never the default.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
 /// --ignoreConfig`), read as the WRAPPER's return type through
@@ -4348,13 +4497,23 @@ fn flow_return_unrepresentable_callee_publishes_the_marker_not_a_fabricated_any(
 fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidate() {
     let host = make_r5_host();
 
-    // Inference HAS a candidate: the interim `unknown`, never the
-    // declared default.
-    for name in [
-        "zzMismACall",
-        "zzMismBCall",
-        "zpExplicitCall",
-        "rvDefaultedFlowCall",
+    // Inference HAS a candidate: the inferred type — the un-widened
+    // literal for a literal argument, the explicit type argument when
+    // authored — never the declared default.
+    for (name, expected) in [
+        (
+            "zzMismACall",
+            NodeShape::Other("Literal(Number(1.0))".to_string()),
+        ),
+        ("zzMismBCall", NodeShape::Primitive(PrimitiveKind::Boolean)),
+        (
+            "zpExplicitCall",
+            NodeShape::Primitive(PrimitiveKind::String),
+        ),
+        (
+            "rvDefaultedFlowCall",
+            NodeShape::Other("Literal(Number(1.0))".to_string()),
+        ),
     ] {
         r5_node(
             &host,
@@ -4363,10 +4522,10 @@ fn flow_return_callee_clause_default_applies_only_when_inference_has_no_candidat
             |dispatch, node| {
                 assert_eq!(
                     node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
+                    expected,
                     "{name}'s call site produces an inference candidate, so the \
-                     declared default is NOT the answer — `unknown` is the interim, \
-                     and the default would be confidently wrong"
+                     declared default is NOT the answer — the default would be \
+                     confidently wrong"
                 );
             },
         );
@@ -4481,21 +4640,35 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
     // CONTROLS — the DECLARED-carrier route, where the claim is the
     // whole point: `shFirst` / `shDecl` annotate returns that owner-scope
     // lowering misresolves to the same-named file-scope interface.
-    for name in ["shUseFirst", "callsShDecl"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                assert_eq!(
-                    node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
-                    "{name}'s callee DECLARES its return, where its own clause is \
-                     out of scope — the resolved head IS the clause parameter"
-                );
-            },
-        );
-    }
+    // `shUseFirst`'s argument is a parameter reference, so the executor is
+    // undecidable and the claim's `unknown` stands; `callsShDecl` supplies
+    // a literal and the executor infers the clause directly.
+    r5_node(
+        &host,
+        "shUseFirst",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Number),
+                "shUseFirst's callee DECLARES its return, where its own clause is \
+                 out of scope — the resolved head IS the clause parameter"
+            );
+        },
+    );
+    r5_node(
+        &host,
+        "callsShDecl",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "callsShDecl infers the clause from the literal argument — the \
+                 inferred literal, never the shadowed interface"
+            );
+        },
+    );
 
     // The IIFE route: a nested function value's signature is COMPOSED
     // from its own body, so it is clause-scoped exactly like a
@@ -4522,22 +4695,36 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
     // BINDING (`bindDeclCall`, through the parameter rail). Both lower
     // their callee's clause in file owner scope, where it is invisible,
     // so the resolved same-named head IS the clause parameter and the
-    // claim must still reach it.
-    for name in ["symCall", "bindDeclCall"] {
-        r5_node(
-            &host,
-            name,
-            FunctionPartIdentity::DeclarationBody,
-            |dispatch, node| {
-                assert_eq!(
-                    node_shape(dispatch, node),
-                    NodeShape::Primitive(PrimitiveKind::Unknown),
-                    "{name}'s callee type lowered in owner scope, where its own \
-                     clause is invisible — the resolved head IS the parameter"
-                );
-            },
-        );
-    }
+    // claim must still reach it. `symCall` is not call-resolved and keeps
+    // the claim's `unknown`; `bindDeclCall` infers from the literal
+    // argument — a ROOTLESS winner (a binding's function type has no
+    // authored occurrence), so the value is served but never admitted.
+    r5_node(
+        &host,
+        "symCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::Unknown),
+                "symCall's callee type lowered in owner scope, where its own \
+                 clause is invisible — the resolved head IS the parameter"
+            );
+        },
+    );
+    r5_node_unadmitted(
+        &host,
+        "bindDeclCall",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "bindDeclCall infers the clause from the literal argument — the \
+                 widened literal of the checker's `string`, never the shadowed declaration"
+            );
+        },
+    );
 
     // CONTROL — a non-generic callee declares no clause at all, so its
     // resolved return reference survives untouched on either route.
@@ -4566,6 +4753,11 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
 /// the control that isolates it: the identical body with the clause
 /// renamed keeps the arm, so the erasure is purely the name collision.
 ///
+/// The two routes agree on the VALUE but not on ADMISSION: the IIFE's
+/// callee has its authored occurrence and warm-admits, while the local
+/// binding's arrow is ROOTLESS — the value is served but the slot is
+/// never warm-admitted.
+///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`,
 /// read through the TWO-STEP probe `const v = f(…); const p: null = v;`
 /// — a one-step `const p: null = f(…)` contextually types the call and
@@ -4585,7 +4777,40 @@ fn flow_return_clause_claim_never_erases_a_foreign_same_named_declaration() {
 fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
     let host = make_r5_host();
 
-    for name in ["nbUse", "nbIife", "ncUse"] {
+    // The BINDING route: the arrow is ROOTLESS, so the value is served
+    // but never warm-admitted — for `ncUse` (renamed clause) alike.
+    for name in ["nbUse", "ncUse"] {
+        r5_node_unadmitted(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                    .iter()
+                    .map(|arm| node_shape(dispatch, *arm))
+                    .collect();
+                assert!(
+                    shapes.contains(&decl_ref("NB")),
+                    "{name}: the callee's body-derived arm is the file-scope \
+                     interface `NB`, a symbol the callee's own clause never \
+                     shadows — got {shapes:?}"
+                );
+                assert!(
+                    shapes.contains(&NodeShape::Primitive(PrimitiveKind::Null)),
+                    "{name}: the `null` arm survives — got {shapes:?}"
+                );
+                assert!(
+                    !shapes.contains(&NodeShape::Primitive(PrimitiveKind::Unknown)),
+                    "{name}: nothing in this answer is the instantiation interim \
+                     — got {shapes:?}"
+                );
+            },
+        );
+    }
+
+    // The IIFE route: same body, same answer — and this callee DOES
+    // warm-admit.
+    for name in ["nbIife"] {
         r5_node(
             &host,
             name,
@@ -4615,20 +4840,16 @@ fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
     }
 }
 
-/// An AMBIENT overload group is no more answerable than a bodied one.
+/// An AMBIENT overload group resolves exactly like a bodied one.
 ///
 /// The per-file function-program index carries ONE entry per overload
 /// group, so the direct-call rail reaches exactly one declaration of a
 /// set the language resolves by ARGUMENTS. For a bodied group that entry
 /// is the hidden implementation; for an AMBIENT group there is no
 /// implementation at all and the entry is simply the LAST declaration —
-/// while TypeScript picks the FIRST matching one. Gating on "the
-/// selected signature has an implementation body" therefore closed only
-/// half the class: the ambient half published a confidently wrong
-/// literal, cleanly and warm.
-///
-/// The predicate for "not answerable without argument-driven overload
-/// resolution" is `signatures.len() > 1` ALONE.
+/// while TypeScript picks the FIRST matching one. The executor resolves
+/// both halves of the class alike: the FIRST APPLICABLE signature in
+/// declaration order, never whichever entry the index happens to hold.
 ///
 /// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict`):
 ///
@@ -4638,30 +4859,64 @@ fn flow_return_binding_and_iife_routes_agree_about_one_callee() {
 /// ovSingleCall(): string
 /// ```
 ///
-/// Mutation recipe: restoring the `has_implementation_body` conjunct
-/// republishes `Literal(String("C"))` for `amb3Call` — the LAST
-/// declaration — with NO degradation and ONE warm candidate, and leaves
-/// every other row green.
+/// The `Literal(String("a"))` rows are the un-widened literals of the
+/// checker's widened `string`.
+///
+/// Mutation recipe: reading the index's LAST declaration republishes
+/// `Literal(String("C"))` for `amb3Call` and the implementation's `any`
+/// for `ovXCall`, and leaves the lone-signature control green.
 #[test]
-fn flow_return_ambient_overload_group_is_not_answerable_either() {
+fn flow_return_ambient_overload_group_resolves_like_a_bodied_one() {
     let host = make_r5_host();
 
-    assert_degraded(
+    r5_node(
         &host,
         "amb3Call",
-        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Other("Literal(String(\"A\"))".to_string()),
+                "an ambient group resolves to the FIRST applicable declaration, \
+                 never the index's last entry"
+            );
+        },
     );
 
-    // CONTROL — the bodied group stays degraded (the half that already
-    // worked).
-    assert_degraded(
+    // An AMBIENT declared literal return is the literal itself, exactly —
+    // no inference ran and nothing widens.
+    for (name, literal) in [("amb3Call", "\"A\""), ("tnAmbBare", "\"TA\"")] {
+        r5_node(
+            &host,
+            name,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                assert_eq!(
+                    node_shape(dispatch, node),
+                    NodeShape::Other(format!("Literal(String({literal}))")),
+                    "the ambient overload's declared literal return is exact"
+                );
+            },
+        );
+    }
+
+    // CONTROL — the bodied group resolves the same way.
+    r5_node(
         &host,
         "ovXCall",
-        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a bodied group resolves to the first applicable overload — \
+                 never the hidden implementation"
+            );
+        },
     );
 
-    // CONTROL — a LONE signature is untouched, bodied or not: the rule is
-    // overload VISIBILITY, not "any function with a body".
+    // CONTROL — a LONE signature resolves identically, bodied or not: the
+    // rule is overload VISIBILITY, not "any function with a body".
     r5_node(
         &host,
         "ovSingleCall",
@@ -4669,8 +4924,9 @@ fn flow_return_ambient_overload_group_is_not_answerable_either() {
         |dispatch, node| {
             assert_eq!(
                 node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "a lone visible signature still instantiates its clause"
+                NodeShape::Primitive(PrimitiveKind::String),
+                "a lone visible signature instantiates its clause from the \
+                 argument"
             );
         },
     );
@@ -4802,12 +5058,12 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 /// tnGenericArray:   string[]         tnLitTernary: 1 | 2
 /// ```
 ///
-/// The overload rows are the DEGRADATION assertion (the substrate does
-/// not resolve an overload group at a call site — `UnrepresentableCallee`
-/// is the typed refusal, `ReturnOnly`); the generic rows assert the
-/// recorded interim (`unknown` for an explicit type argument) and,
-/// discriminatingly, that NO callee binder survives in the published
-/// node.
+/// The overload rows now RESOLVE — the executor picks the first
+/// applicable signature at a bare call, in an `if` arm, and in a ternary
+/// arm alike (one callee, one answer). The generic rows resolve exactly
+/// too: explicit type arguments instantiate the clause, and the ternary
+/// joins both arms. `tnLitTernary` / `tnLitIf` keep their un-widened
+/// literals — the checker's own `1 | 2`.
 ///
 /// Mutation recipe: dispositioning `ConditionalExpression` as
 /// `ValueDescent::Leaf` in the shared classifier flips `tnAmbTernary`
@@ -4818,27 +5074,60 @@ fn flow_return_type_member_route_shares_the_whole_return_clause_policy() {
 fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_return() {
     let host = make_r5_host();
 
-    // An overload group degrades identically at a bare call, in an `if`
+    // An overload group resolves identically at a bare call, in an `if`
     // arm, and in a TERNARY arm — one callee, one answer.
-    for name in ["tnAmbBare", "tnAmbIf", "tnAmbTernary"] {
-        assert_degraded(
+    r5_node(
+        &host,
+        "tnAmbBare",
+        FunctionPartIdentity::DeclarationBody,
+        |dispatch, node| {
+            assert_eq!(
+                node_shape(dispatch, node),
+                NodeShape::Other("Literal(String(\"TA\"))".to_string()),
+                "the bare call resolves to the first applicable overload"
+            );
+        },
+    );
+    for name in ["tnAmbIf", "tnAmbTernary"] {
+        r5_node(
             &host,
             name,
-            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+            FunctionPartIdentity::DeclarationBody,
+            |dispatch, node| {
+                let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                    .iter()
+                    .map(|arm| node_shape(dispatch, *arm))
+                    .collect();
+                assert_eq!(
+                    shapes,
+                    vec![
+                        NodeShape::Other("Literal(String(\"TA\"))".to_string()),
+                        NodeShape::Other("Literal(String(\"TB\"))".to_string()),
+                    ],
+                    "{name}: both arms resolve to the first applicable overload"
+                );
+            },
         );
     }
 
-    // A generic callee in a ternary arm publishes the recorded interim,
-    // never the callee's own binder.
+    // A generic callee in a ternary arm instantiates its clause from the
+    // explicit type arguments — exactly, never the callee's own binder.
     r5_node(
         &host,
         "tnGenericTernary",
         FunctionPartIdentity::DeclarationBody,
         |dispatch, node| {
+            let shapes: Vec<NodeShape> = union_members(dispatch, node)
+                .iter()
+                .map(|arm| node_shape(dispatch, *arm))
+                .collect();
             assert_eq!(
-                node_shape(dispatch, node),
-                NodeShape::Primitive(PrimitiveKind::Unknown),
-                "the ternary's arms take the same interim a bare call takes"
+                shapes,
+                vec![
+                    NodeShape::Primitive(PrimitiveKind::String),
+                    NodeShape::Primitive(PrimitiveKind::Number),
+                ],
+                "the ternary's arms take the same exact answer a bare call takes"
             );
         },
     );
@@ -4905,33 +5194,40 @@ fn flow_return_calls_in_composite_expressions_never_publish_the_raw_callee_retur
 /// ovSoloMethodCall():      "SOLO"    ← a LONE method is not a group
 /// ```
 ///
-/// Picking the right overload needs argument-driven overload resolution;
-/// until then `UnrepresentableCallee` is the typed refusal — the
-/// positional marker, `ReturnOnly`, never warm — which is the same answer
-/// every other overload-group shape already gives.
+/// The executor resolves the group by ARGUMENTS: the first applicable
+/// contributor — which for these fixtures is the SECOND overload, exactly
+/// as the checker picks it — never first-wins and never the marker.
+///
+/// Oracle (tsgo `7.0.0-dev.20260526.1`, `--noEmit --strict
+/// --ignoreConfig`, read as the wrapper's `ReturnType` through
+/// `declare const w: ReturnType<typeof f>; const p: null = w;`):
+///
+/// ```text
+/// ovClassMethodCall():     "MB"      ← the SECOND overload, not the first
+/// ovObjMethodCall():       "PB"
+/// ovIfaceMethodCall():     "IB"
+/// ovIntersectMethodCall(): "MB"
+/// ovSoloMethodCall():      "SOLO"    ← a LONE method is not a group
+/// ```
 ///
 /// Mutation recipe: returning `None` unconditionally from
 /// `SurfaceView::project_known_key_overload_group` restores first-wins
-/// and flips all four group rows to `deg=None cands=1` naming the FIRST
-/// overload's literal (`"MA"` / `"PA"` / `"IA"` / `"MA"`), while leaving
+/// and flips all four group rows to the FIRST overload's literal
+/// (`"MA"` / `"PA"` / `"IA"` / `"MA"`), while leaving
 /// both controls green; gating the group on `>= 1` rather than `>= 2`
 /// collisions flips `ovSoloMethodCall`; dropping the all-methods test
 /// flips `ovPropRead`.
 #[test]
-fn flow_return_method_position_overload_groups_reach_the_size_gate() {
+fn flow_return_method_position_overload_groups_resolve_by_arguments() {
     let host = make_r5_host();
 
-    for name in [
-        "ovClassMethodCall",
-        "ovObjMethodCall",
-        "ovIfaceMethodCall",
-        "ovIntersectMethodCall",
+    for (name, expected) in [
+        ("ovClassMethodCall", "MB"),
+        ("ovObjMethodCall", "PB"),
+        ("ovIfaceMethodCall", "IB"),
+        ("ovIntersectMethodCall", "MB"),
     ] {
-        assert_degraded(
-            &host,
-            name,
-            crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-        );
+        assert_clean_warm(&host, name, string_lit(expected));
     }
 
     // CONTROLS — a LONE method and a plain PROPERTY keep their exact
@@ -5393,9 +5689,9 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnAmbNonNull       "TA"              fails closed ← call position
 /// tnAmbAs            "TA"              "TA"         ← exact
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
-/// tnGenericBare      string            unknown      ← the recorded
-///                                                     explicit-type-argument
-///                                                     interim
+/// tnGenericBare      string            string       ← exact: the explicit
+///                                                     type argument
+///                                                     instantiates the clause
 /// ```
 ///
 /// Mutation recipe: dropping the `embeds_any && composes` half of
@@ -5426,8 +5722,9 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     assert_fails_closed(&host, "tnAmbSequence");
     assert_fails_closed(&host, "tnAmbNonNull");
 
-    // The two rows that ARE exact, and the one recorded interim: they
-    // discriminate the `any` rows above from "everything answers `any`".
+    // The two rows that ARE exact, and the explicit-type-argument row the
+    // executor now resolves exactly: they discriminate the `any` rows
+    // above from "everything answers `any`".
     assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
     assert_clean_warm(
         &host,
@@ -5439,7 +5736,7 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     assert_clean_warm(
         &host,
         "tnGenericBare",
-        TypeExpr::Primitive(PrimitiveName::Unknown),
+        TypeExpr::Primitive(PrimitiveName::String),
     );
 }
 
