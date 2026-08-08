@@ -1928,6 +1928,11 @@ const OPEN_DEBTS: &[&str] = &[
     "N12_literal_union_narrow",
     "N13_nested_property_guard",
     "N14_negated_typeof_guard",
+    // ── CONTEXTUAL — seeded before the owning block exists ──────────────
+    // A declared return annotation's member union is collapsed to a lone
+    // Primitive where the checker keeps `"a" | "b"`. Fails today by design;
+    // the row flips the moment the annotation's union reaches the member.
+    "CC02_annotated_return_literal_union",
     // ── TypeScript semantics: adversarial axes (X family) ──────────────
     // Conditional spread source whose arms share a key set: refused, and the
     // TSX lane faults.
@@ -1975,7 +1980,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2MappedTemplate, 2, 0, 2),
     (Owner::U6CallResolve, 4, 4, 0),
     (Owner::U6ValueInference, 18, 8, 9),
-    (Owner::U6ContextualCore, 0, 0, 0),
+    (Owner::U6ContextualCore, 9, 8, 1),
     (Owner::U6FlowReturnSubstrate, 44, 33, 2),
     (Owner::U6NarrowTypeof, 9, 0, 9),
     (Owner::U6NarrowLattice, 3, 1, 2),

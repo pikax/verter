@@ -232,4 +232,60 @@ pub(crate) const CORPUS: &[Row] = &[
     Row { id: "X20_as_const_spread_source", script: "function base() { return { label: \"x\" } as const }\nfunction makeProps() { return { ...base(), n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\"; n: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String", "n: { type: Number"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::ObjectSpreadProgram, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label", "n"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // `satisfies Record<string, string | number>` on a PLAIN return (no spread): the substrate keeps `Literal` member nodes that widen to the same constructors the checker prints.
     Row { id: "X21_satisfies_plain_return", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies Record<string, string | number> }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String", "n: { type: Number"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label", "n"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
+
+    // ── CC: contextual typing — the expected type at the use site feeds inference ──
+    // Seeded before the contextual block exists: the flow lane's input axis is
+    // the canonical EMPTY point, so every row here measures what the substrate
+    // computes with NO contextual input producer. Plain `.ts` semantics only —
+    // no framework lane (the block's consumer-reach story is not its fence).
+    // A DECLARED return annotation wins over the body join, full stop: the
+    // checker checks the body AGAINST the annotation, so the signature's
+    // return IS the annotation. The plainest contextual shape there is.
+    Row { id: "CC01_annotated_return_object", script: "function makeProps(): { label: string; n: number } { return { label: \"x\", n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive), ("n", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // KNOWN OWED — annotation-directed literal WIDENING: the body returns the
+    // literal `"a"`, and the declared return position contextually types it
+    // into the union `"a" | "b"` — but the substrate COLLAPSES the annotated
+    // member to a single `Primitive` where the checker keeps the union. The
+    // member SET is right; the member TYPE is erased. The pinned `Primitive`
+    // member shape is the tripwire: when the annotation's union reaches the
+    // member, this row fails and is reclassified.
+    Row { id: "CC02_annotated_return_literal_union", script: "function makeProps(): { mode: \"a\" | \"b\" } { return { mode: \"a\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ mode: \"a\" | \"b\"; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("mode", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::KnownOwed { owed_absent: &[], note: "The declared return annotation's member union `\"a\" | \"b\"` is collapsed to a lone `Primitive` — the checker keeps the union. The correct member shape is `Union` (two literal arms); the runtime lane emits `type: String` either way, so the graph-node member shape is the only lane that can see this." }, ..Row::BLANK },
+    // A const-assertion context on a PLAIN return (no spread — the B family
+    // covers `as const` over spread-sourced literals). No lane in this corpus
+    // observes `readonly` or literal preservation, so agreement is over the
+    // member set; the pinned MEMBER shapes are where a dropped const context
+    // would surface.
+    Row { id: "CC03_as_const_plain_return", script: "function makeProps() { return { label: \"x\", n: 1 } as const }", probe: "ReturnType<typeof makeProps>", checker: "{ readonly label: \"x\"; readonly n: 1; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The const-assertion context on ONE MEMBER: the sibling widens, the
+    // asserted member stays literal. Member-granular, so the tripwire is the
+    // member shape split, not the enclosing node.
+    Row { id: "CC04_as_const_member", script: "function makeProps() { return { label: \"x\" as const, n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\"; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // `satisfies` with a literal-union target PRESERVES the literals
+    // (`{ label: "x"; n: 1; }`) — contextual literal preservation, the dual
+    // of the widening targets X21_satisfies_plain_return and
+    // CC09_satisfies_widening_target measure.
+    Row { id: "CC05_satisfies_literal_union", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies { label: \"x\" | \"y\"; n: 1 | 2 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\"; n: 1; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // Parameter-to-argument contextual flow: the arrow `(v) => v.length` has
+    // NO parameter annotation — `v: string` is contextually typed by `apply`'s
+    // parameter, and the call's return feeds member `n`.
+    Row { id: "CC06_contextual_arrow_param", script: "function apply(cb: (v: string) => number) { return cb(\"x\") }\nfunction makeProps() { return { n: apply((v) => v.length) } }", probe: "ReturnType<typeof makeProps>", checker: "{ n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("n", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // An annotation on the SPREAD SOURCE's binding: `cfg`'s declared type is
+    // the union-bearing annotation, and the contextual union must reach the
+    // return THROUGH the spread. BLIND SPOT: a spread-program node has no
+    // member visibility, so no lane here can see whether the union survives or
+    // collapses — agreement is over the member set and the constructors, and
+    // the member-visible twin of this question is CC08's call-return shape.
+    Row { id: "CC07_annotated_spread_source", script: "const cfg: { label: \"x\" | \"y\" } = { label: \"x\" }\nfunction makeProps() { return { ...cfg, n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\" | \"y\"; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::ObjectSpreadProgram, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A contextual type reaching through a CALL return: `inner`'s declared
+    // return is the union-bearing annotation, and returning the call WHOLE
+    // keeps the member set visible. Measured: the annotated union SURVIVES
+    // the call boundary (`label` is `Union`) — the direct-annotation twin
+    // CC02_annotated_return_literal_union collapses the same union to a lone
+    // `Primitive`, so the asymmetry is pinned in both directions.
+    Row { id: "CC08_contextual_through_call_return", script: "function inner(): { label: \"x\" | \"y\" } { return { label: \"x\" } }\nfunction makeProps() { return inner() }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\" | \"y\"; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // `satisfies` with an exact member-type target WIDENS the literals
+    // (checker: `{ label: string; n: number; }`) — the widening twin of
+    // CC05_satisfies_literal_union, and the member-visible sibling of
+    // X21_satisfies_plain_return's Record target.
+    Row { id: "CC09_satisfies_widening_target", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies { label: string; n: number } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
 ];
