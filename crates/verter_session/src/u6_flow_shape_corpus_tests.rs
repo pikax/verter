@@ -287,6 +287,10 @@ pub(crate) enum Flow {
     },
     /// `FlowReturn` answered with a typed non-value (a `Miss`, a `ReturnOnly`
     /// with no value). The row pins the refusal, not a fabricated shape.
+    /// Only a GENUINE producer refusal satisfies this pin: a served signature
+    /// fact carrying no return source (the extractor dropped it) measures as
+    /// [`MeasuredFlow::Absent`] and FAILS the row, so the pin can never pass
+    /// on a function the producer never evaluated.
     NoValue,
 }
 
@@ -920,9 +924,11 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
         crate::project_semantic_dispatch::flow_return::FunctionReturnNode::DeclaredMiss => {
             MeasuredFlow::DeclaredMiss
         }
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(_)
-        | crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Absent => {
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(_) => {
             MeasuredFlow::NoValue
+        }
+        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Absent => {
+            MeasuredFlow::Absent
         }
     }
 }
@@ -947,7 +953,16 @@ enum MeasuredFlow {
     DeclaredMiss,
     /// The function has no served single-signature return carrier at all.
     NoSignature,
+    /// A genuine producer refusal: the `FlowReturn` producer ran and
+    /// answered with a typed non-value. This is the ONLY measurement a
+    /// [`Flow::NoValue`] pin accepts.
     NoValue,
+    /// The served signature fact carried NO return source (a bodiless
+    /// overload or a synthesized signature), so the producer never ran.
+    /// Distinct from [`MeasuredFlow::NoValue`]: collapsing the two would let
+    /// a [`Flow::NoValue`] pin pass when the extractor dropped the return
+    /// rather than the producer genuinely refusing it.
+    Absent,
 }
 
 /// The `.svelte` twin for a row.
@@ -1418,46 +1433,45 @@ mod corpus_suite {
             // named member's own graph-node shape. A narrowing that stopped
             // applying is visible ONLY here — the enclosing node is `Object`
             // whether or not the guard was honoured.
-            let mut check_surface =
-                |node: NodeShape,
-                 got_node: &NodeShape,
-                 members: &[(&str, NodeShape)],
-                 got_members: &[(String, NodeShape)],
-                 failures: &mut Vec<String>| {
-                    if node != *got_node {
-                        failures.push(report(
-                            row,
-                            &format!("flow GRAPH NODE of `{function}`"),
-                            &format!("{node:?}"),
-                            &format!("{got_node:?}"),
-                            "the return's SemanticNodeData discriminant changed. This is \
+            let check_surface = |node: NodeShape,
+                                 got_node: &NodeShape,
+                                 members: &[(&str, NodeShape)],
+                                 got_members: &[(String, NodeShape)],
+                                 failures: &mut Vec<String>| {
+                if node != *got_node {
+                    failures.push(report(
+                        row,
+                        &format!("flow GRAPH NODE of `{function}`"),
+                        &format!("{node:?}"),
+                        &format!("{got_node:?}"),
+                        "the return's SemanticNodeData discriminant changed. This is \
                              asserted on the GRAPH NODE, never the projected TypeExpr, because \
                              TypeParam / DeclRef / BareRef all project to `Ref { name }`.",
-                        ));
-                    }
-                    for (name, want) in members {
-                        match got_members.iter().find(|(got, _)| got == name) {
-                            Some((_, got)) if got == want => {}
-                            Some((_, got)) => failures.push(report(
-                                row,
-                                &format!("member `{name}` of `{function}`'s return"),
-                                &format!("{want:?}"),
-                                &format!("{got:?}"),
-                                "the MEMBER's computed type changed. For a narrowing row this \
+                    ));
+                }
+                for (name, want) in members {
+                    match got_members.iter().find(|(got, _)| got == name) {
+                        Some((_, got)) if got == want => {}
+                        Some((_, got)) => failures.push(report(
+                            row,
+                            &format!("member `{name}` of `{function}`'s return"),
+                            &format!("{want:?}"),
+                            &format!("{got:?}"),
+                            "the MEMBER's computed type changed. For a narrowing row this \
                                  is the whole assertion: `Union` where the checker says \
                                  `Primitive` means the guard stopped applying, and the \
                                  enclosing node looks identical either way.",
-                            )),
-                            None => failures.push(report(
-                                row,
-                                &format!("member `{name}` of `{function}`'s return"),
-                                &format!("{want:?}"),
-                                &format!("no such member; the surface carries {got_members:?}"),
-                                "the pinned member is absent from the returned surface",
-                            )),
-                        }
+                        )),
+                        None => failures.push(report(
+                            row,
+                            &format!("member `{name}` of `{function}`'s return"),
+                            &format!("{want:?}"),
+                            &format!("no such member; the surface carries {got_members:?}"),
+                            "the pinned member is absent from the returned surface",
+                        )),
                     }
-                };
+                }
+            };
             match (row.flow, &measured) {
                 (
                     Flow::Result {
@@ -1523,6 +1537,16 @@ mod corpus_suite {
                      `Flow::Result`.",
                 )),
                 (Flow::NoValue, MeasuredFlow::NoValue) => {}
+                (Flow::NoValue, MeasuredFlow::Absent) => failures.push(report(
+                    row,
+                    &format!("flow lane of `{function}`"),
+                    "Flow::NoValue (a genuine producer refusal)",
+                    "Absent (the served signature fact carried NO return source)",
+                    "the pin demands a refusal the `FlowReturn` producer actually computed; \
+                     this function's return source was dropped BEFORE the producer ran (a \
+                     bodiless overload or a synthesized signature), so nothing was ever \
+                     refused. The pin is measuring the extractor, not the producer.",
+                )),
                 (expected, got) => failures.push(report(
                     row,
                     &format!("flow lane of `{function}`"),
