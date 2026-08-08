@@ -306,6 +306,8 @@ fn materialize_constructor_type_preserves_ctor_ness() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,

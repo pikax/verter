@@ -3248,8 +3248,17 @@ coverage is true **by construction**.
    never matched its own claimed input is detectable, because the recorded extraction input
    is pinned IN the retained-lift metadata, not just the derived fingerprint. The token
    stream is a migration/audit record, NOT a `snapshot_id` input. (This whole
-   `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer is a GENUINELY
-   DEFERRED TODO — not yet wired; the description is the planned design.) (The fingerprint
+   `migration_fingerprint` / `original_body_tokens` body-hash fidelity layer is SHIPPED: the
+   closed extractor is `tests/cases/manifest_data/oracle_migration_extract.rs`, its
+   registry-side half is `tests/cases/manifest_data/oracle_registry_fidelity.rs`, and the
+   SOLE writer of `LIFTED_ROW_MIGRATIONS` is the audited lift command
+   `crates/verter_session/src/bin/oracle_lift.rs` — `cargo run -p verter_session --features
+   oracle-lift --bin oracle_lift -- --row <file.rs>::<fn>`, `pnpm oracle:lift`. It refuses to
+   write unless the row is seated, its vendored source is a checked-in fixture, the row
+   GENUINELY PASSES against the real engine, and the body-extracted fingerprint EQUALS the
+   registry projection; the write is transactional and rolls the tree back on any later
+   failure. `--check` re-validates every retained row read-only, including the BYTE-STABILITY
+   of the provenance table.) (The fingerprint
    is a LIFT-TIME migration check on the payload's FIDELITY; it is NOT a `snapshot_id`
    input — the value-affecting axes
    `symbol_or_expression`/`primary_canonical`/`type_arguments`/`projection_mode`/
@@ -3262,8 +3271,8 @@ coverage is true **by construction**.
    payloads — they hide upserts behind setup helpers (`upsert_cross_file_fixture`,
    `make_host_with_workspace_files_footprint`, package/workspace helpers,
    `support.rs`). A naive text/regex scan would miss those, so the extraction is a
-   STRUCTURED `syn` parse run ONCE per row as a one-time AUDITED lift command (a
-   `cargo run`-style generator step, never a `#[test]`), NOT a runtime guard:
+   STRUCTURED `syn` parse run ONCE per row as an AUDITED lift command (the `cargo run`
+   `oracle_lift` binary, never a `#[test]`), NOT a runtime guard:
    - Parse the original `#[test]` fn body as a `syn::Block` and walk its statements in
      order, collecting every call to a KNOWN oracle helper (`resolve_expr` /
      `shallow_surface_expr` / `evaluate_expr`) and every KNOWN workspace-setup helper. The

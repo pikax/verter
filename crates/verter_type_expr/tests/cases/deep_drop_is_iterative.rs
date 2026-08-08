@@ -145,6 +145,7 @@ fn deeply_nested_mixed_variant_chain_drops_without_stack_overflow() {
                 name: "T".to_string(),
                 constraint: Some(current),
                 default: None,
+                is_const: false,
             })),
             9 => Arc::new(TypeExpr::RecursiveRef {
                 name: Arc::from("R"),

@@ -196,6 +196,8 @@ fn root_only_projection_root_kind_matches_full_fold() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -339,6 +341,8 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -757,6 +761,8 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             type_parameters: StdArc::from(
                 Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
             ),
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
             return_type_span: None,
         }

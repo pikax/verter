@@ -92,7 +92,7 @@ fn flow_invalidations_fi04_destructured_discriminant_preserves_correlation() {
 // union (NOT the `kind: "a"` arm). The function returns `s` in both
 // branches, so the joined return type is the full `Fi04Shape` union,
 // proving narrowing was lost. The result is a 2-arm union of object arms.
-#[ignore = "typeinfo currently resolves `ReturnType<typeof fi05DestructLoses>` to a 2-arm union of `Unknown { raw: \"semanticMiss\" }` arms rather than the structural `{ kind: \"a\"; a: string } | { kind: \"b\"; b: number }` shape: the typeof-of-function-with-destructured-binding ReturnType pipeline is not materialising the parameter's `Fi04Shape` union arms; keep as the future Fi05 destructured-reassignment ReturnType structural-arm contract"]
+#[ignore = "`ReturnType<typeof fi05DestructLoses>` materialises both structural union arms (`{ kind, a }` and `{ kind, b }`) — the reassignment loses the destructured discriminant exactly as TS7 emits — and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.NARROW_INVALIDATION when the row is seated"]
 #[test]
 fn flow_invalidations_fi05_destructured_discriminant_loses_on_reassignment() {
     let expr = resolve_alias("Fi05DestructLosesResult");

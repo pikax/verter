@@ -127,6 +127,18 @@ pub fn display(
             display_type_node(store, result.return_type(), needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
             result.can_fall_through,
         )),
+        SemanticQueryValue::ResolveCall(result) => {
+            let return_type = match result.as_ref() {
+                crate::semantic_query::ResolvedCallResult::Selected { return_type, .. }
+                | crate::semantic_query::ResolvedCallResult::UnionSelected { return_type, .. }
+                | crate::semantic_query::ResolvedCallResult::DynamicAny { return_type } => {
+                    *return_type
+                }
+            };
+            DisplayString(
+                display_type_node(store, return_type, needs, MAX_DISPLAY_DEPTH, &mut Vec::new()).0,
+            )
+        }
         // §14.1: the reserved native-checker seam. No producer constructs it,
         // so reaching it here is a logic error. Matched explicitly — NOT via a
         // `_` wildcard — so any future live `SemanticQueryValue` arm forces a
@@ -513,8 +525,7 @@ pub(crate) fn display_type_node(
             params,
             return_type,
             type_parameters,
-            signature_span: _,
-            return_type_span: _,
+            ..
         } => {
             let new_prefix = match kind {
                 crate::semantic_query::SignatureKind::Call => "",
@@ -590,6 +601,9 @@ pub(crate) fn display_type_node(
         SemanticNodeData::RawFallback { value } => value.raw().to_string(),
         // Synthetic-binding carrier renders the bound name.
         SemanticNodeData::SyntheticBinding { id, .. } => id.binding_name.to_string(),
+        // The sealed callable carrier has no observable return, so it has
+        // no function-type rendering; it is never part of a displayed type.
+        SemanticNodeData::DeferredCallable(_) => "DeferredCallable".to_string(),
     };
     visited.pop();
     DisplayString(out)
@@ -1062,6 +1076,7 @@ fn prec_of(data: &SemanticNodeData) -> Prec {
         | SemanticNodeData::BareRef(_)
         | SemanticNodeData::ImportType(_)
         | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::DeferredCallable(_)
         | SemanticNodeData::SyntheticBinding { .. } => Prec::Atom,
     }
 }

@@ -1,12 +1,14 @@
 //! Guards for the `ApparentType` + `TemplateLiteralReduce` key surface.
 //!
-//! These tests pin the IDENTITY contract of the two new
+//! These tests pin the IDENTITY contract of the
 //! [`SemanticQueryKey`] variants `ApparentType` and `TemplateLiteralReduce`,
 //! their env-in-context dimensions (these keys have NO slot, so their R21
-//! env dims ride INSIDE the context struct), the HONEST-PENDING behaviour of
-//! `ApparentType` (non-producing — there is no lib-member index yet), and the
-//! LIVE concatenation producer of `TemplateLiteralReduce` (which routes
-//! through the ONE shared deferred evaluator, never a hand-rolled reducer).
+//! env dims ride INSIDE the context struct), the LIVE CALLABLE producer of
+//! `ApparentType` (a call-signature-bearing base widens to the project's
+//! registered ambient `Function`; every other base kind stays an honest
+//! non-admitting `Miss`), and the LIVE concatenation producer of
+//! `TemplateLiteralReduce` (which routes through the ONE shared deferred
+//! evaluator, never a hand-rolled reducer).
 //!
 //! Identity is probed BEHAVIORALLY through the family memo exactly as the
 //! sibling class/namespace/enum guards do: publishing a synthetic candidate under key `a`
@@ -18,8 +20,8 @@ use std::sync::Arc;
 
 use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::{
-    ApparentTypeContext, LiteralValue, PrimitiveKind, QueryError, QueryResult, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey, TemplateLiteralReduceContext,
+    ApparentDemandScope, ApparentTypeContext, LiteralValue, PrimitiveKind, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey, TemplateLiteralReduceContext,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -85,6 +87,21 @@ fn apparent_type_key(base: SemanticNodeId, t: u8, l: u8, j: u32) -> SemanticQuer
             type_env_hash: hash16(t),
             lib_env_hash: hash16(l),
             project_identity: j,
+            demand_scope: ApparentDemandScope::Anchored,
+        },
+    }
+}
+
+fn rootless_apparent_type_key(base: SemanticNodeId, demand_canonical: &str) -> SemanticQueryKey {
+    SemanticQueryKey::ApparentType {
+        base,
+        context: ApparentTypeContext {
+            type_env_hash: hash16(0),
+            lib_env_hash: hash16(0),
+            project_identity: 0,
+            demand_scope: ApparentDemandScope::Rootless {
+                canonical: Arc::from(demand_canonical),
+            },
         },
     }
 }
@@ -129,6 +146,18 @@ pub(crate) fn apparent_type_key_covers_lib_env_demand_and_context() {
     assert_distinct_identity(&base, &apparent_type_key(dummy_node(), 0, 0, 9));
     // `base` is part of identity.
     assert_distinct_identity(&base, &apparent_type_key(SemanticNodeId(2), 0, 0, 0));
+    // The demand-scope witness is part of identity: an Anchored demand and
+    // a Rootless demand over the SAME base are distinct.
+    assert_distinct_identity(
+        &base,
+        &rootless_apparent_type_key(dummy_node(), "/a/main.ts"),
+    );
+    // Two Rootless demands from DIFFERENT canonicals are distinct — the
+    // same interned rootless node can never cross-serve between projects.
+    assert_distinct_identity(
+        &rootless_apparent_type_key(dummy_node(), "/a/main.ts"),
+        &rootless_apparent_type_key(dummy_node(), "/b/main.ts"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -147,32 +176,210 @@ fn apparent_type_do_not_warm_hit() {
 }
 
 // ---------------------------------------------------------------------------
-// (3) ApparentType execute is a non-producing, honest Miss that admits
-//     nothing — the HONEST-PENDING discriminator (FAILS if a fake producer
-//     is ever wired).
+// (3) The LIVE callable producer: a call-signature-bearing base widens to the
+//     project's registered ambient `Function` surface, so `.call` / `.apply` /
+//     `.bind` are reachable members carrying the AMBIENT canonical as their
+//     declaration origin. Every non-callable base, and every project whose
+//     ambient corpus registers no such interface, stays an honest
+//     non-admitting `Miss` — the anti-fabrication half.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn apparent_type_execute_is_non_producing_miss() {
-    let host = host();
+/// A callable-surface corpus: the members of the standard-library `Function`
+/// interface a callable value exposes.
+const AMBIENT_FUNCTION_LIB: &str = r#"
+    interface Function {
+        apply(this: Function, thisArg: any, argArray?: any): any;
+        call(this: Function, thisArg: any, ...argArray: any[]): any;
+        bind(this: Function, thisArg: any, ...argArray: any[]): any;
+        readonly length: number;
+    }
+"#;
+
+/// A file whose `Callable` type alias resolves to an authored call signature.
+const CALLABLE_OWNER: &str = r#"
+    export function greet(name: string): string {
+        return name;
+    }
+    export type Callable = typeof greet;
+"#;
+
+const AMBIENT_LIB_ID: &str = "lib.function.d.ts";
+
+/// Build a host over one configured project at `/ws`, optionally registering
+/// the callable ambient corpus, with `/ws/owner.ts` loaded.
+fn callable_host(register_ambient: bool) -> Arc<VerterHost> {
+    use verter_workspace::{
+        CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions,
+        MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    };
+
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    workspace.set_project_graph(ProjectGraph::from_configs(vec![VfsProjectConfig {
+        root: "/ws".to_string(),
+        rank: ProjectRank::Explicit,
+        tsconfig_path: Some("/ws/tsconfig.json".to_string()),
+        root_files: vec![],
+        extensions: vec![".ts".into(), ".tsx".into(), ".d.ts".into()],
+        workspace_root: "/ws".to_string(),
+        workspace_aliases: vec![],
+        compiler_options: IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/ws")),
+    }]));
+    workspace.inject_file("/ws/owner.ts".to_string(), Arc::from(CALLABLE_OWNER));
+    if register_ambient {
+        workspace
+            .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                project_id: None,
+                canonical_id: Arc::from(AMBIENT_LIB_ID),
+                source: Arc::from(AMBIENT_FUNCTION_LIB),
+            })
+            .expect("the callable ambient corpus MUST register against the configured project");
+    }
+    let access: Arc<dyn WorkspaceAccess> = workspace;
+    Arc::new(VerterHost::new(HostConfig::default(), access))
+}
+
+/// Resolve `/ws/owner.ts`'s `Callable` alias to its authored call-signature
+/// node — the base a real apparent-type demand starts from.
+fn callable_base(host: &VerterHost) -> SemanticNodeId {
+    let (outcome, _record) = host
+        .resolve_named_symbol_wire_with_audit(
+            "/ws/owner.ts",
+            "Callable",
+            &[],
+            Some(verter_session::semantic_query::ProjectionMode::Expanded),
+        )
+        .into_parts();
+    let node = outcome
+        .ok()
+        .flatten()
+        .expect("`Callable` MUST resolve to a node");
     let graph = host.project_type_store().semantic_graph();
-    // A concrete base node — a real primitive the apparent-type surface
-    // would project members from once the lib-member index exists.
+    // `typeof greet` resolves to the function's own surface; its single call
+    // signature is the authored callable a member lookup starts from.
+    let data = graph.node_data(node).expect("`Callable` node must exist");
+    let signature = match &*data {
+        SemanticNodeData::Object(surface) if surface.call_signatures.len() == 1 => {
+            surface.call_signatures[0]
+        }
+        other => {
+            panic!("`Callable` MUST resolve to a single-call-signature surface, got {other:?}")
+        }
+    };
+    assert!(
+        matches!(
+            graph.node_data(signature).as_deref(),
+            Some(SemanticNodeData::Signature { .. })
+        ),
+        "the guard's base MUST be an authored call signature, got {:?}",
+        graph.node_data(signature)
+    );
+    signature
+}
+
+/// The `call` member names on `node`'s object surface, paired with the
+/// canonical each was declared in.
+fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Arc<str>>> {
+    let graph = host.project_type_store().semantic_graph();
+    let data = graph.node_data(node).expect("apparent surface must exist");
+    let Some(SemanticNodeData::Object(surface)) = data.as_ref().into() else {
+        panic!("the apparent surface of a callable MUST be an object surface, got {data:?}");
+    };
+    surface
+        .positive_members()
+        .iter()
+        .filter(|member| {
+            matches!(
+                &member.key,
+                verter_session::semantic_query::AuthoredPropertyKey::String(name)
+                    if name.as_ref() == "call"
+            )
+        })
+        .map(|member| member.declaration_origin.clone())
+        .collect()
+}
+
+#[test]
+fn apparent_type_widens_a_callable_to_the_registered_ambient_function_surface() {
+    let host = callable_host(true);
+    let base = callable_base(&host);
+    let key = apparent_type_key(base, 0, 0, 0);
+
+    let result =
+        verter_session::for_tests::dispatch_execute_type_node_for_tests(&host, key.clone());
+    let node = match result {
+        QueryResult::Value(output) => output.value,
+        other => panic!(
+            "a callable base MUST widen to the ambient callable surface, got {other:?}. \
+             This FAILS against a non-producing ApparentType arm."
+        ),
+    };
+    // The widened surface carries `call`, and it is declared in the AMBIENT
+    // canonical — the registry route, not a fabricated member.
+    let origins = call_member_origins(&host, node);
+    assert_eq!(
+        origins.len(),
+        1,
+        "the ambient `Function` surface declares exactly one `call` member, got {origins:?}"
+    );
+    let origin = origins[0]
+        .as_deref()
+        .expect("the widened `call` member MUST carry its declaring canonical");
+    let expected = host
+        .workspace_read()
+        .project_stable_key(verter_workspace::ProjectId(0))
+        .map(|key| verter_workspace::ambient_virtual_canonical_id(key, AMBIENT_LIB_ID))
+        .expect("the configured project MUST have a stable key");
+    assert_eq!(
+        origin,
+        expected.as_ref(),
+        "the widened member MUST be declared in the registered ambient lib's virtual canonical"
+    );
+}
+
+#[test]
+fn apparent_type_misses_without_a_registered_ambient_callable_surface() {
+    // Same callable base, same project — only the ambient registration is
+    // absent. The producer NEVER fabricates a surface it cannot prove.
+    let host = callable_host(false);
+    let base = callable_base(&host);
+    let key = apparent_type_key(base, 0, 0, 0);
+
+    let result =
+        verter_session::for_tests::dispatch_execute_type_node_for_tests(&host, key.clone());
+    assert!(
+        matches!(result, QueryResult::Error(QueryError::Miss)),
+        "an unregistered ambient corpus MUST produce Error(Miss), got {result:?}"
+    );
+    let graph = host.project_type_store().semantic_graph();
+    assert_eq!(
+        graph.slot_candidate_count_for_tests(&key),
+        0,
+        "a missed ApparentType build must admit NOTHING into the shared memo"
+    );
+}
+
+#[test]
+fn apparent_type_misses_for_a_non_callable_base() {
+    // The primitive-to-wrapper widening (`string` → `String`) reads a
+    // lib-member index that does not exist. Even with the callable corpus
+    // registered, a primitive base is an honest, non-admitting Miss.
+    let host = callable_host(true);
+    let graph = host.project_type_store().semantic_graph();
     let base = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = apparent_type_key(base, 0, 0, 0);
 
     let result =
         verter_session::for_tests::dispatch_execute_type_node_for_tests(&host, key.clone());
-    // (a) honest Miss — discriminates a `Value(TypeNode)` producer.
     assert!(
         matches!(result, QueryResult::Error(QueryError::Miss)),
-        "non-producing ApparentType execute arm must return Error(Miss), got {result:?}"
+        "a non-callable base MUST produce Error(Miss), got {result:?}"
     );
-    // (b) admitted / cached NOTHING.
     assert_eq!(
         graph.slot_candidate_count_for_tests(&key),
         0,
-        "a non-producing ApparentType execute arm must admit NOTHING into the shared memo"
+        "a non-callable ApparentType build must admit NOTHING into the shared memo"
     );
 }
 

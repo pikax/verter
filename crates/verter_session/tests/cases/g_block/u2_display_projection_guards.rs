@@ -268,6 +268,8 @@ fn func_node(
         kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -621,15 +623,26 @@ fn function_type_parameters_render_constraint_and_default() {
     let string_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
+    let t_decl_param = store.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: Some(string_id),
+        default: Some(number_id),
+        display_name: Arc::from("T"),
+    });
 
     let func = store.intern_node(SemanticNodeData::Signature {
         kind: verter_session::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: void_id,
+        occurrence: None,
+        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(void_id),
         type_parameters: Arc::from([TypeParamDecl {
             name: Arc::from("T"),
+            param: t_decl_param,
             constraint: Some(string_id),
             default: Some(number_id),
+            is_const: false,
         }]),
         signature_span: None,
         return_type_span: None,

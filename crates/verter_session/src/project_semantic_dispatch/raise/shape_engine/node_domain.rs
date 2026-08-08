@@ -112,6 +112,7 @@ impl RaisedShapeAlg<'_> {
                 // recurses params + return), so they do not gate `materialized`.
                 constraint: tp.constraint.map(|c| c.key),
                 default: tp.default.map(|d| d.key),
+                is_const: tp.is_const,
             })
             .collect();
         (
@@ -1453,6 +1454,7 @@ fn function_expr_to_raised(
                 .as_ref()
                 .map(|c| type_expr_to_key(interner, c)),
             default: tp.default.as_ref().map(|d| type_expr_to_key(interner, d)),
+            is_const: tp.is_const,
         })
         .collect();
     RaisedFunction {
@@ -1553,7 +1555,8 @@ pub(super) fn project_root_summary(
         | SemanticNodeData::TemplateLiteral { .. }
         | SemanticNodeData::TypeParam { .. }
         | SemanticNodeData::ImportType(_)
-        | SemanticNodeData::SyntheticBinding { .. } => {
+        | SemanticNodeData::SyntheticBinding { .. }
+        | SemanticNodeData::DeferredCallable(_) => {
             RootOnlySummary::from_summary(summary::materialized_expanded_leaf())
         }
 

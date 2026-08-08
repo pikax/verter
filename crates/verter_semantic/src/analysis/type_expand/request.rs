@@ -554,11 +554,13 @@ mod tests {
                 name: "T".to_string(),
                 constraint: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
                 default: None,
+                is_const: false,
             },
             TypeParam {
                 name: "U".to_string(),
                 constraint: None,
                 default: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
+                is_const: false,
             },
         ];
 

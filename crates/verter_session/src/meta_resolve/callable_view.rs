@@ -148,7 +148,8 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
         | SemanticNodeData::TypeOf(_)
         | SemanticNodeData::Opaque(_)
         | SemanticNodeData::RawFallback { .. }
-        | SemanticNodeData::SyntheticBinding { .. } => SnippetParamsArg::Unresolved,
+        | SemanticNodeData::SyntheticBinding { .. }
+        | SemanticNodeData::DeferredCallable(_) => SnippetParamsArg::Unresolved,
     }
 }
 

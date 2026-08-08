@@ -490,3 +490,22 @@ fn member_list_anchor_is_sealed_against_forgery() {
     t.compile_fail("tests/cases/compile-fail/member_list_anchor_forge.rs");
     t.compile_fail("tests/cases/compile-fail/member_list_anchor_struct_literal.rs");
 }
+
+/// The index-composed `DeferredCallable` carrier is sealed to its two
+/// consumers. From outside the crate: the composed parts are private
+/// fields, `compose` is `pub(crate)`, `DeferredCallableConsumer` carries a
+/// PRIVATE sealed supertrait (so no third consumer kind can be added), and
+/// neither consumer witness can be minted or struct-literalled — so
+/// `parts` is uncallable. The carrier has NO return-type slot at all, so a
+/// deferred return is unrepresentable as a failed one rather than merely
+/// unreachable. If any barrier regressed, a line in the fixture would
+/// compile and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn deferred_callable_is_sealed_to_its_two_consumers() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs");
+}

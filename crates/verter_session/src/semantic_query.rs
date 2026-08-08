@@ -119,6 +119,12 @@ pub use flow_return_result::FlowReturnResult;
 /// predicate. Inert text only — typed [`QueryError`] data is the control
 /// channel.
 pub(crate) mod compat_spelling;
+
+/// The sealed index-composed callable carrier: an
+/// [`SemanticNodeData::DeferredCallable`] payload with no return-type slot,
+/// readable only by the `ResolveOverloadSet` / `ResolveCall` consumers.
+pub mod deferred_callable;
+pub use deferred_callable::{DeferredCallable, ResolveCallConsumer, ResolveOverloadSetConsumer};
 pub use index_key::CanonicalIndexInt;
 
 pub use demand::{
@@ -1658,6 +1664,11 @@ pub enum FlowReturnFailure {
     /// silently widened whole-return result and never a sibling
     /// materialisation the narrower demand did not ask for.
     UnmodeledDemandPoint,
+    /// A call expression in the body did not resolve: the typed
+    /// [`ResolveCallFailure`] rides along so every consumer propagates it
+    /// as unsupported / partial and suppresses admission. NOTHING converts
+    /// it back to `any`.
+    CallResolution(ResolveCallFailure),
     /// A budget edge stopped the evaluation (the shallow expression
     /// lowering's depth / work budget, or the obligation runtime's
     /// connected-demand cap — surfaced as the work budget).
@@ -1700,6 +1711,336 @@ pub(crate) enum FlowReturnStep {
     /// with the no-value arm is exactly how the two kept being
     /// misapplied at the call sites that dispatch on them.
     NoValue(FlowReturnFailure),
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// ResolveCall (call / construct applicability + overload selection)
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Whether a [`SemanticQueryKey::ResolveCall`] demand is an ordinary call
+/// (`f(...)`) or a construct (`new f(...)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallKind {
+    /// An ordinary call expression.
+    Call,
+    /// A `new` expression.
+    Construct,
+}
+
+/// The authored literal shape of one call argument. This is NOT excess
+/// freshness: relation-time freshness is DERIVED from the argument node's
+/// canonical `ExcessPropertyOrigin` / `ExcessEligibility` facts and never
+/// enters key identity. This axis only records whether the argument was
+/// AUTHORED as a bare literal expression (so its literal content is
+/// subject to the inferring parameter's widening rule) or in a form that
+/// already pins its own type.
+///
+/// It governs the inference DEPOSIT only. Applicability always relates the
+/// argument's actual type — TypeScript widens inference results, never the
+/// assignability check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArgumentLiteralMode {
+    /// A bare literal argument expression: the inference candidate widens
+    /// under the inferring parameter's const policy (a plain type
+    /// parameter widens the literal to its primitive, a `const` type
+    /// parameter preserves it and marks the produced surface `readonly`).
+    Widened,
+    /// An argument whose authored form pins its type — a type assertion
+    /// (`as T` / `as const`), a `satisfies` narrowing, a non-null
+    /// assertion, a reference, a call, a function value. Its inference
+    /// candidate is deposited exactly as authored.
+    Literal,
+}
+
+/// One call argument's key identity. NO freshness field — freshness is
+/// derived at relation time from canonical excess-origin facts, never
+/// carried on the key.
+///
+/// `context_sensitive` is the same class of authored-form fact as
+/// `literal_mode`: a structural property of the argument SYNTAX that the
+/// lowered type cannot express, and that changes the call's result — so it
+/// belongs in the key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CallArgKey {
+    /// An argument whose type is already an interned node (eager carrier).
+    Eager {
+        /// The argument's type node.
+        ty: SemanticNodeId,
+        /// Whether the argument is a spread element (`...xs`).
+        spread: bool,
+        /// The authored literal shape of the argument.
+        literal_mode: ArgumentLiteralMode,
+        /// Whether the argument is a function value at least one of whose
+        /// parameters carries no authored type annotation.
+        context_sensitive: bool,
+    },
+    /// An argument identified by its program expression (the identity of
+    /// the expression record the applicability executor evaluates).
+    ProgramExpression {
+        /// The argument expression's program point.
+        point: ProgramPointId,
+        /// Whether the argument is a spread element (`...xs`).
+        spread: bool,
+        /// The authored literal shape of the argument.
+        literal_mode: ArgumentLiteralMode,
+        /// Whether the argument is a function value at least one of whose
+        /// parameters carries no authored type annotation.
+        context_sensitive: bool,
+    },
+}
+
+impl CallArgKey {
+    /// Whether this argument is withheld from the call's first inference
+    /// pass (an untyped-parameter function value has no self-contained type
+    /// to deposit).
+    #[must_use]
+    pub fn is_context_sensitive(&self) -> bool {
+        match self {
+            Self::Eager {
+                context_sensitive, ..
+            }
+            | Self::ProgramExpression {
+                context_sensitive, ..
+            } => *context_sensitive,
+        }
+    }
+}
+
+/// Env a [`SemanticQueryKey::ResolveCall`] value depends on: the full
+/// `P R T L J` set (call resolution parses the call-site body, resolves
+/// the callee's imports, and is governed by the type / lib / project env)
+/// plus the full active [`CanonicalTypeSubstitution`]. There is NO
+/// contextual-result axis and NO candidate-target axis (excluded demands),
+/// and NO budget axis (budget is runtime state, never key identity).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolveCallContext {
+    /// Parse-env dimension (`P`).
+    pub parse_env_hash: HashValue,
+    /// Import / name-resolution dimension (`R`).
+    pub resolve_env_hash: HashValue,
+    /// Type-env dimension (`T`).
+    pub type_env_hash: HashValue,
+    /// Lib-env dimension (`L`).
+    pub lib_env_hash: HashValue,
+    /// Project-identity dimension (`J`).
+    pub project_identity: HashValue,
+    /// The active TYPE-ONLY substitution environment (type-parameter →
+    /// node) the call resolves under.
+    pub substitution: CanonicalTypeSubstitution,
+}
+
+/// The full identity of one call / construct resolution demand. Reentry
+/// identity on the obligation runtime IS this key exactly. Content-free:
+/// `point` is the call site's content-free `(canonical, offset)`, `callee`
+/// / `receiver` / argument nodes are interned graph identities, and the
+/// `flow` axis is SEALED-EMPTY until non-empty narrowing lands (production
+/// cannot mint a non-empty value here). No freshness field, no
+/// contextual/candidate-target axis, no budget, no content hash —
+/// version-rooting lives on the cached value's read-set facts + self
+/// roots (R6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolveCallKey {
+    /// The call site's program point.
+    pub point: ProgramPointId,
+    /// The callee's interned type node.
+    pub callee: SemanticNodeId,
+    /// Call vs construct.
+    pub kind: CallKind,
+    /// The receiver's interned type node, when the call is a member call.
+    pub receiver: Option<SemanticNodeId>,
+    /// The ordered argument identities.
+    pub args: Arc<[CallArgKey]>,
+    /// The explicit type arguments (`f<A, B>(...)`), in authored order.
+    pub explicit_type_args: Arc<[SemanticNodeId]>,
+    /// The flow-narrowing demand axis — SEALED-EMPTY until the narrowing
+    /// block lands.
+    pub flow: FlowNarrowingKey,
+    /// Env + substitution.
+    pub context: ResolveCallContext,
+}
+
+/// The CONTENT-FREE authored origin of one call/construct signature
+/// candidate: the indexed callable position (declaration slot + function /
+/// member path + contributor / overload ordinal) plus the signature
+/// ordinal inside that position's bucket. It carries no node id, no
+/// content hash and no span, so instantiating a signature PRESERVES it —
+/// an instantiated candidate is the same occurrence as its raw form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignatureOccurrenceIdentity {
+    /// The callable position this signature belongs to.
+    pub function: FlowFunctionSlotIdentity,
+    /// The source-order signature ordinal within the callable position's
+    /// bucket (call or construct), zero-based.
+    pub signature_ordinal: u32,
+}
+
+/// Where one ordered call/construct candidate comes from.
+///
+/// A signature authored at a served declaration position carries the
+/// content-free [`Authored`](Self::Authored) origin. A callable type with
+/// NO authored position at all — an inline function value, a
+/// function-typed parameter / local annotation, an object-type call
+/// signature — is genuinely [`Rootless`](Self::Rootless): it has no stable
+/// identity to key on, so its results stay transaction-local and
+/// `ReturnOnly`, and it is never compared as if it had an occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureCandidateOrigin {
+    /// A content-free authored origin.
+    Authored(SignatureOccurrenceIdentity),
+    /// No authored origin at all.
+    Rootless,
+}
+
+impl SignatureCandidateOrigin {
+    /// The authored occurrence, when the candidate has one.
+    #[must_use]
+    pub fn authored(&self) -> Option<&SignatureOccurrenceIdentity> {
+        match self {
+            Self::Authored(occurrence) => Some(occurrence),
+            Self::Rootless => None,
+        }
+    }
+}
+
+/// The ENV-FREE occurrence identity carried on a signature NODE: the
+/// served function position the signature was authored at (the fact-side
+/// anchor + function/member part + contributor/overload ordinal) plus its
+/// bucket ordinal. Env-free so it can ride the node's interning identity
+/// without over-keying the graph; the env-bearing
+/// [`SignatureOccurrenceIdentity`] derives at demand through the ONE
+/// slot-finalization choke point
+/// ([`ProjectSemanticDispatch::flow_function_slot_for`](crate::project_semantic_dispatch::ProjectSemanticDispatch)).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SignatureNodeOccurrence {
+    /// The env-free served function position.
+    pub function: verter_type_expr::facts::FlowFunctionReturnIdentity,
+    /// The source-order signature ordinal within the callable position's
+    /// bucket (call or construct), zero-based.
+    pub signature_ordinal: u32,
+}
+
+/// Where a signature's return type comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureReturnCarrier {
+    /// A declared return annotation, lowered to its interned node.
+    Declared(SemanticNodeId),
+    /// A body-derived return, served by the `FlowReturn` producer.
+    Function(verter_type_expr::facts::FunctionReturnSource),
+}
+
+/// The admitted value of a `ResolveCall` query. Only a COMPLETE evaluation
+/// produces this: exactly one FULLY-decided first-applicable candidate
+/// (declaration order) selected with its final substitution, or a genuine
+/// dynamic `any` callee. Every uncertainty, failure, budget trip, or
+/// incomplete SCC discharge is a typed failure through `ReturnOnly` and
+/// never enters the family memo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedCallResult {
+    /// A signature occurrence was selected.
+    Selected {
+        /// The winning candidate's origin.
+        selected: SignatureCandidateOrigin,
+        /// The winning signature's (instantiated) node.
+        selected_signature: SemanticNodeId,
+        /// The final type substitution the winner was selected under.
+        substitution: CanonicalTypeSubstitution,
+        /// The call's return type under that substitution.
+        return_type: SemanticNodeId,
+        /// Whether `return_type` is a FRESH primitive literal: the naked
+        /// declared return of an UNCONSTRAINED type parameter that fixed
+        /// to a bare-literal argument. Freshness is provenance consumed by
+        /// position — an enclosing unannotated function-return contributor
+        /// widens a fresh result to its base primitive, while a value
+        /// position (a `const` initializer) keeps the literal.
+        fresh_literal_return: bool,
+    },
+    /// A UNION callee selected one first-applicable signature in EVERY
+    /// callable arm; the call's return is the union of the selected arm
+    /// returns. Arm order carries no overload precedence.
+    UnionSelected {
+        /// The per-arm winners, in arm order.
+        selections: Arc<[ResolvedUnionArm]>,
+        /// The union of the selected arm returns.
+        return_type: SemanticNodeId,
+    },
+    /// The callee is genuine dynamic `any` — a COMPLETE result, not a
+    /// fallback.
+    DynamicAny {
+        /// The call's return type (`any`).
+        return_type: SemanticNodeId,
+    },
+}
+
+/// One union-callee arm's winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnionArm {
+    /// The arm winner's origin.
+    pub selected: SignatureCandidateOrigin,
+    /// The arm winner's (instantiated) signature node — the sealed
+    /// deferred carrier node when the winner deferred its return.
+    pub selected_signature: SemanticNodeId,
+    /// The substitution the arm's winner was selected under.
+    pub substitution: CanonicalTypeSubstitution,
+}
+
+/// A [`ResolvedCallResult`] that MAY be admitted to a shared cache.
+///
+/// Admission requires a stable identity across transactions, which only a
+/// content-free authored occurrence supplies. A winner with no authored
+/// origin is genuinely rootless: it cannot be constructed here, so a
+/// rootless result is structurally unable to reach a shared-cache write
+/// and stays transaction-local.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissibleCallResult(ResolvedCallResult);
+
+impl AdmissibleCallResult {
+    /// `None` when the winner is rootless.
+    #[must_use]
+    pub fn new(result: ResolvedCallResult) -> Option<Self> {
+        Self::admits(&result).then_some(Self(result))
+    }
+
+    /// Whether `result` may be admitted to a shared cache. A union win is
+    /// admissible only when EVERY arm's winner is authored.
+    #[must_use]
+    pub fn admits(result: &ResolvedCallResult) -> bool {
+        match result {
+            ResolvedCallResult::Selected {
+                selected: SignatureCandidateOrigin::Rootless,
+                ..
+            } => false,
+            ResolvedCallResult::UnionSelected { selections, .. } => selections
+                .iter()
+                .all(|arm| arm.selected.authored().is_some()),
+            ResolvedCallResult::Selected { .. } | ResolvedCallResult::DynamicAny { .. } => true,
+        }
+    }
+
+    /// The admitted result.
+    #[must_use]
+    pub fn get(&self) -> &ResolvedCallResult {
+        &self.0
+    }
+
+    /// Consume the wrapper.
+    #[must_use]
+    pub fn into_inner(self) -> ResolvedCallResult {
+        self.0
+    }
+}
+
+/// A typed `ResolveCall` failure. These outcomes are transient/ReturnOnly:
+/// none is a successful call value and none may enter the family memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResolveCallFailure {
+    /// The callee has no signature in the requested call/construct bucket.
+    NotCallable,
+    /// Every visible candidate was definitely inapplicable.
+    NoApplicableOverload,
+    /// Applicability depended on unsupported or unresolved semantic work.
+    Undecidable,
+    /// The call-resolution work envelope tripped.
+    Budget,
 }
 
 /// The env-free declaration-slot SEED — exactly the four env-free
@@ -4733,7 +5074,7 @@ pub enum QueryResult<T> {
 /// materialization cycle gate fills
 /// [`MaterializationCycleGate`](Self::MaterializationCycleGate). The
 /// non-producing keys (`Relate`, plus the `NonProducingPendingReducer`
-/// variants `ResolveAmbientNamespace`, `ResolveEnum`, `ApparentType`,
+/// variants `ResolveAmbientNamespace`, `ResolveEnum`,
 /// `FlowNarrowingAt`, `ContextualTypeAt`) return `Miss` and forward-declare
 /// the `Relation` / `ProgramAnalysis` domains they will produce once their
 /// reducers land. The remaining arms are shells with no live producer —
@@ -4787,6 +5128,12 @@ pub enum SemanticQueryValue {
     /// admits warm); every NO-VALUE outcome is a typed
     /// `FlowReturnFailure` through `ReturnOnly` and never admits.
     FlowReturn(Arc<FlowReturnResult>),
+    /// The call / construct resolution produced by a `ResolveCall` query —
+    /// only a COMPLETE evaluation reaches this domain (one fully-decided
+    /// first-applicable candidate, or a genuine dynamic `any`); every
+    /// uncertainty, failure, or budget trip is a typed failure through
+    /// `ReturnOnly` and never admits.
+    ResolveCall(Arc<ResolvedCallResult>),
     /// The sealed materialization cycle-gate outcome — the LIVE value domain
     /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
     /// authority for "does this declaration transitively reach a cycle
@@ -4814,6 +5161,7 @@ pub enum SemanticQueryValueTag {
     BroadRuntime,
     MaterializationCycleGate,
     FlowReturn,
+    ResolveCall,
     DiagnosticAnalysis,
 }
 
@@ -4831,6 +5179,7 @@ impl SemanticQueryValue {
             Self::BroadRuntime(_) => SemanticQueryValueTag::BroadRuntime,
             Self::MaterializationCycleGate(_) => SemanticQueryValueTag::MaterializationCycleGate,
             Self::FlowReturn(_) => SemanticQueryValueTag::FlowReturn,
+            Self::ResolveCall(_) => SemanticQueryValueTag::ResolveCall,
             Self::DiagnosticAnalysis(_) => SemanticQueryValueTag::DiagnosticAnalysis,
         }
     }
@@ -5107,11 +5456,27 @@ pub struct MaterializationCycleGateKey {
     pub resolve_env_hash: HashValue,
 }
 
-/// A single call/construct signature, identified by its graph node
-/// (a `SemanticNodeData::Signature`). Carried by the overload-set domain.
+/// A single call/construct signature: its graph node (a
+/// `SemanticNodeData::Signature`) plus the occurrence identity and return
+/// carrier that make the ordered candidate list occurrence-aware. Carried
+/// by the overload-set domain — an ORDERED occurrence list (never a
+/// node→source map: structurally identical signatures can intern to one
+/// node while originating from different bodies).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureRef {
     pub node: SemanticNodeId,
+    /// The candidate's origin — a content-free authored occurrence, or
+    /// rootless.
+    pub occurrence: SignatureCandidateOrigin,
+    /// Where the candidate's return comes from (a declared node — a
+    /// concrete seed — or a body-derived `FlowReturn` position).
+    pub return_carrier: SignatureReturnCarrier,
+    /// The UNION-callee arm this candidate belongs to (`0` for a
+    /// non-union callee). Declaration order applies independently WITHIN
+    /// an arm; arm order is never overload precedence — a call selects a
+    /// first-applicable signature in EVERY callable arm and unions the
+    /// selected returns.
+    pub arm_ordinal: u32,
 }
 
 /// A type produced by flow / contextual program analysis (the narrowed or
@@ -5695,7 +6060,14 @@ pub struct BroadRuntimeContext {
 /// skeleton, so keying on those would be a dead axis (R21). The
 /// substitution axis is NOT carried here — the `base` node is already
 /// substituted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `demand_scope` is the scope witness for a base with no authored anchor:
+/// an anchored base derives its scoping canonical from its own occurrence
+/// (`Anchored` carries nothing), while a ROOTLESS base carries the lexical
+/// demand canonical the lookup is scoped by. The witness is content-free
+/// canonical identity (R6) and makes two projects' demands over the same
+/// interned rootless node DISTINCT keys, so they can never cross-serve.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApparentTypeContext {
     /// Type-env dimension (`T`).
     pub type_env_hash: HashValue,
@@ -5703,6 +6075,36 @@ pub struct ApparentTypeContext {
     pub lib_env_hash: HashValue,
     /// Project-isolation dimension (`J`).
     pub project_identity: u32,
+    /// The scope witness for the ambient lookup (see the struct docs).
+    pub demand_scope: ApparentDemandScope,
+}
+
+/// Which canonical scopes a [`SemanticQueryKey::ApparentType`] ambient
+/// lookup.
+///
+/// The producer distinguishes three base classifications: a NON-callable
+/// base produces no surface at all; an AUTHORED callable retains its
+/// declaring-canonical scope (derivable from the base node's occurrence, so
+/// `Anchored` carries nothing); a ROOTLESS callable (a parameter
+/// annotation, a local arrow, an object-type call signature — no authored
+/// occurrence) is scoped by the canonical containing the member-access /
+/// call site that demanded it. Only the canonical's content-free identity
+/// enters the key (R6 — no content or version hash).
+///
+/// A `Rootless` apparent value resolves semantically but NEVER enters a
+/// shared cache: the producer marks its build `cache_suppress`, and that
+/// taint folds through every enclosing member/path/call query.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ApparentDemandScope {
+    /// The base callable carries an authored occurrence; its declaring
+    /// canonical scopes the lookup.
+    Anchored,
+    /// The base callable is rootless; the lexical demand canonical scopes
+    /// the lookup.
+    Rootless {
+        /// The canonical containing the member-access/call site.
+        canonical: Arc<str>,
+    },
 }
 
 /// Env a [`SemanticQueryKey::TemplateLiteralReduce`] value depends on (env
@@ -6070,6 +6472,8 @@ pub enum InferencePassKind {
     /// Ordinary direct conditional-`infer` inference.
     #[default]
     Ordinary,
+    /// Candidate-local inference while deciding call applicability.
+    CallApplicability,
     /// Exact `{ [P in keyof infer T]: X }` reverse projection.
     ReverseHomomorphicMapped,
 }
@@ -6779,19 +7183,33 @@ pub enum SemanticQueryKey {
     /// `base` is the already-substituted [`SemanticNodeId`] (the
     /// substitution axis rides on `base`, so there is NO separate `args`
     /// field and NO `mode` field); `context` carries the `{T, L, J}` env
-    /// the apparent surface depends on (NO `R`, NO `P` — see
-    /// [`ApparentTypeContext`]).
+    /// the apparent surface depends on (NO `R`, NO `P`) plus the
+    /// demand-scope witness (see [`ApparentTypeContext`] /
+    /// [`ApparentDemandScope`]).
     ///
-    /// **Non-producing.** This variant has no `execute`-side producer: the
-    /// lib-member / primitive→wrapper member index it would read does not
-    /// exist yet. The `execute` build arm returns
-    /// [`QueryError::Miss`] (`Opaque(Miss)`) verbatim and never admits or
-    /// caches a value (admission
-    /// [`AdmissionSpec::NonProducingPendingReducer`]). Value domain:
-    /// [`SemanticQueryValueTag::TypeNode`]. The producer lands with the
-    /// lib-member-index block.
+    /// **LIVE producer for the CALLABLE arm** (admission
+    /// [`AdmissionSpec::Singleflight`]). A base that carries call
+    /// signatures widens to the ambient callable-function interface
+    /// (`CallableFunction` / `Function`) registered for the scoping
+    /// project, so `.call` / `.apply` / `.bind` resolve as ordinary
+    /// members of that ambient declaration. An AUTHORED callable is scoped
+    /// by the project that owns its declaring canonical; a ROOTLESS
+    /// callable is scoped by the lexical demand canonical carried in the
+    /// key's [`ApparentDemandScope::Rootless`] witness, and its value is
+    /// built `cache_suppress` — it flows to the caller but never enters a
+    /// shared cache, and the taint folds through every enclosing
+    /// member/path/call query. The widening is registry-proved, never
+    /// name-matched: an unregistered corpus, a rootless callable with no
+    /// demand-scope witness, and a canonical with no owning project all
+    /// return [`QueryError::Miss`].
     ///
-    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    /// The primitive→wrapper widening (`string` → `String`, `number` →
+    /// `Number`, …) reads a lib-member index that does not exist: those
+    /// bases also return `Miss`. An `Error` result is never warm-published,
+    /// so nothing is admitted or cached for them. Value domain:
+    /// [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     ApparentType {
         base: SemanticNodeId,
         context: ApparentTypeContext,
@@ -6940,10 +7358,10 @@ pub enum SemanticQueryKey {
     /// the flow IR: return sites, `if` reachability, bare return,
     /// fallthrough, primitive widening, unions, parameters and simple
     /// local reaching definitions, object returns (spread delegated to
-    /// [`ProjectObjectSpread`](Self::ProjectObjectSpread)), symbolic call
-    /// returns (`ReturnType<typeof …>` / `any` carriers), return-free loop
-    /// transparency, and direct same-slot recursion through the shared
-    /// obligation runtime's coinductive holds.
+    /// [`ProjectObjectSpread`](Self::ProjectObjectSpread)), call returns
+    /// resolved through the shared [`ResolveCall`](Self::ResolveCall)
+    /// authority, return-free loop transparency, and direct same-slot
+    /// recursion through the shared obligation runtime's coinductive holds.
     ///
     /// The payload is the full [`FlowReturnKey`] identity: the function
     /// slot (declaration slot + function part + overload ordinal),
@@ -6959,6 +7377,31 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     FlowReturn(Box<FlowReturnKey>),
+    /// Resolve one call / construct demand: callee applicability, argument
+    /// / receiver / rest / constraint relations, per-parameter inference,
+    /// overload ordering (declaration-order first-applicable), and call
+    /// return selection — ONE typed query owning the whole applicability
+    /// story for the call site.
+    ///
+    /// The payload is the full [`ResolveCallKey`] identity: the call-site
+    /// [`ProgramPointId`], the callee / receiver / argument nodes, call vs
+    /// construct, explicit type args, the SEALED-EMPTY [`FlowNarrowingKey`]
+    /// flow axis, and the env + substitution context. There is NO
+    /// freshness field (derived at relation time from canonical
+    /// excess-origin facts), NO contextual-result or candidate-target axis
+    /// (excluded demands), NO budget (runtime state), and NO content hash
+    /// — version-rooting lives on the cached value's read-set facts +
+    /// self roots (R6). Value domain: [`SemanticQueryValueTag::ResolveCall`].
+    ///
+    /// **Live, staged ReturnOnly.** The applicability executor produces the
+    /// typed caller-return value while its winning inference snapshot remains
+    /// `StagedDeterministic`. Until the return-equation publication
+    /// boundary commits that snapshot, admission remains
+    /// [`AdmissionSpec::NonProducingPendingReducer`] and the value is never a
+    /// warm memo entry.
+    ///
+    /// [`AdmissionSpec::NonProducingPendingReducer`]: crate::semantic_query::query_key_spec::AdmissionSpec::NonProducingPendingReducer
+    ResolveCall(Box<ResolveCallKey>),
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -7002,6 +7445,7 @@ pub enum SemanticQueryKeyTag {
     LowerLocator,
     ClassifyMaterializationCycleGate,
     FlowReturn,
+    ResolveCall,
 }
 
 impl SemanticQueryKeyTag {
@@ -7035,6 +7479,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::LowerLocator,
         SemanticQueryKeyTag::ClassifyMaterializationCycleGate,
         SemanticQueryKeyTag::FlowReturn,
+        SemanticQueryKeyTag::ResolveCall,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -7072,6 +7517,7 @@ impl SemanticQueryKeyTag {
                 "ClassifyMaterializationCycleGate"
             }
             SemanticQueryKeyTag::FlowReturn => "FlowReturn",
+            SemanticQueryKeyTag::ResolveCall => "ResolveCall",
         }
     }
 
@@ -7162,6 +7608,7 @@ impl SemanticQueryKey {
                 SemanticQueryKeyTag::ClassifyMaterializationCycleGate
             }
             SemanticQueryKey::FlowReturn(_) => SemanticQueryKeyTag::FlowReturn,
+            SemanticQueryKey::ResolveCall(_) => SemanticQueryKeyTag::ResolveCall,
         }
     }
 }
@@ -7762,6 +8209,19 @@ pub enum SemanticNodeData {
         params: Arc<[FunctionParam]>,
         return_type: SemanticNodeId,
         type_parameters: Arc<[TypeParamDecl]>,
+        /// The authored position this signature was lowered from, when the
+        /// lowering carried occurrence-grade provenance (the locator-driven
+        /// rails). `None` for a signature without recoverable occurrence
+        /// provenance — the overload-set producer treats an occurrence-less
+        /// candidate as an honest `Miss`, never a fabricated occurrence.
+        /// Participates in node interning (occurrence-aware identity: two
+        /// structurally identical signatures from different authored
+        /// positions never alias).
+        occurrence: Option<SignatureNodeOccurrence>,
+        /// Where the return type comes from: a declared node (a concrete
+        /// seed) or a body-derived `FlowReturn` position the call resolver
+        /// holds as a return obligation. Participates in node interning.
+        return_carrier: SignatureReturnCarrier,
         /// OXC span of the WHOLE signature, stamped from the IR
         /// [`verter_type_expr::FunctionExpr`]'s signature span (NOT recovered
         /// from child node ids). Coordinates are in the signature's origin
@@ -7773,6 +8233,13 @@ pub enum SemanticNodeData {
         /// `FunctionExpr`'s return span. `None` when absent.
         return_type_span: Option<verter_span::Span>,
     },
+    /// An index-composed callable whose body-derived return is deferred to
+    /// its return carrier. It has NO return-type slot, so a deferred
+    /// return is structurally distinct from a failed one; only the
+    /// `ResolveOverloadSet` value boundary and the `ResolveCall`
+    /// applicability executor may read its parts, and it becomes a general
+    /// [`Self::Signature`] only once its return is resolved.
+    DeferredCallable(deferred_callable::DeferredCallable),
     /// Lazy declaration-reference carrier.
     ///
     /// Produced by [`shallow_lower_type_expr`] in `Navigate` mode when it
@@ -7931,6 +8398,7 @@ impl SemanticNodeData {
             // surviving variants keep stable bucket indices independent of
             // declaration order.
             Self::Signature { .. } => 29,
+            Self::DeferredCallable(_) => 31,
             Self::DeclRef { .. } => 20,
             Self::InstantiationRef { .. } => 21,
             Self::BareRef(_) => 22,
@@ -7975,6 +8443,9 @@ impl SemanticNodeData {
             | Self::MergedDecl { .. }
             | Self::Conditional { .. }
             | Self::Signature { .. }
+            // The callable position IS known; only its RETURN is deferred
+            // to the shared return equation.
+            | Self::DeferredCallable(_)
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::SyntheticBinding { .. } => false,
@@ -8125,6 +8596,8 @@ impl PartialEq for SemanticNodeData {
                     params: ap,
                     return_type: ar,
                     type_parameters: atp,
+                    occurrence: ao,
+                    return_carrier: arc,
                     signature_span: asig,
                     return_type_span: aret,
                 },
@@ -8133,13 +8606,27 @@ impl PartialEq for SemanticNodeData {
                     params: bp,
                     return_type: br,
                     type_parameters: btp,
+                    occurrence: bo,
+                    return_carrier: brc,
                     signature_span: bsig,
                     return_type_span: bret,
                 },
                 // Spans participate in identity: provenance-aware interning so
                 // an identical same-file signature shape at a different source
-                // location does not alias another node's spans.
-            ) => ak == bk && ap == bp && ar == br && atp == btp && asig == bsig && aret == bret,
+                // location does not alias another node's spans. Occurrence and
+                // the return carrier participate for the same reason: two
+                // structurally identical signatures from different authored
+                // positions never alias.
+            ) => {
+                ak == bk
+                    && ap == bp
+                    && ar == br
+                    && atp == btp
+                    && ao == bo
+                    && arc == brc
+                    && asig == bsig
+                    && aret == bret
+            }
             (Self::DeclRef { identity: a }, Self::DeclRef { identity: b }) => a == b,
             (
                 Self::InstantiationRef { base: ab, args: aa },
@@ -8266,6 +8753,8 @@ impl std::hash::Hash for SemanticNodeData {
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
@@ -8273,9 +8762,16 @@ impl std::hash::Hash for SemanticNodeData {
                 params.hash(state);
                 return_type.hash(state);
                 type_parameters.hash(state);
+                // Occurrence + return carrier participate in identity
+                // (occurrence-aware interning).
+                occurrence.hash(state);
+                return_carrier.hash(state);
                 // Spans participate in identity (provenance-aware interning).
                 signature_span.hash(state);
                 return_type_span.hash(state);
+            }
+            Self::DeferredCallable(callable) => {
+                callable.hash(state);
             }
             Self::DeclRef { identity } => {
                 identity.hash(state);
@@ -8391,12 +8887,38 @@ impl ClauseSpelling {
     }
 }
 
+/// Split the authored `this` receiver off a lowered parameter list.
+///
+/// A function's authored `this` annotation is preserved as the LEADING
+/// parameter named `this`; it is a receiver, not a positional argument, so it
+/// takes no ordinary arity slot and never appears in `Parameters<F>`. Only the
+/// first parameter can be named `this` in valid TypeScript, so a later
+/// same-named parameter is an ordinary binding.
+///
+/// This is the single authority every consumer that must distinguish the two
+/// reads — applicability, the parameter-tuple utilities, and the
+/// `this`-parameter utilities.
+#[must_use]
+pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>, &[FunctionParam]) {
+    match params.split_first() {
+        Some((first, rest)) if first.name.as_deref() == Some("this") => (Some(first), rest),
+        _ => (None, params),
+    }
+}
+
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
     pub name: Arc<str>,
+    /// The exact interned [`SemanticNodeData::TypeParam`] node for this
+    /// parameter — the identity inference binds. Per-parameter policy
+    /// (const-ness, binding) keys off THIS node, never the display name.
+    pub param: SemanticNodeId,
     pub constraint: Option<SemanticNodeId>,
     pub default: Option<SemanticNodeId>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
+    /// is valid) — never a session-wide flag.
+    pub is_const: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -8981,7 +9503,29 @@ mod tests {
             ),
             (
                 SemanticQueryValue::OverloadSet(Arc::from(
-                    vec![SignatureRef { node }].into_boxed_slice(),
+                    vec![SignatureRef {
+                        node,
+                        occurrence: SignatureCandidateOrigin::Authored(
+                            SignatureOccurrenceIdentity {
+                            function: FlowFunctionSlotIdentity {
+                                declaration_slot: ResolvedDeclSlotIdentity::value_slot(
+                                    Arc::from("/synthetic/callee.ts"),
+                                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                                    Arc::from("callee"),
+                                    0,
+                                    HashValue::default(),
+                                    HashValue::default(),
+                                ),
+                                function_part:
+                                    verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                                overload_ordinal: 0,
+                            },
+                            signature_ordinal: 0,
+                        }),
+                        return_carrier: SignatureReturnCarrier::Declared(node),
+                        arm_ordinal: 0,
+                    }]
+                    .into_boxed_slice(),
                 )),
                 SemanticQueryValueTag::OverloadSet,
             ),
@@ -9017,6 +9561,12 @@ mod tests {
                 SemanticQueryValueTag::FlowReturn,
             ),
             (
+                SemanticQueryValue::ResolveCall(Arc::new(ResolvedCallResult::DynamicAny {
+                    return_type: node,
+                })),
+                SemanticQueryValueTag::ResolveCall,
+            ),
+            (
                 SemanticQueryValue::DiagnosticAnalysis(DiagnosticAnalysisShell),
                 SemanticQueryValueTag::DiagnosticAnalysis,
             ),
@@ -9024,7 +9574,7 @@ mod tests {
         for (value, tag) in &cases {
             assert_eq!(value.tag(), *tag, "tag must match the value domain");
         }
-        // Distinctness: ten cases, ten unique tags. Sort before dedup so
+        // Distinctness: eleven cases, eleven unique tags. Sort before dedup so
         // non-adjacent duplicates are caught (`Vec::dedup` only collapses
         // consecutive runs).
         let mut tags: Vec<SemanticQueryValueTag> = cases.iter().map(|(_, t)| *t).collect();
@@ -9032,7 +9582,7 @@ mod tests {
         tags.dedup();
         assert_eq!(
             tags.len(),
-            10,
+            11,
             "every value domain must have a distinct tag"
         );
     }

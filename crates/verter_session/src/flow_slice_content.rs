@@ -358,6 +358,12 @@ pub enum SliceExpr {
         /// The nested function's own type parameters (the signature's own
         /// binders — carried so the composed signature keeps `<T>`).
         type_parameters: Arc<[SliceTypeParam]>,
+        /// The DECLARED return annotation, when authored. A declared
+        /// return always wins over the body-derived join (the checker
+        /// checks the body AGAINST the annotation; the signature's return
+        /// IS the annotation), so the evaluator answers the annotation
+        /// and never evaluates the body for the signature's return.
+        declared_return: Option<GatedType>,
         /// The nested function's body region (an expression-bodied arrow
         /// lowers to a single `return` of the expression).
         body: SliceRegion,
@@ -470,6 +476,11 @@ pub struct SliceCallSite {
     /// this substrate does not perform; until then their presence means the
     /// DECLARED DEFAULT is definitely not the answer.
     has_explicit_type_arguments: bool,
+    /// The authored call expression's span — the address a call-shaped
+    /// consumer re-reads the expression from the retained snapshot with
+    /// (argument points and explicit type arguments are parse facts,
+    /// never re-derived).
+    span: verter_span::Span,
 }
 
 impl SliceCallSite {
@@ -479,12 +490,20 @@ impl SliceCallSite {
         fixed_argument_count: u32,
         spreads_arguments: bool,
         has_explicit_type_arguments: bool,
+        span: verter_span::Span,
     ) -> Self {
         Self {
             fixed_argument_count,
             spreads_arguments,
             has_explicit_type_arguments,
+            span,
         }
+    }
+
+    /// The authored call expression's span.
+    #[must_use]
+    pub fn span(self) -> verter_span::Span {
+        self.span
     }
 
     /// Whether the call supplies an argument at `ordinal` — the ONLY
@@ -513,6 +532,7 @@ fn call_site(call: &oxc_ast::ast::CallExpression<'_>) -> SliceCallSite {
         fixed as u32,
         fixed != call.arguments.len(),
         call.type_arguments.is_some(),
+        call.span.into(),
     )
 }
 
@@ -2642,6 +2662,15 @@ impl Lowerer<'_> {
             nested_anchor,
         );
         let type_parameters = lower_slice_type_params(node, self.source, &scope);
+        // The DECLARED return annotation, lowered in the nested
+        // signature's own scope (its clause binds inside it), gated
+        // against THIS frame exactly like the parameter list.
+        let declared_return = node.return_type().map(|annotation| {
+            scope.gate(
+                lower_ts_type(&annotation.type_annotation, self.source),
+                scope.param_binders(),
+            )
+        });
         // A nested function value has no index entry of its own — its
         // control regions come from the SAME single inventory walk over
         // its own body, and its lexical authority is its own skeleton
@@ -2712,6 +2741,7 @@ impl Lowerer<'_> {
         SliceExpr::NestedFunctionValue {
             params: Arc::from(params.into_boxed_slice()),
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            declared_return,
             can_fall_through: region.can_fall_through,
             body: region,
         }

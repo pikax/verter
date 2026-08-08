@@ -354,6 +354,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
@@ -371,12 +373,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|parameter| TypeParamDecl {
                         name: Arc::clone(&parameter.name),
+                        param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint
                             .map(|value| projected(memo, value, context)),
                         default: parameter
                             .default
                             .map(|value| projected(memo, value, context)),
+                        is_const: parameter.is_const,
                     })
                     .collect();
                 graph.intern_preserving_scope(
@@ -386,6 +390,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         params: Arc::from(params.into_boxed_slice()),
                         return_type: projected(memo, *return_type, context),
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                        // Projection preserves the occurrence; a declared
+                        // carrier retargets the projected return.
+                        occurrence: occurrence.clone(),
+                        return_carrier: match return_carrier {
+                            crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                                crate::semantic_query::SignatureReturnCarrier::Declared(projected(
+                                    memo,
+                                    *return_type,
+                                    context,
+                                ))
+                            }
+                            crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                                crate::semantic_query::SignatureReturnCarrier::Function(
+                                    source.clone(),
+                                )
+                            }
+                        },
                         signature_span: *signature_span,
                         return_type_span: *return_type_span,
                     },
@@ -547,6 +568,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)

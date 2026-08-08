@@ -148,6 +148,17 @@ macro_rules! future_parity_contract {
     };
 }
 
+/// A parity row whose contract the engine ALREADY satisfies: it runs on every
+/// gate pass, with no `#[ignore]`.
+macro_rules! parity_contract {
+    ($name:ident, $alias:literal, $check:expr) => {
+        #[test]
+        fn $name() {
+            assert_parity_alias($alias, $check);
+        }
+    };
+}
+
 macro_rules! future_parity_aug_contract {
     ($name:ident, $alias:literal, $reason:literal, $check:expr) => {
         #[test]
@@ -238,10 +249,14 @@ future_parity_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
-future_parity_contract!(
+// TP06 — the two `tp06JsxLike("item", { … })` calls each infer `T` from their
+// object-literal argument, and `node.props.value` projects the member across the
+// resulting `TP06Node<…>` union, so the return is `string | number`. The
+// assertion discriminates: a call whose generic did not infer publishes no
+// `string`/`number` member union at `props.value`.
+parity_contract!(
     flow_return_tp06_jsx_like_factory_call_union_projects_props_value,
     "TP06",
-    "typeinfo currently does not infer JSX-like factory generic calls and project unioned prop values; keep as the future TP06 JSX-like factory contract",
     |expr| {
         assert_union_contains_primitive(expr, PrimitiveName::String);
         assert_union_contains_primitive(expr, PrimitiveName::Number);

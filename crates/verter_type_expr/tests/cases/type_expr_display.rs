@@ -39,6 +39,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
         name: "T".into(),
         constraint: Some(Arc::new(reference("Base"))),
         default: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+        is_const: false,
     };
     let callable = function(
         vec![FunctionParam::synthetic(
@@ -73,6 +74,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
                 name: "U".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }),
             true,
             false,
@@ -83,12 +85,14 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
                 name: "U".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             })],
         ),
         vec![TypeParam {
             name: "U".into(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     );
 
@@ -146,6 +150,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                     name: "K".into(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 })),
             }),
             extends: Arc::new(reference("Expected")),
@@ -160,6 +165,7 @@ fn renders_operators_carriers_and_literals_without_precedence_loss() {
                 name: "K".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             })]),
         })),
     };

@@ -1746,6 +1746,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
             LeafTypeFact::Primitive(PrimitiveName::Number),
         ))),
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
+        expression_source: None,
     };
     // An authored TS annotation rides the SAME field under the `Authored` source
     // — proving the field widened to accept BOTH authored locators and closed
@@ -1759,6 +1760,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
             slot(),
         ))),
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
+        expression_source: None,
     };
     assert_ne!(
         inferred, authored,
@@ -1778,6 +1780,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         classification: ValueAnnotationClass::TypeOfAlias,
         annotation: None,
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
+        expression_source: None,
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());

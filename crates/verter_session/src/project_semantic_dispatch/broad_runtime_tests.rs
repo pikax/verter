@@ -142,6 +142,8 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from([]),
         return_type: leaf,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(leaf),
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,

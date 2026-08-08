@@ -9175,6 +9175,10 @@ pub(crate) mod foundations_guards {
             "TS7 oracle harness §4 GENERATION SPIKE (`#[cfg(all(test, feature = \"oracle-gen\"))]`, excluded from the default gate). Writes a tsconfig + fixture into a temp dir for the EXTERNAL tsgo subprocess to read off real disk (tsgo cannot read Verter's in-memory VFS), then re-validates the design's BLOCKING tsgo assumptions. External-tool scaffolding, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
+            "crates/verter_session/src/bin/oracle_lift.rs",
+            "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (docs/arch/u0-oracle-harness-design.md §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+        ),
+        (
             "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
             "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),

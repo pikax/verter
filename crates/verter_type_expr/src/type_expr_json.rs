@@ -484,6 +484,10 @@ fn json_to_type_param(v: &serde_json::Value) -> Option<TypeParam> {
                 }
             })
             .map(Arc::new),
+        is_const: v
+            .get("isConst")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -765,6 +769,9 @@ impl TypeExpr {
         }
         if let Some(ref default) = param.default {
             obj["default"] = default.to_json_value();
+        }
+        if param.is_const {
+            obj["isConst"] = serde_json::Value::Bool(true);
         }
         obj
     }

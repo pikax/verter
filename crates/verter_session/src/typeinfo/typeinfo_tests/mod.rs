@@ -11,6 +11,7 @@ mod basic;
 mod branded_types;
 mod cache_invalidation;
 mod call_resolution;
+mod call_rootless;
 mod class_features;
 mod conditional_infer;
 mod const_type_param;

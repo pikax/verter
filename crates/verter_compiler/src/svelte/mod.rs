@@ -16,6 +16,7 @@
 /// client codegen ([`runtime`]). Lives at the `svelte` module root (not under
 /// [`ide`]) so the runtime backend depends on it without depending on the IDE
 /// projection.
+pub mod attribute_expressions;
 pub(crate) mod bind_contract;
 mod bind_contract_data;
 #[cfg(test)]

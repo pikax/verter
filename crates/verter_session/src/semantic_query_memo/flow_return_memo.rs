@@ -5,8 +5,9 @@
 //! [`ModeSlot::Single`] slot. The stored value is the
 //! [`SemanticQueryValue::FlowReturn`] payload — COMPLETE whole-function
 //! results ONLY: a typed `FlowReturnFailure` (`Unsupported` / `Missing` /
-//! `Budget` / `EmptyCycle` / `Unresolved`) has no value-domain form and is
-//! never admitted anywhere (memo / fact / reverse index). Warm reads
+//! `Budget` / `EmptyCycle` / `Unresolved` / `CallResolution`) has no
+//! value-domain form and is never admitted anywhere (memo / fact /
+//! reverse index). Warm reads
 //! validate the self-version-rooted carrier strictly AND hard-miss on a
 //! `validated_at_generation` mismatch (the family carries the
 //! live-generation gate). Retention rides the family rails (cap 8,

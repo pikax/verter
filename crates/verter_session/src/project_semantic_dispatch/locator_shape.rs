@@ -245,10 +245,27 @@ pub(super) enum BinderIdentityMode<'a> {
         /// The declaring symbol's stable merged name.
         owner_symbol: &'a Arc<str>,
     },
-    /// A signature-scoped parameter (a function / constructor type's own
-    /// generics, or a free authored `TypeParameter` occurrence): binder
-    /// identity = the display name at ordinal 0.
+    /// A free authored `TypeParameter` occurrence: binder identity = the
+    /// display name at ordinal 0.
     Signature,
+    /// A FUNCTION / constructor signature's own generic clause: binder
+    /// identity = the declaring anchor entity (when the lowering position
+    /// carries one) + the parameter's declared clause ordinal, and the
+    /// interned binder node carries NO bound content — constraints and
+    /// defaults are metadata on the signature's `TypeParamDecl` list, never
+    /// part of the binder's interned identity. Every parameter predeclares
+    /// its one binder first; constraints then lower under the COMPLETE
+    /// binder map (self and forward sibling references bind the true
+    /// binder, so an instantiation substitution reaches them), while
+    /// defaults keep the prior-sibling-only frame (TS2744: a default's
+    /// self / forward reference is shadow-forbidden).
+    FunctionSignature {
+        /// The declaring anchor entity's stable symbol, when the lowering
+        /// position names one — it qualifies the binder identity so two
+        /// same-name parameters of DIFFERENT declared functions in one
+        /// file never share a binder node.
+        anchor_symbol: Option<&'a Arc<str>>,
+    },
 }
 
 /// Presence spec of one declared type parameter for the shared binder-frame
@@ -935,11 +952,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     );
                 }
                 let declaration_origin = scope.canonical_file();
-                let mut entries = Vec::with_capacity(obj.properties.len());
-                for member in &obj.properties {
+                let mut members: Vec<SurfaceMember> = Vec::new();
+                let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
+                let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
+                let mut index_signatures: Vec<IndexSignature> = Vec::new();
+                // Authored interleave, kept so the stored surface's
+                // `entries` stream is the source order, never the
+                // grouped bucket order.
+                let mut ordered_entries: Vec<SurfaceEntry> =
+                    Vec::with_capacity(obj.properties.len());
+                for (member_ordinal, member) in obj.properties.iter().enumerate() {
+                    let member_ordinal = u32::try_from(member_ordinal).unwrap_or(u32::MAX);
                     match member {
                         ObjectMember::Property(prop) => {
-                            entries.push(SurfaceEntry::Member(SurfaceMember {
+                            let member_index = members.len();
+                            members.push(SurfaceMember {
                                 key: prop.key.clone().map(
                                     |computed| self.lower_locator_shape_node(&computed, ctx),
                                     |identity| identity,
@@ -970,7 +997,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // neither contains nor converts to one.
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
                                 merge_role: MergeRoleStamp::NEUTRAL,
-                            }));
+                            });
+                            ordered_entries
+                                .push(SurfaceEntry::Member(members[member_index].clone()));
                         }
                         ObjectMember::Method(method) => {
                             let function_expr =
@@ -980,12 +1009,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 &method.function,
                             );
-                            entries.push(SurfaceEntry::Member(SurfaceMember {
+                            let value = self.lower_locator_shape_node(&function_expr, ctx);
+                            let value = self.patch_member_signature_occurrence(
+                                value,
+                                ctx,
+                                member_ordinal,
+                                0,
+                            );
+                            let member_index = members.len();
+                            members.push(SurfaceMember {
                                 key: method.key.clone().map(
                                     |computed| self.lower_locator_shape_node(&computed, ctx),
                                     |identity| identity,
                                 ),
-                                value: self.lower_locator_shape_node(&function_expr, ctx),
+                                value,
                                 optional: method.optional,
                                 readonly: false,
                                 method_kind: Some(method.method_kind),
@@ -998,7 +1035,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 declaration_origin: declaration_origin.clone(),
                                 declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
                                 merge_role: MergeRoleStamp::NEUTRAL,
-                            }));
+                            });
+                            ordered_entries
+                                .push(SurfaceEntry::Member(members[member_index].clone()));
                         }
                         ObjectMember::CallSignature(func) => {
                             let function_expr = TypeExpr::Function(Arc::new(func.clone()));
@@ -1007,9 +1046,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 func,
                             );
-                            entries.push(SurfaceEntry::CallSignature(
-                                self.lower_locator_shape_node(&function_expr, ctx),
-                            ));
+                            let node = self.lower_locator_shape_node(&function_expr, ctx);
+                            let bucket_ordinal =
+                                u32::try_from(call_signatures.len()).unwrap_or(u32::MAX);
+                            let node = self.patch_member_signature_occurrence(
+                                node,
+                                ctx,
+                                member_ordinal,
+                                bucket_ordinal,
+                            );
+                            call_signatures.push(node);
+                            ordered_entries.push(SurfaceEntry::CallSignature(node));
                         }
                         ObjectMember::ConstructSignature(func) => {
                             let function_expr = TypeExpr::ConstructorType(Arc::new(func.clone()));
@@ -1018,18 +1065,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 &function_expr,
                                 func,
                             );
-                            entries.push(SurfaceEntry::ConstructSignature(
-                                self.lower_locator_shape_node(&function_expr, ctx),
-                            ));
+                            let node = self.lower_locator_shape_node(&function_expr, ctx);
+                            let bucket_ordinal =
+                                u32::try_from(construct_signatures.len()).unwrap_or(u32::MAX);
+                            let node = self.patch_member_signature_occurrence(
+                                node,
+                                ctx,
+                                member_ordinal,
+                                bucket_ordinal,
+                            );
+                            construct_signatures.push(node);
+                            ordered_entries.push(SurfaceEntry::ConstructSignature(node));
                         }
                         ObjectMember::IndexSignature(sig) => {
-                            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
+                            let index_index = index_signatures.len();
+                            index_signatures.push(IndexSignature {
                                 key_type: self.lower_locator_shape_node(&sig.key_type, ctx),
                                 value_type: self.lower_locator_shape_node(&sig.value_type, ctx),
                                 readonly: sig.readonly,
                                 spans: sig.spans,
                                 declaration_origin: declaration_origin.clone(),
-                            }))
+                            });
+                            ordered_entries.push(SurfaceEntry::IndexSignature(
+                                index_signatures[index_index].clone(),
+                            ));
                         }
                         // Unreachable by construction: the spread-bearing
                         // check above fails the whole object closed before
@@ -1037,13 +1096,56 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ObjectMember::Spread(_) => {}
                     }
                 }
-                let has_index_signature = entries
-                    .iter()
-                    .any(|entry| matches!(entry, SurfaceEntry::IndexSignature(_)));
-                let view = SurfaceView::from_entries(entries, None, has_index_signature);
+                let has_index_signature = !index_signatures.is_empty();
+                let view = SurfaceView::from_entries(ordered_entries, None, has_index_signature);
                 graph.intern_node_with_scope(SemanticNodeData::Object(view), scope.clone())
             }
         }
+    }
+
+    /// Stamp an object member signature's occurrence from the lowering
+    /// source locator: the member is the `member_ordinal`-th authored
+    /// member of the anchored declaration; `signature_ordinal` is the
+    /// member's position in its call/construct bucket. No-op when the node
+    /// is not a signature, its occurrence is already set, or the source is
+    /// not a whole-body declaration locator.
+    fn patch_member_signature_occurrence(
+        &self,
+        node: SemanticNodeId,
+        ctx: &ShapeLowerCtx<'_>,
+        member_ordinal: u32,
+        signature_ordinal: u32,
+    ) -> SemanticNodeId {
+        let slot = match ctx.infer_source {
+            Some(AuthoredBodyLocator::DeclBody(slot)) if slot.path.is_empty() => slot,
+            _ => return node,
+        };
+        let Some(data) = self.graph().node_data(node) else {
+            return node;
+        };
+        let mut new_data = (*data).clone();
+        let SemanticNodeData::Signature {
+            occurrence: occurrence_slot,
+            ..
+        } = &mut new_data
+        else {
+            return node;
+        };
+        if occurrence_slot.is_some() {
+            return node;
+        }
+        *occurrence_slot = Some(crate::semantic_query::SignatureNodeOccurrence {
+            function: verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: slot.anchor.clone(),
+                function_part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: Arc::from([member_ordinal]),
+                },
+                overload_ordinal: 0,
+            },
+            signature_ordinal,
+        });
+        drop(data);
+        self.graph().intern_preserving_scope(node, new_data)
     }
 
     /// Lower an argument slice in order into the interned-id slice a
@@ -1086,9 +1188,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect();
         let base = LocatorShapeCtx::new(scope, ctx.binders, ctx.name_resolution, ctx.scope_payload)
             .with_optional_infer_source(ctx.infer_source);
+        // The declaring anchor entity qualifies the clause's binder
+        // identity so same-name parameters of different declared functions
+        // in one file never share a binder node.
+        let anchor_symbol = ctx.infer_source.map(|locator| match locator {
+            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
+            AuthoredBodyLocator::AugmentationBody(body) => Arc::clone(&body.anchor.symbol),
+            AuthoredBodyLocator::JsdocTypedefBody(body) => Arc::clone(&body.anchor.symbol),
+            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+        });
         let (own_frame, built) = self.build_type_param_binder_frame(
             &base,
-            BinderIdentityMode::Signature,
+            BinderIdentityMode::FunctionSignature {
+                anchor_symbol: anchor_symbol.as_ref(),
+            },
             &specs,
             TypeParamVisibility::Body,
             |ordinal, position, bound_ctx| {
@@ -1110,10 +1223,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let type_parameters: Vec<TypeParamDecl> = built
             .iter()
-            .map(|binder| TypeParamDecl {
+            .zip(func.type_parameters.iter())
+            .map(|(binder, tp)| TypeParamDecl {
                 name: Arc::clone(&binder.name),
+                param: binder.binder,
                 constraint: binder.constraint,
                 default: binder.default,
+                is_const: tp.is_const,
             })
             .collect();
 
@@ -1138,11 +1254,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 span: p.span,
             })
             .collect();
-        let return_type = match &func.flow_return {
+        let (return_type, return_carrier) = match &func.flow_return {
             // A body-derived return is demanded from the whole-function
             // producer through the sealed helper: the extractor marked the
             // served position with the declaration name; canonical / owner
-            // fill from THIS lowering scope (the defining file's).
+            // fill from THIS lowering scope (the defining file's). The
+            // carrier records the SAME served position.
             Some(identity) => {
                 let mut identity = identity.as_ref().clone();
                 let scope_canonical = match ctx.scope {
@@ -1158,21 +1275,43 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     _ => None,
                 };
                 match scope_canonical {
-                    Some(scope_canonical) => match self.execute_function_return_source(
-                        &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                        scope_canonical.as_ref(),
-                    ) {
-                        super::flow_return::FunctionReturnNode::Flow(result) => {
-                            result.return_type()
-                        }
-                        _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
-                    },
-                    None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    Some(scope_canonical) => {
+                        let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                            verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                        );
+                        let return_type = match self.execute_function_return_source(
+                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                            scope_canonical.as_ref(),
+                        ) {
+                            super::flow_return::FunctionReturnNode::Flow(result) => {
+                                result.return_type()
+                            }
+                            _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                        };
+                        (return_type, carrier)
+                    }
+                    None => (
+                        graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                        crate::semantic_query::SignatureReturnCarrier::Function(
+                            verter_type_expr::facts::FunctionReturnSource::Absent,
+                        ),
+                    ),
                 }
             }
             None => match func.return_type.as_deref() {
-                Some(ret) => self.lower_locator_shape_node(ret, &inner_ctx),
-                None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                Some(ret) => {
+                    let return_type = self.lower_locator_shape_node(ret, &inner_ctx);
+                    (
+                        return_type,
+                        crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+                    )
+                }
+                None => (
+                    graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    crate::semantic_query::SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Absent,
+                    ),
+                ),
             },
         };
         graph.intern_node_with_scope(
@@ -1181,6 +1320,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params: Arc::from(params.into_boxed_slice()),
                 return_type,
                 type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                // The `LowerLocator` producer patches the ROOT signature's
+                // occurrence from the key's locator; nested function nodes
+                // carry none.
+                occurrence: None,
+                return_carrier,
                 signature_span: func.spans.signature,
                 return_type_span: func.spans.return_type,
             },

@@ -488,6 +488,9 @@ fn map_node_kind(data: &SemanticNodeData) -> SemanticNodeKind {
         SemanticNodeData::SyntheticBinding { .. } => SemanticNodeKind::Other {
             name: Arc::from("SyntheticBinding"),
         },
+        SemanticNodeData::DeferredCallable(_) => SemanticNodeKind::Other {
+            name: Arc::from("DeferredCallable"),
+        },
     }
 }
 
@@ -558,6 +561,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             Arc::from(format!("import(\"{specifier}\")"))
         }
         SemanticNodeData::RawFallback { .. } => Arc::from("RawFallback"),
+        // The sealed callable carrier's parts are not observable outside
+        // its two consumers, so the label is the kind alone.
+        SemanticNodeData::DeferredCallable(_) => Arc::from("DeferredCallable"),
         SemanticNodeData::SyntheticBinding { id, .. } => {
             Arc::from(format!("SyntheticBinding({})", id.binding_name))
         }

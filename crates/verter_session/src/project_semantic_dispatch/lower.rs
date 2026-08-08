@@ -2167,6 +2167,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let binder = graph.intern_node_with_scope(
                             SemanticNodeData::TypeParam {
                                 decl,
+                                // The shared signature-scoped binder
+                                // convention (`BinderIdentityMode::Signature`):
+                                // display-name-keyed at ordinal 0.
                                 param_index: 0,
                                 constraint,
                                 default,
@@ -2201,12 +2204,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         span: param.span,
                     })
                     .collect();
-                let return_type = match &func.flow_return {
+                let (return_type, return_carrier) = match &func.flow_return {
                     // A body-derived return is demanded from the
                     // whole-function producer through the sealed helper:
                     // the extractor marked the served position with the
                     // declaration name; canonical / owner fill from THIS
-                    // lowering scope (the defining file's).
+                    // lowering scope (the defining file's). The carrier
+                    // records the SAME served position so the call resolver
+                    // holds the `FlowReturn` obligation instead of treating
+                    // the evaluated node as a concrete seed.
                     Some(identity) => {
                         let mut identity = identity.as_ref().clone();
                         let scope_canonical = match scope {
@@ -2222,31 +2228,58 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             _ => None,
                         };
                         match scope_canonical {
-                            Some(scope_canonical) => match self.execute_function_return_source(
-                                &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                                scope_canonical.as_ref(),
-                            ) {
-                                super::flow_return::FunctionReturnNode::Flow(result) => {
-                                    result.return_type()
-                                }
-                                _ => self.opaque(QueryError::Miss),
-                            },
-                            None => self.opaque(QueryError::Miss),
+                            Some(scope_canonical) => {
+                                let carrier =
+                                    crate::semantic_query::SignatureReturnCarrier::Function(
+                                        verter_type_expr::facts::FunctionReturnSource::Flow(
+                                            identity.clone(),
+                                        ),
+                                    );
+                                let return_type = match self.execute_function_return_source(
+                                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+                                    scope_canonical.as_ref(),
+                                ) {
+                                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                                        result.return_type()
+                                    }
+                                    _ => self.opaque(QueryError::Miss),
+                                };
+                                (return_type, carrier)
+                            }
+                            None => (
+                                self.opaque(QueryError::Miss),
+                                crate::semantic_query::SignatureReturnCarrier::Function(
+                                    verter_type_expr::facts::FunctionReturnSource::Absent,
+                                ),
+                            ),
                         }
                     }
                     None => match func.return_type.as_deref() {
-                        Some(ret) => self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            ret,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
+                        Some(ret) => {
+                            let return_type = self.lower_type_expr_with_infer_factory(
+                                infer_binders,
+                                ret,
+                                env,
+                                scope,
+                                name_resolution,
+                                scope_payload,
+                                shadowing,
+                                substitutions,
+                                reduction_context,
+                            );
+                            (
+                                return_type,
+                                crate::semantic_query::SignatureReturnCarrier::Declared(
+                                    return_type,
+                                ),
+                            )
+                        }
+                        None => (
+                            self.opaque(QueryError::Miss),
+                            crate::semantic_query::SignatureReturnCarrier::Function(
+                                verter_type_expr::facts::FunctionReturnSource::Absent,
+                            ),
                         ),
-                        None => self.opaque(QueryError::Miss),
                     },
                 };
                 let type_parameters: Vec<TypeParamDecl> = func
@@ -2254,6 +2287,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|tp| TypeParamDecl {
                         name: Arc::from(tp.name.as_str()),
+                        // The exact binder node interned above for this own
+                        // parameter — the identity inference binds.
+                        param: env
+                            .get(tp.name.as_str())
+                            .copied()
+                            .expect("own type parameter binder interned in the scoped env"),
                         constraint: tp.constraint.as_deref().map(|c| {
                             self.lower_type_expr_with_infer_factory(
                                 infer_binders,
@@ -2280,6 +2319,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 reduction_context,
                             )
                         }),
+                        is_const: tp.is_const,
                     })
                     .collect();
                 let kind = match expr {
@@ -2292,6 +2332,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         params: Arc::from(params.into_boxed_slice()),
                         return_type,
                         type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                        // The generic type-expression lowering carries no
+                        // declaration occurrence: occurrence-aware provenance
+                        // arrives through the locator-driven rails (the
+                        // `LowerLocator` producer patches the ROOT signature).
+                        occurrence: None,
+                        return_carrier,
                         // Stamp the whole-signature + return spans from the IR
                         // FunctionExpr (NOT recovered from child node ids).
                         signature_span: func.spans.signature,

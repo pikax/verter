@@ -125,6 +125,7 @@ enum VariantTag {
     InferRef = 28,
     Signature = 29,
     ObjectSpreadProgram = 30,
+    DeferredCallable = 31,
 }
 
 /// Descent sentinel: a child id currently on the descent path (a graph cycle).
@@ -578,6 +579,8 @@ impl StructuralEncoder<'_> {
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
@@ -606,9 +609,13 @@ impl StructuralEncoder<'_> {
                     .extend_from_slice(&(type_parameters.len() as u64).to_le_bytes());
                 for tp in type_parameters.iter() {
                     self.push_str(&tp.name);
+                    self.encode_child(tp.param, depth);
                     self.encode_child_opt(tp.constraint, depth);
                     self.encode_child_opt(tp.default, depth);
+                    self.buf.push(u8::from(tp.is_const));
                 }
+                self.push_str(&format!("{occurrence:?}"));
+                self.push_str(&format!("{return_carrier:?}"));
                 self.push_str(&format!("{signature_span:?}"));
                 self.push_str(&format!("{return_type_span:?}"));
             }
@@ -711,6 +718,11 @@ impl StructuralEncoder<'_> {
             SemanticNodeData::DeclRef { identity } => {
                 self.buf.push(VariantTag::DeclRef as u8);
                 self.encode_decl_identity(identity);
+            }
+            // The sealed callable carrier: its composed parts are readable
+            // only by its two consumers, so the encoding is the tag alone.
+            SemanticNodeData::DeferredCallable(_) => {
+                self.buf.push(VariantTag::DeferredCallable as u8);
             }
             SemanticNodeData::SyntheticBinding { id, value_node } => {
                 self.buf.push(VariantTag::SyntheticBinding as u8);

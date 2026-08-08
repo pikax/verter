@@ -671,6 +671,8 @@ fn nsnippet_function(
             .into_boxed_slice(),
         ),
         return_type: void,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,

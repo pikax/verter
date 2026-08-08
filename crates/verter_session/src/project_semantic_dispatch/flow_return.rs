@@ -33,7 +33,7 @@ use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef};
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
     FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
 
 /// The consumer outcome of one sealed function-return demand
@@ -388,6 +388,265 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
             demand,
             input: crate::semantic_query::FlowInputContext::empty(),
+        }
+    }
+
+    /// The instantiation half of the ONE construction point: call
+    /// resolution demands the callee's flow return under the call's
+    /// FINAL ordered type-argument mapping and substitution — the same
+    /// env-bearing slot and context derivation, with the demand and
+    /// input axes at the canonical production point.
+    pub(crate) fn flow_return_key_for_instantiation(
+        &self,
+        identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
+        normalized_type_args: Arc<[SemanticNodeId]>,
+        substitution: crate::semantic_query::CanonicalTypeSubstitution,
+    ) -> FlowReturnKey {
+        let mut key = self.flow_return_key_with_demand(
+            identity,
+            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        key.normalized_type_args = normalized_type_args;
+        key.context.type_substitution = substitution;
+        key
+    }
+
+    /// Full live context for an indexed semantic call at `canonical`:
+    /// the same `P R T L J` env derivation [`Self::flow_return_context_for`]
+    /// owns, with the empty type substitution.
+    pub(crate) fn resolve_call_context_for(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::ResolveCallContext {
+        let host = self.ctx.host_for_fact_tracer_install();
+        let env = host.host_view_env_hashes_for(canonical);
+        crate::semantic_query::ResolveCallContext {
+            parse_env_hash: env.parse_env_hash,
+            resolve_env_hash: env.resolve_env_hash,
+            type_env_hash: env.type_env_hash,
+            lib_env_hash: env.lib_env_hash,
+            project_identity: host.host_view_project_identity().0,
+            substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
+        }
+    }
+
+    /// Execute one indexed semantic call and return only a complete admitted
+    /// selected or genuine-dynamic value node.
+    pub(crate) fn execute_indexed_resolve_call(
+        &self,
+        key: crate::semantic_query::ResolveCallKey,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        self.execute_indexed_resolve_call_with_flow_hold(key, false)
+            .0
+    }
+
+    /// The flow-aware half of [`Self::execute_indexed_resolve_call`]: when
+    /// `hold_flow_result` is set, a complete or held call whose result a
+    /// surrounding FlowReturn evaluation depends on is recorded as a
+    /// tagged hold on the nearest active flow frame instead of serving a
+    /// provisional value — the frame's SCC close joins the admitted
+    /// result through its return equation.
+    pub(crate) fn execute_indexed_resolve_call_with_flow_hold(
+        &self,
+        key: crate::semantic_query::ResolveCallKey,
+        hold_flow_result: bool,
+    ) -> (Option<crate::semantic_query::SemanticNodeId>, bool) {
+        match self.execute_resolve_call(key.clone()) {
+            super::call_resolve::ResolveCallStep::Complete(result) => {
+                let return_type = super::return_equation::resolved_call_return_type(&result);
+                let held_by_flow = hold_flow_result
+                    && self
+                        .dispatch_txn
+                        .borrow_mut()
+                        .reentry_mut()
+                        .record_nearest_flow_hold(
+                            super::dispatch_txn::ReturnObligationIdentity::ResolveCall(key),
+                        );
+                if held_by_flow {
+                    (None, true)
+                } else {
+                    (Some(return_type), false)
+                }
+            }
+            super::call_resolve::ResolveCallStep::Hold(target) => {
+                let held_by_flow = hold_flow_result
+                    && self
+                        .dispatch_txn
+                        .borrow_mut()
+                        .reentry_mut()
+                        .record_nearest_flow_hold(
+                            super::dispatch_txn::ReturnObligationIdentity::ResolveCall(*target),
+                        );
+                (None, held_by_flow)
+            }
+            super::call_resolve::ResolveCallStep::Degraded(_) => (None, false),
+        }
+    }
+
+    /// Evaluate parsed indexed expression IR directly to a semantic node.
+    /// Calls route only through `ResolveCall`; a non-result is a typed miss
+    /// without a scanner/raw-expression fallback.
+    pub(crate) fn evaluate_indexed_value_expression_node(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        self.evaluate_indexed_value_expression_node_inner(canonical, owner, expression, true)
+    }
+
+    pub(crate) fn evaluate_indexed_value_expression_node_inner(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        hold_flow_result: bool,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression};
+        match expression {
+            IndexedValueExpression::Value(value) => self.lower_type_expr_in_owner_scope_with_mode(
+                canonical,
+                owner,
+                value,
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
+            IndexedValueExpression::UnsupportedCall { .. } => {
+                crate::request_context::mark_request_result_partial();
+                None
+            }
+            IndexedValueExpression::Call(call) => {
+                let callee = self.evaluate_indexed_value_expression_node_inner(
+                    canonical,
+                    owner,
+                    &call.callee,
+                    false,
+                )?;
+                let receiver = call.receiver.as_deref().and_then(|receiver| {
+                    self.evaluate_indexed_value_expression_node_inner(
+                        canonical, owner, receiver, false,
+                    )
+                });
+                let mut args = Vec::with_capacity(call.args.len());
+                for argument in call.args.iter() {
+                    let ty = self.evaluate_indexed_value_expression_node_inner(
+                        canonical,
+                        owner,
+                        &argument.expression,
+                        false,
+                    )?;
+                    args.push(crate::semantic_query::CallArgKey::Eager {
+                        ty,
+                        spread: argument.spread,
+                        context_sensitive: argument.context_sensitive,
+                        literal_mode: match argument.literal_mode {
+                            verter_type_expr::IndexedValueLiteralMode::Widened => {
+                                crate::semantic_query::ArgumentLiteralMode::Widened
+                            }
+                            verter_type_expr::IndexedValueLiteralMode::Literal => {
+                                crate::semantic_query::ArgumentLiteralMode::Literal
+                            }
+                        },
+                    });
+                }
+                let explicit_type_args = call
+                    .explicit_type_args
+                    .iter()
+                    .map(|argument| {
+                        self.lower_type_expr_in_owner_scope_with_mode(
+                            canonical,
+                            owner,
+                            argument,
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let (result, held) = self.execute_indexed_resolve_call_with_flow_hold(
+                    crate::semantic_query::ResolveCallKey {
+                        point: crate::semantic_query::ProgramPointId {
+                            canonical_id: Arc::from(canonical),
+                            offset: call.point,
+                        },
+                        callee,
+                        kind: match call.kind {
+                            IndexedValueCallKind::Call => crate::semantic_query::CallKind::Call,
+                            IndexedValueCallKind::Construct => {
+                                crate::semantic_query::CallKind::Construct
+                            }
+                        },
+                        receiver,
+                        args: Arc::from(args.into_boxed_slice()),
+                        explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+                        flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                        context: self.resolve_call_context_for(canonical),
+                    },
+                    hold_flow_result,
+                );
+                if result.is_none() && !held {
+                    crate::request_context::mark_request_result_partial();
+                }
+                result
+            }
+        }
+    }
+
+    /// Consume an inferred declaration's indexed semantic expression source.
+    pub(crate) fn execute_semantic_expression_source(
+        &self,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
+        match source {
+            verter_type_expr::facts::SemanticExpressionSource::FunctionReturn(source) => {
+                let canonical = match source {
+                    verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
+                        locator.slot().anchor.canonical_id.as_ref()
+                    }
+                    verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+                        identity.anchor.canonical_id.as_ref()
+                    }
+                    verter_type_expr::facts::FunctionReturnSource::Absent => return None,
+                };
+                match self.execute_function_return_source(source, canonical) {
+                    FunctionReturnNode::Declared(node) => Some(node.node()),
+                    FunctionReturnNode::Flow(result) => Some(result.return_type()),
+                    FunctionReturnNode::DeclaredMiss
+                    | FunctionReturnNode::NoValue(_)
+                    | FunctionReturnNode::Absent => None,
+                }
+            }
+            verter_type_expr::facts::SemanticExpressionSource::ProgramExpression(point) => {
+                let serve = self
+                    .ctx
+                    .ensure_indexed_ready_serve(point.canonical_id.as_ref())?;
+                let indexed = serve.indexed;
+                let memo = indexed.shallow_state.decl_bodies();
+                let index = memo.function_program_index();
+                let record = index.expression(point)?;
+                match &record.source {
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::FunctionReturn(source) => {
+                        match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
+                            FunctionReturnNode::Declared(node) => Some(node.node()),
+                            FunctionReturnNode::Flow(result) => Some(result.return_type()),
+                            FunctionReturnNode::DeclaredMiss
+                            | FunctionReturnNode::NoValue(_)
+                            | FunctionReturnNode::Absent => None,
+                        }
+                    }
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::UnsupportedCall => {
+                        crate::request_context::mark_request_result_partial();
+                        None
+                    }
+                    verter_semantic::analysis::function_program::ProgramExpressionSource::Value
+                    | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
+                        let expression = memo.indexed_program_expression_ir(record)?;
+                        self.evaluate_indexed_value_expression_node(
+                            point.canonical_id.as_ref(),
+                            owner,
+                            expression.as_ref(),
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -788,11 +1047,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         root_key: &FlowReturnKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
     ) {
-        let (relation_members, flow_members) = {
+        let (relation_members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),
+                std::mem::take(&mut txn.call.completed_members),
             )
         };
         self.publish_scc_member_batch(
@@ -803,6 +1063,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier,
             relation_members,
             flow_members,
+            call_members,
         );
     }
 
@@ -910,7 +1171,61 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Apply a frame key's type substitution to the frame's outgoing
+    /// result — the instantiation transfer for a body-derived callee
+    /// demanded under a call's final ordered mapping. Empty substitution
+    /// (the canonical production key) is a no-op.
+    fn apply_frame_key_substitution(
+        &self,
+        key: &FlowReturnKey,
+        result: FlowReturnResult,
+    ) -> FlowReturnResult {
+        let substitution = &key.context.type_substitution;
+        if substitution.bindings().is_empty() {
+            return result;
+        }
+        let substituted = self.substitute_canonical(result.return_type(), substitution);
+        if substituted == result.return_type() {
+            return result;
+        }
+        result.with_return_type(self.graph().as_ref(), substituted)
+    }
+
     /// Close the machinery ROOT frame.
+    /// Test seam: close one inline frame with a decided outcome and
+    /// tagged holds. Flow identities are rejected by the callee gate's
+    /// clause authority, so the seam accepts the tagged form and
+    /// converts only the resolved-call arm — a flow hold minted without
+    /// its clause would discharge untransferred.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // exercised by the return-equation close tests
+    pub(super) fn flow_frame_close_for_tests(
+        &self,
+        idx: usize,
+        outcome: FlowReturnPendingOutcome,
+        holds: Vec<super::dispatch_txn::ReturnObligationIdentity>,
+    ) -> FlowReturnStep {
+        let holds = holds
+            .into_iter()
+            .filter_map(|identity| match identity {
+                super::dispatch_txn::ReturnObligationIdentity::ResolveCall(key) => {
+                    Some(HeldCallee::call(key))
+                }
+                super::dispatch_txn::ReturnObligationIdentity::FlowReturn(_) => None,
+            })
+            .collect();
+        self.flow_frame_close(
+            idx,
+            FlowEvaluationOutcome {
+                outcome,
+                self_roots: Vec::new(),
+                holds,
+                materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                fresh_seed: false,
+            },
+        )
+    }
+
     fn flow_frame_close_root(&self, idx: usize, evaluated: FlowEvaluationOutcome) -> FlowRootClose {
         match self.flow_frame_pop(idx, evaluated, true) {
             FlowFramePop::RootClose(close) => close,
@@ -936,7 +1251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let FlowEvaluationOutcome {
             outcome,
             self_roots,
-            holds,
+            mut holds,
             materialized,
             fresh_seed,
         } = evaluated;
@@ -953,6 +1268,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
             unreachable!("a flow code path pops a flow frame");
         };
         let inline_flight = flow_state.inline_flight;
+        // Tagged holds recorded against this frame by indexed call
+        // evaluation while it was active ride into the close with the
+        // evaluator's own holds — a resolved-call dependency joins the
+        // fixed point as the call hold it is.
+        holds.extend(
+            flow_state
+                .holds
+                .iter()
+                .filter_map(|identity| match identity {
+                    super::dispatch_txn::ReturnObligationIdentity::ResolveCall(key) => {
+                        Some(HeldCallee::call(key.clone()))
+                    }
+                    super::dispatch_txn::ReturnObligationIdentity::FlowReturn(_) => None,
+                }),
+        );
         // A budget edge on the frame poisons the whole component. The
         // outcome it replaces may already have observed a degradation —
         // carry it, so the budget failure does not launder it away.
@@ -975,9 +1305,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // still-open lowlink to the parent, and return the caller-return
             // step. NEVER publishes here.
             let step = match &outcome {
-                FlowReturnPendingOutcome::Complete(result) => {
-                    FlowReturnStep::Complete(result.clone())
-                }
+                FlowReturnPendingOutcome::Complete(result) => FlowReturnStep::Complete(
+                    self.apply_frame_key_substitution(&root_key, result.clone()),
+                ),
                 FlowReturnPendingOutcome::NoValue { failure, .. } => {
                     FlowReturnStep::NoValue(*failure)
                 }
@@ -1001,6 +1331,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // ── SCC close at this root ──────────────────────────────────
         let mut relation_members = Vec::new();
         let mut flow_members = Vec::new();
+        let mut call_members: Vec<(
+            crate::semantic_query::ResolveCallKey,
+            super::dispatch_txn::ResolveCallPendingState,
+        )> = Vec::new();
         for member in self
             .dispatch_txn
             .borrow_mut()
@@ -1020,6 +1354,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         inline_flight: state.inline_flight,
                     });
                 }
+                PendingObligationDomain::ResolveCall(state) => {
+                    let state = *state;
+                    let key = member
+                        .identity
+                        .as_resolve_call()
+                        .expect("call pending member carries a call identity")
+                        .clone();
+                    call_members.push((key, state));
+                }
                 PendingObligationDomain::FlowReturn(state) => {
                     let key = member
                         .identity
@@ -1038,38 +1381,86 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        let cyclic = !relation_members.is_empty() || !flow_members.is_empty() || self_cycle;
+        let cyclic = !relation_members.is_empty()
+            || !flow_members.is_empty()
+            || !call_members.is_empty()
+            || self_cycle;
         // The ONE discharge: every flow member and the root reach the
         // equation fixed point `result_i = seed_i ∪ (⋃ hold targets)`
         // together — an EmptyCycle with no discharged target stays
         // `ReturnOnly` and poisons the component.
         let mut outcome = outcome;
-        // A SELF-cycle (holds targeting only this root, with no drained
-        // member) discharges through the SAME fixed point: the equation
-        // `r = seed ∪ r` converges to the seed, and the shared discharge
-        // owns the post-convergence literal-widening decision.
+        // The mixed component (this root included, when it has holds or
+        // drained members) discharges to ONE joint fixed point through
+        // the shared close helper: a SELF-cycle converges to its seed,
+        // a hold-only empty cycle resurrects on its targets' admitted
+        // returns, and the call members' replay + return equation
+        // iterates against the flow side's current values.
+        let replay_substitution: super::dispatch_txn::ProvisionalSubstitution = relation_members
+            .iter()
+            .map(|member| {
+                (
+                    super::dispatch_txn::ObligationIdentity::Relate {
+                        key: member.key.clone(),
+                        occurrence: member.occurrence,
+                    },
+                    super::dispatch_txn::ProvisionalVerdict::Relate(
+                        super::relation::relation_step_from_pending(&member.verdict),
+                    ),
+                )
+            })
+            .collect();
+        let mut prefix_entries = Vec::new();
         if !flow_members.is_empty() || !holds.is_empty() {
-            let mut entries: Vec<super::dispatch_txn::FlowDischargeEntry> =
-                Vec::with_capacity(flow_members.len() + 1);
-            entries.push(super::dispatch_txn::FlowDischargeEntry {
+            prefix_entries.push(super::dispatch_txn::FlowDischargeEntry {
                 key: root_key.clone(),
                 outcome: outcome.clone(),
                 holds: holds.clone(),
                 fresh_seed,
             });
-            for member in flow_members.iter() {
-                entries.push(super::dispatch_txn::FlowDischargeEntry {
-                    key: member.key.clone(),
-                    outcome: member.outcome.clone(),
-                    holds: member.holds.clone(),
-                    fresh_seed: member.fresh_seed,
-                });
+        }
+        let (prefix_outcomes, call_results) = match self.discharge_mixed_component_to_fixed_point(
+            prefix_entries,
+            &mut flow_members,
+            &mut call_members,
+            &replay_substitution,
+        ) {
+            Ok(ok) => ok,
+            Err(failure) => {
+                self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                for member in &relation_members {
+                    self.relation_abort_inline_flight(member.inline_flight.as_ref());
+                }
+                self.flow_return_abort_drained_flights(&flow_members);
+                for (_, member) in &call_members {
+                    self.resolve_call_abort_inline_flight(member.inline_flight.as_ref());
+                    if let Some(session) = member.staged_session {
+                        self.abandon_session(session);
+                    }
+                }
+                // The component's OWN failure outranks the solver's: a
+                // frame budget edge and a no-value flow outcome are the
+                // poison the equation failure merely rides.
+                return FlowFramePop::RootClose(FlowRootClose::NoValue(if budget_cap.is_some() {
+                    FlowReturnFailure::Budget(
+                        verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                    )
+                } else if let FlowReturnPendingOutcome::NoValue { failure, .. } = outcome {
+                    failure
+                } else {
+                    match failure {
+                            crate::semantic_query::ResolveCallFailure::Budget => {
+                                FlowReturnFailure::Budget(
+                                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                                )
+                            }
+                            _ => FlowReturnFailure::Unresolved,
+                        }
+                }));
             }
-            self.discharge_flow_component_to_fixed_point(&mut entries);
-            outcome = entries.remove(0).outcome;
-            for (member, entry) in flow_members.iter_mut().zip(entries) {
-                member.outcome = entry.outcome;
-            }
+        };
+        if let Some(root_outcome) = prefix_outcomes.into_iter().next() {
+            outcome = root_outcome;
         }
         // Atomic admission: a degraded flow outcome anywhere in the
         // component (the root included) poisons the WHOLE tagged
@@ -1091,6 +1482,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_abort_inline_flight(member.inline_flight.as_ref());
             }
             self.flow_return_abort_drained_flights(&flow_members);
+            self.resolve_call_abort_drained_flights(&call_results);
             return FlowFramePop::RootClose(FlowRootClose::NoValue(match outcome {
                 FlowReturnPendingOutcome::NoValue { failure, .. } => failure,
                 _ => {
@@ -1135,12 +1527,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
         }
-        // The relation members discharge through the shared coordinator
+        // The drained members discharge through the shared coordinator
         // (no relation root — every relation member routes to the
-        // completed batch; the flow members queue beside them).
-        if (!relation_members.is_empty() || !flow_members.is_empty())
+        // completed batch; the flow and call members queue beside them).
+        if (!relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty())
             && self
-                .relation_discharge_and_route(false, None, relation_members, flow_members, cyclic)
+                .relation_discharge_and_route(
+                    false,
+                    None,
+                    relation_members,
+                    flow_members,
+                    None,
+                    call_results,
+                    cyclic,
+                )
                 .is_err()
         {
             self.flow_return_abort_inline_flight(inline_flight.as_ref());
@@ -1151,6 +1551,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the SCC drain and the caller consumes the computed step.
         match outcome {
             FlowReturnPendingOutcome::Complete(result) => {
+                // The CALLER's mapping applies exactly here, where the
+                // value leaves this frame: the component's internal fixed
+                // point runs in this frame's own binders, and the admitted
+                // value under an instantiation key is the instantiated
+                // return — one transfer point for both publish channels.
+                let result = self.apply_frame_key_substitution(&root_key, result);
                 if machinery_root {
                     // The machinery root publishes through the family
                     // singleflight, which owns the root's own admission —
@@ -1198,6 +1604,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn discharge_flow_component_to_fixed_point(
         &self,
         entries: &mut [super::dispatch_txn::FlowDischargeEntry],
+        call_results: &rustc_hash::FxHashMap<crate::semantic_query::ResolveCallKey, SemanticNodeId>,
     ) {
         let index: rustc_hash::FxHashMap<&FlowReturnKey, usize> = entries
             .iter()
@@ -1234,25 +1641,44 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 let mut ready = true;
                 for hold in &entries[i].holds {
-                    match index.get(hold.key()).and_then(|j| current[*j].as_ref()) {
-                        Some(result) => {
+                    let held = match hold.flow_key() {
+                        Some(key) => match index.get(key).and_then(|j| current[*j].as_ref()) {
+                            Some(result) => {
+                                if degradation.is_none() {
+                                    degradation = result.degradation();
+                                }
+                                Some(result.return_type())
+                            }
+                            // A target outside this component, or one that
+                            // has not discharged: undecided — the entry
+                            // cannot move.
+                            None => None,
+                        },
+                        // A resolved-call target joins from the close's
+                        // current call results, already in the caller's
+                        // terms — the same raw join the executor's own
+                        // equation performs.
+                        None => call_results
+                            .get(match hold {
+                                HeldCallee::Call { key } => key,
+                                HeldCallee::Flow { .. } => unreachable!(),
+                            })
+                            .copied(),
+                    };
+                    match held {
+                        Some(return_node) => {
                             // The SAME transfer the call arm performs, so
-                            // it applies the SAME rule: a hold target is a
-                            // CALLEE, and its admitted return is expressed
-                            // in the CALLEE's binders. Joining
+                            // it applies the SAME rule: a flow hold target
+                            // is a CALLEE, and its admitted return is
+                            // expressed in the CALLEE's binders. Joining
                             // `result.return_type()` raw here re-published
                             // exactly the binder the call arm had already
                             // instantiated away — the fixed point ran the
                             // transfer a second time, around the gate. The
                             // hold's own accessor is now the only way to
                             // reach a node from a target's result.
-                            arms.push(hold.discharged(self, result.return_type()).into_node());
-                            if degradation.is_none() {
-                                degradation = result.degradation();
-                            }
+                            arms.push(hold.discharged(self, return_node).into_node());
                         }
-                        // A target outside this component, or one that has
-                        // not discharged: undecided — the entry cannot move.
                         None => {
                             ready = false;
                             break;
@@ -1455,14 +1881,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let constraint = tp.constraint.as_ref().map(&mut lower);
             let default = tp.default.as_ref().map(&mut lower);
             let display_name: Arc<str> = Arc::clone(&tp.name);
-            finalized.push((
-                tp.name.to_string(),
-                intern_binder(&display_name, constraint, default),
-            ));
+            let binder = intern_binder(&display_name, constraint, default);
+            finalized.push((tp.name.to_string(), binder));
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
                 name: display_name,
+                param: binder,
                 constraint,
                 default,
+                // The slice-content clause does not model `<const T>`;
+                // const-ness reaches declarations through the prepared
+                // fact path, never through a body slice.
+                is_const: false,
             });
         }
         env.extend(finalized);
@@ -1752,6 +2181,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &ir.type_parameters,
             enclosing_binder_env.as_ref(),
         );
+        // The instantiation overlay: a flow key demanded under a call's
+        // FINAL ordered type-argument mapping binds this frame's OWN
+        // clause BY DECLARATION ORDER — the normalized args are the
+        // applicability machinery's final mapping (inference, declared
+        // defaults, and constraints already accounted), so the frame
+        // evaluates with its parameters bound exactly as the call
+        // instantiated them. The canonical production key carries no
+        // args and keeps every binder.
+        let binder_env = if key.normalized_type_args.is_empty() {
+            binder_env
+        } else {
+            binder_env.with_instantiation(&ir.type_parameters, &key.normalized_type_args)
+        };
         // THE root-identifier gate at the SIGNATURE entrances. Every
         // signature answer the content half minted carries the frame
         // names it references; if the owner scope answers one of them,
@@ -1820,6 +2262,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             var_degraded_locals: rustc_hash::FxHashSet::default(),
             var_conditional_locals: rustc_hash::FxHashSet::default(),
             conditional_arm_nesting: 0,
+            call_fresh_literal_returns: Vec::new(),
         };
         let holds;
         let degradation;
@@ -2069,6 +2512,27 @@ fn widen_literal_node(
 /// [`ProjectSemanticDispatch::flow_binder_env`]. Carried by the evaluator
 /// so parameter and body-leaf lowering resolve the function's binders
 /// instead of any outer same-name declaration.
+impl FlowBinderEnv {
+    /// This frame's clause instantiated by declaration order: every
+    /// binder name maps to the call's final argument at its ordinal.
+    /// An ordinal the mapping does not cover keeps its binder — the
+    /// applicability machinery's mapping is total for the calls that
+    /// mint it, and a partial one must not invent a binding.
+    fn with_instantiation(
+        mut self,
+        type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        normalized_type_args: &[SemanticNodeId],
+    ) -> Self {
+        for (ordinal, param) in type_parameters.iter().enumerate() {
+            let Some(arg) = normalized_type_args.get(ordinal) else {
+                continue;
+            };
+            self.env.insert(param.name.to_string(), *arg);
+        }
+        self
+    }
+}
+
 struct FlowBinderEnv {
     /// The file scope the binders declare into.
     scope: crate::semantic_query::NodeScopeId,
@@ -2230,6 +2694,16 @@ struct FlowEvaluator<'d, 'b> {
     /// block NEVER increments it — a block executes unconditionally, so a
     /// `var` it declares has exactly one reaching definition.
     conditional_arm_nesting: u32,
+    /// Return nodes a COMPLETED call in this frame marked
+    /// `fresh_literal_return` (a generic callee whose naked-binder return
+    /// fixed to a fresh-preserved literal). The call executor records the
+    /// provenance; the flow frame's freshness widening happens at the
+    /// return join, so a `return f(…)` whose call closed fresh
+    /// contributes WITH the freshness bit — a value position (an object
+    /// member, a binding initializer) keeps the literal, exactly as the
+    /// return equation's own flow/call domain split decides for held
+    /// calls.
+    call_fresh_literal_returns: Vec<SemanticNodeId>,
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -2666,6 +3140,88 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         Some(node)
     }
 
+    /// Project a frame-rooted `typeof` path leaf: `x.a.b` whose root `x`
+    /// is one of THIS frame's bindings (a parameter by name, or a reaching
+    /// local) resolves its root through the frame's substitution, then
+    /// walks the tail segments through the ONE shared path projection —
+    /// the same `ProjectPath { mode: Navigate }` walk the owner-scope
+    /// lowering applies to a free root's tail
+    /// (`lower.rs`'s `TypeExpr::TypeOf` arm).
+    ///
+    /// `None` when the leaf is not a frame-rooted member path (the caller
+    /// falls back to the leaf's own lowering, whose typed miss carrier
+    /// stays the honest answer). A projection miss after a resolved root
+    /// takes the same fallback: the position degrades exactly as the
+    /// owner-scope walk's miss does, never a fabricated member.
+    fn eval_frame_rooted_typeof_path(
+        &mut self,
+        ty: &verter_type_expr::TypeExpr,
+    ) -> Option<Positional<SemanticNodeId>> {
+        self.frame_rooted_typeof_path_node(ty)
+            .map(Positional::Value)
+    }
+
+    /// The node half of [`Self::eval_frame_rooted_typeof_path`]: resolve
+    /// the path's root through THIS frame (a parameter by name, else the
+    /// two-layer local read) and walk the tail through the one shared
+    /// `ProjectPath { mode: Navigate }` projection. `None` when the leaf
+    /// is not a frame-rooted member path or the projection misses.
+    fn frame_rooted_typeof_path_node(
+        &mut self,
+        ty: &verter_type_expr::TypeExpr,
+    ) -> Option<SemanticNodeId> {
+        let verter_type_expr::TypeExpr::TypeOf(value_ref) = ty else {
+            return None;
+        };
+        if value_ref.path.len() < 2 || !value_ref.type_args.is_empty() {
+            return None;
+        }
+        let head = value_ref.path[0].as_str();
+        // A parameter is addressed BY NAME here (the leaf carries no
+        // ordinal); a local resolves through the same two-layer read every
+        // other local reference takes, flags folded by construction.
+        let root = if let Some(ordinal) = self
+            .param_names
+            .iter()
+            .position(|param| param.name.as_deref() == Some(head))
+        {
+            self.params.get(ordinal).copied()
+        } else {
+            self.read_local(head)
+        }?;
+        let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
+            value_ref.path[1..]
+                .iter()
+                .map(|segment| {
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(Arc::from(segment.as_str())),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        // The member walk may widen a ROOTLESS callable (a function-typed
+        // parameter's signature) to its ambient apparent surface; that
+        // widening scopes its registry lookup by the lexical demand site,
+        // which rides this guard (see `apparent_type.rs`).
+        let _demand_scope = super::LexicalDemandScopeGuard::push(
+            &self.dispatch.lexical_demand_scope,
+            Arc::from(self.canonical),
+        );
+        match self.dispatch.execute_type_node(
+            crate::semantic_query::SemanticQueryKey::ProjectPath {
+                base: root,
+                path,
+                context: crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            },
+        ) {
+            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
+            _ => None,
+        }
+    }
+
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
     /// constituents the initializer is comparable to. The survivors are
     /// DECLARED constituents — never the initializer's own type — so
@@ -2689,7 +3245,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 super::dispatch_txn::RelationStep::NotAssignable => {}
                 super::dispatch_txn::RelationStep::Unknown
                 | super::dispatch_txn::RelationStep::BudgetExceeded(_)
-                | super::dispatch_txn::RelationStep::Assumed => {
+                | super::dispatch_txn::RelationStep::Assumed(_) => {
                     survivors.clear();
                     break;
                 }
@@ -2905,6 +3461,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                             let outcome = self.eval_expr(expr);
                             if let Some(node) = self.settle(outcome) {
                                 fresh_literal |= self.holds.len() > holds_before;
+                                // A COMPLETED call that closed fresh feeds
+                                // the same join: its executor-marked
+                                // fresh-literal return is a fresh source
+                                // here, exactly as a bare literal argument
+                                // is.
+                                fresh_literal |= self.call_fresh_literal_returns.contains(&node);
                                 contributors.push(FlowContribution {
                                     node,
                                     fresh_literal,
@@ -3140,6 +3702,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         &mut self,
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
+        declared_return: Option<&crate::flow_slice_content::GatedType>,
         body: &crate::flow_slice_content::SliceRegion,
         can_fall_through: bool,
     ) -> SemanticNodeId {
@@ -3225,6 +3788,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 span: None,
             });
         }
+        // A DECLARED return annotation wins over the body join, full stop:
+        // the checker checks the body AGAINST the annotation, and the
+        // signature's return IS the annotation — the body cannot change
+        // the answer, so it is never evaluated for the signature's
+        // return. The annotation lowers under the nested signature's own
+        // binder environment, behind the same per-slot frame gate every
+        // parameter annotation takes: a shadowed answer carries the typed
+        // marker in the RETURN position and degrades the enclosing result.
+        if let Some(declared) = declared_return {
+            let return_type =
+                if signature_answer_is_frame_shadowed(self.dispatch, &binder_env, declared) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                    );
+                    self.unmodeled_position()
+                } else {
+                    let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                    self.dispatch.shallow_lower_type_expr_with_context(
+                        declared.ty(),
+                        &binder_env.env,
+                        &binder_env.scope,
+                        &binder_env.name_resolution,
+                        binder_env.scope_payload.as_ref(),
+                        &binder_env.shadowing,
+                        &mut substitutions,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    )
+                };
+            return graph.intern_node(SemanticNodeData::Signature {
+                kind: crate::semantic_query::SignatureKind::Call,
+                params: Arc::from(signature_params.into_boxed_slice()),
+                return_type,
+                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                signature_span: None,
+                return_type_span: None,
+                // A nested function value's synthesized signature has no
+                occurrence: None,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                    return_type,
+                ),
+            });
+        }
         // The captured function-scope layer: the enclosing parameters BY
         // NAME, overlaid by the enclosing `var` layer (a redeclaring
         // enclosing `var` shares the parameter's slot and still wins).
@@ -3262,6 +3867,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 var_degraded_locals: self.var_degraded_locals.clone(),
                 var_conditional_locals: self.var_conditional_locals.clone(),
                 conditional_arm_nesting: 0,
+                call_fresh_literal_returns: Vec::new(),
             };
             let outcome = nested_evaluator.eval_region(body);
             nested_holds = nested_evaluator.holds.clone();
@@ -3307,6 +3913,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
+            // A nested function value's synthesized signature has no
+            // authored occurrence anchor and no served position: the
+            // return carrier is the interned node itself.
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
         })
     }
 
@@ -3496,6 +4107,21 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 {
                     return Positional::Unmodeled;
                 }
+                // The owner scope answers NOTHING — but the FRAME may.
+                // A member path rooted at one of the frame's own bindings
+                // (`x.a.b` over parameter `x`, `node.props.value` over a
+                // reaching local) resolves its root through the frame's
+                // substitution and projects the tail segments through the
+                // one shared path projection, exactly as the owner-scope
+                // lowering projects a free root's tail. Only when the
+                // frame carries no such root does the leaf evaluate
+                // unchanged: its own typed miss carrier is the honest
+                // answer, exactly as for any other unresolved reference.
+                if let crate::flow_slice_content::SliceExpr::Type(leaf) = inner.as_ref() {
+                    if let Some(node) = self.eval_frame_rooted_typeof_path(leaf.ty()) {
+                        return node;
+                    }
+                }
                 self.eval_expr(inner)
             }
             // A parameter ordinal the frame's own parameter list does not
@@ -3541,15 +4167,18 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::flow_slice_content::SliceExpr::NestedFunctionValue {
                 params: nested_params,
                 type_parameters,
+                declared_return,
                 body,
                 can_fall_through,
             } => {
-                // The nested function's signature: its body-derived return
+                // The nested function's signature: a DECLARED return
+                // annotation decides it outright; a body-derived return
                 // evaluates through the same flow machinery in a FRESH
                 // frame (the nested function's own params / locals).
                 Positional::Value(self.eval_nested_function_signature(
                     nested_params,
                     type_parameters,
+                    declared_return.as_ref(),
                     body,
                     *can_fall_through,
                 ))
@@ -3613,6 +4242,238 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             // at THIS position — the marker, never a fabricated `any` and
             // never the enclosing structure.
             crate::flow_slice_content::SliceExpr::Elided => Positional::Unmodeled,
+        }
+    }
+
+    /// Evaluate one argument of an authored call IN THIS FRAME: a bare
+    /// identifier names a frame binding (a parameter or a reaching
+    /// local), which owner-scope lowering cannot see; every other shape
+    /// lowers through the owner-scope indexed evaluation.
+    fn eval_indexed_call_argument(
+        &mut self,
+        expression: &verter_type_expr::IndexedValueExpression,
+    ) -> Option<SemanticNodeId> {
+        // A bare identifier names a frame binding (a parameter or a
+        // reaching local), which owner-scope lowering cannot see. The
+        // indexed lowering spells one as either a bare `Ref` or a
+        // single-segment `typeof` path — both are the same read here.
+        let bare_name = match expression {
+            verter_type_expr::IndexedValueExpression::Value(verter_type_expr::TypeExpr::Ref {
+                name,
+                type_arguments,
+            }) if type_arguments.is_empty() && !name.contains('.') => Some(name.as_ref()),
+            verter_type_expr::IndexedValueExpression::Value(
+                verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef { path, type_args }),
+            ) if type_args.is_empty() && path.len() == 1 => Some(path[0].as_str()),
+            _ => None,
+        };
+        if let Some(name) = bare_name {
+            if let Some(node) = self.read_local(name) {
+                return Some(node);
+            }
+            if let Some(ordinal) = self
+                .param_names
+                .iter()
+                .position(|param| param.name.as_deref() == Some(name))
+            {
+                if let Some(node) = self.params.get(ordinal) {
+                    return Some(*node);
+                }
+            }
+        }
+        self.dispatch.evaluate_indexed_value_expression_node_inner(
+            self.canonical,
+            self.owner,
+            expression,
+            false,
+        )
+    }
+
+    /// The direct-call target's callee VALUE TYPE through the same
+    /// owner-scope path the annotated-callee arm uses — never the
+    /// initializer's flow position.
+    fn direct_callee_value_node(
+        &self,
+        target: &verter_semantic::analysis::function_program::FunctionProgramKey,
+    ) -> Option<SemanticNodeId> {
+        let callee_expr = verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+            path: target
+                .declaration
+                .name
+                .split('.')
+                .map(str::to_string)
+                .collect(),
+            type_args: Vec::new(),
+        });
+        self.dispatch.lower_type_expr_in_owner_scope_with_context(
+            self.canonical,
+            self.owner,
+            &callee_expr,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+    }
+
+    /// Whether one call site's callee — as a settled signature group —
+    /// needs the executor's applicability machinery: an OVERLOADED group
+    /// (argument-driven first-applicable selection), or a generic
+    /// signature whose call SUPPLIES inference evidence (arguments or
+    /// explicit type arguments), which this rail's clause transfer would
+    /// otherwise answer `unknown` for.
+    fn call_group_needs_executor(
+        &self,
+        node: SemanticNodeId,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> bool {
+        let Some((_, call_sigs, construct_sigs)) = self.dispatch.settle_signature_group(node)
+        else {
+            return false;
+        };
+        if call_sigs.len() + construct_sigs.len() > 1 {
+            return true;
+        }
+        let supplies_evidence =
+            site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments();
+        if !supplies_evidence {
+            return false;
+        }
+        call_sigs
+            .iter()
+            .chain(construct_sigs.iter())
+            .any(|signature| {
+                matches!(
+                    self.dispatch.graph().node_data(*signature).as_deref(),
+                    Some(SemanticNodeData::Signature {
+                        type_parameters,
+                        ..
+                    }) if !type_parameters.is_empty()
+                )
+            })
+    }
+
+    /// The call-executor route of one authored call: overload selection
+    /// and argument-driven clause inference are the executor's
+    /// applicability machinery, so this rail re-reads the authored call
+    /// from the retained snapshot (argument expressions and explicit type
+    /// arguments are parse facts, never re-derived), mints the
+    /// content-free key, and folds the typed outcome back into the
+    /// frame's vocabulary — a completed, already-instantiated return
+    /// through the callee gate's named no-transfer constructor, an
+    /// SCC back-edge as a hold, a typed refusal as the
+    /// `UnrepresentableCallee` degradation this rail already defines for
+    /// a callee it cannot represent.
+    fn eval_call_via_resolve_call(
+        &mut self,
+        callee: SemanticNodeId,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Option<Positional<CallValue>> {
+        let Some(serve) = self.dispatch.ctx.ensure_indexed_ready_serve(self.canonical) else {
+            return Some(self.degraded_unrepresentable_callee());
+        };
+        let memo = serve.indexed.shallow_state.decl_bodies();
+        let Some(indexed) = memo.indexed_call_expression_at(site.span()) else {
+            return Some(self.degraded_unrepresentable_callee());
+        };
+        let call = indexed.as_ref();
+        let mut args = Vec::with_capacity(call.args.len());
+        for argument in call.args.iter() {
+            let Some(ty) = self.eval_indexed_call_argument(&argument.expression) else {
+                // An argument this substrate cannot type leaves
+                // applicability without its evidence: the executor
+                // refuses as surely, and degrading here is the same
+                // typed marker with one less hop.
+                return Some(self.degraded_unrepresentable_callee());
+            };
+            args.push(crate::semantic_query::CallArgKey::Eager {
+                ty,
+                spread: argument.spread,
+                context_sensitive: argument.context_sensitive,
+                literal_mode: match argument.literal_mode {
+                    verter_type_expr::IndexedValueLiteralMode::Widened => {
+                        crate::semantic_query::ArgumentLiteralMode::Widened
+                    }
+                    verter_type_expr::IndexedValueLiteralMode::Literal => {
+                        crate::semantic_query::ArgumentLiteralMode::Literal
+                    }
+                },
+            });
+        }
+        let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
+        for argument in call.explicit_type_args.iter() {
+            let Some(node) = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
+                self.canonical,
+                self.owner,
+                argument,
+                crate::semantic_query::ProjectionMode::Navigate,
+            ) else {
+                return Some(self.degraded_unrepresentable_callee());
+            };
+            explicit_type_args.push(node);
+        }
+        // A member call's receiver rides the key: `.call` / `.apply`
+        // rebase and `this`-typed methods read it — the same indexed
+        // lowering the callee came from, evaluated in the same scope.
+        let receiver = match call.receiver.as_deref() {
+            Some(receiver) => match self.eval_indexed_call_argument(receiver) {
+                Some(node) => Some(node),
+                None => return Some(self.degraded_unrepresentable_callee()),
+            },
+            None => None,
+        };
+        let key = crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from(self.canonical),
+                offset: call.point,
+            },
+            callee,
+            kind: crate::semantic_query::CallKind::Call,
+            receiver,
+            args: Arc::from(args.into_boxed_slice()),
+            explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
+            flow: crate::semantic_query::FlowNarrowingKey::empty(),
+            context: self.dispatch.resolve_call_context_for(self.canonical),
+        };
+        let step = self.dispatch.execute_resolve_call(key);
+        match step {
+            super::call_resolve::ResolveCallStep::Complete(result) => {
+                // Fresh-literal provenance: a call that closed on a FRESH
+                // literal return (a generic callee's naked-binder return
+                // fixed to a fresh-preserved literal) feeds the flow
+                // frame's freshness widening — the return join widens it,
+                // a value position keeps it.
+                if let crate::semantic_query::ResolvedCallResult::Selected {
+                    return_type,
+                    fresh_literal_return: true,
+                    ..
+                } = &result
+                {
+                    self.call_fresh_literal_returns.push(*return_type);
+                }
+                Some(Positional::Value(CallValue::of_resolved_call(
+                    self.dispatch,
+                    super::return_equation::resolved_call_return_type(&result),
+                )))
+            }
+            // An SCC back-edge through the executor: the close discharges
+            // it on the component's admitted results.
+            super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
+            // A PROVEN refusal — the callee is not callable, or no
+            // overload accepts the authored arguments — is the typed
+            // `UnrepresentableCallee` degradation this rail already
+            // defines; the executor never widens it to `any`, and
+            // neither does this rail.
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::NotCallable
+                | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
+            ) => Some(self.degraded_unrepresentable_callee()),
+            // An UNDECIDED executor (the machinery cannot decide this
+            // shape, or a budget edge) is NOT a refusal: the caller
+            // falls back to this rail's own read of the same call, which
+            // is never worse than the answer it gave without the
+            // executor.
+            super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Undecidable
+                | crate::semantic_query::ResolveCallFailure::Budget,
+            ) => None,
         }
     }
 
@@ -3728,38 +4589,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     }
                     _ => 0,
                 };
-                // An OVERLOADED callee is not answerable here, and the
-                // predicate for that is the SIZE of the overload group
-                // alone.
-                //
-                // TypeScript resolves an overloaded call by ARGUMENTS,
-                // picking the FIRST signature that matches. This rail
-                // reaches ONE entry of the group and cannot pick: the
-                // function-program index carries a single entry per
-                // group, so for a BODIED group it lands on the trailing
-                // implementation — the one signature the language HIDES
-                // — and for an AMBIENT group (`declare function f(…)`
-                // ×3, no implementation at all) it lands on the LAST
-                // declaration while the language would pick the first.
-                // Gating on "the selected signature has an
-                // implementation body" therefore closed only the bodied
-                // half and left the ambient half publishing a
-                // confidently wrong answer, cleanly and warm.
-                //
-                // Picking the right overload needs argument-driven
-                // overload resolution, which this substrate does not
-                // perform. The answer is the `UnrepresentableCallee`
-                // degradation it already exists for: the typed positional
-                // marker, ReturnOnly by contract — never a warm-admitted
-                // wrong answer. A LONE signature is untouched, bodied or
-                // not:
-                // the rule is overload VISIBILITY, not "any function with
-                // a body".
+                // An OVERLOADED callee is not answerable by this rail's
+                // lone-signature read: TypeScript resolves an overloaded
+                // call by ARGUMENTS, picking the FIRST applicable
+                // signature in declaration order, and the function-program
+                // index reaches only one entry of the group (the trailing
+                // implementation the language HIDES, for a bodied group).
+                // Argument-driven selection is the call executor's
+                // applicability machinery, so the authored call routes
+                // through it — the ordered group, the authored argument
+                // literals, and a typed refusal when nothing applies,
+                // never a warm-admitted wrong answer and never the
+                // implementation's own signature.
                 if prepared
                     .as_ref()
                     .is_some_and(|prepared| prepared.signatures.len() > 1)
                 {
-                    return self.degraded_unrepresentable_callee();
+                    let Some(callee) = self.direct_callee_value_node(target) else {
+                        return self.degraded_unrepresentable_callee();
+                    };
+                    // An undecided executor maps to the same degradation
+                    // this rail would publish without it — there is no
+                    // lone-signature read to fall back to.
+                    return self
+                        .eval_call_via_resolve_call(callee, site)
+                        .unwrap_or_else(|| self.degraded_unrepresentable_callee());
                 }
                 let source = prepared.as_ref().and_then(|prepared| {
                     prepared
@@ -3809,6 +4663,28 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         return self.degraded_unrepresentable_callee()
                     }
                 };
+                // Argument-driven clause inference (and explicit type
+                // arguments) are the call executor's domain too: a
+                // generic callee whose call SUPPLIES inference evidence
+                // routes through it, binding the clause from the authored
+                // argument literals with constraint / declared-default
+                // fallback — rather than this rail's `unknown` interim
+                // for every parameter the arguments could have bound. A
+                // call supplying NO evidence keeps the rail's answer: a
+                // declared default is exact, and `unknown` is the
+                // checker's own answer for an unbound parameter.
+                if callee_clause.is_generic()
+                    && (site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
+                {
+                    if let Some(callee) = self.direct_callee_value_node(target) {
+                        // An undecided executor falls through to this
+                        // rail's own clause read below — the answer it
+                        // gave before the executor existed, never worse.
+                        if let Some(value) = self.eval_call_via_resolve_call(callee, site) {
+                            return value;
+                        }
+                    }
+                }
                 // A target the value registry does not carry as a
                 // prepared declaration (a namespace-scoped function) is
                 // only reachable through the body-derived demand.
@@ -3971,6 +4847,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 // through the callee's body is a different symbol, and
                 // the IIFE route — the same body, invoked directly —
                 // already keeps it.
+                // An overloaded or inference-bearing binding-held callee
+                // resolves through the executor, never the first
+                // signature's raw return; an undecided executor falls
+                // back to the rail's own signature read (overloads keep
+                // the typed degradation — the read cannot pick).
+                if self.call_group_needs_executor(node, site) {
+                    let overloaded = matches!(
+                        self.dispatch.settle_signature_group(node),
+                        Some((_, call_sigs, construct_sigs))
+                            if call_sigs.len() + construct_sigs.len() > 1
+                    );
+                    if let Some(value) = self.eval_call_via_resolve_call(node, site) {
+                        return value;
+                    }
+                    if overloaded {
+                        return self.degraded_unrepresentable_callee();
+                    }
+                }
                 match CallValue::of_signature_node(
                     self.dispatch,
                     node,
@@ -4044,14 +4938,60 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 if name.as_ref() != "ReturnType" || type_arguments.len() != 1 {
                     return self.degraded_unrepresentable_callee();
                 }
-                let Some(callee_node) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                    self.canonical,
-                    self.owner,
-                    &type_arguments[0],
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                ) else {
+                // A member-call callee rooted at a FRAME binding
+                // (`fn.call`, `local.call`, `instance.run`): the owner
+                // scope answers nothing for the root, but the frame
+                // substitutes it — resolve the root through the frame and
+                // project the member tail, exactly as the frame-rooted
+                // `typeof` leaf does. Everything else lowers in owner
+                // scope as before.
+                let mut frame_rooted = false;
+                let Some(callee_node) =
+                    (match self.frame_rooted_typeof_path_node(&type_arguments[0]) {
+                        Some(node) => {
+                            frame_rooted = true;
+                            Some(node)
+                        }
+                        None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                            self.canonical,
+                            self.owner,
+                            &type_arguments[0],
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        ),
+                    })
+                else {
                     return self.degraded_unrepresentable_callee();
                 };
+                // A FRAME-ROOTED member callee carries receiver semantics
+                // this rail's lone signature read is blind to (the ambient
+                // `.call` / `.apply` rebase, a `this`-typed method): route
+                // it through the executor first. The fallback is exactly
+                // the answer this rail gave before the executor existed —
+                // a frame-rooted member callee lowered to nothing then, so
+                // nothing that worked can regress. An undecided executor
+                // (`None`) keeps the rail's own read below.
+                if frame_rooted {
+                    if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                        return value;
+                    }
+                }
+                // An overloaded or inference-bearing symbolic callee
+                // resolves through the executor exactly like a direct
+                // one — the lone non-generic read stays on this rail,
+                // and an undecided executor falls back to it.
+                if self.call_group_needs_executor(callee_node, site) {
+                    let overloaded = matches!(
+                        self.dispatch.settle_signature_group(callee_node),
+                        Some((_, call_sigs, construct_sigs))
+                            if call_sigs.len() + construct_sigs.len() > 1
+                    );
+                    if let Some(value) = self.eval_call_via_resolve_call(callee_node, site) {
+                        return value;
+                    }
+                    if overloaded {
+                        return self.degraded_unrepresentable_callee();
+                    }
+                }
                 self.call_return_of_callee_node(callee_node, site)
             }
         }

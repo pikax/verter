@@ -741,27 +741,62 @@ impl<'a> ProjectSemanticDispatch<'a> {
             prepared.type_annotation.classification,
             verter_type_expr::facts::ValueAnnotationClass::Absent
         ) {
-            // The annotation FACT carries either a trivially-closed leaf (an
-            // inferred primitive/literal annotation) or routes to the authored
-            // value-annotation POSITION — lowered through the ONE located body
-            // source (`LowerLocator` deref of the value anchor), never a
-            // stored typed body.
-            match prepared.type_annotation.annotation.as_ref() {
-                Some(verter_type_expr::facts::SemanticTypeSource::Closed(
-                    verter_type_expr::facts::ClosedTypeFact::Leaf(leaf),
-                )) => self.shallow_lower_type_expr_with_context(
-                    &super::lower::leaf_type_fact_expr(leaf),
-                    &empty_env,
-                    &scope,
-                    &prepared.name_resolution,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    context,
-                ),
-                Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
-                    .lower_located_body_with_provenance(
-                        locator.clone(),
+            if let Some(source) = prepared.type_annotation.expression_source.as_ref() {
+                match self.execute_semantic_expression_source(source, effective_owner) {
+                    Some(node) => node,
+                    None => {
+                        composed_partial = true;
+                        self.opaque(QueryError::Miss)
+                    }
+                }
+            } else {
+                // The annotation FACT carries either a trivially-closed leaf (an
+                // inferred primitive/literal annotation) or routes to the authored
+                // value-annotation POSITION — lowered through the ONE located body
+                // source (`LowerLocator` deref of the value anchor), never a
+                // stored typed body.
+                match prepared.type_annotation.annotation.as_ref() {
+                    Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                        verter_type_expr::facts::ClosedTypeFact::Leaf(leaf),
+                    )) => self.shallow_lower_type_expr_with_context(
+                        &super::lower::leaf_type_fact_expr(leaf),
+                        &empty_env,
+                        &scope,
+                        &prepared.name_resolution,
+                        scope_payload.as_ref(),
+                        &shadowing,
+                        &mut substitutions,
+                        context,
+                    ),
+                    Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
+                        .lower_located_body_with_provenance(
+                            locator.clone(),
+                            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                            &[],
+                            &prepared.name_resolution,
+                            &empty_env,
+                            &scope,
+                            scope_payload.as_ref(),
+                            &shadowing,
+                            &mut substitutions,
+                            context,
+                        ),
+                    // A complex INFERRED annotation carries no closed fact — it is
+                    // recovered by demand through the SAME authored value-position
+                    // locator (the transient value-part re-borrow serves the
+                    // initializer-inferred typed IR).
+                    _ => self.lower_located_body_with_provenance(
+                        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+                            verter_type_expr::locators::TypeBodySlot {
+                                anchor: verter_type_expr::locators::AuthoredAnchor {
+                                    canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+                                    owner: prepared.root_identity.owner,
+                                    symbol: Arc::clone(&prepared.root_identity.symbol_name),
+                                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                                },
+                                path: Arc::from(Vec::new().into_boxed_slice()),
+                            },
+                        ),
                         verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
                         &[],
                         &prepared.name_resolution,
@@ -772,32 +807,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         &mut substitutions,
                         context,
                     ),
-                // A complex INFERRED annotation carries no closed fact — it is
-                // recovered by demand through the SAME authored value-position
-                // locator (the transient value-part re-borrow serves the
-                // initializer-inferred typed IR).
-                _ => self.lower_located_body_with_provenance(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                        verter_type_expr::locators::TypeBodySlot {
-                            anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
-                                owner: prepared.root_identity.owner,
-                                symbol: Arc::clone(&prepared.root_identity.symbol_name),
-                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                            },
-                            path: Arc::from(Vec::new().into_boxed_slice()),
-                        },
-                    ),
-                    verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
-                    &[],
-                    &prepared.name_resolution,
-                    &empty_env,
-                    &scope,
-                    scope_payload.as_ref(),
-                    &shadowing,
-                    &mut substitutions,
-                    context,
-                ),
+                }
             }
         } else if prepared.object_shape.is_some() {
             // Const-object shape: the members' value positions are content-
@@ -1345,6 +1355,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params: Arc::from(Vec::new().into_boxed_slice()),
                 return_type: instance_return,
                 type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                occurrence: None,
+                // The synthesized default-constructor instance is a concrete
+                // seed, never a body-derived obligation.
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                    instance_return,
+                ),
                 signature_span: None,
                 return_type_span: None,
             },
@@ -1678,10 +1694,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///   arity) DROPS from the set (TS overload resolution under explicit
     ///   type arguments); all-dropped is an honest `Miss`.
     ///
+    /// A UNION callee is ONE composite union-signature group: every arm
+    /// settles to its OWN ordered bucket through the same rail, and the
+    /// produced node is the arm-group union the value boundary converts
+    /// into arm-tagged candidates (declaration order applies WITHIN an
+    /// arm; arm order is never overload precedence). A non-callable arm
+    /// is an honest `Miss`.
+    ///
     /// Self-version rooting: on the file-derived origins of EVERY input
     /// node — the callee AND each explicit type argument (the node-keyed
     /// rooting rule `NormalizeUnion` uses; the produced value semantically
-    /// depends on the arg nodes, so they root too).
+    /// depends on the arg nodes, so they root too) — plus, for a union,
+    /// each settled arm node's origin. A ROOTLESS group (any candidate
+    /// with no authored occurrence) is `cache_suppress`ed: it resolves
+    /// in-transaction but admits no family candidate and no reverse
+    /// metadata.
     pub(super) fn build_resolve_overload_set(
         &self,
         callee: SemanticNodeId,
@@ -1708,16 +1735,162 @@ impl<'a> ProjectSemanticDispatch<'a> {
             callee,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         );
-        // Unwrap alias chains to the signature-group-bearing node.
-        let mut group_node = settled;
+        // A UNION callee is ONE composite union-signature group: each arm
+        // settles to its OWN ordered signature group (declaration order
+        // applies independently within an arm; arm order is never overload
+        // precedence). A non-callable arm makes the whole callee an honest
+        // `Miss` (the executor's `NotCallable`). Nested unions and alias
+        // hops flatten into the arm list.
+        let mut arms: Vec<SemanticNodeId> = Vec::new();
+        {
+            let mut stack = vec![settled];
+            let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+            while let Some(node) = stack.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                match self.graph().node_data(node).as_deref() {
+                    Some(SemanticNodeData::Alias(target)) => stack.push(*target),
+                    Some(SemanticNodeData::Union(members)) => {
+                        // Preserve stored arm order (the stack pops last
+                        // first, so push reversed).
+                        for member in members.iter().rev() {
+                            stack.push(*member);
+                        }
+                    }
+                    _ => arms.push(node),
+                }
+            }
+        }
+        if arms.len() > 1 {
+            let mut arm_group_nodes = Vec::with_capacity(arms.len());
+            let mut arm_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> = Vec::new();
+            let mut any_rootless_arm = false;
+            for arm in arms {
+                let arm = self.resolve_signature_source_carrier(
+                    arm,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                );
+                let Some((group_node, call_sigs, construct_sigs)) =
+                    self.settle_signature_group(arm)
+                else {
+                    // A non-callable arm makes the whole union non-callable.
+                    return miss();
+                };
+                let arm_node = if type_args.is_empty() {
+                    group_node
+                } else {
+                    match self.instantiate_overload_group(&call_sigs, &construct_sigs, type_args) {
+                        Some(node) => node,
+                        None => return miss(),
+                    }
+                };
+                if self.signature_group_is_rootless(&call_sigs, &construct_sigs) {
+                    any_rootless_arm = true;
+                }
+                let roots = self.observed_self_roots_from_nodes(std::iter::once(arm_node));
+                for root in roots {
+                    if !arm_roots.iter().any(|(c, h)| *c == root.0 && *h == root.1) {
+                        arm_roots.push(root);
+                    }
+                }
+                arm_group_nodes.push(arm_node);
+            }
+            let result_node = self.graph().intern_node(SemanticNodeData::Union(Arc::from(
+                arm_group_nodes.into_boxed_slice(),
+            )));
+            let mut observed_self_roots = self.observed_self_roots_from_nodes(
+                std::iter::once(callee).chain(type_args.iter().copied()),
+            );
+            for root in arm_roots {
+                if !observed_self_roots
+                    .iter()
+                    .any(|(c, h)| *c == root.0 && *h == root.1)
+                {
+                    observed_self_roots.push(root);
+                }
+            }
+            // A rootless arm supplies no durable reuse ownership: rooting
+            // the composite on the demanding file would be false
+            // provenance, so the result stays transaction-local.
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                    QueryResult::Value(result_node),
+                    self.project_generation_signature(),
+                ))
+                .with_observed_self_roots(observed_self_roots);
+            output.cache_suppress |= any_rootless_arm;
+            return output;
+        }
+        let Some(single) = arms.first().copied() else {
+            return miss();
+        };
+        let Some((group_node, call_sigs, construct_sigs)) = self.settle_signature_group(single)
+        else {
+            return miss();
+        };
+
+        let result_node = if type_args.is_empty() {
+            group_node
+        } else {
+            match self.instantiate_overload_group(&call_sigs, &construct_sigs, type_args) {
+                Some(node) => node,
+                None => return miss(),
+            }
+        };
+
+        let observed_self_roots = self.observed_self_roots_from_nodes(
+            std::iter::once(callee).chain(type_args.iter().copied()),
+        );
+        // A ROOTLESS callee (a parameter / local / inline callable with no
+        // authored occurrence) supplies no durable reuse ownership: its
+        // set stays transaction-local (no family candidate, no reverse
+        // metadata) while the value still serves this transaction —
+        // rooting it on the demanding file would be false provenance.
+        // Authored callees stay warm-cacheable.
+        let rootless = self.signature_group_is_rootless(&call_sigs, &construct_sigs);
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+                QueryResult::Value(result_node),
+                self.project_generation_signature(),
+            ))
+            .with_observed_self_roots(observed_self_roots);
+        output.cache_suppress |= rootless;
+        output
+    }
+
+    /// Whether any candidate of an ordered signature group has NO authored
+    /// occurrence — a parameter / local / inline callable position. Such a
+    /// group is genuinely rootless: no stable identity owns it.
+    fn signature_group_is_rootless(
+        &self,
+        call_sigs: &[SemanticNodeId],
+        construct_sigs: &[SemanticNodeId],
+    ) -> bool {
+        call_sigs.iter().chain(construct_sigs.iter()).any(|sig| {
+            match self.graph().node_data(*sig).as_deref() {
+                Some(SemanticNodeData::Signature { occurrence, .. }) => occurrence.is_none(),
+                // The sealed carrier's occurrence is always authored.
+                Some(SemanticNodeData::DeferredCallable(_)) => false,
+                _ => true,
+            }
+        })
+    }
+
+    /// Unwrap alias chains to the signature-group-bearing node and read its
+    /// ordered call/construct buckets. `None` when the node carries no
+    /// signature group (never a fabricated empty set).
+    pub(crate) fn settle_signature_group(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, Vec<SemanticNodeId>, Vec<SemanticNodeId>)> {
+        let mut group_node = node;
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
         let (call_sigs, construct_sigs): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) = loop {
             if !visited.insert(group_node) {
-                return miss();
+                return None;
             }
-            let Some(data) = self.graph().node_data(group_node) else {
-                return miss();
-            };
+            let data = self.graph().node_data(group_node)?;
             match &*data {
                 SemanticNodeData::Alias(target) => {
                     let target = *target;
@@ -1735,72 +1908,71 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         break (Vec::new(), vec![group_node])
                     }
                 },
+                // The sealed index-composed carrier is its own one-element
+                // bucket, read through the `ResolveOverloadSet` witness.
+                SemanticNodeData::DeferredCallable(callable) => {
+                    match callable
+                        .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                        .kind
+                    {
+                        crate::semantic_query::SignatureKind::Call => {
+                            break (vec![group_node], Vec::new())
+                        }
+                        crate::semantic_query::SignatureKind::Construct => {
+                            break (Vec::new(), vec![group_node])
+                        }
+                    }
+                }
                 SemanticNodeData::Object(surface) => {
                     break (
                         surface.call_signatures.to_vec(),
                         surface.construct_signatures.to_vec(),
                     )
                 }
-                _ => return miss(),
+                _ => return None,
             }
         };
         if call_sigs.is_empty() && construct_sigs.is_empty() {
-            return miss();
+            return None;
         }
+        Some((group_node, call_sigs, construct_sigs))
+    }
 
-        let result_node = if type_args.is_empty() {
-            group_node
-        } else {
-            // Explicit type arguments: instantiate per candidate; drop the
-            // candidates that cannot accept the argument list.
-            let instantiate = |sigs: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
-                sigs.iter()
-                    .filter_map(|sig| {
-                        let instantiated = self.apply_typeof_instantiation_args(*sig, type_args);
-                        let dropped = matches!(
-                            self.graph().node_data(instantiated).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        );
-                        (!dropped).then_some(instantiated)
-                    })
-                    .collect()
-            };
-            let instantiated_calls = instantiate(&call_sigs);
-            let instantiated_constructs = instantiate(&construct_sigs);
-            match (
-                instantiated_calls.as_slice(),
-                instantiated_constructs.as_slice(),
-            ) {
-                ([], []) => return miss(),
-                // A lone instantiated signature IS the group node — no
-                // synthetic surface wrapper for the single-candidate case.
-                ([lone], []) | ([], [lone]) => *lone,
-                _ => self
-                    .graph()
-                    .intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
-                        instantiated_calls
-                            .into_iter()
-                            .map(SurfaceEntry::CallSignature)
-                            .chain(
-                                instantiated_constructs
-                                    .into_iter()
-                                    .map(SurfaceEntry::ConstructSignature),
-                            )
-                            .collect(),
-                        None,
-                        false,
-                    ))),
-            }
+    /// Apply explicit type arguments to an ordered overload group:
+    /// instantiate per candidate; a candidate that cannot accept the
+    /// argument list DROPS from the set; all-dropped is `None`.
+    fn instantiate_overload_group(
+        &self,
+        call_sigs: &[SemanticNodeId],
+        construct_sigs: &[SemanticNodeId],
+        type_args: &Arc<[SemanticNodeId]>,
+    ) -> Option<SemanticNodeId> {
+        let instantiate = |sigs: &[SemanticNodeId]| -> Vec<SemanticNodeId> {
+            sigs.iter()
+                .filter_map(|sig| self.instantiate_call_candidate(*sig, type_args))
+                .collect()
         };
-
-        let observed_self_roots = self.observed_self_roots_from_nodes(
-            std::iter::once(callee).chain(type_args.iter().copied()),
-        );
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
-            QueryResult::Value(result_node),
-            self.project_generation_signature(),
-        ))
-        .with_observed_self_roots(observed_self_roots)
+        let instantiated_calls = instantiate(call_sigs);
+        let instantiated_constructs = instantiate(construct_sigs);
+        match (
+            instantiated_calls.as_slice(),
+            instantiated_constructs.as_slice(),
+        ) {
+            ([], []) => None,
+            // A lone instantiated signature IS the group node — no
+            // synthetic surface wrapper for the single-candidate case.
+            ([lone], []) | ([], [lone]) => Some(*lone),
+            _ => Some(self.graph().intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from(Vec::new().into_boxed_slice()),
+                    call_signatures: Arc::from(instantiated_calls.into_boxed_slice()),
+                    construct_signatures: Arc::from(instantiated_constructs.into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            ))),
+        }
     }
 
     /// Lower the class's OWN constructor-object surface — the prepared
@@ -2264,6 +2436,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     params: Arc::clone(params),
                                     return_type: derived_return,
                                     type_parameters: Arc::clone(type_parameters),
+                                    // A synthesized inheritance twin — no
+                                    // authored position of its own.
+                                    occurrence: None,
+                                    // The derived instance return is a
+                                    // concrete seed.
+                                    return_carrier:
+                                        crate::semantic_query::SignatureReturnCarrier::Declared(
+                                            derived_return,
+                                        ),
                                     // Composed signature — no single source site.
                                     signature_span: None,
                                     return_type_span: None,
@@ -4990,6 +5171,52 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 (QueryResult::Value(result), fence, false)
             }
 
+            // `ThisParameterType<F>` reads the authored `this` receiver the
+            // call signature preserves; a signature with no authored `this`
+            // has none, which is `unknown`. `OmitThisParameter<F>` republishes
+            // the same call signature with that receiver removed, and is the
+            // identity on a signature that has none.
+            "ThisParameterType" | "OmitThisParameter" if args.len() == 1 => {
+                let source_resolved = self.resolve_signature_source_carrier(args[0], context);
+                let receiver = self
+                    .select_signature_function(source_resolved, SignatureBucket::Call)
+                    .and_then(|function_node| {
+                        let data = self.graph().node_data(function_node)?;
+                        let SemanticNodeData::Signature { params, .. } = &*data else {
+                            return None;
+                        };
+                        let params = Arc::clone(params);
+                        drop(data);
+                        Some((function_node, params))
+                    });
+                let result = match (name, receiver) {
+                    ("ThisParameterType", Some((_, params))) => {
+                        match crate::semantic_query::split_this_receiver(&params).0 {
+                            Some(receiver) => receiver.ty,
+                            None => self
+                                .graph()
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+                        }
+                    }
+                    ("ThisParameterType", None) => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+                    (_, Some((function_node, params))) => {
+                        match crate::semantic_query::split_this_receiver(&params) {
+                            (Some(_), ordinary) => {
+                                self.intern_signature_without_receiver(function_node, ordinary)
+                            }
+                            // No authored receiver: `OmitThisParameter` is the
+                            // identity on its argument.
+                            (None, _) => source_resolved,
+                        }
+                    }
+                    (_, None) => source_resolved,
+                };
+                record_utility_edges(result);
+                (QueryResult::Value(result), fence, false)
+            }
+
             // ---- Object-filter utilities ----
             // `Pick<X, K>` produces an Object surface containing the
             // subset of `X`'s members whose names appear in `K`'s
@@ -5294,7 +5521,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         crate::project_semantic_dispatch::dispatch_txn::RelationStep::Unknown
                         | crate::project_semantic_dispatch::dispatch_txn::RelationStep::BudgetExceeded(..)
-                        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed => {
+                        | crate::project_semantic_dispatch::dispatch_txn::RelationStep::Assumed(
+                            _,
+                        ) => {
                             // Any undecidable arm forces the whole
                             // utility result to defer — partial
                             // reduction would silently drop
@@ -5738,6 +5967,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params,
             return_type,
             type_parameters,
+            occurrence,
+            return_carrier,
             signature_span,
             return_type_span,
         } = data.as_ref()
@@ -5749,6 +5980,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             params: Arc::clone(params),
             return_type: *return_type,
             type_parameters: Arc::clone(type_parameters),
+            // The kind twin is the SAME authored position and carrier.
+            occurrence: occurrence.clone(),
+            return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
             return_type_span: *return_type_span,
         };
@@ -6029,6 +6263,90 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result
     }
 
+    /// Apply instantiation type arguments to the sealed index-composed
+    /// callable carrier. Substitution runs over the carrier's OWN
+    /// parameters and binder constraints/defaults; the consumed type
+    /// parameters are stripped, and both the occurrence and the deferred
+    /// return carrier are preserved — an instantiated candidate is the
+    /// same occurrence with the same equation edge. An unsatisfiable
+    /// argument list is an honest miss.
+    fn instantiate_deferred_callable(
+        &self,
+        callable: &crate::semantic_query::DeferredCallable,
+        args: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
+        let type_parameters = Arc::clone(parts.type_parameters);
+        if type_parameters.is_empty() || args.len() > type_parameters.len() {
+            return self.opaque(QueryError::Miss);
+        }
+        let mut params: Vec<crate::semantic_query::FunctionParam> = parts.params.to_vec();
+        let mut bound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        for (index, decl) in type_parameters.iter().enumerate() {
+            let arg = match self.instantiation_argument(args, index, decl.default, &bound) {
+                Some(arg) => arg,
+                None => return self.opaque(QueryError::Miss),
+            };
+            for param in &mut params {
+                param.ty = self.substitute_semantic_type_param(param.ty, decl.param, arg);
+            }
+            bound.push((decl.param, arg));
+        }
+        self.graph().intern_node(SemanticNodeData::DeferredCallable(
+            callable.with_substituted(
+                Arc::from(params.into_boxed_slice()),
+                Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice()),
+            ),
+        ))
+    }
+
+    /// The type argument binding the type parameter at `index`: the
+    /// supplied argument, otherwise its declared default.
+    ///
+    /// A default may REFERENCE an earlier parameter (`<T, U = T>`), and by
+    /// the time it is read those earlier parameters have already been
+    /// substituted away — reading the declared node verbatim would leave a
+    /// binder with no binding. `bound` carries the bindings fixed so far,
+    /// in declaration order, and the default is instantiated under them.
+    /// `None` means the parameter is neither supplied nor defaulted.
+    fn instantiation_argument(
+        &self,
+        args: &[SemanticNodeId],
+        index: usize,
+        default: Option<SemanticNodeId>,
+        bound: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<SemanticNodeId> {
+        if let Some(arg) = args.get(index).copied() {
+            return Some(arg);
+        }
+        let mut default = default?;
+        for (param, arg) in bound {
+            default = self.substitute_semantic_type_param(default, *param, *arg);
+        }
+        Some(default)
+    }
+
+    /// Apply a call site's explicit type arguments to ONE candidate
+    /// signature. `None` when the candidate cannot accept the argument
+    /// list, which drops it from that call site's ordered bucket.
+    ///
+    /// The single authority for that drop: the ordered bucket a call site
+    /// sees and the raw bucket its executor pairs each candidate back to
+    /// must be filtered identically, or a surviving candidate is paired
+    /// with a dropped candidate's binders.
+    pub(super) fn instantiate_call_candidate(
+        &self,
+        signature: SemanticNodeId,
+        type_args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let instantiated = self.apply_typeof_instantiation_args(signature, type_args);
+        let dropped = matches!(
+            self.graph().node_data(instantiated).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        );
+        (!dropped).then_some(instantiated)
+    }
+
     /// Apply instantiation-expression type arguments
     /// (`typeof C.make<string>`) to a resolved generic signature node:
     /// each of the function's OWN type parameters substitutes positionally
@@ -6047,6 +6365,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(data) = self.graph().node_data(node) else {
             return self.opaque(QueryError::Miss);
         };
+        // The sealed index-composed carrier instantiates in place: its
+        // parameters and binders substitute, the occurrence and the
+        // deferral are preserved.
+        if let SemanticNodeData::DeferredCallable(callable) = &*data {
+            let callable = callable.clone();
+            drop(data);
+            return self.instantiate_deferred_callable(&callable, args);
+        }
         let SemanticNodeData::Signature {
             type_parameters, ..
         } = &*data
@@ -6059,12 +6385,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return self.opaque(QueryError::Miss);
         }
         let mut result = node;
+        let mut bound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for (index, decl) in type_parameters.iter().enumerate() {
-            let arg = match args.get(index).copied().or(decl.default) {
+            let arg = match self.instantiation_argument(args, index, decl.default, &bound) {
                 Some(arg) => arg,
                 // Unsatisfied non-defaulted parameter — honest miss.
                 None => return self.opaque(QueryError::Miss),
             };
+            bound.push((decl.param, arg));
             // The walked root IS the signature whose own parameters are being
             // instantiated — its own `type_parameters` entry for `decl.name`
             // must not shadow; NESTED functions re-declaring the name do.
@@ -6078,12 +6406,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
         // Strip the consumed type parameters — the instantiated signature
-        // is non-generic.
+        // is non-generic. Instantiation PRESERVES the occurrence; a
+        // declared carrier retargets the instantiated return.
         match self.graph().node_data(result).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind,
                 params,
                 return_type,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
                 ..
@@ -6094,6 +6425,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 type_parameters: Arc::from(
                     Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
                 ),
+                occurrence: occurrence.clone(),
+                return_carrier: match return_carrier {
+                    crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                        crate::semantic_query::SignatureReturnCarrier::Declared(*return_type)
+                    }
+                    crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                        crate::semantic_query::SignatureReturnCarrier::Function(source.clone())
+                    }
+                },
                 signature_span: *signature_span,
                 return_type_span: *return_type_span,
             }),
@@ -6514,6 +6854,46 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// names (TS reflects them in hover); optional / rest flags track
     /// the original signature. `function_node` must be a
     /// `SemanticNodeData::Signature`; returns `None` otherwise.
+    /// Re-intern `function_node`'s call signature with `ordinary` as its whole
+    /// parameter list — the authored `this` receiver removed. Every other axis
+    /// (kind, return type and carrier, binders, occurrence, spans) is carried
+    /// through unchanged: the signature is the same occurrence minus its
+    /// receiver slot.
+    fn intern_signature_without_receiver(
+        &self,
+        function_node: SemanticNodeId,
+        ordinary: &[crate::semantic_query::FunctionParam],
+    ) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(function_node) else {
+            return function_node;
+        };
+        let SemanticNodeData::Signature {
+            kind,
+            return_type,
+            type_parameters,
+            occurrence,
+            return_carrier,
+            signature_span,
+            return_type_span,
+            ..
+        } = &*data
+        else {
+            return function_node;
+        };
+        let rebuilt = SemanticNodeData::Signature {
+            kind: *kind,
+            params: Arc::from(ordinary.to_vec().into_boxed_slice()),
+            return_type: *return_type,
+            type_parameters: Arc::clone(type_parameters),
+            occurrence: occurrence.clone(),
+            return_carrier: return_carrier.clone(),
+            signature_span: *signature_span,
+            return_type_span: *return_type_span,
+        };
+        drop(data);
+        self.graph().intern_preserving_scope(function_node, rebuilt)
+    }
+
     fn intern_function_params_tuple(
         &self,
         function_node: SemanticNodeId,
@@ -6526,7 +6906,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let params = Arc::clone(params);
         drop(data);
-        let elements: Vec<TupleElement> = params
+        // The authored `this` receiver takes no positional slot: TypeScript's
+        // `Parameters<F>` / `ConstructorParameters<F>` publish the ordinary
+        // parameters only.
+        let elements: Vec<TupleElement> = crate::semantic_query::split_this_receiver(&params)
+            .1
             .iter()
             .map(|param| TupleElement {
                 label: param.name.as_ref().map(Arc::clone),

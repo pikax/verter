@@ -34,19 +34,27 @@ use crate::framework_common::carrier_compiler::{
 };
 use crate::framework_common::ctx::{receive_svelte_carrier_token, CarrierCompilerCtx};
 
+use super::attribute_expressions::SvelteAttributeExpressions;
 use super::parser::{parse_svelte, ParsedSvelte, SvelteScript};
 
-/// The concrete Svelte carrier: the parsed component behind the erasure seam.
+/// The concrete Svelte carrier: the parsed component behind the erasure seam,
+/// plus the typed lowering of its plain-attribute `{expr}` values.
 #[derive(Debug)]
 pub struct SvelteParseCarrier {
     parsed: Arc<ParsedSvelte>,
+    attribute_expressions: SvelteAttributeExpressions,
 }
 
 impl SvelteParseCarrier {
-    /// Wrap a parsed Svelte component.
+    /// Wrap a parsed Svelte component, lowering its plain-attribute values
+    /// against the carrier `source` they were parsed from.
     #[must_use]
-    pub fn new(parsed: Arc<ParsedSvelte>) -> Self {
-        Self { parsed }
+    pub fn new(parsed: Arc<ParsedSvelte>, source: &str) -> Self {
+        let attribute_expressions = SvelteAttributeExpressions::lower(&parsed, source);
+        Self {
+            parsed,
+            attribute_expressions,
+        }
     }
 
     /// The wrapped parse result.
@@ -59,6 +67,12 @@ impl SvelteParseCarrier {
     #[must_use]
     pub fn parsed_arc(&self) -> &Arc<ParsedSvelte> {
         &self.parsed
+    }
+
+    /// The retained typed lowering of this component's plain-attribute values.
+    #[must_use]
+    pub fn attribute_expressions(&self) -> &SvelteAttributeExpressions {
+        &self.attribute_expressions
     }
 }
 
@@ -98,7 +112,7 @@ pub const SVELTE_CARRIER_ARTIFACT_VERSION: verter_language::carrier_versions::Ca
 /// Wrap a parsed Svelte component for the registered projector.
 #[must_use]
 pub fn build_svelte_parse_artifact(
-    _source: &str,
+    source: &str,
     parsed: Arc<ParsedSvelte>,
     parser_version: u32,
 ) -> Arc<FrameworkParseArtifact> {
@@ -110,7 +124,7 @@ pub fn build_svelte_parse_artifact(
             inventory: Arc::default(),
             diagnostics: Vec::new(),
         },
-        Arc::new(SvelteParseCarrier::new(parsed)),
+        Arc::new(SvelteParseCarrier::new(parsed, source)),
     ))
 }
 
@@ -149,9 +163,18 @@ impl SvelteCarrierCompiler {
         &self,
         artifact: &'a FrameworkParseArtifact,
     ) -> Option<&'a ParsedSvelte> {
-        self.ctx
-            .carrier_for::<SvelteParseCarrier>(artifact)
-            .map(|carrier| carrier.parsed())
+        self.svelte_carrier(artifact)
+            .map(SvelteParseCarrier::parsed)
+    }
+
+    /// Reach the Svelte carrier payload — the parse plus its retained typed
+    /// attribute-value lowering — or `None` for a foreign artifact.
+    #[must_use]
+    fn svelte_carrier<'a>(
+        &self,
+        artifact: &'a FrameworkParseArtifact,
+    ) -> Option<&'a SvelteParseCarrier> {
+        self.ctx.carrier_for::<SvelteParseCarrier>(artifact)
     }
 
     /// Run the Svelte IDE projection once and return BOTH the rendered
@@ -293,16 +316,22 @@ impl CarrierCompiler for SvelteCarrierCompiler {
 
     fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
         // A foreign artifact (not a Svelte carrier) yields empty neutral facts.
-        let Some(parsed) = self.parsed_svelte(artifact) else {
+        let Some(carrier) = self.svelte_carrier(artifact) else {
             return TemplateFacts::default();
         };
+        let parsed = carrier.parsed();
         let mut data = crate::compile::RawTemplateData::default();
         // STRUCTURAL walk over the typed `ParsedSvelte.template` tree (mirrors
         // `collect_slot_elements`' walk shape — recurse element children, block
         // children, and each clause's children). The component-by-KIND
         // classification reads the typed AST; expression TEXT is span-sliced from
         // the carrier source. No structural source scan.
-        super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
+        super::template_facts::collect_component_usages(
+            &parsed.template,
+            carrier.attribute_expressions(),
+            source,
+            &mut data,
+        );
         super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
         super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
         TemplateFacts { data }
@@ -317,11 +346,12 @@ impl CarrierCompiler for SvelteCarrierCompiler {
     ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
         // A foreign artifact (not a Svelte carrier) declines with the typed
         // answer — never a silent empty bundle.
-        let Some(parsed) = self.parsed_svelte(artifact) else {
+        let Some(carrier) = self.svelte_carrier(artifact) else {
             return Err(CompileUnsupported::NoIdeProjection {
                 adapter_id: self.adapter_id(),
             });
         };
+        let parsed = carrier.parsed();
 
         let mut bundle = RuntimeCompileOutput::default();
 
@@ -501,7 +531,12 @@ impl CarrierCompiler for SvelteCarrierCompiler {
 
         if opts.want_template_data {
             let mut data = crate::compile::RawTemplateData::default();
-            super::template_facts::collect_component_usages(&parsed.template, source, &mut data);
+            super::template_facts::collect_component_usages(
+                &parsed.template,
+                carrier.attribute_expressions(),
+                source,
+                &mut data,
+            );
             super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
             super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
             bundle.template_data = Some(data);
@@ -1127,6 +1162,37 @@ let count = $state(0);
         // leak into bindings.
         assert!(!prop_names.contains(&"value"));
         assert!(!binding_names.contains(&"onclick"));
+    }
+
+    #[test]
+    fn template_data_reads_bound_prop_expressions_from_the_carrier_lowering() {
+        // A call-shaped bound prop publishes the carrier's retained typed
+        // record, anchored at the CARRIER offset of the call. A static prop
+        // publishes none. Mutation: drop the carrier lowering (or key it on the
+        // attribute span instead of the value span) and the record is absent or
+        // mis-anchored.
+        let source = "<script lang=\"ts\">function makeMsg() { return \"x\"; }</script>\n\
+             <Child label=\"static\" msg={makeMsg()} />";
+        let data = facts_for(source);
+        let usage = &data.components[0];
+        let msg = usage.props.iter().find(|p| p.name == "msg").unwrap();
+        let expression = msg
+            .indexed_expression
+            .as_ref()
+            .expect("a bound prop publishes the retained typed record");
+        assert!(
+            matches!(
+                expression,
+                verter_type_expr::IndexedValueExpression::Call(call)
+                    if call.point == source.rfind("makeMsg()").unwrap() as u32
+            ),
+            "the record is a call anchored at its carrier offset: {expression:?}"
+        );
+        let label = usage.props.iter().find(|p| p.name == "label").unwrap();
+        assert!(
+            label.indexed_expression.is_none(),
+            "a static Text value is not an expression"
+        );
     }
 
     #[test]

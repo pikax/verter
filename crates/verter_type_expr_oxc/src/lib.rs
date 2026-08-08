@@ -21,7 +21,7 @@
 use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSFunctionType, TSImportType,
     TSImportTypeQualifier, TSMappedType, TSMappedTypeModifierOperator, TSQualifiedName,
-    TSSignature, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
+    TSSignature, TSThisParameter, TSTupleElement, TSType, TSTypeName, TSTypeOperatorOperator,
     TSTypeParameterDeclaration, TSTypeQuery, TSTypeQueryExprName, TSTypeReference, UnaryOperator,
 };
 use oxc_span::GetSpan;
@@ -133,7 +133,7 @@ pub fn lower_ts_type(ts_type: &TSType<'_>, source: &str) -> TypeExpr {
         // construct semantics walks the inner function exactly as before.
         TSType::TSConstructorType(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, source),
+                lower_formal_parameters(&ctor.params, None, source),
                 Some(Arc::new(lower_ts_type(
                     &ctor.return_type.type_annotation,
                     source,
@@ -500,7 +500,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         TSSignature::TSMethodSignature(method) => {
             let key = lower_property_key(&method.key, source);
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&method.params, source),
+                lower_formal_parameters(&method.params, method.this_param.as_deref(), source),
                 method
                     .return_type
                     .as_ref()
@@ -529,7 +529,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&call.params, source),
+                lower_formal_parameters(&call.params, call.this_param.as_deref(), source),
                 call.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
@@ -576,7 +576,7 @@ fn lower_ts_signature(sig: &TSSignature<'_>, source: &str) -> Option<ObjectMembe
         }
         TSSignature::TSConstructSignatureDeclaration(ctor) => {
             let func = normalize_function_type_params(FunctionExpr::with_spans(
-                lower_formal_parameters(&ctor.params, source),
+                lower_formal_parameters(&ctor.params, None, source),
                 ctor.return_type
                     .as_ref()
                     .map(|rt| Arc::new(lower_ts_type(&rt.type_annotation, source))),
@@ -648,7 +648,7 @@ fn lower_tuple_element(elem: &TSTupleElement<'_>, source: &str) -> TupleElement 
 
 fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr {
     normalize_function_type_params(FunctionExpr::with_spans(
-        lower_formal_parameters(&func.params, source),
+        lower_formal_parameters(&func.params, func.this_param.as_deref(), source),
         Some(Arc::new(lower_ts_type(
             &func.return_type.type_annotation,
             source,
@@ -664,11 +664,33 @@ fn lower_function_type(func: &TSFunctionType<'_>, source: &str) -> FunctionExpr 
     ))
 }
 
-fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<FunctionParam> {
-    params
-        .items
-        .iter()
-        .map(|param| {
+/// Lower a function-like node's parameter list. An authored `this` receiver
+/// (`(this: T, ...)`) is preserved as the LEADING parameter named `this` — the
+/// representation applicability splits off before ordinary arity, and the one
+/// `ThisParameterType` / `OmitThisParameter` read. OXC carries it outside
+/// `FormalParameters`, so callers pass it explicitly; a node that cannot
+/// author one (a constructor type / construct signature) passes `None`.
+fn lower_formal_parameters(
+    params: &FormalParameters<'_>,
+    this_param: Option<&TSThisParameter<'_>>,
+    source: &str,
+) -> Vec<FunctionParam> {
+    this_param
+        .map(|this| {
+            FunctionParam::with_span(
+                Some("this".to_string()),
+                this.type_annotation
+                    .as_ref()
+                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
+                false,
+                false,
+                Some(this.span.into()),
+                this.type_annotation.is_some(),
+            )
+        })
+        .into_iter()
+        .chain(params.items.iter().map(|param| {
             let name = binding_pattern_name(&param.pattern);
             // OXC structural fact: did this parameter carry an explicit TS
             // annotation? (An explicit `: any` lowers to `Primitive(Any)` like a
@@ -687,7 +709,7 @@ fn lower_formal_parameters(params: &FormalParameters<'_>, source: &str) -> Vec<F
                 Some(param.span().into()),
                 has_ts_annotation,
             )
-        })
+        }))
         .chain(params.rest.as_ref().map(|rest| {
             let name = binding_pattern_name(&rest.rest.argument);
             let has_ts_annotation = rest.type_annotation.is_some();
@@ -722,6 +744,7 @@ fn lower_type_params(type_params: &TSTypeParameterDeclaration<'_>, source: &str)
                 .default
                 .as_ref()
                 .map(|d| Arc::new(lower_ts_type(d, source))),
+            is_const: p.r#const,
         })
         .collect()
 }
@@ -764,6 +787,7 @@ fn normalize_type_parameter_decls(type_parameters: Vec<TypeParam>) -> Vec<TypePa
             name: param.name,
             constraint,
             default,
+            is_const: param.is_const,
         });
     }
 
@@ -1231,6 +1255,7 @@ mod synthetic_carrier_tests {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }];
         let normalized = normalize_type_parameter_refs(&object, &scope);
         let TypeExpr::Object(obj) = &normalized else {

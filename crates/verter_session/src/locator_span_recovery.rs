@@ -285,8 +285,24 @@ pub(crate) fn recover_function_param_span(
 struct FunctionSpanFacts {
     signature_span: Span,
     return_type_span: Option<Span>,
+    /// Positional parameter spans in LOWERED order: an authored `this`
+    /// receiver leads the list, exactly as it leads the lowered parameter
+    /// vector a `FunctionParamSelector::Positional` ordinal indexes.
     param_spans: Vec<Span>,
     rest_param_span: Option<Span>,
+}
+
+/// The lowered positional parameter spans of a function-like node: the
+/// authored `this` receiver first (when present), then `params.items`.
+fn positional_param_spans(
+    this_param: Option<&oxc_ast::ast::TSThisParameter<'_>>,
+    params: &oxc_ast::ast::FormalParameters<'_>,
+) -> Vec<Span> {
+    this_param
+        .map(|this| Span::from(this.span))
+        .into_iter()
+        .chain(params.items.iter().map(|param| Span::from(param.span)))
+        .collect()
 }
 
 /// A member surface reached from a decl body: interface / type-literal
@@ -460,7 +476,7 @@ fn ts_function_type_facts(func: &TSFunctionType<'_>) -> FunctionSpanFacts {
     FunctionSpanFacts {
         signature_span: func.span.into(),
         return_type_span: Some(func.return_type.type_annotation.span().into()),
-        param_spans: func.params.items.iter().map(|p| p.span.into()).collect(),
+        param_spans: positional_param_spans(func.this_param.as_deref(), &func.params),
         rest_param_span: func.params.rest.as_ref().map(|r| r.span.into()),
     }
 }
@@ -478,13 +494,10 @@ fn located_member_function_facts(member: LocatedMember<'_>) -> Option<FunctionSp
                     .return_type
                     .as_ref()
                     .map(|rt| rt.type_annotation.span().into()),
-                param_spans: method
-                    .value
-                    .params
-                    .items
-                    .iter()
-                    .map(|p| p.span.into())
-                    .collect(),
+                param_spans: positional_param_spans(
+                    method.value.this_param.as_deref(),
+                    &method.value.params,
+                ),
                 rest_param_span: method.value.params.rest.as_ref().map(|r| r.span.into()),
             })
         }
@@ -501,7 +514,7 @@ fn signature_function_facts(sig: &TSSignature<'_>) -> Option<FunctionSpanFacts> 
                 .return_type
                 .as_ref()
                 .map(|rt| rt.type_annotation.span().into()),
-            param_spans: method.params.items.iter().map(|p| p.span.into()).collect(),
+            param_spans: positional_param_spans(method.this_param.as_deref(), &method.params),
             rest_param_span: method.params.rest.as_ref().map(|r| r.span.into()),
         }),
         TSSignature::TSCallSignatureDeclaration(call) => Some(FunctionSpanFacts {
@@ -510,7 +523,7 @@ fn signature_function_facts(sig: &TSSignature<'_>) -> Option<FunctionSpanFacts> 
                 .return_type
                 .as_ref()
                 .map(|rt| rt.type_annotation.span().into()),
-            param_spans: call.params.items.iter().map(|p| p.span.into()).collect(),
+            param_spans: positional_param_spans(call.this_param.as_deref(), &call.params),
             rest_param_span: call.params.rest.as_ref().map(|r| r.span.into()),
         }),
         TSSignature::TSConstructSignatureDeclaration(ctor) => Some(FunctionSpanFacts {
@@ -519,7 +532,7 @@ fn signature_function_facts(sig: &TSSignature<'_>) -> Option<FunctionSpanFacts> 
                 .return_type
                 .as_ref()
                 .map(|rt| rt.type_annotation.span().into()),
-            param_spans: ctor.params.items.iter().map(|p| p.span.into()).collect(),
+            param_spans: positional_param_spans(None, &ctor.params),
             rest_param_span: ctor.params.rest.as_ref().map(|r| r.span.into()),
         }),
         _ => None,

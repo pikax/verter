@@ -563,6 +563,11 @@ fn hash_node_rec<H: std::hash::Hasher>(
             hasher.write_u8(26);
             id.hash(hasher);
         }
+        // The sealed callable carrier's parts are readable only by its two
+        // consumers, so the cycle hash mixes the kind alone.
+        SemanticNodeData::DeferredCallable(_) => {
+            hasher.write_u8(31);
+        }
         // `BareRef` is consumed by the `bare_ref_head` arm above the match;
         // every other reference / literal / primitive / alias variant has an
         // explicit arm.

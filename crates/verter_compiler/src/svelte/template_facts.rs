@@ -19,13 +19,17 @@
 //! Typed-IR only: the walk classifies elements BY KIND off the typed AST and
 //! recurses the typed children/clauses; expression TEXT is span-sliced from the
 //! carrier source. There is NO structural source scan — the typed tree is the
-//! authority for what is a component, a prop, a binding, an event.
+//! authority for what is a component, a prop, a binding, an event. A bound
+//! prop's typed expression comes from the carrier's retained
+//! [`SvelteAttributeExpressions`](super::attribute_expressions::SvelteAttributeExpressions)
+//! lowering; this walk never parses.
 
 use crate::compile::{
     RawComponentBindingUsage, RawComponentEventUsage, RawComponentUsage, RawPropData,
     RawTemplateData,
 };
 
+use super::attribute_expressions::SvelteAttributeExpressions;
 use super::parser::template_ast::{
     SvelteAttributeKind, SvelteAttributeValue, SvelteBlock, SvelteBlockKind, SvelteDirectiveKind,
     SvelteElement, SvelteElementKind, SvelteNode, SvelteSpecialKind,
@@ -36,22 +40,29 @@ use verter_span::Span;
 ///
 /// Recurses element children, block children, and each block clause's children
 /// (the same walk shape as `svelte_exec::collect_slot_elements`). `source` is
-/// the carrier component source; expression spans slice it directly.
-pub fn collect_component_usages(nodes: &[SvelteNode], source: &str, data: &mut RawTemplateData) {
+/// the carrier component source; expression spans slice it directly for TEXT.
+/// `expressions` is the carrier's retained typed lowering of bound attribute
+/// values, keyed by the same spans the typed tree records.
+pub fn collect_component_usages(
+    nodes: &[SvelteNode],
+    expressions: &SvelteAttributeExpressions,
+    source: &str,
+    data: &mut RawTemplateData,
+) {
     for node in nodes {
         match node {
             SvelteNode::Element(element) => {
-                if let Some(usage) = component_usage_for(element, source) {
+                if let Some(usage) = component_usage_for(element, expressions, source) {
                     data.components.push(usage);
                 }
                 // Recurse into the element's children regardless of kind — a
                 // component may itself contain nested component usages.
-                collect_component_usages(&element.children, source, data);
+                collect_component_usages(&element.children, expressions, source, data);
             }
             SvelteNode::Block(block) => {
-                collect_component_usages(&block.children, source, data);
+                collect_component_usages(&block.children, expressions, source, data);
                 for clause in &block.clauses {
-                    collect_component_usages(&clause.children, source, data);
+                    collect_component_usages(&clause.children, expressions, source, data);
                 }
             }
             _ => {}
@@ -175,7 +186,11 @@ fn classify(element: &SvelteElement) -> Option<UsageClass> {
 
 /// Build the neutral [`RawComponentUsage`] for a component element, or `None`
 /// when the element is not a component usage.
-fn component_usage_for(element: &SvelteElement, source: &str) -> Option<RawComponentUsage> {
+fn component_usage_for(
+    element: &SvelteElement,
+    expressions: &SvelteAttributeExpressions,
+    source: &str,
+) -> Option<RawComponentUsage> {
     let class = classify(element)?;
     let is_dynamic = matches!(class, UsageClass::Dynamic);
 
@@ -207,6 +222,7 @@ fn component_usage_for(element: &SvelteElement, source: &str) -> Option<RawCompo
                     *name_span,
                     value.as_ref(),
                     attr.span,
+                    expressions,
                     source,
                 ));
             }
@@ -302,16 +318,20 @@ fn plain_prop(
     name_span: Span,
     value: Option<&SvelteAttributeValue>,
     attr_span: Span,
+    expressions: &SvelteAttributeExpressions,
     source: &str,
 ) -> RawPropData {
     let is_bound = matches!(
         value,
         Some(SvelteAttributeValue::Expression(_)) | Some(SvelteAttributeValue::Mixed(_))
     );
+    let expression = value.and_then(|v| expression_text(v, source));
+    let indexed_expression = value.and_then(|value| indexed_expression(value, expressions));
     RawPropData {
         name: name.to_string(),
         is_bound,
-        expression: value.and_then(|v| expression_text(v, source)),
+        expression,
+        indexed_expression,
         referenced_bindings: Vec::new(),
         all_bindings_static: None,
         from_spread: false,
@@ -319,6 +339,18 @@ fn plain_prop(
         name_span,
         is_same_name_shorthand: false,
     }
+}
+
+/// The carrier's retained typed lowering for a bound attribute value. Only an
+/// interpolation carries one; a quoted-text or mixed value is not an expression.
+fn indexed_expression(
+    value: &SvelteAttributeValue,
+    expressions: &SvelteAttributeExpressions,
+) -> Option<verter_type_expr::IndexedValueExpression> {
+    let SvelteAttributeValue::Expression(span) = value else {
+        return None;
+    };
+    expressions.get(*span).cloned()
 }
 
 /// The expression/value text of an attribute value, span-sliced from the

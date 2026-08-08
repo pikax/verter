@@ -63,6 +63,8 @@ fn function_with_return_span(
         params: Arc::from(params.into_boxed_slice()),
         return_type,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
         return_type_span,
     })

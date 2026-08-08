@@ -177,11 +177,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         )
-        .then(|| {
-            self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&identity.decl_name),
-            })
-        })
+        .then(|| self.recursive_ref_sentinel(identity))
     }
 
     fn plan_reference_projection(
@@ -265,9 +261,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     identity.owner,
                     identity.decl_name.as_ref(),
                 ) {
-                    return ReferenceProjectionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&identity.decl_name),
-                    }));
+                    return ReferenceProjectionPlan::Ready(self.recursive_ref_sentinel(identity));
                 }
                 if matches!(
                     context.mode,
@@ -1228,6 +1222,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 remaining -= 1;
                 for parameter in type_parameters.iter() {
+                    if remaining == 0 {
+                        return Some((parameter.param, context));
+                    }
+                    remaining -= 1;
                     if let Some(constraint) = parameter.constraint {
                         if remaining == 0 {
                             return Some((constraint, context));
@@ -1274,6 +1272,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::SyntheticBinding { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::Conditional { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::TypeOf(_)
@@ -1349,6 +1348,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 remaining -= 1;
                 for parameter in type_parameters.iter() {
+                    if remaining == 0 {
+                        return Some((parameter.param, *context));
+                    }
+                    remaining -= 1;
                     if let Some(constraint) = parameter.constraint {
                         if remaining == 0 {
                             return Some((constraint, *context));

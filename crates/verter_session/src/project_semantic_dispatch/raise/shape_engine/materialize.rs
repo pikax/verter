@@ -594,6 +594,10 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                 name: name.as_ref().to_string(),
                 constraint,
                 default,
+                // A type-parameter REFERENCE shape: `is_const` is
+                // declaration metadata (carried on `TypeParamDecl`), not a
+                // property of a use site.
+                is_const: false,
             }),
             degraded_leaves,
         }
@@ -653,6 +657,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
                     name: tp.name.as_ref().to_string(),
                     constraint,
                     default,
+                    is_const: tp.is_const,
                 }
             })
             .collect();

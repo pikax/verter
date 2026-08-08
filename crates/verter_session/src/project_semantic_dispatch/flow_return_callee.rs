@@ -269,6 +269,11 @@ impl CalleeClause {
         }
     }
 
+    /// Whether the clause declares any parameter to instantiate.
+    pub(super) fn is_generic(&self) -> bool {
+        !self.params.is_empty()
+    }
+
     /// READ a callee's own clause from the shallow function-program
     /// entry the index ANSWERED WITH — the one producer on the direct
     /// rail, and the reason that rail cannot fabricate a clause.
@@ -564,6 +569,22 @@ impl CallValue {
         Self(clause.instantiate(dispatch, return_node, origin))
     }
 
+    /// The call value of an already-RESOLVED call: the executor's
+    /// selection applied the substitution, so the return is expressed in
+    /// the caller's terms and no clause transfer remains — stated by
+    /// name through the non-generic clause, never omitted.
+    pub(super) fn of_resolved_call(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        return_node: SemanticNodeId,
+    ) -> Self {
+        Self::of_served_return(
+            dispatch,
+            &CalleeClause::non_generic(),
+            return_node,
+            ReturnOrigin::ClauseScoped,
+        )
+    }
+
     /// A call with NO callee clause in play: the implicit-`any` call of
     /// an unbound or `any`-typed binding, and the modeled `any` of a
     /// degraded callee. `any` declares no binders, so there is nothing
@@ -630,9 +651,23 @@ pub(super) fn unmodeled_position_marker(dispatch: &ProjectSemanticDispatch<'_>) 
 /// the same rule. Carrying only the key is what let the fixed point undo
 /// the call arm's instantiation.
 #[derive(Debug, Clone)]
-pub(super) struct HeldCallee {
-    key: FlowReturnKey,
-    clause: CalleeClause,
+pub(super) enum HeldCallee {
+    /// A hold on another served FLOW position: the target's admitted
+    /// return is expressed in the CALLEE's binders, so the discharge
+    /// owes the same instantiation transfer the call arm performed —
+    /// the clause rides with the key.
+    Flow {
+        key: FlowReturnKey,
+        clause: CalleeClause,
+    },
+    /// A hold on an in-flight RESOLVED CALL: the executor's selection
+    /// already applied the substitution, so the target's result is
+    /// expressed in the caller's terms and joins RAW — no clause, and
+    /// none can be supplied (the call's substitution lives in its
+    /// selection, not here).
+    Call {
+        key: crate::semantic_query::ResolveCallKey,
+    },
 }
 
 impl HeldCallee {
@@ -643,7 +678,7 @@ impl HeldCallee {
     /// discharge's origin is [`ReturnOrigin::ClauseScoped`] by
     /// construction.
     pub(super) fn foreign(key: FlowReturnKey, clause: CalleeClause) -> Self {
-        Self { key, clause }
+        Self::Flow { key, clause }
     }
 
     /// A hold on THIS frame's own slot (direct self-recursion) — the
@@ -656,30 +691,43 @@ impl HeldCallee {
     /// return (`f<T>(x: T): T` answering `T | unknown` instead of `T`).
     /// The non-generic clause states exactly that, by name.
     pub(super) fn own_frame(key: FlowReturnKey) -> Self {
-        Self {
+        Self::Flow {
             key,
             clause: CalleeClause::non_generic(),
         }
     }
 
-    /// The held target's flow identity.
-    pub(super) fn key(&self) -> &FlowReturnKey {
-        &self.key
+    /// A hold on an in-flight call obligation — the ONLY construction of
+    /// the call arm, so a flow frame's dependency on a resolved call is
+    /// stated here and nowhere else.
+    pub(super) fn call(key: crate::semantic_query::ResolveCallKey) -> Self {
+        Self::Call { key }
+    }
+
+    /// The held target's flow identity, when it has one.
+    pub(super) fn flow_key(&self) -> Option<&FlowReturnKey> {
+        match self {
+            Self::Flow { key, .. } => Some(key),
+            Self::Call { .. } => None,
+        }
     }
 
     /// The target's admitted return, as an arm of this entry's fixed
-    /// point — the ONLY accessor that turns a hold target's result into
-    /// a node, so the equation cannot join a raw callee return.
+    /// point — the ONLY accessor that turns a flow hold target's result
+    /// into a node, so the equation cannot join a raw callee return.
     pub(super) fn discharged(
         &self,
         dispatch: &ProjectSemanticDispatch<'_>,
         return_node: SemanticNodeId,
     ) -> CallValue {
-        CallValue::of_served_return(
-            dispatch,
-            &self.clause,
-            return_node,
-            ReturnOrigin::ClauseScoped,
-        )
+        match self {
+            Self::Flow { clause, .. } => CallValue::of_served_return(
+                dispatch,
+                clause,
+                return_node,
+                ReturnOrigin::ClauseScoped,
+            ),
+            Self::Call { .. } => CallValue::of_resolved_call(dispatch, return_node),
+        }
     }
 }

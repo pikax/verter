@@ -8697,6 +8697,8 @@ mod node_predicates_tests {
             kind: crate::semantic_query::SignatureKind::Call,
             params: StdArc::from(Vec::new().into_boxed_slice()),
             return_type: object_body,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(object_body),
             type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,

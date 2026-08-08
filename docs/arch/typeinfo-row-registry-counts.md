@@ -14,10 +14,10 @@ preserved by a named equivalent-or-stronger successor row).
 
 | Count | Value |
 | --- | --- |
-| baseline (registry cardinality) | 364 |
-| ignored | 301 |
+| baseline (registry cardinality) | 365 |
+| ignored | 284 |
 | running_unratified | 14 |
-| lifted | 49 |
+| lifted | 67 |
 | superseded | 0 |
 
 ## Per block
@@ -25,7 +25,7 @@ preserved by a named equivalent-or-stronger successor row).
 | Block | Total | Ignored | Running unratified | Lifted | Superseded |
 | --- | --- | --- | --- | --- | --- |
 | U0.MANIFEST_SUBSTRATE | 0 | 0 | 0 | 0 | 0 |
-| U2.QUERY_VALUE_DOMAIN | 21 | 0 | 0 | 21 | 0 |
+| U2.QUERY_VALUE_DOMAIN | 22 | 0 | 0 | 22 | 0 |
 | U2.BINDER_IDENTITY_FACTS | 0 | 0 | 0 | 0 | 0 |
 | U8.WIRE_SURFACE_CLOSURE | 0 | 0 | 0 | 0 | 0 |
 | U12.EXPORTER | 0 | 0 | 0 | 0 | 0 |
@@ -38,7 +38,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U2.ENUMS | 7 | 7 | 0 | 0 | 0 |
 | U2.MODULE_AUGMENTATION | 4 | 4 | 0 | 0 | 0 |
 | U2.JSX_FOUNDATIONS | 7 | 7 | 0 | 0 | 0 |
-| U6.FLOW_RETURN_SUBSTRATE | 7 | 3 | 1 | 3 | 0 |
+| U6.FLOW_RETURN_SUBSTRATE | 8 | 3 | 1 | 4 | 0 |
 | U6.NARROW_TYPEOF | 15 | 15 | 0 | 0 | 0 |
 | U6.NARROW_EQUALITY | 15 | 15 | 0 | 0 | 0 |
 | U6.NARROW_TRUTHINESS | 15 | 15 | 0 | 0 | 0 |
@@ -48,7 +48,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U6.NARROW_SUBSTITUTION | 11 | 11 | 0 | 0 | 0 |
 | U6.NARROW_INVALIDATION | 5 | 5 | 0 | 0 | 0 |
 | U6.PREDICATE_ASSERTION | 3 | 3 | 0 | 0 | 0 |
-| U6.CALL_RESOLVE | 21 | 21 | 0 | 0 | 0 |
+| U6.CALL_RESOLVE | 20 | 4 | 0 | 16 | 0 |
 | U6.CONTEXTUAL_CALLBACK | 17 | 15 | 2 | 0 | 0 |
 | U6.VALUE_INFERENCE | 1 | 1 | 0 | 0 | 0 |
 | U6.ASYNC_GENERATOR | 1 | 1 | 0 | 0 | 0 |

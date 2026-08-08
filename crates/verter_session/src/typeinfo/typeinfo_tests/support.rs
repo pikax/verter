@@ -86,12 +86,12 @@ pub(super) const FLOW_RETURN_PACKAGE_DECLARATIONS: &str =
 pub(super) const FLOW_RETURN_EDGE_PACKAGE_DECLARATIONS: &str =
     include_str!("fixtures/flow_return_edge_package_declarations.ts");
 
+/// The standalone typeinfo host, built by the ONE shared owner
+/// ([`crate::typeinfo::oracle_core::standalone_host`]) so the rows' tests and
+/// the oracle harness's source-side walk / reducer preflight resolve the SAME
+/// program.
 pub(crate) fn make_host_with_footprint() -> Arc<VerterHost> {
-    Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        footprint_capture: true,
-        ..HostConfig::default()
-    }))
+    crate::typeinfo::oracle_core::standalone_host::standalone_footprint_host()
 }
 
 pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {

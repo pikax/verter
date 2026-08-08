@@ -361,6 +361,9 @@ impl ProjectSemanticDispatch<'_> {
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
                 | SemanticNodeData::RawFallback { .. }
+                // The sealed callable carrier is an intra-transaction call
+                // callee and never reaches a runtime classification.
+                | SemanticNodeData::DeferredCallable(_)
                 | SemanticNodeData::SyntheticBinding { .. } => push_unknown(&mut kinds),
                 SemanticNodeData::Opaque(error) => {
                     if let Some(reasons) = runtime_query_error_partial_reason(error) {

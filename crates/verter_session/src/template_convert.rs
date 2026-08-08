@@ -13,8 +13,9 @@ use verter_semantic::analysis::template::{
     PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
     TemplateAttribute, TemplateBindingOccurrence, TemplateComponentBinding, TemplateComponentEvent,
     TemplateComponentUsage, TemplateComponentVModel, TemplateDirective, TemplateElement,
-    TemplateEventHandler, TemplateMemberRead, TemplatePropUsage, TemplateRef, TemplateTextSegment,
-    UnresolvedBinding, VForDirective, VModelDirective,
+    TemplateEventHandler, TemplateExpressionLocator, TemplateExpressionRecord, TemplateMemberRead,
+    TemplatePropUsage, TemplateRef, TemplateTextSegment, UnresolvedBinding, VForDirective,
+    VModelDirective,
 };
 use verter_semantic::analysis::types::{
     AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, VueApiCallSite, VueApiClassification,
@@ -80,6 +81,7 @@ pub(crate) fn convert_raw_to_analysis(
     class_domains: &TemplateClassDomainIndex,
     unused_declarations: Option<&UnusedDeclarationContext<'_>>,
 ) -> TemplateAnalysisSnapshot {
+    let mut expression_records = Vec::new();
     let components: Vec<TemplateComponentUsage> = raw
         .components
         .iter()
@@ -110,6 +112,16 @@ pub(crate) fn convert_raw_to_analysis(
                         name: p.name.clone(),
                         is_bound: p.is_bound,
                         expression: p.expression.clone(),
+                        expression_locator: p.indexed_expression.as_ref().map(|expression| {
+                            let locator = TemplateExpressionLocator(
+                                u32::try_from(expression_records.len()).unwrap_or(u32::MAX),
+                            );
+                            expression_records.push(TemplateExpressionRecord {
+                                span: p.span,
+                                expression: expression.clone(),
+                            });
+                            locator
+                        }),
                         constness,
                         referenced_bindings: p.referenced_bindings.clone(),
                         from_spread: p.from_spread,
@@ -340,17 +352,27 @@ pub(crate) fn convert_raw_to_analysis(
             let directives = e
                 .directives
                 .iter()
-                .map(|d| TemplateDirective {
-                    name: d.name.clone(),
-                    raw_name: d.raw_name.clone(),
-                    argument: d.argument.clone(),
-                    modifiers: d.modifiers.clone(),
-                    expression: d.expression.clone(),
-                    span: d.span,
-                    name_end: d.name_end,
-                    arg_span: d.arg_span,
-                    expression_span: d.expression_span,
-                    modifier_spans: d.modifier_spans.clone(),
+                .map(|d| {
+                    if let (Some(expression), Some(span)) =
+                        (d.indexed_expression.as_ref(), d.expression_span)
+                    {
+                        expression_records.push(TemplateExpressionRecord {
+                            span,
+                            expression: expression.clone(),
+                        });
+                    }
+                    TemplateDirective {
+                        name: d.name.clone(),
+                        raw_name: d.raw_name.clone(),
+                        argument: d.argument.clone(),
+                        modifiers: d.modifiers.clone(),
+                        expression: d.expression.clone(),
+                        span: d.span,
+                        name_end: d.name_end,
+                        arg_span: d.arg_span,
+                        expression_span: d.expression_span,
+                        modifier_spans: d.modifier_spans.clone(),
+                    }
                 })
                 .collect();
             let bind_class_expressions: Vec<&str> = e
@@ -568,6 +590,7 @@ pub(crate) fn convert_raw_to_analysis(
                 value_span: directive.value_span,
             })
             .collect(),
+        expression_records,
         // prop/emit definitions and type_enhancements come from script analysis.
         ..Default::default()
     };

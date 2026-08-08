@@ -21630,6 +21630,145 @@ const showNative = true
     }
 }
 
+/// A STATIC `is="…"` classifies structurally, exactly as the IDE template
+/// rewrite does: an HTML tag name is a native root, and every other value
+/// is a component reference — here, an in-scope non-type-only import
+/// binding. Both directions are asserted, because the two surfaces must not
+/// disagree about one construct.
+/// Mutation recipe: mint a bare string literal for every static `is=` and
+/// the component direction collapses to a native tag; mint a `typeof` value
+/// reference for every static `is=` and the native direction stops
+/// resolving `div`.
+#[test]
+fn static_is_resolves_imported_component_and_native_tag() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><component is="Child" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/Native.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="div" /></template>"#,
+        )
+        .unwrap();
+
+    let component_meta = get_meta(&project, "/App.vue");
+    assert!(
+        root_chain_steps(&component_meta)
+            .iter()
+            .any(|step| matches!(
+                step,
+                ResolvedRootStep::Component { component_name, .. } if component_name == "Child"
+            )),
+        "a static is=\"Child\" naming an imported binding is a COMPONENT root: {:?}",
+        component_meta.fallthrough_surface
+    );
+    assert!(
+        !root_chain_steps(&component_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "Child")),
+        "a static is=\"Child\" naming an imported binding is never a native tag: {:?}",
+        component_meta.fallthrough_surface
+    );
+
+    let native_meta = get_meta(&project, "/Native.vue");
+    assert!(
+        root_chain_steps(&native_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "div")),
+        "a static is=\"div\" naming no in-scope binding is a NATIVE tag: {:?}",
+        native_meta.fallthrough_surface
+    );
+}
+
+/// The GLOBAL-registration direction of the same authority: a static
+/// `is="GlobalWidget"` names no import and no HTML tag, so it is a COMPONENT
+/// target — exactly what the IDE template rewrite decides through the same
+/// `is_html_tag` authority when it mints a `GlobalComponents` fallback const
+/// for that name. Verter's project side owns no `GlobalComponents`
+/// resolution, so the branch is UNRESOLVED (fail-closed) rather than an
+/// intrinsic attribute surface fabricated for a component; the genuine
+/// native tag in the same fixture still resolves as native.
+///
+/// Mutation recipe: classify a non-import static `is=` as a string literal
+/// again and `GlobalWidget` reappears as `NativeTag`; classify every static
+/// `is=` as a `typeof` reference and `div` stops resolving as native.
+#[test]
+fn static_is_global_component_name_is_a_component_target_not_a_native_tag() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/Global.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="GlobalWidget" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/NativeToo.vue",
+            r#"<script setup lang="ts">
+</script>
+<template><component is="div" /></template>"#,
+        )
+        .unwrap();
+
+    let global_meta = get_meta(&project, "/Global.vue");
+    let global_steps = root_chain_steps(&global_meta);
+    assert!(
+        !global_steps
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { .. })),
+        "a globally-registered is=\"GlobalWidget\" is never a native tag: {:?}",
+        global_meta.fallthrough_surface
+    );
+    assert!(
+        global_steps.iter().any(|step| matches!(
+            step,
+            ResolvedRootStep::Unresolved {
+                reason: UnresolvedBranchReason::DynamicComponentIs,
+                ..
+            }
+        )),
+        "a component target this project cannot resolve fails closed as an \
+         unresolved branch: {:?}",
+        global_meta.fallthrough_surface
+    );
+
+    let native_meta = get_meta(&project, "/NativeToo.vue");
+    assert!(
+        root_chain_steps(&native_meta)
+            .iter()
+            .any(|step| matches!(step, ResolvedRootStep::NativeTag { tag } if tag == "div")),
+        "a genuine native tag still resolves as native: {:?}",
+        native_meta.fallthrough_surface
+    );
+}
+
+/// Every root-chain step reachable from a resolved fallthrough surface.
+fn root_chain_steps(
+    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+) -> Vec<ResolvedRootStep> {
+    match &meta.fallthrough_surface {
+        FallthroughSurface::Branches { branches } => branches
+            .iter()
+            .flat_map(|branch| branch.root_chain.iter().cloned())
+            .collect(),
+        FallthroughSurface::None { .. } => Vec::new(),
+    }
+}
+
 #[test]
 fn root_v_bind_known_object_shape_is_consumed_exactly() {
     let project = make_project();

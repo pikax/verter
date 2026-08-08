@@ -53,6 +53,15 @@ test-util = []
 # NON-test mode (where the `[dev-dependencies]` blake3 is absent). It stays out
 # of the default/production closure — `default` does not list it.
 oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfile"]
+# The AUDITED LIFT COMMAND (`src/bin/oracle_lift.rs`) — the sole writer of the
+# retained `LIFTED_ROW_MIGRATIONS` provenance. It reads the ORIGINAL `#[ignore]`d
+# test body through the closed `syn` migration-fidelity extractor and derives the
+# `migration_fingerprint` + `original_body_tokens` from it, so it needs the
+# extractor's `syn` / `quote` / `blake3` closure (`sha2` is already a regular
+# dependency). Gated so the default
+# build and `cargo clippy --workspace --all-targets` skip the command entirely,
+# exactly like `oracle-gen`; `default` does not list it.
+oracle-lift = ["dep:syn", "dep:quote", "dep:proc-macro2", "dep:blake3"]
 # Opt-in: enables tests that read from `.integration-tests/repos/...`
 # alongside the workspace. The default `cargo test --workspace --tests`
 # run MUST stay hermetic — it does NOT enable this feature. Tests that
@@ -122,6 +131,15 @@ blake3 = { workspace = true, optional = true }
 # + activated ONLY by `oracle-gen`; in `#[cfg(test)]` builds the
 # `[dev-dependencies]` entry below provides it. NEVER on the default closure.
 tempfile = { version = "3.27", optional = true }
+# The migration-fidelity extractor closure the `oracle-lift` command compiles in
+# NON-test mode (the `[dev-dependencies]` copies below serve the `#[cfg(test)]` /
+# integration-test builds). OPTIONAL + activated ONLY by `oracle-lift`, so none of
+# them enter the default/production closure. `span-locations` is what lets the
+# command locate a test fn's attribute + body byte ranges from the parsed item
+# instead of scanning text.
+syn = { version = "2.0", features = ["full", "extra-traits", "visit", "parsing"], optional = true }
+quote = { version = "1.0.45", optional = true }
+proc-macro2 = { version = "1.0", features = ["span-locations"], optional = true }
 # Async runtime for the `oracle-gen` spike's `#[tokio::test]` tsgo driver. OPTIONAL
 # (only the `oracle-gen` feature activates it) so it stays off the default closure.
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "io-util", "process", "sync"], optional = true }
@@ -286,6 +304,14 @@ required-features = ["oracle-gen"]
 name = "oracle_upgrade"
 path = "src/bin/oracle_upgrade.rs"
 required-features = ["oracle-gen"]
+
+# The AUDITED LIFT COMMAND — the sole writer of `LIFTED_ROW_MIGRATIONS`. Run with
+# `cargo run -p verter_session --features oracle-lift --bin oracle_lift -- --row <file.rs>::<fn>`
+# (or `-- --check`). `required-features` keeps it out of the default build.
+[[bin]]
+name = "oracle_lift"
+path = "src/bin/oracle_lift.rs"
+required-features = ["oracle-lift"]
 
 [[bench]]
 name = "host_bench"

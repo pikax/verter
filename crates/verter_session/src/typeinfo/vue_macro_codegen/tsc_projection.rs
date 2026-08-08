@@ -791,6 +791,16 @@ fn inferred_class_members(
                 ) => {
                     return Err(ClassInferenceFailure::InferenceUnavailable(reason));
                 }
+                // A call in the body did not resolve: the member is typed
+                // UNSUPPORTED and suppresses admission — never widened
+                // back to `any`.
+                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    crate::semantic_query::FlowReturnFailure::CallResolution(_),
+                ) => {
+                    return Err(ClassInferenceFailure::Unsupported(
+                        UnsupportedReason::SemanticConstruct,
+                    ));
+                }
                 _ => {
                     return Err(ClassInferenceFailure::Unsupported(
                         UnsupportedReason::SemanticConstruct,

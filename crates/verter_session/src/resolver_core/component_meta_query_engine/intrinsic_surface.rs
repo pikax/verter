@@ -395,6 +395,7 @@ fn expanded_call_signature_from_node(
                     ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
                     constraint: None,
                     default: None,
+                    is_const: param.is_const,
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),

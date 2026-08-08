@@ -154,7 +154,7 @@ fn using_declaration_simulated_return_type_resolves_to_primitive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "typeinfo currently emits a `semanticMiss` for Awaited<ReturnType<typeof async_helper>> where the async helper has a try/finally body and an explicit Promise<T> annotation; keep as the future `await using`-equivalent return-type contract"]
+#[ignore = "`Awaited<ReturnType<typeof async_helper>>` over the try/finally async helper projects the `number` primitive and the row PASSES under --include-ignored; it stays ignored because it has no `ORACLE_QUERY_SPECS` seat: `ProofRequirement::Ts7Oracle` requires a registry entry, a vendored source, a checked-in tsgo snapshot, and retained lift-migration provenance from the audited lift command. Lift under U6.ASYNC_GENERATOR when the row is seated"]
 fn await_using_simulated_return_type_resolves_to_primitive() {
     // TS7 contract (simulated): `Awaited<ReturnType<typeof consumeAsyncDisposable>>`
     // unwraps the Promise<number> to `number`. The SIMULATED form characterises

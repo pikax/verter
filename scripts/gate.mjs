@@ -28,15 +28,40 @@
 //   either is a usage error, exit 127), so neither exit-0 mode can be reached with junk arguments.
 //
 // PURPOSE
-//   Builds the whole workspace test universe ONCE (via `cargo nextest archive`) and runs BOTH
-//   verification surfaces from the SAME archived artifacts:
+//   Builds the whole workspace test universe via `cargo nextest archive` and runs THREE verification
+//   surfaces. Surfaces 1 and 2 share ONE dev-profile archive; surface 3 has its own archive because it
+//   requires a different Cargo profile (see SHIPPED-CFG SURFACE below):
 //     1. nextest run (per-test PROCESS ISOLATION) — surfaces nothing that survives a fork, catches the
 //        ordinary regression set.
 //     2. the verter_session libtest binaries executed DIRECTLY (in-process / multi-test-per-process) —
 //        surfaces shared-process state bugs the isolated path cannot.
-//   Because the only build command issued is the single `--workspace` archive build, the gate NEVER
-//   issues the package-scoped `cargo test -p verter_session` resolution and so structurally cannot incur
-//   the recompile that resolution caused (see "Canonical feature set" below).
+//     3. nextest run over a SECOND archive built with `debug_assertions` OFF — surfaces behaviour that
+//        differs between the debug test build and every shipped artifact.
+//   Every build command issued is a `--workspace` archive build, so the gate NEVER issues the
+//   package-scoped `cargo test -p verter_session` resolution and so structurally cannot incur the
+//   recompile that resolution caused (see "Canonical feature set" below).
+//
+// SHIPPED-CFG SURFACE (surface 3) — WHAT IT COVERS AND WHAT IT DOES NOT
+//   `debug_assert!` does NOT evaluate its argument when `debug_assertions` is off, and
+//   `#[cfg(debug_assertions)]` items do not exist there. Every shipped artifact (the LSP binary, napi,
+//   wasm) is built that way. So a side effect written inside a `debug_assert!` argument — the real,
+//   shipped shape being `debug_assert!(session.commit_completed())`, where the call performs a state
+//   transition — executes in every debug test and in NO shipped build.
+//   NOTHING ELSE IN THIS REPO SEES THAT. Surfaces 1 and 2 are debug builds, so the effect happens and the
+//   tests pass. `cargo check --workspace --release` compiles the shipped cfg but RUNS NOTHING, so it
+//   cannot observe a runtime no-op. Only running tests with `debug_assertions` off makes it observable.
+//   Surface 3 therefore builds the workspace test universe again under the `no-debug-assertions` profile
+//   (declared in the workspace Cargo.toml: `debug_assertions` off + `overflow-checks` off, dev codegen
+//   otherwise) and RUNS the `package(verter_session) + package(verter_scheduler)` filterset from it. The
+//   same profile split also turns a cross-crate item whose availability was gated on `debug_assertions`
+//   into a COMPILE error here, instead of a shipped-build surprise.
+//   NOT COVERED, explicitly: this is not an optimised build. The profile inherits dev codegen (opt-level
+//   0, no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of
+//   scope. It runs under nextest process isolation only — there is no in-process shipped-cfg pass
+//   equivalent to surface 2 — and it runs the filterset above, not the whole archive, so a
+//   `debug_assertions`-dependent regression in a package outside that filterset is not covered.
+//   COST: surface 3 adds a second whole-workspace compile (a different profile is a different unit hash,
+//   so no artifact is shared with the dev archive) plus the filtered run.
 //
 // CANONICAL FEATURE SET (why no `-p verter_session`)
 //   `cargo nextest run --workspace` and `cargo test --workspace` SHARE Cargo feature unification, which
@@ -82,7 +107,8 @@
 //      process whose command line references the RUNNER-OWNED target dir (NOT the repo root), so a
 //      developer's interactive cargo / rust-analyzer (which carry the repo root but write target/debug) is
 //      never touched.
-//   5. Whole-gate hard timeout (default 50m, --timeout) — a deadline for the ENTIRE gate, not per-step. On
+//   5. Whole-gate hard timeout (default 80m, --timeout) — a deadline for the ENTIRE gate, not per-step. It
+//      covers BOTH archive builds and all three surfaces. On
 //      expiry the active step's tree is reaped + a sweep runs; exit 124.
 //   6. Stall detector with SEPARATE build vs test phases:
 //        BUILD phase (the archive build): progress = stdout/stderr byte growth OR runner-owned target-tree
@@ -188,9 +214,9 @@
 //   In CI deps are already installed, so the preflight is a cheap no-op.
 //
 // USAGE
-//   node scripts/gate.mjs [--timeout 50m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
+//   node scripts/gate.mjs [--timeout 80m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
 //                         [--test-threads N]                # THE GATE — exit 0 = suite built + passed.
-//   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 50m] [--stall 12m]
+//   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 80m] [--stall 12m]
 //                                             # warm-pass: archive + list (+ a one-shot warm of the macOS
 //                                             # first-launch assessment). Prints the `PREPARED_NOT_GATE`
 //                                             # marker — this is a PRE-WARM (tests were NOT run), NOT a gate
@@ -199,7 +225,7 @@
 //                                             # positional argument is a usage error (exit 127).
 //   node scripts/gate.mjs --help              # prints this usage + exits 0. Accepts no other argument
 //                                             # (a bare --help only); --help with any other token => 127.
-//     durations: s/m/h suffix or bare seconds (e.g. 50m, 12m, 5s, 90).
+//     durations: s/m/h suffix or bare seconds (e.g. 80m, 12m, 5s, 90).
 //
 //   This CLI accepts ONLY the flags above. There is intentionally NO test-seam / classifier-hook /
 //   custom-command mode — every accepted invocation either runs the real gate, runs the `--prepare`
@@ -500,7 +526,7 @@ function parseArgs(argv) {
     }
     return {
       mode: "help",
-      timeoutSecs: parseDuration("50m"),
+      timeoutSecs: parseDuration("80m"),
       stallSecs: parseDuration("12m"),
       targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
       noFailFast: true,
@@ -514,7 +540,7 @@ function parseArgs(argv) {
   if (argv.includes("--prepare")) {
     const opts = {
       mode: "prepare",
-      timeoutSecs: parseDuration("50m"),
+      timeoutSecs: parseDuration("80m"),
       stallSecs: parseDuration("12m"),
       targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
       noFailFast: true,
@@ -547,7 +573,7 @@ function parseArgs(argv) {
   // Gate mode — the real-gate flag set. No mode flag, so the gate-pass contract applies.
   const opts = {
     mode: "gate",
-    timeoutSecs: parseDuration("50m"),
+    timeoutSecs: parseDuration("80m"),
     stallSecs: parseDuration("12m"),
     targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
     noFailFast: true,
@@ -765,25 +791,61 @@ async function main() {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Archive + list — the shared front half of both the gate and --prepare. Returns the parsed list JSON +
-// the extract dir, or an `{ error }` on setup/build failure.
+// Build VARIANTS. Each is one whole-workspace test universe, built by the SAME `cargo nextest archive
+// --workspace` command and enumerated by the SAME `cargo nextest list` — one archive file and one extract
+// dir per variant, so the two never share artifacts or a listing. There is no second discovery mechanism:
+// a variant only chooses the Cargo profile.
+//
+//   DEBUG          — the default dev profile; surfaces 1 and 2 run from it.
+//   SHIPPED_CFG    — the `no-debug-assertions` profile (see the workspace Cargo.toml): `debug_assertions`
+//                    off and `overflow-checks` off, i.e. the conditional-compilation and runtime-check
+//                    state of every shipped artifact, at dev codegen cost. Surface 3 runs from it.
 // ----------------------------------------------------------------------------------------------------
-async function archiveAndList(ctx) {
+const VARIANT_DEBUG = {
+  key: "debug",
+  cargoProfile: null, // cargo's default (dev)
+  archiveName: "nextest.tar.zst",
+  extractName: "extract",
+  label: "workspace test universe (dev profile)",
+};
+const VARIANT_SHIPPED_CFG = {
+  key: "shipped-cfg",
+  cargoProfile: "no-debug-assertions",
+  archiveName: "nextest-no-debug-assertions.tar.zst",
+  extractName: "extract-no-debug-assertions",
+  label: "workspace test universe (no-debug-assertions profile: debug_assertions OFF)",
+};
+
+// SURFACE 3 selection. `debug_assertions` decides what a `debug_assert!` argument does and which
+// `cfg(debug_assertions)` items exist, so the surface is only meaningful where the tree actually uses
+// those constructs to guard state the tests observe. `verter_session` and the crates it drives own that
+// state, and running them is what makes surface 3 a RUN rather than a compile check. The expression is a
+// nextest filterset evaluated against the release-cfg archive's own listing.
+const SHIPPED_CFG_FILTER = "package(verter_session) + package(verter_scheduler)";
+
+// ----------------------------------------------------------------------------------------------------
+// Archive + list — the shared front half of the gate, --prepare, and surface 3. Returns the parsed list
+// JSON + the extract dir, or an `{ error }` on setup/build failure. `variant` selects the Cargo profile
+// and the per-variant archive/extract paths; everything else (the command, the flags, the parsing, the
+// watchdog model) is identical across variants.
+// ----------------------------------------------------------------------------------------------------
+async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   const { cargoEnv, repoRealpath, runnerTarget, gateDir, deadlineMs, stallMs } = ctx;
-  const archiveFile = join(gateDir, "nextest.tar.zst");
-  const extractDir = join(gateDir, "extract");
+  const archiveFile = join(gateDir, variant.archiveName);
+  const extractDir = join(gateDir, variant.extractName);
   mkdirSync(gateDir, { recursive: true });
   // nextest's --extract-to canonicalizes the destination BEFORE extracting, so it must already exist.
   mkdirSync(extractDir, { recursive: true });
 
   // --- BUILD the whole workspace test universe ONCE (workspace unification => session_metrics ON) ---
-  log("archiving workspace test universe (cargo nextest archive --workspace) …");
+  log(`archiving ${variant.label} (cargo nextest archive --workspace) …`);
   const archiveRes = await runContainedStep({
     cmd: "cargo",
     args: [
       "nextest",
       "archive",
       "--workspace",
+      ...(variant.cargoProfile ? ["--cargo-profile", variant.cargoProfile] : []),
       "--archive-file",
       archiveFile,
       "--target-dir",
@@ -816,16 +878,21 @@ async function archiveAndList(ctx) {
     // a gate FAILURE (exit 1, fail-closed) either way — a build that was signal-killed is not a green build.
     err(
       archiveRes.signalName
-        ? `cargo nextest archive build child terminated by signal ${archiveRes.signalName} (not a ` +
-            "compile exit code) — workspace build did not complete"
-        : `cargo nextest archive build failed (exit ${archiveRes.code}) — workspace did not compile`,
+        ? `cargo nextest archive build [${variant.key}] child terminated by signal ` +
+            `${archiveRes.signalName} (not a compile exit code) — workspace build did not complete`
+        : `cargo nextest archive build [${variant.key}] failed (exit ${archiveRes.code}) — ` +
+            `workspace did not compile under ${variant.cargoProfile || "the dev profile"}`,
     );
     return { error: EXIT_FAIL, where: "archive", res: archiveRes };
   }
-  log(`archive built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`);
+  log(
+    `archive [${variant.key}] built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`,
+  );
 
   // --- LIST the suites from the archive (NO rebuild); JSON to a dedicated stdout capture ---
-  log("listing suites from the archive (cargo nextest list --message-format json) …");
+  log(
+    `listing suites from the [${variant.key}] archive (cargo nextest list --message-format json) …`,
+  );
   const listRes = await runContainedStep({
     cmd: "cargo",
     args: [
@@ -980,14 +1047,129 @@ async function runVueMacroOracleChecks(ctx) {
 }
 
 // ----------------------------------------------------------------------------------------------------
+// SURFACE 3 — the shipped-cfg surface. Builds the whole workspace test universe a SECOND time under the
+// `no-debug-assertions` profile (`debug_assertions` off, `overflow-checks` off — the conditional-
+// compilation and runtime-check state of every shipped artifact) and RUNS the selected tests from it.
+//
+// WHAT ONLY THIS SURFACE CAN SEE. `debug_assert!` does not evaluate its argument when `debug_assertions`
+// is off. A side effect written inside that argument — `debug_assert!(session.commit_completed())`, where
+// the call performs a state transition — runs in every debug test and in NO shipped build. Surfaces 1 and
+// 2 are debug builds, so the effect happens there and every test passes. `cargo check --workspace
+// --release` compiles the shipped cfg but runs nothing, so it cannot see it either. Only executing tests
+// with `debug_assertions` off makes the no-op observable. The same profile split also makes a cross-crate
+// item gated on `debug_assertions` a COMPILE error here rather than a shipped-build surprise, because a
+// dependent's test code is compiled against the same profile as the dependency.
+//
+// WHAT IT DOES NOT COVER, stated plainly: it is not an optimised build. The profile inherits `dev`
+// codegen (opt-level 0, no LTO, many codegen units), so optimisation-, inlining-, and LTO-dependent
+// behaviour is out of scope, as is anything specific to release's `panic`/codegen settings. It also runs
+// under nextest process isolation only — there is no in-process shipped-cfg pass equivalent to surface 2 —
+// and it runs the filterset below, not the whole archive.
+// ----------------------------------------------------------------------------------------------------
+async function runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed) {
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+
+  log(
+    "SURFACE 3: building the shipped-cfg test universe " +
+      "(cargo nextest archive --workspace --cargo-profile no-debug-assertions) …",
+  );
+  const out = await archiveAndList(ctx, VARIANT_SHIPPED_CFG);
+  if (out.error) {
+    err(`SURFACE 3 setup failed at the ${out.where} step`);
+    return { exit: out.error };
+  }
+  const { listJson, extractDir, archiveFile } = out;
+  const allSuites = Object.values(listJson["rust-suites"] || {});
+
+  // SELECTION INTEGRITY. The filterset must match real work in THIS archive's own listing. A filter that
+  // silently selects nothing would let surface 3 report a green run having executed zero tests, which is
+  // the "selectors matched non-zero work" failure the gate contract forbids. Assert the packages the
+  // filterset names are present with the target kinds BEFORE the run, and assert a non-zero run count
+  // AFTER it.
+  const sel = selectSessionSuites(allSuites);
+  if (sel.error) {
+    err(`SURFACE 3 SETUP FAILURE: ${sel.error}`);
+    return { exit: EXIT_USAGE };
+  }
+  const schedulerSuites = allSuites.filter(
+    (s) => s["package-name"] === "verter_scheduler" && (s.kind === "lib" || s.kind === "test"),
+  );
+  if (schedulerSuites.length === 0) {
+    err(
+      "SURFACE 3 SETUP FAILURE: zero verter_scheduler lib/test suites in the shipped-cfg archive " +
+        `listing, but the filterset names that package (${SHIPPED_CFG_FILTER}). Refusing to run a ` +
+        "filterset that cannot match.",
+    );
+    return { exit: EXIT_USAGE };
+  }
+  log(
+    `SURFACE 3: shipped-cfg archive lists ${allSuites.length} suites; filterset '${SHIPPED_CFG_FILTER}' ` +
+      `covers verter_session (lib=${sel.lib}, test=${sel.test}) + verter_scheduler (${schedulerSuites.length} suites)`,
+  );
+
+  const runArgs = [
+    "nextest",
+    "run",
+    "--archive-file",
+    archiveFile,
+    "--extract-to",
+    extractDir,
+    "--extract-overwrite",
+    "--workspace-remap",
+    repoRealpath,
+    "-E",
+    SHIPPED_CFG_FILTER,
+  ];
+  if (opts.noFailFast) runArgs.push("--no-fail-fast");
+  const runRes = await runContainedStep({
+    cmd: "cargo",
+    args: runArgs,
+    cwd: repoRealpath,
+    env: cargoEnv,
+    phase: "test", // TEST phase: byte-growth-only liveness (a silent test binary is a hang)
+    deadlineMs,
+    stallMs,
+    targetDir: runnerTarget,
+  });
+  if (runRes.reason) {
+    err(`SURFACE 3 nextest run ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`);
+    return { exit: mapStepReason(runRes) };
+  }
+  const s3 = analyzeNextestSurface(
+    runRes.stdout + "\n" + runRes.stderr,
+    runRes.code,
+    freshnessToleranceAllowed,
+  );
+  if (s3.summary.runCount === 0) {
+    err(
+      `SURFACE 3 SETUP FAILURE: the filterset '${SHIPPED_CFG_FILTER}' selected ZERO tests to run in the ` +
+        "shipped-cfg archive. A surface that executes nothing proves nothing; refusing to pass it.",
+    );
+    return { exit: EXIT_USAGE };
+  }
+  log(
+    `SURFACE 3 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
+      `${s3.summary.runCount}${s3.summary.unrun > 0 ? `/${s3.summary.initialCount}` : ""} run, ` +
+      `${s3.summary.passed} passed, ${s3.summary.nonPassed} did not pass ` +
+      `(${s3.summary.failed} failed, ${s3.summary.timedOut} timed out, ${s3.summary.execFailed} exec failed` +
+      `${s3.summary.unrun > 0 ? `, ${s3.summary.unrun} NEVER RAN` : ""}) ` +
+      `(${s3.namedCount} named, ${s3.toleratedCount} tolerated), ${s3.summary.skipped} skipped; ` +
+      `run exit ${runRes.code}`,
+  );
+  return { failures: s3.failures, tolerated: s3.toleratedCount > 0 };
+}
+
+// ----------------------------------------------------------------------------------------------------
 // runGate: the full canonical gate.
 //   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
 //   1. Verify the pinned Vue macro oracle and its extractor.
-//   2. archive (build ONCE) + list (parse rust-suites).
+//   2. archive (build ONCE, dev profile) + list (parse rust-suites).
 //   3. SURFACE 1 — nextest run from the archive (process isolation).
 //   4. SURFACE 2 — directly exec every verter_session suite (kind ∈ {lib,test}) with cwd = its package
 //      manifest dir (the in-process / libtest surface). ZERO recompile (reads the archived artifacts).
-//   5. Aggregate failures across both surfaces; tolerated-only => PASS-WITH-TOLERATED.
+//   5. SURFACE 3 — archive the workspace AGAIN under the `no-debug-assertions` profile (shipped
+//      `cfg(debug_assertions)` state) and run the selected tests from it.
+//   6. Aggregate failures across all three surfaces; tolerated-only => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
@@ -1281,6 +1463,15 @@ async function runGate(opts, ctx) {
     `SURFACE 2 done: ${s2Passed} suites clean, ${s2Failed} suites with non-tolerated failures, ${s2Tolerated} tolerated test failures`,
   );
 
+  // ---------- SURFACE 3: shipped-cfg (debug_assertions OFF) build + run ----------
+  // Runs LAST: it needs its own whole-workspace compile, so the two cheap debug surfaces report their
+  // (far more common) regressions first. See runShippedCfgSurface for what this surface covers and, just
+  // as importantly, what it does not.
+  const s3 = await runShippedCfgSurface(opts, ctx, freshnessToleranceAllowed);
+  if (s3.exit !== undefined) return s3.exit;
+  for (const f of s3.failures) failures.push({ surface: `shipped-cfg/${f.surface}`, name: f.name });
+  if (s3.tolerated) toleratedOccurred = true;
+
   // ---------- Aggregate verdict ----------
   if (hardSetupFail) {
     err(
@@ -1304,7 +1495,7 @@ async function runGate(opts, ctx) {
     );
     return EXIT_PASS;
   }
-  log("VERDICT: PASS (both surfaces green)");
+  log("VERDICT: PASS (all three surfaces green)");
   return EXIT_PASS;
 }
 

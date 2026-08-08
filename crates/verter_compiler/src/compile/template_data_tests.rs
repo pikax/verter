@@ -89,12 +89,43 @@ fn bound_ref_prop_not_static() {
 }
 
 #[test]
+fn call_shaped_component_prop_keeps_indexed_expression_record() {
+    let source = r#"<template><Child :msg="makeMsg()" /></template>"#;
+    let data = extract(source);
+    let expression = data.components[0].props[0]
+        .indexed_expression
+        .as_ref()
+        .expect("bound prop keeps parsed expression IR");
+    assert!(matches!(
+        expression,
+        verter_type_expr::IndexedValueExpression::Call(call)
+            if call.point == source.find("makeMsg()").unwrap() as u32
+    ));
+}
+
+#[test]
 fn spread_detected() {
     let data = extract_with_script(
         r#"<template><Child v-bind="obj" /></template>"#,
         "import { reactive } from 'vue'\nconst obj = reactive({})",
     );
     assert!(data.components[0].has_spread);
+}
+
+#[test]
+fn call_shaped_v_bind_spread_keeps_indexed_expression_record() {
+    let source = r#"<template><Child v-bind="makeAttrs()" /></template>"#;
+    let data = extract(source);
+    let directive = data.elements[0]
+        .directives
+        .iter()
+        .find(|directive| directive.name == "bind" && directive.argument.is_none())
+        .expect("argument-less v-bind directive");
+    assert!(matches!(
+        directive.indexed_expression.as_ref(),
+        Some(verter_type_expr::IndexedValueExpression::Call(call))
+            if call.point == source.find("makeAttrs()").unwrap() as u32
+    ));
 }
 
 // ── Binding occurrences ──

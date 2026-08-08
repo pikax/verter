@@ -281,6 +281,7 @@ struct RaisedTypeParam {
     name: Arc<str>,
     constraint: Option<RaisedShapeKey>,
     default: Option<RaisedShapeKey>,
+    is_const: bool,
 }
 
 /// Per-evaluation hash-cons interner: maps a [`RaisedTerm`] to a stable

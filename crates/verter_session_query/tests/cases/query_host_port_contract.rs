@@ -66,6 +66,7 @@ impl QueryHostPort for MockHost {
                         name: "T".to_string(),
                         constraint: None,
                         default: None,
+                        is_const: false,
                     }],
                     visibility: TypeParamVisibility::Body,
                 })
@@ -133,6 +134,7 @@ fn port_serves_neutral_lowering_for_known_locator() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
         "the lowering must carry the owning declaration's type parameters"
     );

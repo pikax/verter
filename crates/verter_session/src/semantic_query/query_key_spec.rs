@@ -25,9 +25,10 @@
 //!    (`ObjectProjection`), `Relate` (`Relation`),
 //!    `ResolveOverloadSet` (`OverloadSet`), `ClassifyBroadRuntime`
 //!    (`BroadRuntime`), `ClassifyMaterializationCycleGate`
-//!    (`MaterializationCycleGate`), and `FlowNarrowingAt` /
-//!    `ContextualTypeAt` (`ProgramAnalysis`), which is the current-tree truth,
-//!    and the
+//!    (`MaterializationCycleGate`), `FlowNarrowingAt` /
+//!    `ContextualTypeAt` (`ProgramAnalysis`), `FlowReturn`
+//!    (`FlowReturn`), and `ResolveCall` (`ResolveCall`), which is the
+//!    current-tree truth, and the
 //!    [`SemanticQueryKeyTag::ALL`](crate::semantic_query::SemanticQueryKeyTag::ALL)
 //!    set triangulates against both the spec set and the enum-scan set.
 //!
@@ -65,6 +66,11 @@
 //!   value domain: each `execute` arm is non-producing (returns `Miss`,
 //!   admission [`NonProducingPendingReducer`](AdmissionSpec::NonProducingPendingReducer))
 //!   until the flow-narrowing / contextual-type reducers land in U6.
+//!   `FlowReturn` records the live
+//!   [`SemanticQueryValueTag::FlowReturn`] domain; only a COMPLETE
+//!   evaluation admits. `ResolveCall` records
+//!   [`SemanticQueryValueTag::ResolveCall`] as a live value domain: only a
+//!   fully discharged mixed-component result admits through singleflight.
 //! - `allowed_demand` is a [`DemandAxis`]-vocabulary mask and does NOT capture
 //!   the `ReductionDemand` slot-selection dimension. A key carrying a
 //!   `ProjectionReductionContext` (`Instantiate` / `KeyOf` / `MappedType` /
@@ -853,11 +859,17 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // skeleton, so `T L J` (no `R`, no `P` — keying on either would be a
         // dead axis; the substitution axis rides on the `base` node, not a
         // separate field). The key has NO slot, so these env dims ride IN
-        // the context. Non-producing: the lib-member index reducer is
-        // unimplemented, so the execute arm returns Miss and never
-        // admits/caches (a fabricated apparent surface would be a stub). The
-        // member-facet demand the apparent surface implies is the mode-axis
-        // facet mask.
+        // the context, alongside the demand-scope witness: a ROOTLESS
+        // callable (no authored occurrence) is scoped by the lexical demand
+        // canonical the witness carries (content-free canonical identity,
+        // R6), and its value is built `cache_suppress` — never admitted.
+        // LIVE producer for the CALLABLE arm: a base carrying call
+        // signatures widens to the scoping project's registered ambient
+        // callable-function interface. Every other base kind (the
+        // primitive-to-wrapper widening) returns Miss from inside the
+        // producer and admits nothing — a fabricated apparent surface would
+        // be a stub. The member-facet demand the apparent surface implies is
+        // the mode-axis facet mask.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::ApparentType,
             lifecycle: KeyLifecycle::Live,
@@ -866,7 +878,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: mode_axes,
             cross_context_guard: "apparent_type_do_not_warm_hit",
-            admission: AdmissionSpec::NonProducingPendingReducer,
+            admission: AdmissionSpec::Singleflight,
         },
         // TemplateLiteralReduce { pattern, args, context } — folds a
         // template-literal type to its surface through the shared deferred
@@ -1012,6 +1024,33 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "flow_return_keys_do_not_warm_hit_across_env_axes",
             admission: AdmissionSpec::Singleflight,
         },
+        // ResolveCall(key: ResolveCallKey) — ONE typed query owning
+        // call/construct applicability, inference, overload ordering
+        // (declaration-order first-applicable), and call return selection.
+        // The full `P R T L J` env rides on `ResolveCallContext` (no slot —
+        // call resolution parses the call-site body and resolves the
+        // callee's imports, the widest-env operation) together with the
+        // full `CanonicalTypeSubstitution` axis. The key identity is the
+        // call-site program point + callee/receiver/argument nodes + kind
+        // + explicit type args + the SEALED-EMPTY flow axis — NO freshness
+        // field (derived at relation time from canonical excess-origin
+        // facts), NO contextual-result or candidate-target axis (excluded
+        // demands), NO budget (runtime state). No mode / demand axis
+        // (`allowed_demand` empty), so the family lives in the `Single`
+        // slot. Value domain is `ResolveCall` (NOT `TypeNode` — the
+        // selected-occurrence + final-substitution carrier, or genuine
+        // dynamic `any`). Only the mixed return-equation boundary can admit.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::ResolveCall,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "ResolveCallContext",
+            value_domain: SemanticQueryValueTag::ResolveCall,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard:
+                "resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 
@@ -1049,6 +1088,7 @@ fn render_value_domain(tag: SemanticQueryValueTag) -> &'static str {
         SemanticQueryValueTag::BroadRuntime => "BroadRuntime",
         SemanticQueryValueTag::MaterializationCycleGate => "MaterializationCycleGate",
         SemanticQueryValueTag::FlowReturn => "FlowReturn",
+        SemanticQueryValueTag::ResolveCall => "ResolveCall",
         SemanticQueryValueTag::DiagnosticAnalysis => "DiagnosticAnalysis",
     }
 }

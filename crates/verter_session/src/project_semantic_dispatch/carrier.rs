@@ -150,8 +150,11 @@ impl AuthoredResolutionDebtFrame {
     /// Finalize this call-owned frame and report whether unresolved-owner debt
     /// remains after normal reference resolution.
     pub(super) fn finish(&self) -> bool {
+        // The latch flips in EVERY build so the frame's finalization state
+        // is configuration-independent; only its prior value is asserted.
+        let was_finished = self.finished.replace(true);
         debug_assert!(
-            !self.finished.replace(true),
+            !was_finished,
             "authored resolution debt must be finalized exactly once"
         );
         self.outstanding.get()
@@ -708,6 +711,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // being materialised by an enclosing `build_instantiate` frame mints
         // `Opaque(RecursiveRef)` — the dispatcher-local `instantiate_active`
         // stack is the single source of truth (never copied into the context).
+        // The sentinel interns under the DECLARING file's scope: the name
+        // alone does not identify the declaration, so the relation engine's
+        // carrier unwrap re-resolves the back-edge through the shared
+        // `Instantiate` dispatch from the scope sidecar (an interface's own
+        // body referencing itself relates exactly like the `DeclRef` the
+        // same reference lowers to at any other position).
         if arg_count == 0
             && self.is_instantiate_active(
                 resolved_root.canonical_id.as_ref(),
@@ -715,8 +724,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 resolved_root.symbol_name.as_ref(),
             )
         {
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::RecursiveRef {
-                name: Arc::clone(&resolved_root.symbol_name),
+            let whole_hash = self
+                .ctx
+                .shallow_file_state(resolved_root.canonical_id.as_ref())
+                .map_or(HashValue::default(), |s| s.whole_hash);
+            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(&DeclIdentity {
+                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                owner: resolved_root.owner,
+                whole_hash,
+                decl_name: Arc::clone(&resolved_root.symbol_name),
             }));
         }
 

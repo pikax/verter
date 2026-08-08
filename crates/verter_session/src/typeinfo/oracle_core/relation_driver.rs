@@ -168,7 +168,7 @@ pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
         RelationStep::Unknown | RelationStep::BudgetExceeded(_) => EngineObservation::Unknown(
             "execute(Relate) returned an undecided judgement".to_string(),
         ),
-        RelationStep::Assumed => EngineObservation::Unknown(
+        RelationStep::Assumed(_) => EngineObservation::Unknown(
             "execute(Relate) hit an unexpected open assumption at the root".to_string(),
         ),
     }

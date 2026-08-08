@@ -556,6 +556,7 @@ fn generic_function_binds_own_type_param_in_params_and_return() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     );
     let expr = TypeExpr::Function(Arc::new(func));
@@ -608,6 +609,7 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             },
             verter_type_expr::TypeParam {
                 name: "U".to_string(),
@@ -616,6 +618,7 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
                     type_arguments: verter_type_expr::empty_type_args(),
                 })),
                 default: None,
+                is_const: false,
             },
         ],
     );
@@ -678,6 +681,7 @@ fn generic_function_default_sees_prior_type_param_binder() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             },
             verter_type_expr::TypeParam {
                 name: "U".to_string(),
@@ -686,6 +690,7 @@ fn generic_function_default_sees_prior_type_param_binder() {
                     name: Arc::from("T"),
                     type_arguments: verter_type_expr::empty_type_args(),
                 })),
+                is_const: false,
             },
         ],
     );

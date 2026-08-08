@@ -421,6 +421,7 @@ fn oracle_normalization_canonicalizes_cosmetic_names() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     )));
     let fn_u = TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
@@ -435,6 +436,7 @@ fn oracle_normalization_canonicalizes_cosmetic_names() {
             name: "U".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }],
     )));
     assert_eq!(
@@ -489,11 +491,13 @@ fn binder_order_is_cross_side_stable() {
                     name: first.to_string(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 },
                 TypeParam {
                     name: second.to_string(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 },
             ],
         )))

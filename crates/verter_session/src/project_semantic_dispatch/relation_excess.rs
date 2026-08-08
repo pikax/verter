@@ -31,19 +31,20 @@
 //!    relation continues against the ORIGINAL target in the same frame, so
 //!    union alternatives never rerun branch-local excess checking.
 //!
-//! **Engine capability without a production caller.** No non-test code path
-//! constructs a [`RelateMemoKey`] with `excess_property_check: true` — the
-//! only non-test references are the `RelationPolicy` field, the reducer's
-//! gate, and oracle identity plumbing defaulting it to `false`. The prepass
-//! becomes user-visible only when a checking surface issues a `Fresh` +
-//! excess ask for an object-literal EXPRESSION source against its expected
-//! type: a value-declaration initializer against its annotation, a call
-//! argument against its parameter type, a return expression against the
-//! declared return type, or a macro object argument against its declared
-//! surface. The behavior is proven by the direct relation-level suite
-//! (`fresh_excess_property_checking` in
-//! `project_semantic_dispatch_invariants_tests.rs`), not by an end-to-end
-//! fixture.
+//! **The production caller.** The call applicability executor is the one
+//! non-test code path that constructs a [`RelateMemoKey`] with
+//! `excess_property_check: true`, and it does so for ARGUMENT positions
+//! only: a receiver (`this`) position never excess-checks, and neither does
+//! a post-inference constraint check. The gate's freshness half comes from
+//! [`ProjectSemanticDispatch::freshness_for_source_node`], the single
+//! freshness authority, so the prepass runs exactly when the argument node
+//! is a proven fresh object literal. An object literal that became a
+//! binding's reaching definition is REGULARIZED at the binding
+//! ([`ProjectSemanticDispatch::regularized_source_node`]) and is therefore
+//! never a fresh source. Other checking surfaces — a value-declaration
+//! initializer against its annotation, a return expression against the
+//! declared return type, a macro object argument against its declared
+//! surface — do not yet issue excess-checked asks.
 //!
 //! **Present semantic gaps in this prepass.**
 //!
@@ -138,6 +139,134 @@ pub(super) enum ArmKnows {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
+    /// Derive the relation-time freshness of one source (argument) node
+    /// from its canonical excess-origin facts — never a key-carried axis.
+    /// [`ExcessPropertyOrigin`] is the single authority: a source is
+    /// `Fresh` ONLY when it is a proven fresh literal — an object surface
+    /// whose every member is `FreshOwn` (a spread-tainted or non-literal
+    /// member revokes freshness). Spread programs, aliases (followed),
+    /// and every non-object node are `Regular`.
+    #[allow(dead_code)] // consumed by the applicability executor (call resolution)
+    pub(crate) fn freshness_for_source_node(
+        &self,
+        node: SemanticNodeId,
+    ) -> crate::semantic_query::FreshnessKey {
+        let graph = self.graph();
+        let mut node = node;
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        loop {
+            if !visited.insert(node) {
+                return crate::semantic_query::FreshnessKey::Regular;
+            }
+            let Some(data) = graph.node_data(node) else {
+                return crate::semantic_query::FreshnessKey::Regular;
+            };
+            match &*data {
+                SemanticNodeData::Alias(target) => {
+                    node = *target;
+                }
+                SemanticNodeData::Object(view) => {
+                    let fresh = view
+                        .positive_members()
+                        .iter()
+                        .all(|member| member.excess_origin == ExcessPropertyOrigin::FreshOwn);
+                    return if fresh {
+                        crate::semantic_query::FreshnessKey::Fresh
+                    } else {
+                        crate::semantic_query::FreshnessKey::Regular
+                    };
+                }
+                _ => return crate::semantic_query::FreshnessKey::Regular,
+            }
+        }
+    }
+
+    /// The REGULARIZED form of one node: the same surface with every
+    /// `FreshOwn` member origin restamped `NonLiteral`, recursively through
+    /// member values and aliases.
+    ///
+    /// Freshness is a property of the object-literal EXPRESSION site alone.
+    /// Once a literal becomes a binding's reaching definition, later reads
+    /// of that binding are variable materialisations — the
+    /// [`ExcessPropertyOrigin::NonLiteral`] origin — so
+    /// [`Self::freshness_for_source_node`] (the single freshness authority)
+    /// answers `Regular` for them and no excess-property prepass runs.
+    ///
+    /// A node carrying no fresh member is returned unchanged, so this never
+    /// mints a peer for an already-regular surface.
+    #[allow(dead_code)] // exercised by the call-resolution tests
+    pub(crate) fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
+            rustc_hash::FxHashMap::default();
+        self.regularize_node(node, &mut memo)
+    }
+
+    /// `memo` is both the shared-subgraph memo and the cycle guard: a node
+    /// is pre-mapped to ITSELF on entry, so a cycle terminates on the
+    /// original node while a second visit through a different member
+    /// reuses the SAME regularized peer instead of the unregularized one.
+    #[allow(dead_code)] // exercised through `regularized_source_node` by tests
+    fn regularize_node(
+        &self,
+        node: SemanticNodeId,
+        memo: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+    ) -> SemanticNodeId {
+        if let Some(regular) = memo.get(&node) {
+            return *regular;
+        }
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return node;
+        };
+        memo.insert(node, node);
+        let regular = match &*data {
+            SemanticNodeData::Alias(target) => {
+                let regular = self.regularize_node(*target, memo);
+                if regular == *target {
+                    node
+                } else {
+                    graph.intern_node(SemanticNodeData::Alias(regular))
+                }
+            }
+            SemanticNodeData::Object(view) => {
+                let mut changed = false;
+                let members = view
+                    .positive_members()
+                    .iter()
+                    .map(|member| {
+                        let value = self.regularize_node(member.value, memo);
+                        if member.excess_origin == ExcessPropertyOrigin::FreshOwn
+                            || value != member.value
+                        {
+                            changed = true;
+                        }
+                        let mut member = member.clone();
+                        member.excess_origin = ExcessPropertyOrigin::NonLiteral;
+                        member.value = value;
+                        member
+                    })
+                    .collect::<Vec<_>>();
+                if changed {
+                    graph.intern_node(SemanticNodeData::Object(
+                        crate::semantic_query::surface_view! {
+                            members: Arc::from(members.into_boxed_slice()),
+                            call_signatures: Arc::clone(&view.call_signatures),
+                            construct_signatures: Arc::clone(&view.construct_signatures),
+                            index_signatures: Arc::clone(&view.index_signatures),
+                            keyspace: view.keyspace,
+                            has_index_signature: view.closed().has_index_signature(),
+                        },
+                    ))
+                } else {
+                    node
+                }
+            }
+            _ => node,
+        };
+        memo.insert(node, regular);
+        regular
+    }
+
     /// Run the fresh excess-property prepass for `key`'s frame. The caller
     /// has already checked the KEY half of the gate (`Fresh` +
     /// `excess_property_check` on an `Assignable` ask).
@@ -992,5 +1121,170 @@ fn filter_primitives_if_contains_nonprimitive(
         arms.to_vec()
     } else {
         filtered
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    //! Freshness derivation from canonical excess-origin facts:
+    //! `FreshOwn` / `SpreadTainted` / `NonLiteral` are the single
+    //! authority — a spread-tainted or non-literal member revokes
+    //! freshness; only an all-`FreshOwn` object surface is `Fresh`.
+
+    use std::sync::Arc;
+
+    use verter_type_expr::ExcessPropertyOrigin;
+
+    use super::*;
+    use crate::semantic_query::{
+        AuthoredPropertyKey, FreshnessKey, MacroOwnBodyStamp, MergeRoleStamp, SurfaceMember,
+    };
+    use crate::{HostConfig, VerterHost};
+
+    fn host() -> VerterHost {
+        VerterHost::new_standalone(HostConfig::default())
+    }
+
+    fn member(origin: ExcessPropertyOrigin, value: SemanticNodeId) -> SurfaceMember {
+        SurfaceMember {
+            key: AuthoredPropertyKey::string("m"),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            excess_origin: origin,
+        }
+    }
+
+    fn object_with(
+        graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+        members: Vec<SurfaceMember>,
+    ) -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::Object(
+            crate::semantic_query::surface_view! {
+                members: Arc::from(members.into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
+    }
+
+    #[test]
+    fn all_fresh_own_members_derive_fresh() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let node = object_with(
+            graph,
+            vec![
+                member(ExcessPropertyOrigin::FreshOwn, string),
+                member(ExcessPropertyOrigin::FreshOwn, string),
+            ],
+        );
+        assert_eq!(
+            dispatch.freshness_for_source_node(node),
+            FreshnessKey::Fresh,
+            "an all-FreshOwn object surface is a proven fresh literal"
+        );
+    }
+
+    #[test]
+    fn empty_object_surface_derives_fresh() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let node = object_with(graph, Vec::new());
+        assert_eq!(
+            dispatch.freshness_for_source_node(node),
+            FreshnessKey::Fresh,
+            "`{{}}` is a fresh literal (vacuously all-FreshOwn)"
+        );
+    }
+
+    /// The spread-derived freshness row: a spread-tainted member revokes
+    /// freshness — excess checking must NOT apply.
+    #[test]
+    fn spread_tainted_member_revokes_freshness() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let node = object_with(
+            graph,
+            vec![
+                member(ExcessPropertyOrigin::FreshOwn, string),
+                member(ExcessPropertyOrigin::SpreadTainted, string),
+            ],
+        );
+        assert_eq!(
+            dispatch.freshness_for_source_node(node),
+            FreshnessKey::Regular,
+            "a spread-tainted member revokes freshness"
+        );
+    }
+
+    #[test]
+    fn non_literal_member_revokes_freshness() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let node = object_with(
+            graph,
+            vec![member(ExcessPropertyOrigin::NonLiteral, string)],
+        );
+        assert_eq!(
+            dispatch.freshness_for_source_node(node),
+            FreshnessKey::Regular,
+            "a non-literal origin is never fresh"
+        );
+    }
+
+    #[test]
+    fn alias_chains_derive_through() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        let object = object_with(graph, vec![member(ExcessPropertyOrigin::FreshOwn, string)]);
+        let alias = graph.intern_node(SemanticNodeData::Alias(object));
+        assert_eq!(
+            dispatch.freshness_for_source_node(alias),
+            FreshnessKey::Fresh,
+            "freshness derives through alias chains"
+        );
+    }
+
+    #[test]
+    fn non_object_nodes_are_regular() {
+        let host = host();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = dispatch.graph();
+        let string = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::String,
+        ));
+        assert_eq!(
+            dispatch.freshness_for_source_node(string),
+            FreshnessKey::Regular,
+            "a primitive is never a fresh object literal"
+        );
     }
 }

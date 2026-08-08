@@ -48,6 +48,7 @@ fn generic_param_rename_does_not_shift_semantic_hash() {
                 name: param_name.to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }],
         )))
     };

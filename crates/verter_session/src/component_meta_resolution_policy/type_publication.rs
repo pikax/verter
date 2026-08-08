@@ -413,6 +413,9 @@ fn proof_reference_map(root: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> Option<
             | SemanticNodeData::Infer { .. }
             | SemanticNodeData::InferRef { .. }
             | SemanticNodeData::RawFallback { .. }
+            // A sealed callable carrier records no reference identity and
+            // opens only to its two sanctioned consumers — terminal here.
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => {}
         }
     }

@@ -9,7 +9,7 @@
 //! │   │                            backedges/lowlinks, the generic pending
 //! │   │                            ledger + watermarks, the tagged
 //! │   │                            provisional substitution table)
-//! │   ├── ObligationIdentity::{Relate}
+//! │   ├── ObligationIdentity::{Relate, FlowReturn, ResolveCall}
 //! │   ├── ObligationReentryStack (frames + tagged index)
 //! │   └── ObligationPendingLedger
 //! └── RelationDomainRuntime      (inference sessions, relation
@@ -62,10 +62,12 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::semantic_query::{
-    ConstParamPolicy, ContextualInferenceMode, FlowReturnFailure, FlowReturnKey, FlowReturnResult,
-    IndexSignature, InferBinding, InferableParamSetId, InferenceCandidatePriority,
-    InferenceContextKey, InferencePassKind, NoInferMask, RecursionOrBudgetCap, RelateMemoKey,
-    RelationPayload, SemanticNodeId, SurfaceMember, TupleElement, VariancePhase, VariancePolicy,
+    CanonicalTypeSubstitution, ConstParamPolicy, ContextualInferenceMode, FlowReturnFailure,
+    FlowReturnKey, FlowReturnResult, IndexSignature, InferBinding, InferableParamSetId,
+    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
+    RecursionOrBudgetCap, RelateMemoKey, RelationPayload, ResolveCallFailure, ResolveCallKey,
+    ResolvedCallResult, SemanticNodeId, SignatureCandidateOrigin, SurfaceMember, TupleElement,
+    VariancePhase, VariancePolicy,
 };
 use crate::semantic_query_memo::InlineRelationFlight;
 
@@ -173,7 +175,33 @@ pub(crate) enum RelationStep {
     /// identity is already on the reentry stack, so the relation is
     /// ASSUMED to hold for this SCC and the caller's frame recorded the
     /// assumption edge. NEVER warm-admitted, NEVER the published proof.
-    Assumed,
+    Assumed(RelationAssumptionEvidence),
+}
+
+/// Exact transient dependency evidence carried by a coinductive relation
+/// assumption. The suffix starts at the intercepted ancestor and ends at the
+/// current demander; it is never admitted into a memo value.
+#[derive(Debug, Clone)]
+pub(crate) struct RelationAssumptionEvidence {
+    closure: Arc<[ObligationIdentity]>,
+}
+
+impl RelationAssumptionEvidence {
+    pub(crate) fn reaches_flow_function(
+        &self,
+        function: &crate::semantic_query::FlowFunctionSlotIdentity,
+    ) -> bool {
+        self.closure.iter().any(|identity| {
+            matches!(identity, ObligationIdentity::FlowReturn(key) if &key.function == function)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty_for_tests() -> Self {
+        Self {
+            closure: Arc::from([]),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +223,10 @@ pub(crate) enum ObligationIdentity {
     /// A whole-function `FlowReturn` evaluation in flight. Reentry
     /// identity IS the `FlowReturnKey` exactly.
     FlowReturn(FlowReturnKey),
+    /// A call-resolution execution. Its transparent generic-runtime frame
+    /// owns no pending/publication payload, but makes every relation opened by
+    /// the executor structurally inline.
+    ResolveCall(ResolveCallKey),
 }
 
 impl ObligationIdentity {
@@ -202,7 +234,7 @@ impl ObligationIdentity {
     pub(crate) fn as_relate(&self) -> Option<(&RelateMemoKey, InferenceOccurrence)> {
         match self {
             Self::Relate { key, occurrence } => Some((key, *occurrence)),
-            Self::FlowReturn(_) => None,
+            Self::FlowReturn(_) | Self::ResolveCall(_) => None,
         }
     }
 
@@ -211,6 +243,15 @@ impl ObligationIdentity {
         match self {
             Self::Relate { .. } => None,
             Self::FlowReturn(key) => Some(key),
+            Self::ResolveCall(_) => None,
+        }
+    }
+
+    /// The call-resolution key, when this obligation is a call.
+    pub(crate) fn as_resolve_call(&self) -> Option<&ResolveCallKey> {
+        match self {
+            Self::Relate { .. } | Self::FlowReturn(_) => None,
+            Self::ResolveCall(key) => Some(key),
         }
     }
 
@@ -260,6 +301,16 @@ pub(crate) struct FlowReturnFrameState {
     /// either completed by the root's batched publish or explicitly
     /// aborted.
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
+    /// Tagged return dependencies discovered by indexed call evaluation
+    /// while this flow frame is active.
+    pub(crate) holds: Vec<ReturnObligationIdentity>,
+}
+
+/// The call-resolution-domain payload of one in-flight frame.
+#[derive(Debug, Default)]
+pub(crate) struct ResolveCallFrameState {
+    /// Store-owned family admission claimed for a non-root inline call.
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
 }
 
 /// The domain payload of one in-flight frame.
@@ -269,6 +320,8 @@ pub(crate) enum ObligationFrameDomain {
     Relate(RelationFrameState),
     /// Flow-return frame state.
     FlowReturn(FlowReturnFrameState),
+    /// Call-resolution frame state.
+    ResolveCall(ResolveCallFrameState),
 }
 
 /// One in-flight obligation frame on the reentry stack — a tagged
@@ -307,7 +360,7 @@ impl ObligationFrame {
     pub(crate) fn relation(&self) -> Option<&RelationFrameState> {
         match &self.domain {
             ObligationFrameDomain::Relate(state) => Some(state),
-            ObligationFrameDomain::FlowReturn(_) => None,
+            ObligationFrameDomain::FlowReturn(_) | ObligationFrameDomain::ResolveCall(_) => None,
         }
     }
 
@@ -315,7 +368,7 @@ impl ObligationFrame {
     pub(crate) fn relation_mut(&mut self) -> Option<&mut RelationFrameState> {
         match &mut self.domain {
             ObligationFrameDomain::Relate(state) => Some(state),
-            ObligationFrameDomain::FlowReturn(_) => None,
+            ObligationFrameDomain::FlowReturn(_) | ObligationFrameDomain::ResolveCall(_) => None,
         }
     }
 
@@ -324,6 +377,15 @@ impl ObligationFrame {
         match &mut self.domain {
             ObligationFrameDomain::Relate(_) => None,
             ObligationFrameDomain::FlowReturn(state) => Some(state),
+            ObligationFrameDomain::ResolveCall(_) => None,
+        }
+    }
+
+    /// The call-resolution frame state mutably, when this is a call frame.
+    pub(crate) fn resolve_call_mut(&mut self) -> Option<&mut ResolveCallFrameState> {
+        match &mut self.domain {
+            ObligationFrameDomain::Relate(_) | ObligationFrameDomain::FlowReturn(_) => None,
+            ObligationFrameDomain::ResolveCall(state) => Some(state),
         }
     }
 }
@@ -395,6 +457,29 @@ impl ObligationReentryStack {
         idx
     }
 
+    /// Push a transparent RESOLVE-CALL executor frame. The frame exists before
+    /// candidate sessions or argument relations are opened, so the generic
+    /// transaction — not a relation-domain special case — classifies those
+    /// relations as inline.
+    pub(crate) fn push_resolve_call(
+        &mut self,
+        key: ResolveCallKey,
+        pending_watermark: usize,
+    ) -> usize {
+        let identity = ObligationIdentity::ResolveCall(key);
+        let idx = self.frames.len();
+        self.frames.push(ObligationFrame {
+            identity: identity.clone(),
+            assumption_targets: Vec::new(),
+            min_open_target: None,
+            budget_cap: None,
+            pending_watermark,
+            domain: ObligationFrameDomain::ResolveCall(ResolveCallFrameState::default()),
+        });
+        self.index.insert(identity, idx);
+        idx
+    }
+
     /// Pop the top frame. Callers uphold strict LIFO nesting (the
     /// transaction's execution model).
     pub(crate) fn pop(&mut self) -> ObligationFrame {
@@ -421,6 +506,16 @@ impl ObligationReentryStack {
         self.frames.get(idx)
     }
 
+    pub(crate) fn assumption_evidence(&self, target: usize) -> RelationAssumptionEvidence {
+        let closure = self.frames[target..]
+            .iter()
+            .map(|frame| frame.identity.clone())
+            .collect::<Vec<_>>();
+        RelationAssumptionEvidence {
+            closure: Arc::from(closure.into_boxed_slice()),
+        }
+    }
+
     /// The frame at `idx` mutably, when in range.
     pub(crate) fn frame_mut_for_update(&mut self, idx: usize) -> Option<&mut ObligationFrame> {
         self.frames.get_mut(idx)
@@ -436,6 +531,32 @@ impl ObligationReentryStack {
             .iter()
             .rev()
             .find_map(|frame| frame.identity.as_relate())
+    }
+
+    /// Attach a resolved-call hold to the nearest active flow frame.
+    /// Returns false when the caller is not executing inside FlowReturn,
+    /// or when the identity is a bare flow return (a flow hold without
+    /// its instantiation clause cannot be transferred — the evaluator's
+    /// own callee gate records those).
+    pub(crate) fn record_nearest_flow_hold(&mut self, hold: ReturnObligationIdentity) -> bool {
+        if matches!(hold, ReturnObligationIdentity::FlowReturn(_)) {
+            return false;
+        }
+        let Some(state) = self
+            .frames
+            .iter_mut()
+            .rev()
+            .find_map(|frame| match &mut frame.domain {
+                ObligationFrameDomain::FlowReturn(state) => Some(state),
+                ObligationFrameDomain::Relate(_) | ObligationFrameDomain::ResolveCall(_) => None,
+            })
+        else {
+            return false;
+        };
+        if !state.holds.contains(&hold) {
+            state.holds.push(hold);
+        }
+        true
     }
 }
 
@@ -531,6 +652,130 @@ pub(crate) struct FlowReturnPendingState {
     pub(crate) fresh_seed: bool,
 }
 
+/// The winning candidate's signature while the shared return equation is
+/// still running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectedSignature {
+    /// A general signature node.
+    General(SemanticNodeId),
+    /// The sealed index-composed carrier. Its general signature is minted
+    /// only once the equation resolves the call's return, so a deferred
+    /// return is never observable as a failed one.
+    Deferred(Box<crate::semantic_query::DeferredCallable>),
+}
+
+/// Stable winner metadata retained while the shared return equation resolves
+/// the call's return node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolveCallSelection {
+    Selected {
+        selected: SignatureCandidateOrigin,
+        selected_signature: SelectedSignature,
+        substitution: CanonicalTypeSubstitution,
+        /// The FRESH primitive-literal return candidates this winner may
+        /// close on: a naked declared return of an unconstrained parameter
+        /// fixed to a bare-literal argument. Consulted at close — a final
+        /// return equal to one of these is a fresh literal the caller's
+        /// return position widens.
+        fresh_literal_returns: Vec<SemanticNodeId>,
+    },
+    /// A UNION callee's per-arm winners: one first-applicable signature in
+    /// EVERY callable arm; the close unions the arm returns.
+    UnionSelected {
+        arms: Vec<ResolveCallUnionArmSelection>,
+    },
+    DynamicAny,
+}
+
+/// One union-callee arm's staged winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolveCallUnionArmSelection {
+    pub(crate) selected: SignatureCandidateOrigin,
+    /// The arm winner's signature node (the sealed deferred carrier node
+    /// when the arm's return deferred — the general signature of a lone
+    /// winner is minted at close, but a union close has no per-arm return
+    /// to mint with, so the carrier node itself is the arm's signature).
+    pub(crate) selected_signature: SemanticNodeId,
+    pub(crate) substitution: CanonicalTypeSubstitution,
+}
+
+impl ResolveCallSelection {
+    /// The winner's fresh primitive-literal return candidates (empty for a
+    /// dynamic-`any` selection).
+    pub(crate) fn fresh_literal_returns(&self) -> &[SemanticNodeId] {
+        match self {
+            Self::Selected {
+                fresh_literal_returns,
+                ..
+            } => fresh_literal_returns,
+            Self::UnionSelected { .. } | Self::DynamicAny => &[],
+        }
+    }
+
+    pub(crate) fn with_return_type(
+        &self,
+        dispatch: &super::ProjectSemanticDispatch<'_>,
+        return_type: SemanticNodeId,
+    ) -> ResolvedCallResult {
+        match self {
+            Self::Selected {
+                selected,
+                selected_signature,
+                substitution,
+                fresh_literal_returns,
+            } => ResolvedCallResult::Selected {
+                selected: selected.clone(),
+                selected_signature: match selected_signature {
+                    SelectedSignature::General(node) => *node,
+                    SelectedSignature::Deferred(callable) => dispatch
+                        .graph()
+                        .intern_node(callable.clone().into_general_signature(return_type)),
+                },
+                substitution: substitution.clone(),
+                return_type,
+                fresh_literal_return: fresh_literal_returns.contains(&return_type),
+            },
+            Self::UnionSelected { arms } => ResolvedCallResult::UnionSelected {
+                selections: Arc::from(
+                    arms.iter()
+                        .map(|arm| crate::semantic_query::ResolvedUnionArm {
+                            selected: arm.selected.clone(),
+                            selected_signature: arm.selected_signature,
+                            substitution: arm.substitution.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                return_type,
+            },
+            Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
+        }
+    }
+}
+
+/// The call-resolution-domain deferral payload of a popped member.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolveCallPendingState {
+    /// The fixed winning occurrence/substitution, without a pre-equation
+    /// return node.
+    pub(crate) selection: ResolveCallSelection,
+    /// Concrete return seeds owned by the call (declared return or dynamic
+    /// `any`).
+    pub(crate) concrete_seeds: Vec<SemanticNodeId>,
+    /// Tagged return dependencies (a body-derived winner holds FlowReturn).
+    pub(crate) holds: Vec<ReturnObligationIdentity>,
+    /// Candidate session staged by this winner, committed only after the
+    /// mixed component is stable.
+    pub(crate) staged_session: Option<SessionId>,
+    /// Relation-only assumptions require a fresh applicability replay at the
+    /// component root before the return equation runs.
+    pub(crate) replay_applicability: bool,
+    /// Store-owned admission for this inline member.
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
+    /// The call site's own file roots.
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
 /// The domain deferral payload of a popped member.
 #[derive(Debug)]
 pub(crate) enum PendingObligationDomain {
@@ -538,6 +783,9 @@ pub(crate) enum PendingObligationDomain {
     Relate(RelationPendingState),
     /// Flow-return deferral state.
     FlowReturn(FlowReturnPendingState),
+    /// ResolveCall deferral state (boxed: the union-selection payload
+    /// makes this by far the largest domain).
+    ResolveCall(Box<ResolveCallPendingState>),
 }
 
 /// The per-`CheckerDispatchTransaction` pending ledger (design §2.3 step 4
@@ -557,6 +805,16 @@ impl ObligationPendingLedger {
     /// at push.
     pub(crate) fn pending_len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Whether `identity` is an OPEN member of the enclosing component —
+    /// deposited here and not yet drained by an SCC close. A hold edge is
+    /// only meaningful against such a member; anything else has already
+    /// converged to a value.
+    pub(crate) fn contains(&self, identity: &ObligationIdentity) -> bool {
+        self.pending
+            .iter()
+            .any(|member| &member.identity == identity)
     }
 
     /// Drain every member deposited at or after `watermark` — exactly the
@@ -579,6 +837,8 @@ impl ObligationPendingLedger {
 pub(crate) enum ProvisionalVerdict {
     /// A relation step verdict.
     Relate(RelationStep),
+    /// A converged call result used while relation members re-discharge.
+    ResolveCall(ResolvedCallResult),
 }
 
 /// The ONE tagged provisional substitution table: SCC members re-discharge
@@ -596,7 +856,18 @@ pub(crate) fn provisional_relate_step<'a>(
         occurrence,
     }) {
         Some(ProvisionalVerdict::Relate(step)) => Some(step),
-        None => None,
+        Some(ProvisionalVerdict::ResolveCall(_)) | None => None,
+    }
+}
+
+/// Read a RESOLVE-CALL result from the tagged table.
+pub(crate) fn provisional_resolve_call_result<'a>(
+    substitution: &'a ProvisionalSubstitution,
+    key: &ResolveCallKey,
+) -> Option<&'a ResolvedCallResult> {
+    match substitution.get(&ObligationIdentity::ResolveCall(key.clone())) {
+        Some(ProvisionalVerdict::ResolveCall(result)) => Some(result),
+        _ => None,
     }
 }
 
@@ -694,15 +965,18 @@ impl ObligationRuntime {
 // Relation domain runtime
 // ---------------------------------------------------------------------------
 
-/// Lifecycle of an in-flight inference session (design Decision 3).
+/// Lifecycle of an in-flight inference session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InferenceSessionState {
     /// Still collecting candidates — NOT converged (ReturnOnly).
-    InProgress,
-    /// Fixation completed deterministically: every inferable param is
-    /// fixed-or-deterministically-defaulted and the final bindings are
-    /// immutable. The ONLY state that admits.
-    CompletedDeterministic,
+    Collecting,
+    /// Fixation completed deterministically. The binding snapshot is
+    /// immutable and the session is inactive for deposits, but it has not
+    /// crossed the atomic publication boundary.
+    StagedDeterministic,
+    /// The staged snapshot crossed its stability gate. The ONLY state that
+    /// admits when its ledger is atomically drained.
+    CommittedDeterministic,
     /// Cancel / budget-exceeded / superseded / non-deterministic — the
     /// deferred batch releases WITHOUT publish (ReturnOnly).
     Abandoned,
@@ -787,6 +1061,14 @@ pub(crate) struct InferenceInfoSetup {
     param_node: SemanticNodeId,
     /// The parameter's display name (bindings surface by name).
     param_name: Arc<str>,
+    /// Call inference owns const policy per declaration parameter. Other
+    /// inference domains use the neutral ordinary policy.
+    const_policy: ConstParamPolicy,
+    /// Whether the declared parameter carries a constraint. A FRESH
+    /// primitive-literal candidate stays fresh only for an UNCONSTRAINED
+    /// parameter (a constrained parameter's preserved literal is regular
+    /// — the upper-bound check regularizes it).
+    has_constraint: bool,
 }
 
 impl InferenceInfoSetup {
@@ -794,6 +1076,22 @@ impl InferenceInfoSetup {
         Self {
             param_node,
             param_name,
+            const_policy: ConstParamPolicy::NonConst,
+            has_constraint: false,
+        }
+    }
+
+    pub(crate) fn for_call(
+        param_node: SemanticNodeId,
+        param_name: Arc<str>,
+        const_policy: ConstParamPolicy,
+        has_constraint: bool,
+    ) -> Self {
+        Self {
+            param_node,
+            param_name,
+            const_policy,
+            has_constraint,
         }
     }
 }
@@ -860,6 +1158,8 @@ impl InferenceSessionSetup {
 struct InferenceInfo {
     param_node: SemanticNodeId,
     param_name: Arc<str>,
+    const_policy: ConstParamPolicy,
+    has_constraint: bool,
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
@@ -877,6 +1177,11 @@ struct InferenceInfo {
 /// a not-yet-knowable fingerprint does not arise in this subset).
 #[derive(Debug)]
 pub(crate) struct InferenceSession {
+    /// FRESH primitive-literal deposits accepted at a NAKED top-level
+    /// position of an UNCONSTRAINED parameter: `(param, literal)` pairs.
+    /// Freshness provenance consumed at fixation to mark a naked declared
+    /// return as a fresh literal the caller's return position widens.
+    fresh_literal_deposits: Vec<(SemanticNodeId, SemanticNodeId)>,
     /// The transient per-transaction token (content-free, never a key).
     #[allow(dead_code)] // identity for ledger keying; retained for the session stack
     pub(crate) id: SessionId,
@@ -887,6 +1192,8 @@ pub(crate) struct InferenceSession {
     /// Reverse-projection journals, present only for a reverse-homomorphic
     /// session selected at open.
     reverse_projection: Option<ReverseProjectionState>,
+    /// Immutable fixed bindings retained across staging and commit.
+    staged_bindings: Option<Arc<[InferBinding]>>,
     /// Session lifecycle.
     pub(crate) state: InferenceSessionState,
 }
@@ -903,15 +1210,19 @@ impl InferenceSession {
             .map(|info| InferenceInfo {
                 param_node: info.param_node,
                 param_name: Arc::clone(&info.param_name),
+                const_policy: info.const_policy,
+                has_constraint: info.has_constraint,
                 candidates: Vec::new(),
             })
             .collect();
         Self {
+            fresh_literal_deposits: Vec::new(),
             id,
             setup,
             infos,
             reverse_projection,
-            state: InferenceSessionState::InProgress,
+            staged_bindings: None,
+            state: InferenceSessionState::Collecting,
         }
     }
 
@@ -963,6 +1274,9 @@ impl InferenceSession {
     /// checkpoint (foreign session) is ignored rather than corrupting
     /// state.
     pub(crate) fn rollback_to(&mut self, checkpoint: &SessionCheckpoint) {
+        if self.state != InferenceSessionState::Collecting {
+            return;
+        }
         if checkpoint.candidate_lens.len() != self.infos.len() {
             debug_assert!(
                 false,
@@ -1011,6 +1325,9 @@ impl InferenceSession {
     /// registration, so nested checkpoints can remove it without mutating an
     /// earlier alternative's state.
     pub(crate) fn register_projection_targets(&mut self, targets: &[SemanticNodeId]) -> bool {
+        if self.state != InferenceSessionState::Collecting {
+            return false;
+        }
         let Some(reverse) = self.reverse_projection.as_mut() else {
             return false;
         };
@@ -1044,6 +1361,9 @@ impl InferenceSession {
         priority: InferenceCandidatePriority,
         variance: VariancePhase,
     ) -> bool {
+        if self.state != InferenceSessionState::Collecting {
+            return false;
+        }
         let Some(info) = self.reverse_projection.as_mut().and_then(|reverse| {
             reverse
                 .projection_infos
@@ -1078,12 +1398,18 @@ impl InferenceSession {
     }
 
     pub(crate) fn push_recovered(&mut self, recovered: ReverseRecoveredEntry) {
+        if self.state != InferenceSessionState::Collecting {
+            return;
+        }
         if let Some(reverse) = self.reverse_projection.as_mut() {
             reverse.recovered.push(recovered);
         }
     }
 
     pub(crate) fn mark_reverse_partial(&mut self) {
+        if self.state != InferenceSessionState::Collecting {
+            return;
+        }
         if let Some(reverse) = self.reverse_projection.as_mut() {
             reverse.partial = true;
         }
@@ -1111,6 +1437,9 @@ impl InferenceSession {
         candidate: SemanticNodeId,
         priority: InferenceCandidatePriority,
     ) -> bool {
+        if self.state != InferenceSessionState::Collecting {
+            return false;
+        }
         let Some(info_index) = self
             .infos
             .iter()
@@ -1142,6 +1471,9 @@ impl InferenceSession {
         priority: InferenceCandidatePriority,
         variance: VariancePhase,
     ) -> bool {
+        if self.state != InferenceSessionState::Collecting {
+            return false;
+        }
         let Some(info) = self
             .infos
             .iter_mut()
@@ -1157,19 +1489,65 @@ impl InferenceSession {
         true
     }
 
-    /// Fixation (design §4.2): combine each parameter's candidates into its
+    /// Whether `param_node` is one of this session's frozen inference
+    /// declarations — a deposit target the forward relation arm binds.
+    pub(crate) fn declares(&self, param_node: SemanticNodeId) -> bool {
+        self.infos.iter().any(|info| info.param_node == param_node)
+    }
+
+    /// Record a FRESH primitive-literal deposit for `param_node`. A
+    /// constrained parameter regularizes its preserved literal, so the
+    /// note is a no-op there.
+    pub(crate) fn note_fresh_literal_deposit(
+        &mut self,
+        param_node: SemanticNodeId,
+        literal: SemanticNodeId,
+    ) {
+        let unconstrained = self
+            .infos
+            .iter()
+            .any(|info| info.param_node == param_node && !info.has_constraint);
+        if unconstrained {
+            self.fresh_literal_deposits.push((param_node, literal));
+        }
+    }
+
+    /// Whether `param_node` accepted a FRESH deposit of exactly `literal`.
+    pub(crate) fn fresh_literal_deposit(
+        &self,
+        param_node: SemanticNodeId,
+        literal: SemanticNodeId,
+    ) -> bool {
+        self.fresh_literal_deposits.contains(&(param_node, literal))
+    }
+
+    pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
+        (self.context_key().pass_kind == InferencePassKind::CallApplicability)
+            .then(|| {
+                self.infos
+                    .iter()
+                    .find(|info| info.param_node == param_node)
+                    .map(|info| info.const_policy)
+            })
+            .flatten()
+    }
+
+    /// Stage deterministic fixation: combine each parameter's candidates into its
     /// final binding through the closed priority ladder — the HIGHEST rung
     /// with candidates wins. Within the chosen rung the combination
     /// variance is PER-CANDIDATE: when any candidate came from a
     /// contravariant position, the contravariant candidates win and
     /// INTERSECT (the TS contravariant-inference rule); otherwise the
     /// covariant candidates union (deduplicated). Every parameter fixes
-    /// (unfixed parameters default to `unknown`), so the session always
-    /// reaches `CompletedDeterministic`.
-    pub(crate) fn fixate<F>(&mut self, mut combine: F) -> Vec<InferBinding>
+    /// (unfixed parameters default to `unknown`). Only a collecting session
+    /// may stage, and staging makes every candidate journal deposit-inactive.
+    pub(crate) fn stage_fixation<F>(&mut self, mut combine: F) -> Option<Arc<[InferBinding]>>
     where
         F: FnMut(&[SemanticNodeId], VariancePhase) -> SemanticNodeId,
     {
+        if self.state != InferenceSessionState::Collecting {
+            return None;
+        }
         let mut bindings = Vec::with_capacity(self.infos.len());
         let infos = std::mem::take(&mut self.infos);
         for info in &infos {
@@ -1182,9 +1560,105 @@ impl InferenceSession {
             });
         }
         self.infos = infos;
-        self.state = InferenceSessionState::CompletedDeterministic;
-        bindings
+        let bindings = Arc::from(bindings.into_boxed_slice());
+        self.staged_bindings = Some(Arc::clone(&bindings));
+        self.state = InferenceSessionState::StagedDeterministic;
+        Some(bindings)
     }
+
+    /// The per-parameter fixation inputs of a COLLECTING session, in
+    /// declaration order: the parameter node, its display name, the winning
+    /// candidate rung, and that rung's combination variance.
+    ///
+    /// Fixation itself runs OUTSIDE the transaction borrow, because
+    /// TypeScript's `getInferredType` needs a relation (an uninferred
+    /// parameter falls back to its CONSTRAINT when the default-or-`unknown`
+    /// fallback does not satisfy it) and a relation re-enters the
+    /// transaction. The computed bindings are staged back through
+    /// [`Self::stage_fixation_bindings`].
+    pub(crate) fn fixation_inputs(&self) -> Option<Vec<FixationInput>> {
+        if self.state != InferenceSessionState::Collecting {
+            return None;
+        }
+        Some(
+            self.infos
+                .iter()
+                .map(|info| {
+                    let (candidates, variance) = select_inference_candidates(&info.candidates);
+                    FixationInput {
+                        param: info.param_node,
+                        name: Arc::clone(&info.param_name),
+                        candidates,
+                        variance,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Stage an immutable fixation snapshot computed from
+    /// [`Self::fixation_inputs`]. Only a collecting session may stage, and
+    /// staging makes every candidate journal deposit-inactive.
+    pub(crate) fn stage_fixation_bindings(
+        &mut self,
+        bindings: Vec<InferBinding>,
+    ) -> Option<Arc<[InferBinding]>> {
+        if self.state != InferenceSessionState::Collecting {
+            return None;
+        }
+        let bindings = Arc::from(bindings.into_boxed_slice());
+        self.staged_bindings = Some(Arc::clone(&bindings));
+        self.state = InferenceSessionState::StagedDeterministic;
+        Some(bindings)
+    }
+
+    /// Commit an immutable staged snapshot after its stability gate. The
+    /// caller must immediately drain/publish the owning ledger boundary.
+    pub(crate) fn commit_completed(&mut self) -> bool {
+        if self.state != InferenceSessionState::StagedDeterministic
+            || self.staged_bindings.is_none()
+        {
+            return false;
+        }
+        self.state = InferenceSessionState::CommittedDeterministic;
+        true
+    }
+
+    /// Abandon a collecting or staged session. A committed snapshot cannot be
+    /// rolled back after publication admission begins.
+    pub(crate) fn abandon(&mut self) -> bool {
+        if !matches!(
+            self.state,
+            InferenceSessionState::Collecting | InferenceSessionState::StagedDeterministic
+        ) {
+            return false;
+        }
+        for info in &mut self.infos {
+            info.candidates.clear();
+        }
+        if let Some(reverse) = self.reverse_projection.as_mut() {
+            reverse.projection_infos.clear();
+            reverse.recovered.clear();
+            reverse.partial = false;
+            reverse.aggregate_candidates.clear();
+        }
+        self.staged_bindings = None;
+        self.state = InferenceSessionState::Abandoned;
+        true
+    }
+}
+
+/// One parameter's fixation inputs — see
+/// [`InferenceSession::fixation_inputs`].
+pub(crate) struct FixationInput {
+    /// The exact declaration node whose binder fixes.
+    pub(crate) param: SemanticNodeId,
+    /// The binder's display name.
+    pub(crate) name: Arc<str>,
+    /// The winning candidate rung (empty when the parameter is uninferred).
+    pub(crate) candidates: Vec<SemanticNodeId>,
+    /// That rung's combination variance.
+    pub(crate) variance: VariancePhase,
 }
 
 /// Select the winning priority rung and combination variance for a candidate
@@ -1252,7 +1726,7 @@ pub(crate) fn redischarge_is_stable(
 
 /// The per-session deferred-admission ledger (design §2.3 step 4 /
 /// §3.3): binding members of a not-yet-closed SCC record here at
-/// SCC-close; the drain at the relevant session's `CompletedDeterministic`
+/// SCC-close; the drain at the relevant session's `CommittedDeterministic`
 /// close re-discharges against the converged state and publishes ONLY a
 /// stable determined outcome (flip / abandonment publishes nothing).
 #[derive(Debug, Default)]
@@ -1264,6 +1738,15 @@ impl SessionAdmissionLedger {
     /// Record `key` as deferred on session `session`'s close.
     pub(crate) fn defer(&mut self, session: SessionId, key: RelateMemoKey) {
         self.deferred.entry(session).or_default().push(key);
+    }
+
+    /// Validate a deferred member without consuming the ledger. Mixed
+    /// return components perform every fallible check before committing
+    /// call sessions, then drain in the no-semantic-work publication tail.
+    pub(crate) fn contains(&self, session: SessionId, key: &RelateMemoKey) -> bool {
+        self.deferred
+            .get(&session)
+            .is_some_and(|keys| keys.iter().any(|candidate| candidate == key))
     }
 
     /// Drain every key deferred on `session` (at that session's close).
@@ -1304,7 +1787,34 @@ pub(crate) struct RelationDomainRuntime {
     /// Per-target-node memo of the `infer`-pattern detection (a pure
     /// function of the pattern; avoids rescanning per ask).
     pub(crate) pattern_cache: FxHashMap<SemanticNodeId, Option<super::relation::InferPatternInfo>>,
+    /// Nestable call-applicability final-check barriers. Sessions below the
+    /// newest length watermark are inactive; a genuinely nested call may push
+    /// a fresh session above it and infer normally.
+    binding_disabled_session_barriers: Vec<usize>,
+    /// Literal interpretation for the current call argument relation. Empty
+    /// outside call-owned collection, so ordinary relation inference is
+    /// unchanged.
+    call_argument_literal_modes: Vec<CallArgumentLiteralPolicy>,
+    /// Monotonic count of ACCEPTED session deposits (ordinary, reverse
+    /// aggregate, and projection), bumped at each acceptance site. The
+    /// call executor charges its `inference_deposits` fuse from deltas of
+    /// this counter, so the fuse's unit is the accepted deposit itself —
+    /// never one unit per top-level argument.
+    pub(crate) accepted_inference_deposits: u64,
     next_session_id: u64,
+}
+
+/// One in-flight call-argument relation's literal policy: the argument's
+/// authored literal mode plus the parameter positions its declared TARGET
+/// exposes at TOP LEVEL (the naked type-parameter set — the parameter
+/// itself or a union / intersection arm). A deposit into a top-level
+/// position preserves a primitive-literal candidate (TypeScript's naked
+/// inference, constrained or not); a nested deposit widens under the
+/// parameter's const policy.
+#[derive(Debug)]
+struct CallArgumentLiteralPolicy {
+    literal_mode: Option<crate::semantic_query::ArgumentLiteralMode>,
+    top_level_infer_targets: Vec<SemanticNodeId>,
 }
 
 /// Saved transient state for a nested SCC re-discharge. Persistent relation
@@ -1335,6 +1845,19 @@ pub(crate) struct CompletedFlowReturnMember {
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
 }
 
+/// A call member whose mixed component closed cleanly, queued for the
+/// root's completed-member drain — fenced backfill behind the root's
+/// committing admission, never a second commit boundary.
+#[derive(Debug)]
+pub(crate) struct CompletedResolveCallMember {
+    pub(crate) key: ResolveCallKey,
+    /// The admitted result. A rootless winner cannot be represented here,
+    /// so it never reaches the shared cache.
+    pub(crate) result: crate::semantic_query::AdmissibleCallResult,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineResolveCallFlight>,
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
 /// The flow-return domain runtime: the completed flow members queued
 /// for the relation root's batched publish. Contributor maps ride the
 /// in-flight frames and the tagged pending ledger (a popped member's
@@ -1353,6 +1876,17 @@ pub(crate) struct FlowReturnDomainRuntime {
     pub(crate) last_root_failure: Option<crate::semantic_query::FlowReturnFailure>,
 }
 
+/// The call-resolution domain runtime.
+#[derive(Debug, Default)]
+pub(crate) struct ResolveCallDomainRuntime {
+    /// Mixed-component members awaiting the root carrier's drain (fenced
+    /// backfill behind the root's committing admission).
+    pub(crate) completed_members: Vec<CompletedResolveCallMember>,
+    /// Typed failure channel for a machinery-root call whose family value is
+    /// suppressed.
+    pub(crate) last_root_failure: Option<ResolveCallFailure>,
+}
+
 /// The per-obligation-root cold-compute frame (design §2.1 /
 /// `native-typeinfo-parity.md` §4.2): ONE tagged obligation runtime plus
 /// the per-domain runtimes. Transient; NEVER a cache key.
@@ -1365,13 +1899,15 @@ pub(crate) struct CheckerDispatchTransaction {
     pub(crate) relation: RelationDomainRuntime,
     /// The flow-return domain runtime.
     pub(crate) flow: FlowReturnDomainRuntime,
+    /// The call-resolution domain runtime.
+    pub(crate) call: ResolveCallDomainRuntime,
 }
 
 /// One entry of a tagged flow component awaiting its equation fixed
 /// point: the member's current outcome (a Complete outcome IS its
 /// concrete seed join; a hold-only EmptyCycle has no seed) and the
 /// coinductive hold targets its evaluation met.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct FlowDischargeEntry {
     /// The member's flow identity.
     pub(super) key: crate::semantic_query::FlowReturnKey,
@@ -1383,6 +1919,50 @@ pub(super) struct FlowDischargeEntry {
     /// Whether the member's own contributors were all FRESH literals —
     /// the post-convergence literal-widening input.
     pub(super) fresh_seed: bool,
+}
+
+/// Identity of a member in the shared return equation. This is deliberately
+/// separate from [`ObligationIdentity`]: relations share SCC topology but do
+/// not inhabit the return lattice.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ReturnObligationIdentity {
+    FlowReturn(FlowReturnKey),
+    ResolveCall(ResolveCallKey),
+}
+
+/// Domain-specific metadata retained beside the shared return lattice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReturnDomainMetadata {
+    // Exercised by the solver's own contract tests: production flow members
+    // discharge through the callee-clause fixed point and never enter the
+    // call equation.
+    #[allow(dead_code)]
+    FlowReturn {
+        can_fall_through: bool,
+    },
+    ResolveCall,
+}
+
+/// One member of the multi-domain return equation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReturnEquationMember {
+    /// The member's FRESH primitive-literal return candidates (ResolveCall
+    /// members only; a flow member's own position already widened its
+    /// fresh leaves). A FLOW-domain consumer widens a contributed leaf
+    /// equal to one of these.
+    pub(crate) fresh_literal_returns: Vec<SemanticNodeId>,
+    pub(crate) identity: ReturnObligationIdentity,
+    pub(crate) concrete_seeds: Vec<SemanticNodeId>,
+    pub(crate) holds: Vec<ReturnObligationIdentity>,
+    pub(crate) domain: ReturnDomainMetadata,
+}
+
+/// Failure of the shared equation. Both cases poison the whole mixed
+/// component and admit nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReturnEquationFailure {
+    EmptyCycle,
+    UnresolvedOutsideHold,
 }
 
 impl CheckerDispatchTransaction {
@@ -1399,21 +1979,108 @@ impl CheckerDispatchTransaction {
         SessionId(self.relation.next_session_id)
     }
 
-    /// The active (innermost `InProgress`) session, if any.
-    pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
+    /// Push a fresh collecting session unconditionally. Call-owned candidate
+    /// execution uses this path even when an outer collector exists; relation
+    /// roots retain their separate admission predicate.
+    pub(crate) fn push_collecting_session(
+        &mut self,
+        setup: InferenceSessionSetup,
+        reverse_projection: Option<ReverseProjectionState>,
+    ) -> SessionId {
+        let id = self.alloc_session_id();
         self.relation
             .sessions
+            .push(InferenceSession::new(id, setup, reverse_projection));
+        id
+    }
+
+    /// The active (innermost `Collecting`) session, if any.
+    pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
+        let start = self
+            .relation
+            .binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0);
+        self.relation
+            .sessions
+            .get_mut(start..)?
             .iter_mut()
             .rev()
-            .find(|s| s.state == InferenceSessionState::InProgress)
+            .find(|s| s.state == InferenceSessionState::Collecting)
     }
 
     pub(crate) fn active_session(&self) -> Option<&InferenceSession> {
+        let start = self
+            .relation
+            .binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0);
         self.relation
             .sessions
+            .get(start..)?
             .iter()
             .rev()
-            .find(|s| s.state == InferenceSessionState::InProgress)
+            .find(|s| s.state == InferenceSessionState::Collecting)
+    }
+
+    pub(crate) fn binding_is_disabled(&self) -> bool {
+        !self.relation.binding_disabled_session_barriers.is_empty()
+    }
+
+    pub(crate) fn begin_binding_disabled(&mut self) {
+        self.relation
+            .binding_disabled_session_barriers
+            .push(self.relation.sessions.len());
+    }
+
+    pub(crate) fn end_binding_disabled(&mut self) {
+        self.relation
+            .binding_disabled_session_barriers
+            .pop()
+            .expect("binding-disabled barrier underflow");
+    }
+
+    pub(crate) fn begin_call_argument(
+        &mut self,
+        literal_mode: Option<crate::semantic_query::ArgumentLiteralMode>,
+        top_level_infer_targets: Vec<SemanticNodeId>,
+    ) {
+        self.relation
+            .call_argument_literal_modes
+            .push(CallArgumentLiteralPolicy {
+                literal_mode,
+                top_level_infer_targets,
+            });
+    }
+
+    pub(crate) fn end_call_argument(&mut self) {
+        self.relation
+            .call_argument_literal_modes
+            .pop()
+            .expect("call-argument literal-mode stack underflow");
+    }
+
+    pub(crate) fn call_argument_literal_mode(
+        &self,
+    ) -> Option<crate::semantic_query::ArgumentLiteralMode> {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .and_then(|policy| policy.literal_mode)
+    }
+
+    /// Whether the CURRENT call argument's declared TARGET exposes
+    /// `param_node` at top level (a naked type-parameter position — the
+    /// parameter itself, or a union / intersection arm of it). A deposit
+    /// into a top-level position preserves a primitive-literal candidate;
+    /// a nested deposit widens it.
+    pub(crate) fn call_argument_target_is_top_level(&self, param_node: SemanticNodeId) -> bool {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .is_some_and(|policy| policy.top_level_infer_targets.contains(&param_node))
     }
 
     /// The session the frame at `idx` opened, if any.

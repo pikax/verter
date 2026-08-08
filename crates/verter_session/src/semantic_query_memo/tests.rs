@@ -373,6 +373,8 @@ fn intern_span_participates_in_identity() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
@@ -2597,6 +2599,7 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
                 flight,
             }],
             Vec::new(),
+            Vec::new(),
         ),
         "the inline member publish must retain its admission right"
     );
@@ -2680,6 +2683,7 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
                     .relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
                 flight,
             }],
+            Vec::new(),
             Vec::new(),
         )
     });
@@ -2802,9 +2806,9 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
 
 /// DECIDED-ONLY ADMISSION (the relation-engine activation contract) —
 /// both directions: a DECIDED payload publish admits AND warm-serves its
-/// binary outcome; `Unknown` / `BudgetExceeded` NEVER enter the memo
-/// through any path (the retired memoized-`Unknown` arm is deleted —
-/// admission rows 3–4 of `docs/arch/u2-relation-infer-design.md`).
+/// binary outcome; an UNDECIDED payload (`BudgetExceeded`) NEVER enters
+/// the memo through any path (admission rows 3–4 of
+/// `docs/arch/u2-relation-infer-design.md`).
 ///
 /// The refusal is RELEASE-ACTIVE: the publish gate returns `false` and
 /// releases the flight rather than relying on a `debug_assert!`, which is
@@ -2815,6 +2819,12 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
 /// `Unknown` fails the refuse assertions (the publish reports `true` and
 /// a warm entry appears); a store that stopped admitting decided payloads
 /// fails the admit assertions.
+///
+/// The refusal is release-active, so this test is compiled and run under
+/// EVERY cargo profile — including the `no-debug-assertions` profile,
+/// where `debug_assertions` is off. A refusal enforced only by
+/// `debug_assert!` would admit the undecided payload there and fail the
+/// REFUSE leg's `!published` / zero-entry assertions.
 #[test]
 fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let host = ctx_host();
@@ -2852,12 +2862,11 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         "ADMIT: the admitted payload warm-serves its decided outcome",
     );
 
-    // REFUSE direction — the store's production publish path
-    // (`publish_relation_member`) only ever carries decided binary
-    // payloads (debug-asserted); the authority maps `Unknown` /
-    // `BudgetExceeded` onto ReturnOnly BEFORE any write. Prove the
-    // contract at the store surface: a `BudgetExceeded` payload must be
-    // rejected by the publish path's own gate.
+    // REFUSE direction — the authority maps an undecided outcome onto
+    // ReturnOnly BEFORE any write, and the publication fence itself is
+    // the backstop. Prove the contract at the store surface: a
+    // `BudgetExceeded` payload is refused by the publish path's own
+    // gate, which reports "not published" instead of writing.
     let refuse_key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         source,
@@ -2887,15 +2896,37 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         gen0,
         vec![crate::semantic_query_memo::PendingRelationMember {
             key: refuse_key.clone(),
-            payload: budget_payload,
+            payload: budget_payload.clone(),
             flight: refuse_flight,
         }],
+        Vec::new(),
         Vec::new(),
     );
     assert!(
         !published,
         "REFUSE: a BudgetExceeded payload must be rejected by the publish gate (row 4) \
          — as a returned refusal, not a debug-only assertion",
+    );
+    let refuse_flight = store
+        .begin_inline_relation_flight(&refuse_key)
+        .expect("the refused member re-claims its family flight");
+    let published = store.publish_scc_members_fenced(
+        None,
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: refuse_key.clone(),
+            payload: budget_payload,
+            flight: refuse_flight,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !published,
+        "REFUSE: a BudgetExceeded payload must be refused by the publish gate (row 4)",
     );
     assert_eq!(
         store.relation_memo_count(),
@@ -2910,6 +2941,56 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         store.retained_claimed_flight_keys_for_tests().is_empty()
             && store.resident_flight_keys_for_tests().is_empty(),
         "REFUSE: the refused member's flight must be released and retired, not stranded",
+    );
+
+    // REFUSE + FLIGHT — the same refusal on the fenced inline-member
+    // path must also RELEASE the claimed flight, exactly as the
+    // invalidation and cancellation refusals do. A refusal that returned
+    // early without aborting would strand every joiner on the flight's
+    // condvar; the reclaim below is what observes that.
+    let flight_key = crate::semantic_query::RelateMemoKey::assignable(
+        target,
+        target,
+        crate::semantic_query::RelationContext::default(),
+    );
+    let flight = store
+        .begin_inline_relation_flight(&flight_key)
+        .expect("fixture: the vacant relation family flight must be claimable");
+    let flight_published = store.publish_scc_members_fenced(
+        Some(&host),
+        &root_witness,
+        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &Arc::from(Vec::<Arc<str>>::new()),
+        gen0,
+        vec![crate::semantic_query_memo::PendingRelationMember {
+            key: flight_key.clone(),
+            payload: store.relation_payload_for_tests(
+                crate::semantic_query::RelationOutcome::BudgetExceeded(
+                    crate::semantic_query::BudgetExceededKind::RelationBudget,
+                ),
+            ),
+            flight,
+        }],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        !flight_published,
+        "REFUSE: an undecided payload on the fenced member path must not publish",
+    );
+    assert_eq!(
+        store.relation_memo_count(),
+        1,
+        "REFUSE: the fenced undecided member leaves the relation memo untouched",
+    );
+    assert!(
+        store.get_relation_payload(ctx, &flight_key).is_none(),
+        "REFUSE: the refused member key has no warm entry to serve",
+    );
+    assert!(
+        store.begin_inline_relation_flight(&flight_key).is_some(),
+        "REFUSE: the refusal must retire the claimed flight so the key is reclaimable \
+         (a refusal that skipped the abort would strand joiners on the condvar)",
     );
 }
 
@@ -8393,6 +8474,14 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
 /// DISCRIMINATION: reverting the FIX-2 admission `debug_assert!` + OR gate
 /// makes this build publish a warm `MemoEntry` (no panic), so the
 /// `#[should_panic]` expectation fails.
+///
+/// PREMISE: the admission invariant is a `debug_assert!`, so it fires only
+/// where `debug_assertions` is on. This test is compiled only under that
+/// same predicate — a build with debug assertions off has nothing to panic
+/// and would fail the expectation for a reason that says nothing about the
+/// code. It runs in every debug build, which is every profile the assert
+/// itself is active in.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "invariant violated at memo admission")]
 fn memo_admission_debug_asserts_against_partial_without_suppress() {
@@ -10406,6 +10495,7 @@ mod prepared_identity_bijection {
                         type_env_hash: h16(0),
                         lib_env_hash: h16(0),
                         project_identity: 0,
+                        demand_scope: crate::semantic_query::ApparentDemandScope::Anchored,
                     },
                 },
                 SemanticQueryKey::ApparentType {
@@ -10414,6 +10504,7 @@ mod prepared_identity_bijection {
                         type_env_hash: h16(0),
                         lib_env_hash: h16(0),
                         project_identity: 0,
+                        demand_scope: crate::semantic_query::ApparentDemandScope::Anchored,
                     },
                 },
             ),
@@ -10487,7 +10578,34 @@ mod prepared_identity_bijection {
                 flow_return_test_key("FlowA", 0),
                 flow_return_test_key("FlowB", 0),
             ),
+            SemanticQueryKeyTag::ResolveCall => (
+                resolve_call_test_key("a.ts", 0),
+                resolve_call_test_key("a.ts", 1),
+            ),
         }
+    }
+
+    fn resolve_call_test_key(canonical: &str, offset: u32) -> SemanticQueryKey {
+        SemanticQueryKey::ResolveCall(Box::new(crate::semantic_query::ResolveCallKey {
+            point: crate::semantic_query::ProgramPointId {
+                canonical_id: Arc::from(canonical),
+                offset,
+            },
+            callee: SemanticNodeId(1),
+            kind: crate::semantic_query::CallKind::Call,
+            receiver: None,
+            args: Arc::from(Vec::new().into_boxed_slice()),
+            explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            flow: FlowNarrowingKey::empty(),
+            context: crate::semantic_query::ResolveCallContext {
+                parse_env_hash: h16(0),
+                resolve_env_hash: h16(0),
+                type_env_hash: h16(0),
+                lib_env_hash: h16(0),
+                project_identity: h16(0),
+                substitution: crate::semantic_query::CanonicalTypeSubstitution::empty(),
+            },
+        }))
     }
 
     fn flow_return_test_key(name: &str, overload_ordinal: u32) -> SemanticQueryKey {

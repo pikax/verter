@@ -116,3 +116,5 @@ pub(crate) mod u2b6_apparent_template_guards;
 pub(crate) mod u2b7_flow_contextual_guards;
 #[path = "g_block/u2b8_relate_upgrade_guards.rs"]
 pub(crate) mod u2b8_relate_upgrade_guards;
+#[path = "g_block/u6_call_resolve_guards.rs"]
+mod u6_call_resolve_guards;

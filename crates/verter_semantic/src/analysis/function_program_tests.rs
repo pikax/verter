@@ -16,7 +16,7 @@ fn index_of(source: &str) -> FunctionProgramIndex {
         ret.errors
     );
     let owners = TopLevelOwnerTable::ordinary_file(ret.program.body.len());
-    build_function_program_index(&ret.program, source, &owners)
+    build_function_program_index(&ret.program, source, &owners, Arc::from("/test.ts"))
 }
 
 fn hash_of(source: &str, name: &str) -> crate::analysis::types::Hash16 {
@@ -119,7 +119,60 @@ namespace Ns {
 }
 
 #[test]
-fn function_program_inventory_records_returns_loops_and_direct_calls() {
+fn declaration_calls_and_derived_callbacks_have_exact_indexed_sources() {
+    let source = r#"
+const direct = id("x");
+const derived = $derived.by(() => id("y"));
+namespace Ns { export const nested = make(1); }
+"#;
+    let index = index_of(source);
+    let point = |needle: &str| ProgramExpressionIdentity {
+        canonical_id: Arc::from("/test.ts"),
+        offset: u32::try_from(source.find(needle).expect("fixture needle")).unwrap(),
+    };
+
+    let direct = index
+        .expression(&point("id(\"x\")"))
+        .expect("direct call record");
+    assert!(matches!(
+        &direct.source,
+        ProgramExpressionSource::SemanticCall {
+            kind: ProgramExpressionCallKind::Call,
+            ..
+        }
+    ));
+
+    let derived = index
+        .expression(&point("$derived.by"))
+        .expect("derived initializer record");
+    let ProgramExpressionSource::SemanticCall { site, .. } = &derived.source else {
+        panic!("derived initializer must be a semantic call record");
+    };
+    let callback_source = site.args[0]
+        .function_return_source
+        .as_ref()
+        .expect("callback return carrier");
+    let callback = index
+        .expression(&point("() =>"))
+        .expect("callback expression record");
+    assert!(matches!(
+        &callback.source,
+        ProgramExpressionSource::FunctionReturn(source) if source == callback_source
+    ));
+    assert!(index.entries.iter().any(|entry| {
+        entry.key.declaration.name.as_ref() == "derived"
+            && matches!(entry.key.part, FunctionPartIdentity::Other { .. })
+            && entry.span.start == callback.span.start
+    }));
+
+    assert!(
+        index.expression(&point("make(1)")).is_some(),
+        "namespaced declaration initializers are indexed too"
+    );
+}
+
+#[test]
+fn function_program_inventory_records_returns_loops_and_call_site_targets() {
     let index = index_of(
         r#"
 export function selfRec(n: number) {
@@ -154,20 +207,28 @@ export function memberCall() {
     assert_eq!(self_rec.return_sites.len(), 2);
     assert!(
         self_rec
-            .direct_calls
+            .call_sites
             .iter()
-            .any(|call| call.target.declaration.name.as_ref() == "selfRec"),
-        "the self-call is an exact direct call: {:?}",
-        self_rec.direct_calls
+            .any(|site| site.target.as_ref().is_some_and(|target| target
+                .declaration
+                .name
+                .as_ref()
+                == "selfRec")),
+        "the self-call site carries its exact target: {:?}",
+        self_rec.call_sites
     );
 
     let calls_other = entry_of(&index, "callsOther");
     assert!(
         calls_other
-            .direct_calls
+            .call_sites
             .iter()
-            .any(|call| call.target.declaration.name.as_ref() == "selfRec"),
-        "the local call resolves to the exact same-file target"
+            .any(|site| site.target.as_ref().is_some_and(|target| target
+                .declaration
+                .name
+                .as_ref()
+                == "selfRec")),
+        "the local call site resolves to the exact same-file target"
     );
 
     let transparent = entry_of(&index, "loopTransparent");
@@ -202,8 +263,11 @@ export function memberCall() {
 
     let member_call = entry_of(&index, "memberCall");
     assert!(
-        member_call.direct_calls.is_empty(),
-        "a static member call is never an exact direct call"
+        member_call
+            .call_sites
+            .iter()
+            .all(|site| site.target.is_none()),
+        "a static member call site never binds an exact same-file target"
     );
     assert!(
         member_call
@@ -551,5 +615,322 @@ export function occursNested<T = number>(a: string, b: { k: T }): T { return b.k
         occurrence("occursNested"),
         Some(1),
         "occurrence is structural, not top-level: `{{ k: T }}` names T"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Indexed call-site records + nested served positions + capture identities
+// ---------------------------------------------------------------------------
+
+fn entries_with_part<'a>(
+    index: &'a FunctionProgramIndex,
+    name: &str,
+    part: &FunctionPartIdentity,
+) -> Vec<&'a FunctionProgramEntry> {
+    index
+        .entries
+        .iter()
+        .filter(|entry| entry.key.declaration.name.as_ref() == name && &entry.key.part == part)
+        .collect()
+}
+
+#[test]
+fn call_sites_record_callee_args_spreads_and_literal_modes() {
+    let index = index_of(
+        r#"
+function f() {
+  g(a, { x: 1 }, ...rest, () => a, "lit", 42, cond ? a : b);
+}
+"#,
+    );
+    let f = entry_of(&index, "f");
+    assert_eq!(f.call_sites.len(), 1, "one indexed call site");
+    let site = &f.call_sites[0];
+    assert!(
+        matches!(&site.callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "g"),
+        "callee carrier is the bare identifier, got {:?}",
+        site.callee
+    );
+    let shape: Vec<(bool, FunctionCallArgLiteralMode, bool)> = site
+        .args
+        .iter()
+        .map(|arg| (arg.spread, arg.literal_mode, arg.is_function_value))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (false, FunctionCallArgLiteralMode::Widened, false),
+            (false, FunctionCallArgLiteralMode::Literal, false),
+            (true, FunctionCallArgLiteralMode::Widened, false),
+            (false, FunctionCallArgLiteralMode::Widened, true),
+            (false, FunctionCallArgLiteralMode::Literal, false),
+            (false, FunctionCallArgLiteralMode::Literal, false),
+            (false, FunctionCallArgLiteralMode::Widened, false),
+        ],
+        "per-argument spread / literal-mode / function-value facts in source order"
+    );
+}
+
+#[test]
+fn hoisted_nested_function_gets_exact_key_locator_parent_and_captures() {
+    let index = index_of(
+        r#"
+function outer() {
+  const x = 1;
+  function inner() { return x; }
+  return inner();
+}
+"#,
+    );
+    let outers = entries_with_part(&index, "outer", &FunctionPartIdentity::DeclarationBody);
+    assert_eq!(outers.len(), 1);
+    let outer = outers[0];
+
+    let nested: Vec<&FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .collect();
+    assert_eq!(nested.len(), 1, "exactly one nested served position");
+    let inner = nested[0];
+
+    // Exact key: the parent's declaration identity + Other { ordinal }.
+    assert_eq!(inner.key.declaration, outer.key.declaration);
+    assert!(
+        matches!(inner.key.part, FunctionPartIdentity::Other { ordinal: 0 }),
+        "the first nested position is Other {{ 0 }}, got {:?}",
+        inner.key.part
+    );
+    // Body locator: parent descent + the BodyStatement step (statement 1 —
+    // `const x = 1;` is statement 0).
+    assert_eq!(
+        inner.locator.descent.last(),
+        Some(&FunctionDescentStep::BodyStatement {
+            statement_ordinal: 1
+        }),
+        "the nested locator ends at the hoisted declaration's statement ordinal"
+    );
+    // Lexical parent + capture identity (content-free binding identity only).
+    assert_eq!(
+        inner.lexical_parent.as_deref(),
+        Some(&outer.key),
+        "the lexical parent is the enclosing position"
+    );
+    assert_eq!(
+        inner.captures.0.as_ref(),
+        &[FlowBindingIdentity {
+            name: Arc::from("x"),
+            kind: FunctionBindingKind::Const,
+            defining_function: outer.key.clone(),
+            binding_slot: 0,
+        }],
+        "the nested body captures `x` from the parent frame (defining frame + slot)"
+    );
+}
+
+#[test]
+fn call_argument_callback_gets_exact_key_locator_and_captures() {
+    let index = index_of(
+        r#"
+function outer() {
+  const x = 1;
+  return run(() => x, "other");
+}
+"#,
+    );
+    let callbacks: Vec<&FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .collect();
+    assert_eq!(callbacks.len(), 1, "exactly one callback position");
+    let callback = callbacks[0];
+    assert!(
+        matches!(
+            callback.key.part,
+            FunctionPartIdentity::Other { ordinal: 0 }
+        ),
+        "the callback is the first nested position"
+    );
+    assert_eq!(
+        callback.locator.descent.last(),
+        Some(&FunctionDescentStep::CallArgument {
+            call_ordinal: 0,
+            arg_ordinal: 0
+        }),
+        "the callback locator addresses (call site 0, argument 0)"
+    );
+    assert_eq!(
+        callback.captures.0.as_ref(),
+        &[FlowBindingIdentity {
+            name: Arc::from("x"),
+            kind: FunctionBindingKind::Const,
+            defining_function: entry_of(&index, "outer").key.clone(),
+            binding_slot: 0,
+        }],
+        "the callback captures the enclosing `x`"
+    );
+}
+
+#[test]
+fn nested_call_sites_are_indexed_on_the_nested_frame_not_the_outer() {
+    let index = index_of(
+        r#"
+function outer() {
+  return run(() => id(deep));
+}
+"#,
+    );
+    let outer = entry_of(&index, "outer");
+    assert_eq!(outer.call_sites.len(), 1, "the outer frame sees only `run`");
+    assert!(
+        matches!(&outer.call_sites[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "run"),
+    );
+    let callbacks: Vec<&FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
+        .collect();
+    assert_eq!(callbacks.len(), 1);
+    assert_eq!(
+        callbacks[0].call_sites.len(),
+        1,
+        "the callback's own `id(deep)` call site is on the callback frame"
+    );
+    assert!(
+        matches!(&callbacks[0].call_sites[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "id"),
+    );
+}
+
+#[test]
+fn capture_of_a_hoisted_nested_name_is_recorded() {
+    let index = index_of(
+        r#"
+function outer() {
+  function inner() { return 1; }
+  return run(() => inner());
+}
+"#,
+    );
+    let callbacks: Vec<&FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.locator.descent.last(),
+                Some(FunctionDescentStep::CallArgument { .. })
+            )
+        })
+        .collect();
+    assert_eq!(callbacks.len(), 1);
+    assert_eq!(
+        callbacks[0].captures.0.as_ref(),
+        &[FlowBindingIdentity {
+            name: Arc::from("inner"),
+            kind: FunctionBindingKind::NestedFunction,
+            defining_function: entry_of(&index, "outer").key.clone(),
+            binding_slot: 0,
+        }],
+        "the hoisted nested name is a capture of kind NestedFunction"
+    );
+}
+
+/// Three same-name binders — the outer frame's parameter, an inner frame's
+/// parameter, and that inner frame's BLOCK-scoped `const` — produce three
+/// DISTINCT capture identities, and each capturing position resolves to the
+/// binder its own lexical position sees. Mutation recipe: deduplicate the
+/// frame's binding inventory by name (or resolve a reference to the first
+/// same-name binding in the chain instead of the innermost containing
+/// scope) and the block capture collapses onto the frame parameter's slot,
+/// making two of these identities equal.
+#[test]
+fn same_name_bindings_in_shadowing_scopes_get_distinct_capture_identities() {
+    let index = index_of(
+        r#"
+declare function run(cb: () => unknown): void;
+function outer(shadowed: string) {
+  run(() => shadowed);
+  function middle(shadowed: number) {
+    run(() => shadowed);
+    {
+      const shadowed = true;
+      run(() => shadowed);
+    }
+  }
+}
+"#,
+    );
+    let outer = entry_of(&index, "outer");
+    let middle = index
+        .entries
+        .iter()
+        .find(|entry| entry.nested_declaration_name.as_deref() == Some("middle"))
+        .expect("the hoisted nested declaration is a served position");
+
+    let mut callbacks: Vec<&FunctionProgramEntry> = index
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.locator.descent.last(),
+                Some(FunctionDescentStep::CallArgument { .. })
+            )
+        })
+        .collect();
+    callbacks.sort_by_key(|entry| entry.span.start);
+    assert_eq!(
+        callbacks.len(),
+        3,
+        "three callback positions: {callbacks:?}"
+    );
+
+    let identities: Vec<&FlowBindingIdentity> = callbacks
+        .iter()
+        .map(|entry| {
+            assert_eq!(
+                entry.captures.0.len(),
+                1,
+                "each callback captures exactly one binding: {:?}",
+                entry.captures
+            );
+            &entry.captures.0[0]
+        })
+        .collect();
+
+    // The outer callback sees the outer frame's parameter.
+    assert_eq!(identities[0].defining_function, outer.key);
+    assert_eq!(identities[0].binding_slot, 0);
+    assert_eq!(identities[0].kind, FunctionBindingKind::Param);
+    // The middle callback sees the middle frame's parameter — a DIFFERENT
+    // frame, so a name (or a per-capture-list ordinal) cannot tell them
+    // apart.
+    assert_eq!(identities[1].defining_function, middle.key);
+    assert_eq!(identities[1].binding_slot, 0);
+    assert_eq!(identities[1].kind, FunctionBindingKind::Param);
+    // The block callback sees the middle frame's BLOCK-scoped `const` — the
+    // same frame as the previous capture, at a different slot.
+    assert_eq!(identities[2].defining_function, middle.key);
+    assert_eq!(identities[2].binding_slot, 1);
+    assert_eq!(identities[2].kind, FunctionBindingKind::Const);
+
+    assert_ne!(identities[0], identities[1]);
+    assert_ne!(identities[1], identities[2]);
+    assert_ne!(identities[0], identities[2]);
+
+    // The frame inventory retains BOTH same-name binders in source order.
+    let middle_shadowed: Vec<(&FunctionBindingKind, usize)> = middle
+        .bindings
+        .iter()
+        .enumerate()
+        .filter(|(_, binding)| binding.name.as_ref() == "shadowed")
+        .map(|(slot, binding)| (&binding.kind, slot))
+        .collect();
+    assert_eq!(
+        middle_shadowed,
+        vec![
+            (&FunctionBindingKind::Param, 0),
+            (&FunctionBindingKind::Const, 1)
+        ],
+        "the frame inventory keeps every same-name binder, in source order"
     );
 }

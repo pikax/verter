@@ -1,0 +1,101 @@
+error[E0277]: the trait bound `ForeignConsumer: deferred_callable::sealed::Sealed` is not satisfied
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:28:35
+   |
+28 | impl DeferredCallableConsumer for ForeignConsumer {}
+   |                                   ^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `deferred_callable::sealed::Sealed` is not implemented for `ForeignConsumer`
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:24:1
+   |
+24 | struct ForeignConsumer;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+   = note: `ForeignConsumer` implements similarly named trait `unicode_width::private::Sealed`, but not `deferred_callable::sealed::Sealed`
+help: the following other types implement trait `deferred_callable::sealed::Sealed`
+  --> src/semantic_query/deferred_callable.rs
+   |
+   | impl sealed::Sealed for ResolveOverloadSetConsumer {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ResolveOverloadSetConsumer`
+   | impl sealed::Sealed for ResolveCallConsumer {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ResolveCallConsumer`
+note: required by a bound in `DeferredCallableConsumer`
+  --> src/semantic_query/deferred_callable.rs
+   |
+   | pub trait DeferredCallableConsumer: sealed::Sealed {}
+   |                                     ^^^^^^^^^^^^^^ required by this bound in `DeferredCallableConsumer`
+   = note: `DeferredCallableConsumer` is a "sealed trait", because to implement it you also need to implement `verter_session::semantic_query::deferred_callable::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             verter_session::semantic_query::ResolveOverloadSetConsumer
+             verter_session::semantic_query::ResolveCallConsumer
+
+error[E0624]: associated function `witness` is private
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:32:41
+   |
+32 |     let _ = ResolveOverloadSetConsumer::witness();
+   |                                         ^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/deferred_callable.rs
+   |
+   |     pub(crate) fn witness() -> Self {
+   |     ------------------------------- private associated function defined here
+
+error[E0624]: associated function `witness` is private
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:33:34
+   |
+33 |     let _ = ResolveCallConsumer::witness();
+   |                                  ^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/deferred_callable.rs
+   |
+   |     pub(crate) fn witness() -> Self {
+   |     ------------------------------- private associated function defined here
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:34:13
+   |
+34 |     let _ = ResolveOverloadSetConsumer(());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/semantic_query/deferred_callable.rs
+   |
+   | pub struct ResolveOverloadSetConsumer(());
+   |                                       ^^ private field
+help: you might have meant to use the `witness` associated function
+   |
+34 -     let _ = ResolveOverloadSetConsumer(());
+34 +     let _ = ResolveOverloadSetConsumer::witness();
+   |
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:35:13
+   |
+35 |     let _ = ResolveCallConsumer(());
+   |             ^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/semantic_query/deferred_callable.rs
+   |
+   | pub struct ResolveCallConsumer(());
+   |                                ^^ private field
+help: you might have meant to use the `witness` associated function
+   |
+35 -     let _ = ResolveCallConsumer(());
+35 +     let _ = ResolveCallConsumer::witness();
+   |
+
+error[E0624]: associated function `compose` is private
+  --> tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs:42:31
+   |
+42 |       let _ = DeferredCallable::compose;
+   |                                 ^^^^^^^ private associated function
+   |
+  ::: src/semantic_query/deferred_callable.rs
+   |
+   | /     pub(crate) fn compose(
+   | |         kind: SignatureKind,
+   | |         params: Arc<[FunctionParam]>,
+   | |         type_parameters: Arc<[TypeParamDecl]>,
+   | |         occurrence: SignatureNodeOccurrence,
+   | |         return_carrier: SignatureReturnCarrier,
+   | |     ) -> Self {
+   | |_____________- private associated function defined here

@@ -1174,12 +1174,14 @@ impl DeclBodyMemo {
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let owner_table = Arc::clone(&self.owner_table);
+        let canonical = Arc::clone(&self.key.canonical);
         let Some(index) = service.run_leased(&self.key, move |program| {
             program.map(|p| {
                 verter_semantic::analysis::function_program::build_function_program_index(
                     p.borrow_dependent(),
                     p.source_str(),
                     owner_table.as_ref(),
+                    Arc::clone(&canonical),
                 )
             })
         }) else {
@@ -1334,6 +1336,57 @@ impl DeclBodyMemo {
             return None;
         };
         skeleton
+    }
+
+    /// Transient typed IR for one indexed declaration expression. The retained
+    /// AST is reborrowed on demand; no body `TypeExpr` is memo-owned.
+    pub fn indexed_program_expression_ir(
+        &self,
+        record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        let service = self.service.as_ref()?;
+        self.ensure_lease();
+        let record = record.clone();
+        let node = service.run_leased(&self.key, move |program| {
+            program.and_then(|parsed| {
+                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
+                    parsed.borrow_dependent(),
+                    parsed.source_str(),
+                    &record,
+                )
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    /// Transient typed IR for one authored call expression, re-read from
+    /// the retained snapshot at `span`. The call's served-function entry
+    /// is found through the program index (a flow-selected call is inside
+    /// a served function by construction); no body `TypeExpr` is
+    /// memo-owned.
+    pub fn indexed_call_expression_at(
+        &self,
+        span: verter_span::Span,
+    ) -> Option<Arc<verter_type_expr::IndexedValueCall>> {
+        let service = self.service.as_ref()?;
+        self.ensure_lease();
+        let index = self.function_program_index();
+        let node = service.run_leased(&self.key, move |program| {
+            program.and_then(|parsed| {
+                let call = verter_semantic::analysis::function_program::call_expression_at(
+                    parsed.borrow_dependent(),
+                    &index,
+                    span,
+                )?;
+                Some(
+                    verter_semantic::analysis::type_eval_build::lower_indexed_call_expression(
+                        call,
+                        parsed.source_str(),
+                    ),
+                )
+            })
+        })??;
+        Some(Arc::new(node))
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -3046,6 +3099,7 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
             classification: ValueAnnotationClass::Direct,
             annotation: Some(instance),
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+            expression_source: None,
         },
         vec![FunctionSignature {
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),

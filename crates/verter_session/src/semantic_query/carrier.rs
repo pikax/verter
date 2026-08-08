@@ -289,6 +289,7 @@ impl SemanticNodeData {
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
+            | Self::DeferredCallable(_)
             | Self::SyntheticBinding { .. } => &[],
         }
     }
@@ -411,6 +412,7 @@ impl SemanticNodeData {
             | Self::DeclRef { .. }
             | Self::InstantiationRef { .. }
             | Self::RawFallback { .. }
+            | Self::DeferredCallable(_)
             | Self::SyntheticBinding { .. } => None,
         }
     }

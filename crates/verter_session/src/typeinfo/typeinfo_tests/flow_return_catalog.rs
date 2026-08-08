@@ -693,10 +693,14 @@ future_catalog_contract!(
     }
 );
 
-future_catalog_contract!(
+// LR07 — `lr07(x: { a: { b: string } }) { return x.a.b }` returns `string`. The
+// whole-function producer projects the nested parameter member path through the
+// parameter's object type, so the return is the terminal `string` primitive
+// rather than an unresolved typeof path. The assertion discriminates: an
+// unprojected return does not reduce to `Primitive(String)`.
+catalog_contract!(
     flow_return_lr07_projects_nested_parameter_member_path,
     "LR07",
-    "typeinfo currently lowers nested parameter member returns to typeof paths instead of projecting through the parameter object type; keep as the future LR07 member-path contract",
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 

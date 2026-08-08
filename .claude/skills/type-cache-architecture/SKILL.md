@@ -1836,7 +1836,7 @@ is permitted.
 
 The `TypeExpr`→handle migration carries graph handles on the hot path but keeps cache keys content-free (R6). Foundation contracts (additive, dormant):
 
-- **`HotTypeRef`** (the session hot handle around a `SemanticNodeId`) is a content/version-bearing arena ordinal — exactly what R6 bans from a derived-`Hash` query-identity key. It derives neither `Hash` nor `Ord`, so it cannot be a map key nor be embedded in a `#[derive(Hash)]` cache key; the materialised VALUE roots its version through the node's `NodeScopeId` + read-set, never the handle.
+- **`HotTypeRef`** is an opaque session handle around a graph-instance `SemanticNodeId`; R6 does not prohibit such IDs, although this boundary type deliberately omits `Hash`/`Ord`. Any key containing a `SemanticNodeId` must obtain content validity solely from value-side read sets and strict self-roots. Because `HotTypeRef` derives neither `Hash` nor `Ord`, it cannot itself be a map key nor be embedded in a `#[derive(Hash)]` cache key; the materialised VALUE roots its version through the node's `NodeScopeId` + read-set, never the handle.
 - **`SyntheticBindingId`** is the content-free successor to `SyntheticCarrierKey.value_node: u64` — `(scope_canonical_id, surface_kind, slot_name, binding_name)` with NO arena ordinal. It is the identity a future synthetic-deepening key roots on; the `value_node` ordinal is demoted to value-side provenance on the `SemanticNodeData::SyntheticBinding` carrier (re-attached only at the compat materialisation boundary).
 - **`CarrierResolverContext`** is value-side runtime resolution state, never hashed into a `SemanticQueryKey`.
 

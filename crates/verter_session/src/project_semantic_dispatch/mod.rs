@@ -66,7 +66,7 @@ use crate::semantic_query::{
     NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment, PrimitiveKind, ProjectionMode,
     PropertyKey, QueryError, QueryResult, ResolveDeclKey, ResultProvenance, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SemanticQueryValue, SemanticQueryValueTag, SignatureRef, SurfaceView,
+    SemanticQueryValue, SemanticQueryValueTag, SignatureRef,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use verter_type_expr::PrimitiveName;
@@ -87,6 +87,7 @@ use verter_type_expr::PrimitiveName;
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 pub(crate) mod absorb;
+mod apparent_type;
 mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod carrier;
@@ -102,6 +103,9 @@ pub(crate) mod query_error_disposition;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
+mod call_resolve;
+#[cfg(test)]
+mod call_resolve_tests;
 pub(crate) mod dispatch_txn;
 pub(crate) mod flow_return;
 pub(crate) mod flow_return_callee;
@@ -120,12 +124,16 @@ pub(crate) mod flow_return_tests;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;
+pub(crate) mod prototype_call;
 pub(crate) mod raise;
 pub(crate) mod raise_sentinel;
 pub(crate) mod reactive_wrapper;
 pub(crate) mod relation;
 pub(crate) mod relation_excess;
 pub(crate) mod relation_predicates;
+mod return_equation;
+#[cfg(test)]
+mod return_equation_tests;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -357,6 +365,19 @@ pub struct ProjectSemanticDispatch<'a> {
     /// `cache_suppress` (memo non-admission), never the request partial
     /// sticky (which would wrongly refuse component-meta warm).
     pub(super) build_local_taint: std::cell::RefCell<smallvec::SmallVec<[BuildLocalTaint; 8]>>,
+    /// Lexical demand-scope stack: the canonical containing the
+    /// member-access/call site currently being evaluated. Installed by the
+    /// flow evaluator around member-projection dispatches (RAII guard,
+    /// panic-safe) and read ONLY by [`Self::apparent_type_of`] to scope a
+    /// ROOTLESS callable's ambient lookup — the canonical is copied into
+    /// the `ApparentType` key's demand-scope witness, so the produced
+    /// value is a pure function of its key (this stack never reaches a
+    /// build closure). Rootless apparent values are `cache_suppress`, and
+    /// that taint folds through every enclosing member/path/call query, so
+    /// nothing scoped through this stack is ever admitted to a shared
+    /// cache. Empty when no member-access/call site is on the stack — a
+    /// rootless apparent demand then fails closed (`Miss`).
+    pub(super) lexical_demand_scope: std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
     /// The transient per-obligation-root cold-compute frame (design
     /// `docs/arch/u2-relation-infer-design.md` §2.1): the ONE shared
     /// tagged re-entry / cycle-id space with its generic frame /
@@ -448,6 +469,31 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
     }
 }
 
+/// Panic-safe RAII frame for the dispatch's
+/// [`ProjectSemanticDispatch::lexical_demand_scope`] stack: pushes the
+/// member-access/call-site canonical on construction and pops it on drop,
+/// so an unwinding evaluation can never leak its scope onto a later
+/// build's rootless apparent lookup.
+pub(super) struct LexicalDemandScopeGuard<'g> {
+    stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+}
+
+impl<'g> LexicalDemandScopeGuard<'g> {
+    pub(super) fn push(
+        stack: &'g std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
+        canonical: Arc<str>,
+    ) -> Self {
+        stack.borrow_mut().push(canonical);
+        Self { stack }
+    }
+}
+
+impl<'g> Drop for LexicalDemandScopeGuard<'g> {
+    fn drop(&mut self) {
+        self.stack.borrow_mut().pop();
+    }
+}
+
 impl<'a> ProjectSemanticDispatch<'a> {
     /// Create a dispatcher bound to `ctx`.
     ///
@@ -476,6 +522,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
             closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            lexical_demand_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             dispatch_txn: std::cell::RefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
@@ -559,6 +606,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             },
             trip,
         )
+    }
+
+    /// Whether the connected-demand ledger has ALREADY tripped on this
+    /// dispatch. A sub-query suppressed under a tripped ledger is never
+    /// evidence about the queried surface — the caller must report the
+    /// budget, not a semantic verdict.
+    pub(super) fn connected_demand_tripped(&self) -> bool {
+        !self.connected_demand.tripped.get().is_empty()
     }
 
     pub(super) fn charge_connected_work(
@@ -1177,28 +1232,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// value-domain conversion for `ResolveOverloadSet` (call bucket
     /// first, then construct; a lone `Function` IS its one-element set).
     /// Returns `None` for a non-signature-bearing node (only reachable
-    /// through a poisoned synthetic publish).
+    /// through a poisoned synthetic publish) AND for any candidate whose
+    /// node carries no occurrence — an occurrence-less candidate is an
+    /// honest `Miss`, never a fabricated occurrence.
     fn overload_set_refs_for(&self, node: SemanticNodeId) -> Option<Arc<[SignatureRef]>> {
         let graph = self.ctx.project_type_store().semantic_graph();
         let data = graph.node_data(node)?;
-        match &*data {
-            // Both kinds intentionally: a lone signature of EITHER kind is
-            // its own overload set (mirroring the Object arm, which chains
-            // the call AND construct buckets); each `SignatureRef` node
-            // carries its kind for consumers to discriminate.
-            SemanticNodeData::Signature { .. } => {
-                Some(Arc::from(vec![SignatureRef { node }].into_boxed_slice()))
+        let to_ref = |sig: SemanticNodeId, arm_ordinal: u32| -> Option<SignatureRef> {
+            let sig_data = graph.node_data(sig)?;
+            // The sealed index-composed carrier is read through the
+            // `ResolveOverloadSet` consumer witness — its occurrence is
+            // always authored and its return is deferred to the carrier.
+            if let SemanticNodeData::DeferredCallable(callable) = &*sig_data {
+                let parts =
+                    callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
+                return Some(SignatureRef {
+                    node: sig,
+                    occurrence: crate::semantic_query::SignatureCandidateOrigin::Authored(
+                        self.signature_occurrence_for(parts.occurrence),
+                    ),
+                    return_carrier: parts.return_carrier.clone(),
+                    arm_ordinal,
+                });
             }
-            SemanticNodeData::Object(surface) => Some(Arc::from(
-                surface
+            let SemanticNodeData::Signature {
+                occurrence,
+                return_carrier,
+                ..
+            } = &*sig_data
+            else {
+                return None;
+            };
+            // A signature authored at a served declaration position
+            // carries its content-free occurrence; an ANONYMOUS callable
+            // type (an inline function value, a function-typed
+            // annotation, an object-type call signature) has no authored
+            // position and is ROOTLESS — never a fabricated declaration
+            // slot and never a graph-instance node id standing in for an
+            // occurrence.
+            let occurrence = match occurrence {
+                Some(occurrence) => crate::semantic_query::SignatureCandidateOrigin::Authored(
+                    self.signature_occurrence_for(occurrence),
+                ),
+                None => crate::semantic_query::SignatureCandidateOrigin::Rootless,
+            };
+            Some(SignatureRef {
+                node: sig,
+                occurrence,
+                return_carrier: return_carrier.clone(),
+                arm_ordinal,
+            })
+        };
+        let refs_for_arm = |arm: SemanticNodeId, arm_ordinal: u32| -> Option<Vec<SignatureRef>> {
+            let arm_data = graph.node_data(arm)?;
+            match &*arm_data {
+                // Both kinds intentionally: a lone signature of EITHER
+                // kind is its own overload set (mirroring the Object
+                // arm, which chains the call AND construct buckets);
+                // each `SignatureRef` node carries its kind for
+                // consumers to discriminate.
+                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                    Some(vec![to_ref(arm, arm_ordinal)?])
+                }
+                SemanticNodeData::Object(surface) => surface
                     .call_signatures
                     .iter()
                     .chain(surface.construct_signatures.iter())
-                    .map(|sig| SignatureRef { node: *sig })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )),
-            _ => None,
+                    .map(|sig| to_ref(*sig, arm_ordinal))
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            }
+        };
+        match &*data {
+            // A UNION group-bearing node is the composite union-signature
+            // group: one ordered bucket per arm, tagged with its arm
+            // ordinal — the executor selects a first-applicable signature
+            // in EVERY callable arm and unions the selected returns.
+            SemanticNodeData::Union(members) => {
+                let mut refs = Vec::new();
+                for (ordinal, member) in members.iter().enumerate() {
+                    refs.extend(refs_for_arm(*member, u32::try_from(ordinal).ok()?)?);
+                }
+                Some(Arc::from(refs.into_boxed_slice()))
+            }
+            _ => refs_for_arm(node, 0).map(|refs| Arc::from(refs.into_boxed_slice())),
+        }
+    }
+
+    /// The env-bearing occurrence identity of one candidate — the env-free
+    /// node occurrence finalized through the ONE slot-finalization choke
+    /// point (the same one the `FlowReturn` key surface uses). The
+    /// declaration's symbol space comes from the occurrence anchor (an
+    /// interface method is a TYPE-space member; a function declaration is
+    /// a VALUE-space position).
+    pub(crate) fn signature_occurrence_for(
+        &self,
+        occurrence: &crate::semantic_query::SignatureNodeOccurrence,
+    ) -> crate::semantic_query::SignatureOccurrenceIdentity {
+        crate::semantic_query::SignatureOccurrenceIdentity {
+            function: {
+                let mut function = self.flow_function_slot_for(
+                    Arc::clone(&occurrence.function.anchor.canonical_id),
+                    occurrence.function.anchor.owner,
+                    Arc::clone(&occurrence.function.anchor.symbol),
+                    occurrence.function.function_part.clone(),
+                    occurrence.function.overload_ordinal,
+                );
+                function.declaration_slot.symbol_space = match occurrence.function.anchor.space {
+                    verter_type_expr::locators::LocatorSymbolSpace::Type => {
+                        crate::semantic_query::SemanticSymbolSpace::Type
+                    }
+                    verter_type_expr::locators::LocatorSymbolSpace::Value => {
+                        crate::semantic_query::SemanticSymbolSpace::Value
+                    }
+                    verter_type_expr::locators::LocatorSymbolSpace::Namespace => {
+                        crate::semantic_query::SemanticSymbolSpace::Namespace
+                    }
+                };
+                function
+            },
+            signature_ordinal: occurrence.signature_ordinal,
         }
     }
 
@@ -1354,6 +1507,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// wants a node id rather than a top-level error.
     pub(super) fn opaque(&self, err: QueryError) -> SemanticNodeId {
         self.graph().intern_node(SemanticNodeData::Opaque(err))
+    }
+
+    /// Intern the `Opaque(RecursiveRef)` back-edge sentinel under the
+    /// DECLARING file's scope. The sentinel's name alone does not identify
+    /// the declaration, so the scope sidecar carries the file identity the
+    /// relation engine's carrier unwrap re-resolves the back-edge through
+    /// (an interface's own body referencing itself relates exactly like
+    /// the `DeclRef` the same reference lowers to at any other position).
+    pub(super) fn recursive_ref_sentinel(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::Opaque(QueryError::RecursiveRef {
+                name: Arc::clone(&identity.decl_name),
+            }),
+            NodeScopeId::File {
+                canonical_id: Arc::clone(&identity.canonical_id),
+                owner: identity.owner,
+                whole_hash: identity.whole_hash,
+                local_scope: None,
+            },
+        )
     }
 
     /// Build the dep-signature fragment for a canonical file at a given
@@ -1786,6 +1962,8 @@ pub(super) fn utility_param_names(name: &str) -> &'static [&'static str] {
         | "Parameters"
         | "ConstructorParameters"
         | "InstanceType"
+        | "ThisParameterType"
+        | "OmitThisParameter"
         | "Uppercase"
         | "Lowercase"
         | "Capitalize"
@@ -1975,10 +2153,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output.map_result(|result| match result {
             QueryResult::Value(node) => match self.overload_set_refs_for(node) {
                 Some(refs) => QueryResult::Value(SemanticQueryValue::OverloadSet(refs)),
-                None => QueryResult::Error(QueryError::ValueDomainMismatch {
-                    expected: SemanticQueryValueTag::OverloadSet,
-                    actual: SemanticQueryValueTag::TypeNode,
-                }),
+                None => {
+                    // A signature-bearing node whose candidate set cannot
+                    // be read (a torn node payload) is an honest `Miss`;
+                    // only a genuinely non-signature node (a poisoned
+                    // synthetic publish) is a domain mismatch.
+                    match self
+                        .ctx
+                        .project_type_store()
+                        .semantic_graph()
+                        .node_data(node)
+                        .as_deref()
+                    {
+                        Some(SemanticNodeData::Signature { .. })
+                        | Some(SemanticNodeData::Object(_)) => QueryResult::Error(QueryError::Miss),
+                        _ => QueryResult::Error(QueryError::ValueDomainMismatch {
+                            expected: SemanticQueryValueTag::OverloadSet,
+                            actual: SemanticQueryValueTag::TypeNode,
+                        }),
+                    }
+                }
             },
             QueryResult::Recursive(node) => QueryResult::Recursive(node),
             QueryResult::Error(error) => QueryResult::Error(error),
@@ -2277,6 +2471,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             if let SemanticQueryKey::FlowReturn(key) = &key_for_build {
                 return self.build_flow_return(key);
             }
+            if let SemanticQueryKey::ResolveCall(key) = &key_for_build {
+                return self.build_resolve_call(key);
+            }
             if let SemanticQueryKey::ProjectObjectSpread {
                 program,
                 selector,
@@ -2440,20 +2637,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ClassifyMaterializationCycleGate(_) => {
                     unreachable!("typed classifier returned before node-domain build")
                 }
-                // ResolveAmbientNamespace / ResolveEnum / ApparentType /
-                // FlowNarrowingAt / ContextualTypeAt —
+                // ApparentType — LIVE producer for the CALLABLE arm. A base
+                // that carries call signatures widens to the project's
+                // registered ambient callable-function interface, so its
+                // `.call` / `.apply` / `.bind` members are reachable. Every
+                // other base kind (the primitive-to-wrapper widening) is an
+                // honest `Miss` from inside the producer.
+                SemanticQueryKey::ApparentType { base, context } => {
+                    self.build_apparent_type(*base, context)
+                }
+                // ResolveAmbientNamespace / ResolveEnum / FlowNarrowingAt /
+                // ContextualTypeAt —
                 // non-producing: these variants have no execute-side reducer.
                 // The build returns `Opaque(Miss)` verbatim (mirroring the
                 // `Relate` arm above); an `Error` result is never
                 // warm-published, so nothing is admitted or cached. Returning
-                // a fabricated apparent surface for `ApparentType` (whose
-                // lib-member index does not exist yet) — or a fabricated
-                // narrowed / contextual node for `FlowNarrowingAt` /
-                // `ContextualTypeAt` (whose flow / contextual engines land in
-                // U6) — would be a stub; `Miss` is the honest non-result.
+                // a fabricated narrowed / contextual node for `FlowNarrowingAt`
+                // / `ContextualTypeAt` (whose flow / contextual engines land in
+                // U6) would be a stub; `Miss` is the honest non-result.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
                 | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::ApparentType { .. }
                 | SemanticQueryKey::FlowNarrowingAt { .. }
                 | SemanticQueryKey::ContextualTypeAt { .. } => {
                     let fence = self.project_generation_signature();
@@ -2468,6 +2671,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // producers); it never reaches the node-domain match.
                 SemanticQueryKey::FlowReturn(_) => unreachable!(
                     "FlowReturn builds through the early typed-producer arm"
+                ),
+                SemanticQueryKey::ResolveCall(_) => unreachable!(
+                    "ResolveCall builds through the early typed-producer arm"
                 ),
             }
             };
@@ -3052,8 +3258,8 @@ impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
         // The helper already returns the typed semantic value held by the
         // family memo. This boundary adds only clean result provenance. The
         // remaining non-producing keys (`ResolveAmbientNamespace`,
-        // `ResolveEnum`, `ApparentType`, `FlowNarrowingAt`,
-        // `ContextualTypeAt`) return `Error(Miss)` and never reach the wrap.
+        // `ResolveEnum`, `FlowNarrowingAt`, `ContextualTypeAt`) return
+        // `Error(Miss)` and never reach the wrap.
         // `Relate` is a LIVE producer (`build_relate`): its decided binary
         // payloads reach the wrap; its undecided judgements surface
         // `Error(Miss)`. The boundary provenance is `clean` — a wrapper

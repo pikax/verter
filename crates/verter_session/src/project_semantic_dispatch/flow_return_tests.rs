@@ -3599,6 +3599,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 carrier.validated_at_generation,
                 Vec::new(),
                 pending,
+                Vec::new(),
             );
 
             for (name, key, query, ..) in &staged {

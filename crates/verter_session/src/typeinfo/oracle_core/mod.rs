@@ -28,6 +28,10 @@ pub(crate) mod probe;
 pub(crate) mod relation_probe;
 pub(crate) mod snapshot;
 pub(crate) mod source_walk;
+// The ONE standalone typeinfo host construction, shared by the
+// `typeinfo_tests` helper and the oracle harness's source-side walk /
+// reducer preflight so both resolve the SAME program.
+pub(crate) mod standalone_host;
 
 // The shared, tsgo-free `source_admission_digest` derivation — ONE owner for the
 // source-side admission digest, reached by BOTH the `#[cfg(test)]` consumption

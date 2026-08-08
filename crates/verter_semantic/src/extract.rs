@@ -1243,6 +1243,7 @@ mod tests {
             name: name.to_string(),
             is_bound: constness != PropValueConstness::Const,
             expression: None,
+            expression_locator: None,
             constness,
             referenced_bindings: Vec::new(),
             from_spread: false,

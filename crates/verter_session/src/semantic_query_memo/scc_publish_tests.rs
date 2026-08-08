@@ -181,6 +181,7 @@ fn run_batch_with_degradations(
         0,
         pending,
         pending_flow,
+        Vec::new(),
     );
 
     // Residency is reported by STABLE NAME (`root`, `m0`, `m1`, ...,
@@ -573,6 +574,7 @@ fn run_exact_fit_pressure_batch(
             0,
             pending,
             pending_flow,
+            Vec::new(),
         ),
         "root + {label} exactly fills a cap-{cap} budget and must publish whole"
     );
@@ -776,6 +778,7 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
             payload: store.relation_payload_for_tests(RelationOutcome::Assignable),
             flight,
         }],
+        Vec::new(),
         Vec::new(),
     );
     assert!(

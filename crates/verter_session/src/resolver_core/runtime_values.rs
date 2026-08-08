@@ -234,6 +234,7 @@ mod tests {
                 LeafTypeFact::StringLiteral(lit.to_string()),
             ))),
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+            expression_source: None,
         }
     }
 
@@ -710,6 +711,7 @@ mod tests {
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,

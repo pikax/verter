@@ -127,8 +127,9 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 
 pub use ambient_lib::{
     ambient_virtual_canonical_id, compute_ambient_hash16,
-    normalize_canonical_id as normalize_ambient_canonical_id, AmbientLibEntry, AmbientLibError,
-    AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit, ProjectAmbientLibs,
+    normalize_canonical_id as normalize_ambient_canonical_id, parse_ambient_virtual_canonical_id,
+    AmbientLibEntry, AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit,
+    ProjectAmbientLibs,
 };
 pub use canonical_path::{canonicalize_path, CanonicalPath};
 #[cfg(not(target_arch = "wasm32"))]

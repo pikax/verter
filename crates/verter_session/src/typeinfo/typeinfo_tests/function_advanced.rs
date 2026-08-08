@@ -16,34 +16,20 @@ fn upsert(host: &crate::VerterHost) {
     upsert_ts(host, "/fixtures/function_advanced.ts", FUNCTION_ADVANCED);
 }
 
+// TS7 contract: `lookup("count")` matches the second overload
+// `function lookup(key: "count"): number`. The call-site return is
+// `number`. The implementation signature is invisible to overload
+// resolution.
+//
+// Indirection note: the fixture exposes this via
+//   `LookupCountResult = ReturnType<typeof callLookupCount>`
+// where `callLookupCount = () => lookup("count")`. The test therefore
+// exercises "ReturnType of an inferred-return wrapper over an overload
+// call" — semantically equivalent to "ReturnType of the overload call
+// directly", but routed through one inference layer.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not pick the matching overload from a string-literal call site; keep as the future overload-selection contract"]
-fn function_advanced_overload_call_picks_matching_signature_return() {
-    // TS7 contract: `lookup("count")` matches the second overload
-    // `function lookup(key: "count"): number`. The call-site return is
-    // `number`. The implementation signature is invisible to overload
-    // resolution.
-    //
-    // Indirection note: the fixture exposes this via
-    //   `LookupCountResult = ReturnType<typeof callLookupCount>`
-    // where `callLookupCount = () => lookup("count")`. The test therefore
-    // exercises "ReturnType of an inferred-return wrapper over an overload
-    // call" — semantically equivalent to "ReturnType of the overload call
-    // directly", but routed through one inference layer.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "LookupCountResult",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::Number);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_overload_call_picks_matching_signature_return() {}
 
 // LIFTED: `ReturnType<typeof lookup>` selects the LAST VISIBLE overload of the
 // ordered declaration group (the bodied implementation signature is
@@ -79,11 +65,11 @@ fn function_advanced_parameters_omits_this_slot() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// TS7 contract: `ThisParameterType<typeof withReceiver>` = the type of
+// the `this` parameter annotation = `{ value: number }`.
 #[test]
-#[ignore = "typeinfo currently does not project `ThisParameterType<T>` to the declared `this` annotation; keep as the future this-parameter projection contract"]
+#[ignore = "`ThisParameterType<typeof withReceiver>` projects the declared `this` annotation `{ value: number }` today and the row PASSES under --include-ignored; it stays ignored because it cannot be oracle-seated: the harness source-side admission gate rejects the row with `Reject(ThisTypeOrParam)`, so no checked-in tsgo snapshot can be generated for it. Lift when the admission allowlist covers `this`-typed declarations"]
 fn function_advanced_this_parameter_type_returns_this_annotation() {
-    // TS7 contract: `ThisParameterType<typeof withReceiver>` = the type of
-    // the `this` parameter annotation = `{ value: number }`.
     let host = make_host_with_footprint();
     upsert(&host);
 
@@ -101,12 +87,12 @@ fn function_advanced_this_parameter_type_returns_this_annotation() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// TS7 contract: `OmitThisParameter<typeof withReceiver>` =
+// `(factor: number) => number`. The function type is republished with
+// the `this` slot stripped.
 #[test]
-#[ignore = "typeinfo currently does not strip the `this` parameter via `OmitThisParameter<T>`; keep as the future OmitThisParameter contract"]
+#[ignore = "`OmitThisParameter<typeof withReceiver>` republishes `(factor: number) => number` with the `this` slot stripped today and the row PASSES under --include-ignored; it stays ignored because it cannot be oracle-seated: the harness source-side admission gate rejects the row with `Reject(ThisTypeOrParam)`, so no checked-in tsgo snapshot can be generated for it. Lift when the admission allowlist covers `this`-typed declarations"]
 fn function_advanced_omit_this_parameter_returns_function_without_this() {
-    // TS7 contract: `OmitThisParameter<typeof withReceiver>` =
-    // `(factor: number) => number`. The function type is republished with
-    // the `this` slot stripped.
     let host = make_host_with_footprint();
     upsert(&host);
 
@@ -269,7 +255,7 @@ fn function_advanced_hybrid_interface_publishes_both_call_and_construct_signatur
 }
 
 #[test]
-#[ignore = "typeinfo currently does not return the higher-order composition's concrete `(a: string) => boolean` for an explicit instantiation; keep as the future higher-order generic-return contract"]
+#[ignore = "owned by U6.CONTEXTUAL_CALLBACK. The explicit `compose<string, number, boolean>` instantiation resolves to `Unknown(semanticMiss)` today, not the concrete `(a: string) => boolean`: the composed result's parameter type comes from contextually typing the two composed callbacks against the instantiated type parameters, which is contextual-callback inference rather than call-site overload dispatch. Lift when U6.CONTEXTUAL_CALLBACK lands that inference"]
 fn function_advanced_higher_order_composition_returns_concrete_function() {
     // TS7 contract: `compose<string, number, boolean>(f, g)` returns
     // `(a: string) => boolean`. The wrapped call binds `A = string`,
@@ -299,28 +285,14 @@ fn function_advanced_higher_order_composition_returns_concrete_function() {
     assert_query_mode(&record, ProjectionModeTag::Expanded);
 }
 
+// TS7 contract: `type VoidCallback = () => void` declares a function
+// with `void` return. `ReturnType<typeof voidCallback>` = `void`. The
+// TS7 quirk is that void-return functions are assignable from functions
+// returning any value, but the DECLARED type is still `void` and what
+// `ReturnType<>` projects.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not preserve the declared `void` return on a function-type alias; keep as the future void-return preservation contract"]
-fn function_advanced_void_callback_return_preserves_void() {
-    // TS7 contract: `type VoidCallback = () => void` declares a function
-    // with `void` return. `ReturnType<typeof voidCallback>` = `void`. The
-    // TS7 quirk is that void-return functions are assignable from functions
-    // returning any value, but the DECLARED type is still `void` and what
-    // `ReturnType<>` projects.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "VoidCallbackReturn",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::Void);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_void_callback_return_preserves_void() {}
 
 // LIFTED: `ReturnType<typeof MethodHolder.prototype.greet>` hops the synthesized
 // `.prototype` instance projection to the method and projects its
@@ -339,93 +311,51 @@ fn function_advanced_class_method_prototype_extraction_projects_return() {}
 #[test]
 fn function_advanced_class_method_prototype_extraction_projects_parameters() {}
 
+// TS7 contract: `overloadedTypeParam(42 as 42)` against the overload set
+//   <T>(x: T): T
+//   (x: string): string
+// The number literal `42` is NOT assignable to `string`, so the
+// string-specific overload is filtered out. Only the generic overload
+// remains; it binds `T = 42` (no widening because of `as 42`), and the
+// return is the literal `42`.
+//
+// Verified via tsgo `IsExactly<OverloadedGenericResult, 42>`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not perform overload selection at a numeric call site against a generic-vs-string-specific overload pair; keep as the future overload-selection generic-binds-literal contract"]
-fn function_advanced_overload_generic_first_binds_to_literal_argument() {
-    // TS7 contract: `overloadedTypeParam(42 as 42)` against the overload set
-    //   <T>(x: T): T
-    //   (x: string): string
-    // The number literal `42` is NOT assignable to `string`, so the
-    // string-specific overload is filtered out. Only the generic overload
-    // remains; it binds `T = 42` (no widening because of `as 42`), and the
-    // return is the literal `42`.
-    //
-    // Verified via tsgo `IsExactly<OverloadedGenericResult, 42>`.
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_overload_generic_first_binds_to_literal_argument() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "OverloadedGenericResult",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_number_literal(&expr, 42.0);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// TS7 contract: `overloadedTypeParam("hello")` against
+//   <T>(x: T): T          // declared first
+//   (x: string): string   // declared second
+// TS picks the FIRST matching overload in declaration order. The generic
+// overload `<T>(x: T): T` matches `"hello"` immediately. Without `as
+// const` on the argument, `T` widens from the literal `"hello"` to the
+// primitive `string` during inference. The return is therefore `string`
+// (NOT the literal `"hello"`, NOT routed through the second signature).
+//
+// The string-specific second signature is functionally UNREACHABLE for any
+// non-const string argument because the generic-first ordering shadows
+// it. This test characterises:
+//   (a) overload picking order is declaration-first (NOT specificity-first
+//       and NOT last-wins), and
+//   (b) generic T widens from a non-const literal argument to the
+//       primitive constraint.
+//
+// Verified via tsgo `IsExactly<OverloadedStringResult, string>` (and
+// `IsExactly<OverloadedStringResult, "hello">` = `false`).
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not perform overload selection where the FIRST generic overload matches a non-const string argument and widens T to the primitive; keep as the future first-overload-wins generic-widening contract"]
-fn function_advanced_overload_generic_first_widens_t_to_string_for_string_argument() {
-    // TS7 contract: `overloadedTypeParam("hello")` against
-    //   <T>(x: T): T          // declared first
-    //   (x: string): string   // declared second
-    // TS picks the FIRST matching overload in declaration order. The generic
-    // overload `<T>(x: T): T` matches `"hello"` immediately. Without `as
-    // const` on the argument, `T` widens from the literal `"hello"` to the
-    // primitive `string` during inference. The return is therefore `string`
-    // (NOT the literal `"hello"`, NOT routed through the second signature).
-    //
-    // The string-specific second signature is functionally UNREACHABLE for any
-    // non-const string argument because the generic-first ordering shadows
-    // it. This test characterises:
-    //   (a) overload picking order is declaration-first (NOT specificity-first
-    //       and NOT last-wins), and
-    //   (b) generic T widens from a non-const literal argument to the
-    //       primitive constraint.
-    //
-    // Verified via tsgo `IsExactly<OverloadedStringResult, string>` (and
-    // `IsExactly<OverloadedStringResult, "hello">` = `false`).
-    let host = make_host_with_footprint();
-    upsert(&host);
+fn function_advanced_overload_generic_first_widens_t_to_string_for_string_argument() {}
 
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "OverloadedStringResult",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_primitive(&expr, PrimitiveName::String);
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
-
+// TS7 contract: `constrainedIdentity<T extends string>(x: T): T` called
+// with `"constrained" as const`. The `as const` assertion locks the
+// argument's apparent type to the literal `"constrained"`; the
+// `T extends string` constraint is satisfied (literal types are
+// assignable to their widened primitive bound); `T` is inferred as the
+// literal `"constrained"` (NOT widened to `string`). The return is
+// therefore the literal `"constrained"`.
+//
+// Verified via tsgo `IsExactly<ConstrainedIdentityResult, "constrained">`.
+#[oracle_row]
 #[test]
-#[ignore = "typeinfo currently does not perform constraint-aware generic inference from an `as const` literal argument; keep as the future constrained-generic-literal-inference contract"]
-fn function_advanced_constrained_generic_infers_literal_under_as_const() {
-    // TS7 contract: `constrainedIdentity<T extends string>(x: T): T` called
-    // with `"constrained" as const`. The `as const` assertion locks the
-    // argument's apparent type to the literal `"constrained"`; the
-    // `T extends string` constraint is satisfied (literal types are
-    // assignable to their widened primitive bound); `T` is inferred as the
-    // literal `"constrained"` (NOT widened to `string`). The return is
-    // therefore the literal `"constrained"`.
-    //
-    // Verified via tsgo `IsExactly<ConstrainedIdentityResult, "constrained">`.
-    let host = make_host_with_footprint();
-    upsert(&host);
-
-    let (expr, record) = resolve_expr(
-        &host,
-        "/fixtures/function_advanced.ts",
-        "ConstrainedIdentityResult",
-        &[],
-        ProjectionMode::Expanded,
-    );
-
-    assert_string_literal(&expr, "constrained");
-    assert_query_mode(&record, ProjectionModeTag::Expanded);
-}
+fn function_advanced_constrained_generic_infers_literal_under_as_const() {}

@@ -315,12 +315,14 @@ fn normalize_node(
                     name: placeholder,
                     constraint: None,
                     default: None,
+                    is_const: param.is_const,
                 }))
             } else {
                 Ok(TypeExpr::TypeParameter(TypeParam {
                     name: param.name.clone(),
                     constraint: normalize_opt(&param.constraint, mode, scope)?,
                     default: normalize_opt(&param.default, mode, scope)?,
+                    is_const: param.is_const,
                 }))
             }
         }
@@ -545,6 +547,7 @@ fn normalize_function(
                 name: placeholder,
                 constraint: normalize_opt(&tp.constraint, mode, scope)?,
                 default: normalize_opt(&tp.default, mode, scope)?,
+                is_const: tp.is_const,
             });
         }
         Ok(FunctionExpr::synthetic(

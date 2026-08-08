@@ -752,6 +752,7 @@ fn locator_predeclares_carrier_template_and_signature_bound_infers() {
             name: "Head".to_string(),
             constraint: Some(Arc::new(carrier_infer)),
             default: Some(Arc::new(template_infer)),
+            is_const: false,
         }],
     )));
     let true_type = TypeExpr::Object(Arc::new(ObjectExpr {

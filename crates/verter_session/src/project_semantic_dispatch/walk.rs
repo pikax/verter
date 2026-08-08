@@ -1869,6 +1869,26 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     continue;
                                 }
                             }
+                            // A surface that carries CALL SIGNATURES exposes
+                            // the members of the ambient callable-function
+                            // interface in addition to its own. Its own
+                            // members win (the lookup above already ran);
+                            // only an absent member widens to the APPARENT
+                            // type and re-processes this segment there. The
+                            // widening is owned by the `ApparentType` family
+                            // — the walker never looks an ambient symbol up
+                            // itself — and an unproduced apparent surface
+                            // keeps the terminal `Opaque(Miss)` below.
+                            if !surface.call_signatures.is_empty() {
+                                let apparent = self.dispatch.apparent_type_of(current);
+                                drop(data);
+                                if let Some(apparent) = apparent {
+                                    if apparent != current {
+                                        current = apparent;
+                                        continue;
+                                    }
+                                }
+                            }
                             results.push(self.opaque_miss());
                             return;
                         }
@@ -2936,6 +2956,29 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     }
                     current = resolved;
                 }
+                // A callable carries no members of its own, but a value of
+                // that type exposes the members of the ambient
+                // callable-function interface — that is where `.call` /
+                // `.apply` / `.bind` live. Widen to the APPARENT type and
+                // re-process the same segment against that surface. The
+                // widening is owned by the `ApparentType` family; the walker
+                // never looks an ambient symbol up itself. An unproduced
+                // apparent surface (no registered ambient corpus, a rootless
+                // callable with no lexical demand site on the stack) keeps
+                // the terminal `Opaque(Miss)` below.
+                SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
+                    drop(data);
+                    match self.dispatch.apparent_type_of(current) {
+                        Some(apparent) if apparent != current => {
+                            current = apparent;
+                            continue;
+                        }
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    }
+                }
                 SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
                 | SemanticNodeData::Opaque(_)
@@ -2943,7 +2986,6 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 | SemanticNodeData::TypeParam { .. }
                 | SemanticNodeData::Infer { .. }
                 | SemanticNodeData::InferRef { .. }
-                | SemanticNodeData::Signature { .. }
                 // Raw-fallback / constructor / synthetic-binding carriers
                 // cannot be path-navigated as-is and have no head-resolution
                 // rail. Return Opaque(Miss).
@@ -5026,6 +5068,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             // no shallow surface members (a raw-fallback holds no surface; a
             // constructor / synthetic binding is its own terminal).
             | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => {
                 drop(data);
                 self.contribute_surface(

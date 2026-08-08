@@ -236,6 +236,7 @@ fn referenced_names_masks_function_and_constructor_binders_depth_safely() {
                 name: name.to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }],
         )))
     };
@@ -298,6 +299,7 @@ fn referenced_names_masks_function_and_constructor_binders_depth_safely() {
                     name: "T".to_string(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 }],
             )),
         ],

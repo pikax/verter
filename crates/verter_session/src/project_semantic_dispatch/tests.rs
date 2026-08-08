@@ -173,6 +173,8 @@ fn conditional_infer_route_defers_unsupported_object_index_call_and_construct_po
                 .into_boxed_slice(),
             ),
             return_type: value,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(value),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -1218,6 +1220,8 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
                 .into_boxed_slice(),
             ),
             return_type: void,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -1308,6 +1312,8 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
                 .into_boxed_slice(),
             ),
             return_type: void,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -8891,6 +8897,8 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
             .into_boxed_slice(),
         ),
         return_type: void_node,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void_node),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -10668,6 +10676,8 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
             .into_boxed_slice(),
         ),
         return_type: any_node,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -10685,6 +10695,8 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
             .into_boxed_slice(),
         ),
         return_type: any_node,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -10742,6 +10754,8 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
                 .into_boxed_slice(),
             ),
             return_type: void_node,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void_node),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -10964,6 +10978,8 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
         kind: SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: raw_fallback,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(raw_fallback),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -11068,6 +11084,8 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
             .into_boxed_slice(),
         ),
         return_type: void,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -11309,6 +11327,8 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
             .into_boxed_slice(),
         ),
         return_type: raw_fallback,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(raw_fallback),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -11628,6 +11648,8 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
                 .into_boxed_slice(),
             ),
             return_type,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -12704,6 +12726,8 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
                 .into_boxed_slice(),
             ),
             return_type: void,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -12901,6 +12925,8 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
                     .into_boxed_slice(),
             ),
             return_type: void,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -13113,11 +13139,15 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
             .into_boxed_slice(),
         ),
         return_type: void,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(
             vec![TypeParamDecl {
                 name: Arc::from("ShadowT"),
+                param: shadow_parameter,
                 constraint: None,
                 default: None,
+                is_const: false,
             }]
             .into_boxed_slice(),
         ),
@@ -13136,6 +13166,8 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
             .into_boxed_slice(),
         ),
         return_type: void,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13254,6 +13286,8 @@ fn substitute_recurses_into_function_params_and_return_type() {
             .into_boxed_slice(),
         ),
         return_type: t_param,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13902,6 +13936,8 @@ fn unary_function(
             .into_boxed_slice(),
         ),
         return_type: return_ty,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_ty),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -16369,6 +16405,8 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
         type_parameters: Arc::from(
             Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
@@ -16392,6 +16430,8 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: string_ty,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_ty),
         type_parameters: Arc::from(
             Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
@@ -17286,6 +17326,8 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -17307,6 +17349,11 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: simple_object(&graph, &[("a", string_ty)]),
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(simple_object(
+            &graph,
+            &[("a", string_ty)],
+        )),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -19667,6 +19714,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
             LowerLocator { .. } => "LowerLocator",
             ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
             FlowReturn(_) => "FlowReturn",
+            ResolveCall(_) => "ResolveCall",
         }
     }
     // Sanity probe: each variant carries a distinct label and the
@@ -22517,6 +22565,7 @@ fn assert_inner_generic_identity_fn(expr: &verter_type_expr::TypeExpr, label: &s
         name: "T".to_string(),
         constraint: None,
         default: None,
+        is_const: false,
     });
     // Discriminating negatives: the OUTER `T`'s substitution must not leak
     // into the shadowing inner binder's occurrences.
@@ -22595,6 +22644,7 @@ fn typeof_instantiation_args_substitute_outer_binder_in_nested_default() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }
         )),
         "the collection must not leave the nested default as the unbound `T`"
@@ -22637,6 +22687,7 @@ fn typeof_instantiation_args_substitute_outer_binder_in_nested_constraint() {
                 name: "T".to_string(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }
         )),
         "the collection must not leave the nested constraint as the unbound `T`"
@@ -22686,6 +22737,7 @@ fn unbound_type_param(name: &str) -> verter_type_expr::TypeExpr {
         name: name.to_string(),
         constraint: None,
         default: None,
+        is_const: false,
     })
 }
 
@@ -22944,6 +22996,7 @@ fn ctorless_subclass_inherits_base_ctor_with_heritage_type_args_applied() {
             name: "T".to_string(),
             constraint: None,
             default: None,
+            is_const: false,
         }),
         "inherited ctor param must NOT stay the unbound base `T`"
     );
@@ -23296,6 +23349,164 @@ fn resolve_overload_set_projects_ordered_visible_group_hiding_implementation() {
     );
 }
 
+/// Every candidate of the ordered visible group carries its occurrence
+/// identity (the declaration anchor + overload/signature ordinals) and a
+/// DECLARED return carrier — the overload set is an ordered OCCURRENCE
+/// list, never bare nodes.
+#[test]
+fn resolve_overload_set_candidates_carry_occurrence_and_return_carrier() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "lookup");
+    let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("overload set must resolve, got {err:?}"));
+    assert_eq!(refs.len(), 2, "the two bodiless overloads are visible");
+    for (ordinal, sig) in refs.iter().enumerate() {
+        let Some(crate::semantic_query::SignatureOccurrenceIdentity {
+            function,
+            signature_ordinal,
+        }) = sig.occurrence.authored()
+        else {
+            panic!(
+                "an overload-group candidate carries an AUTHORED occurrence, got {:?}",
+                sig.occurrence
+            );
+        };
+        assert_eq!(
+            function.declaration_slot.defining_canonical.as_ref(),
+            "/w/class_mech.ts",
+            "occurrence anchor canonical"
+        );
+        assert_eq!(
+            function.declaration_slot.merged_symbol_name.as_ref(),
+            "lookup",
+            "occurrence anchor symbol"
+        );
+        assert!(
+            matches!(
+                function.function_part,
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
+            ),
+            "an overload-group member is the declaration's own callable body"
+        );
+        assert_eq!(
+            function.overload_ordinal, ordinal as u32,
+            "the overload ordinal is the group position"
+        );
+        assert_eq!(
+            *signature_ordinal, ordinal as u32,
+            "the signature ordinal is the bucket position"
+        );
+        // `lookup`'s overloads declare their returns — a concrete seed,
+        // never a body-derived obligation.
+        assert!(
+            matches!(
+                sig.return_carrier,
+                crate::semantic_query::SignatureReturnCarrier::Declared(_)
+            ),
+            "a declared return carries the Declared carrier, got {:?}",
+            sig.return_carrier
+        );
+    }
+}
+
+/// Instantiation PRESERVES the occurrence: the explicit-type-args
+/// candidate is a NEW signature node with the SAME occurrence identity.
+#[test]
+fn resolve_overload_set_explicit_type_args_preserve_occurrence() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let callee = typeof_value_node(&host, &dispatch, "/w/class_mech.ts", "bare");
+    let plain = execute_overload_set(
+        &dispatch,
+        overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new()),
+    )
+    .unwrap_or_else(|err| panic!("uninstantiated set must resolve, got {err:?}"));
+    let string_node = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let instantiated = execute_overload_set(
+        &dispatch,
+        overload_set_key_for(&host, "/w/class_mech.ts", callee, vec![string_node]),
+    )
+    .unwrap_or_else(|err| panic!("instantiated set must resolve, got {err:?}"));
+    assert_eq!(plain.len(), 1, "lone bodied signature is visible");
+    assert_eq!(
+        instantiated.len(),
+        1,
+        "explicit <string> keeps one candidate"
+    );
+    assert_ne!(
+        plain[0].node, instantiated[0].node,
+        "instantiation produces a NEW signature node"
+    );
+    assert_eq!(
+        plain[0].occurrence, instantiated[0].occurrence,
+        "instantiation preserves the occurrence identity"
+    );
+}
+
+/// A callable type with NO authored declaration position (an inline
+/// function value, a function-typed annotation, an object-type call
+/// signature) is a ROOTLESS candidate: it carries no occurrence at all —
+/// never a fabricated declaration slot, and never the interned signature
+/// node standing in for one. Structurally identical anonymous callables
+/// authored at DIFFERENT positions hash-cons to ONE node, so a node-keyed
+/// "occurrence" would silently alias them into a shared identity; the
+/// rootless origin has no identity to share. The candidate is still never
+/// dropped from the set. Mutation recipe: minting an authored occurrence
+/// for it fabricates a declaration slot; keying it on the signature node
+/// makes the aliased pair claim one occurrence; refusing the candidate
+/// makes every anonymous callable `NotCallable`.
+#[test]
+fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_occurrence() {
+    let host = class_mech_host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+    let void = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Void,
+    ));
+    let anonymous = || {
+        graph.intern_node(SemanticNodeData::Signature {
+            kind: crate::semantic_query::SignatureKind::Call,
+            params: Arc::from(Vec::new().into_boxed_slice()),
+            return_type: void,
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            signature_span: None,
+            return_type_span: None,
+        })
+    };
+    let first = anonymous();
+    let second = anonymous();
+    assert_eq!(
+        first, second,
+        "structurally identical anonymous callables intern to ONE node"
+    );
+    for synthetic in [first, second] {
+        let key = overload_set_key_for(&host, "/w/class_mech.ts", synthetic, Vec::new());
+        let refs = execute_overload_set(&dispatch, key)
+            .unwrap_or_else(|err| panic!("an anonymous callable resolves, got {err:?}"));
+        assert_eq!(
+            refs.len(),
+            1,
+            "the lone anonymous signature is the candidate"
+        );
+        assert_eq!(
+            refs[0].occurrence,
+            crate::semantic_query::SignatureCandidateOrigin::Rootless,
+            "an anonymous callable is rootless"
+        );
+        assert!(
+            refs[0].occurrence.authored().is_none(),
+            "a rootless candidate exposes no authored occurrence"
+        );
+    }
+}
+
 /// A lone signature is visible even if bodied (the lone-signature arm of the
 /// visibility rule): `bare<T>(x: T): T {}` yields a one-element set.
 #[test]
@@ -23575,11 +23786,27 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: carrier_return,
+        occurrence: Some(crate::semantic_query::SignatureNodeOccurrence {
+            function: verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: Arc::from("/w/class_mech.ts"),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: Arc::from("genericFnWithCarrierReturn"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+            signature_ordinal: 0,
+        }),
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(carrier_return),
         type_parameters: Arc::from(
             vec![crate::semantic_query::TypeParamDecl {
                 name: Arc::from("T"),
+                param: t_param,
                 constraint: None,
                 default: None,
+                is_const: false,
             }]
             .into_boxed_slice(),
         ),
@@ -26175,6 +26402,13 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
     );
 }
 
+/// PREMISE: the frame-escape check is a `debug_assert!`, so it fires only
+/// where `debug_assertions` is on. This test is compiled only under that
+/// same predicate — a build with debug assertions off has nothing to
+/// panic and would fail the `#[should_panic]` expectation for a reason
+/// that says nothing about the code. It runs in every debug build,
+/// which is every profile the check itself is active in.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "released a Partial or cache-suppressed node")]
 fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
@@ -27649,4 +27883,98 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
         }
         other => panic!("expected Union value, got {other:?}"),
     }
+}
+
+// =============================================================================
+// Function type-parameter binder identity — stability across evaluations.
+// =============================================================================
+
+/// The signature type-parameter binders of a declared generic function are
+/// STABLE identities: cold, warm, repeated, and concurrent evaluations of
+/// the same overload set derive node-id-identical `TypeParamDecl.param`
+/// binders, and a constraint referencing a LATER sibling embeds exactly
+/// that sibling's binder id. Mutation recipe: derive the binder identity
+/// from the lowered bound content and the forward-constrained row diverges
+/// between evaluations that lower the bound in different orders — the
+/// cross-evaluation equality fails.
+#[test]
+fn generic_function_binder_identities_are_stable_across_evaluations() {
+    const CANONICAL: &str = "/w/binder_identity_pair.ts";
+    const SOURCE: &str =
+        "export declare function pair<T extends U, U extends string>(t: T, u: U): [T, U];\n";
+    let binder_params = |host: &VerterHost| -> Vec<SemanticNodeId> {
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let callee = typeof_value_node(host, &dispatch, CANONICAL, "pair");
+        let key = overload_set_key_for(host, CANONICAL, callee, Vec::new());
+        let refs = execute_overload_set(&dispatch, key)
+            .unwrap_or_else(|err| panic!("overload set must resolve, got {err:?}"));
+        assert_eq!(refs.len(), 1, "one visible signature");
+        let graph = host.project_type_store().semantic_graph();
+        let data = graph.node_data(refs[0].node).expect("signature node");
+        let SemanticNodeData::Signature {
+            type_parameters, ..
+        } = &*data
+        else {
+            panic!("candidate must be a signature, got {data:?}");
+        };
+        assert_eq!(type_parameters.len(), 2, "two declared type parameters");
+        type_parameters.iter().map(|decl| decl.param).collect()
+    };
+
+    let host = host();
+    upsert_ts(&host, CANONICAL, SOURCE);
+    let cold = binder_params(&host);
+    let warm = binder_params(&host);
+    assert_eq!(cold, warm, "warm re-read derives identical binder ids");
+    let repeated = binder_params(&host);
+    assert_eq!(
+        cold, repeated,
+        "repeated evaluation derives identical binder ids"
+    );
+
+    // Concurrent: two threads each run their own dispatch over the same host.
+    let host = std::sync::Arc::new(host);
+    let mut results = Vec::new();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let host = std::sync::Arc::clone(&host);
+                scope.spawn(move || binder_params(&host))
+            })
+            .collect();
+        for handle in handles {
+            results.push(handle.join().expect("binder thread"));
+        }
+    });
+    for concurrent in &results {
+        assert_eq!(
+            &cold, concurrent,
+            "concurrent evaluation derives identical binder ids"
+        );
+    }
+
+    // The forward constraint on `T` references the SAME binder node the
+    // sibling `U` declares — the substitution that fixes `U` can reach the
+    // reference inside `T`'s constraint.
+    let graph = host.project_type_store().semantic_graph();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let callee = typeof_value_node(&host, &dispatch, CANONICAL, "pair");
+    let key = overload_set_key_for(&host, CANONICAL, callee, Vec::new());
+    let refs = execute_overload_set(&dispatch, key)
+        .unwrap_or_else(|err| panic!("overload set must resolve, got {err:?}"));
+    let data = graph.node_data(refs[0].node).expect("signature node");
+    let SemanticNodeData::Signature {
+        type_parameters, ..
+    } = &*data
+    else {
+        panic!("candidate must be a signature, got {data:?}");
+    };
+    let t_constraint = type_parameters[0]
+        .constraint
+        .expect("T carries its authored constraint");
+    assert_eq!(
+        t_constraint, type_parameters[1].param,
+        "T's forward constraint IS the sibling binder U — not a shell the \
+         fixation substitution cannot reach"
+    );
 }

@@ -1114,6 +1114,7 @@ pub fn audit_key_for_node(
             )
         }
         SemanticNodeData::RawFallback { value } => format!("RawFallback(\"{}\")", value.raw()),
+        SemanticNodeData::DeferredCallable(_) => "DeferredCallable".to_string(),
         SemanticNodeData::SyntheticBinding { id: binding, .. } => format!(
             "SyntheticBinding({}::{})",
             binding.scope_canonical_id, binding.binding_name

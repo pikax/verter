@@ -32,6 +32,23 @@ fn convert_raw_to_analysis(
     super::convert_raw_to_analysis(raw, script_imports, &domains, unused_declarations)
 }
 
+fn indexed_call(point: u32) -> verter_type_expr::IndexedValueExpression {
+    use verter_type_expr::{IndexedValueCall, IndexedValueCallKind, IndexedValueExpression};
+    IndexedValueExpression::Call(IndexedValueCall {
+        point,
+        kind: IndexedValueCallKind::Call,
+        callee: Box::new(IndexedValueExpression::Value(
+            verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["make".to_string()],
+                type_args: Vec::new(),
+            }),
+        )),
+        receiver: None,
+        args: std::sync::Arc::from([]),
+        explicit_type_args: std::sync::Arc::from([]),
+    })
+}
+
 /// @ai-generated - Empty raw data converts to empty snapshot
 #[test]
 fn empty_raw_converts_to_empty_snapshot() {
@@ -58,6 +75,7 @@ fn component_with_import_resolved() {
                 name: "msg".to_string(),
                 is_bound: false,
                 expression: Some("hello".to_string()),
+                indexed_expression: None,
                 referenced_bindings: vec![],
                 all_bindings_static: None,
                 from_spread: false,
@@ -191,6 +209,7 @@ fn prop_constness_classified() {
                     name: "static_prop".to_string(),
                     is_bound: false,
                     expression: Some("hello".to_string()),
+                    indexed_expression: None,
                     referenced_bindings: vec![],
                     all_bindings_static: None,
                     from_spread: false,
@@ -202,6 +221,7 @@ fn prop_constness_classified() {
                     name: "const_bound".to_string(),
                     is_bound: true,
                     expression: Some("LABEL".to_string()),
+                    indexed_expression: Some(indexed_call(17)),
                     referenced_bindings: vec!["LABEL".to_string()],
                     all_bindings_static: Some(true),
                     from_spread: false,
@@ -213,6 +233,7 @@ fn prop_constness_classified() {
                     name: "dynamic_bound".to_string(),
                     is_bound: true,
                     expression: Some("count".to_string()),
+                    indexed_expression: None,
                     referenced_bindings: vec!["count".to_string()],
                     all_bindings_static: Some(false),
                     from_spread: false,
@@ -224,6 +245,7 @@ fn prop_constness_classified() {
                     name: "".to_string(),
                     is_bound: true,
                     expression: None,
+                    indexed_expression: None,
                     referenced_bindings: vec![],
                     all_bindings_static: None,
                     from_spread: true,
@@ -250,6 +272,14 @@ fn prop_constness_classified() {
     assert_eq!(props[1].constness, PropValueConstness::Const); // bound const
     assert_eq!(props[2].constness, PropValueConstness::Dynamic); // bound ref
     assert_eq!(props[3].constness, PropValueConstness::Unknown); // spread
+    let locator = props[1]
+        .expression_locator
+        .expect("bound prop keeps its indexed expression locator");
+    assert!(matches!(
+        result.expression(locator),
+        Some(verter_type_expr::IndexedValueExpression::Call(call))
+            if call.point == 17
+    ));
 }
 
 /// @ai-generated - Template refs convert correctly
@@ -541,6 +571,7 @@ fn element_class_bind_directive_resolved_from_union() {
                 argument: Some("class".to_string()),
                 modifiers: vec![],
                 expression: Some("variant".to_string()),
+                indexed_expression: Some(indexed_call(12)),
                 span: Span::new(5, 20),
                 name_end: 6,
                 arg_span: Some(Span::new(6, 11)),
@@ -565,6 +596,11 @@ fn element_class_bind_directive_resolved_from_union() {
         vec!["primary", "secondary"],
         "bind directive :class should resolve to string literal union values"
     );
+    assert!(matches!(
+        result.expression_at_span(Span::new(12, 19)),
+        Some(verter_type_expr::IndexedValueExpression::Call(call))
+            if call.point == 12
+    ));
 }
 
 #[test]
@@ -597,6 +633,7 @@ fn element_style_bind_directive_extracts_css_vars() {
                 argument: Some("style".to_string()),
                 modifiers: vec![],
                 expression: Some("{ '--theme-color': color }".to_string()),
+                indexed_expression: None,
                 span: Span::new(5, 35),
                 name_end: 6,
                 arg_span: Some(Span::new(6, 11)),

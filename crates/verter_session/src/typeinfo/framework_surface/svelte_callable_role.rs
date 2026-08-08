@@ -57,7 +57,6 @@ pub(super) fn classify_svelte_callable_role(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use verter_type_expr::PropCallableRoleUnresolvedReason;
 

@@ -403,16 +403,22 @@ pub(super) enum FamilyKey {
     /// its R21 env dims (`type_env_hash` = `T`, `lib_env_hash` = `L`,
     /// `project_identity` = `J`) ride here ON the family key — these are
     /// ENV hashes, NOT content/version hashes (R6-clean). Two queries
-    /// differing only in any env dim do NOT collide. Non-producing (the
-    /// lib-member index is unimplemented): the execute path returns
-    /// `Opaque(Miss)` and nothing is ever admitted under this family; like
-    /// `Relate`, the variant exists so `family_and_slot` stays total and
-    /// honest.
+    /// differing only in any env dim do NOT collide. `demand_scope` is the
+    /// rootless-callable scope witness (content-free canonical identity,
+    /// R6-clean): an `Anchored` demand and a `Rootless` demand over the
+    /// SAME base node are DISTINCT family identities, as are two `Rootless`
+    /// demands from different canonicals — the same interned rootless node
+    /// can never cross-serve between projects. LIVE producer for the
+    /// CALLABLE arm only; a rootless value is built `cache_suppress` so
+    /// nothing rootless is ever admitted under this family. The
+    /// primitive-to-wrapper arm (the lib-member index) is unimplemented and
+    /// returns `Opaque(Miss)`.
     ApparentType {
         base: SemanticNodeId,
         type_env_hash: crate::semantic_query::HashValue,
         lib_env_hash: crate::semantic_query::HashValue,
         project_identity: u32,
+        demand_scope: crate::semantic_query::ApparentDemandScope,
     },
     /// Mode-erased `TemplateLiteralReduce` identity. `pattern` (quasis) and
     /// the ORDER-SIGNIFICANT `args` (NEVER reordered — concatenation order
@@ -525,6 +531,22 @@ pub(super) enum FamilyKey {
     FlowReturn {
         key: Box<crate::semantic_query::FlowReturnKey>,
     },
+    /// Mode-erased `ResolveCall` identity. The family fields are EXACTLY
+    /// the full [`crate::semantic_query::ResolveCallKey`] — call-site
+    /// program point, callee / receiver / argument nodes, call-vs-construct
+    /// kind, explicit type args, the sealed-empty flow axis, and the env +
+    /// substitution context — and NOTHING else: no freshness field, no
+    /// contextual / candidate-target axis, no budget, no content hash (R6);
+    /// version-rooting lives on the cached value's read-set facts + self
+    /// roots. The applicability executor is live, but its winner remains
+    /// staged/ReturnOnly until the return-equation boundary commits it; the
+    /// family identity is already final so `family_and_slot` stays total.
+    ///
+    /// BOXED (mirroring [`Self::Relate`]): the key composite would
+    /// inflate EVERY entry of the hot keyspace.
+    ResolveCall {
+        key: Box<crate::semantic_query::ResolveCallKey>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -613,6 +635,7 @@ impl FamilyKey {
                 "ClassifyMaterializationCycleGate"
             }
             FamilyKey::FlowReturn { .. } => "FlowReturn",
+            FamilyKey::ResolveCall { .. } => "ResolveCall",
         }
     }
 
@@ -667,6 +690,7 @@ impl FamilyKey {
             FamilyKey::ContextualTypeAt { .. } => 4,
             FamilyKey::LowerLocator { .. } => 4,
             FamilyKey::ClassifyMaterializationCycleGate { .. } => 4,
+            FamilyKey::ResolveCall { .. } => 4,
         }
     }
 }
@@ -1747,8 +1771,9 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             },
             ModeSlot::Single,
         ),
-        // ApparentType — non-producing. No projection mode → the `Single`
-        // slot. The `{T, L, J}` env dims ride on the family key (the key
+        // ApparentType — LIVE producer for the callable arm. No projection
+        // mode → the `Single` slot. The `{T, L, J}` env dims AND the
+        // rootless demand-scope witness ride on the family key (the key
         // has no slot to carry them).
         SemanticQueryKey::ApparentType { base, context } => (
             FamilyKey::ApparentType {
@@ -1756,6 +1781,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 type_env_hash: context.type_env_hash,
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
+                demand_scope: context.demand_scope.clone(),
             },
             ModeSlot::Single,
         ),
@@ -1850,6 +1876,15 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         SemanticQueryKey::FlowReturn(key) => {
             (FamilyKey::FlowReturn { key: key.clone() }, ModeSlot::Single)
         }
+        // ResolveCall — complete mixed-equation results only. Mode-erased:
+        // the full `ResolveCallKey` IS the family
+        // identity (call-site point + callee/receiver/args + kind +
+        // explicit type args + sealed-empty flow axis + env/substitution
+        // context), so the family uses the `Single` slot.
+        SemanticQueryKey::ResolveCall(key) => (
+            FamilyKey::ResolveCall { key: key.clone() },
+            ModeSlot::Single,
+        ),
     }
 }
 

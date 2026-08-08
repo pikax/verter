@@ -702,6 +702,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             name: "T".into(),
             constraint: Some(arc(TypeExpr::named("Base"))),
             default: Some(arc(TypeExpr::Primitive(PrimitiveName::String))),
+            is_const: false,
         }),
     ));
     v.push((
@@ -710,6 +711,7 @@ fn corpus() -> Vec<(&'static str, TypeExpr)> {
             name: "U".into(),
             constraint: None,
             default: None,
+            is_const: false,
         }),
     ));
 
@@ -922,6 +924,7 @@ fn sample_function(with_typeparams: bool) -> FunctionExpr {
                 name: "T".into(),
                 constraint: Some(arc(TypeExpr::named("Base"))),
                 default: None,
+                is_const: false,
             }]
         } else {
             Vec::new()

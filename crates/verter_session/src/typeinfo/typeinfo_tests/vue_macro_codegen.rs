@@ -753,7 +753,9 @@ defineProps<Payload>()
 #[test]
 fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let mut inferred = "0".to_owned();
+    // A deep array nest is lowered element-wise by the flow IR's own
+    // structural lowering, so it charges that lowering's nesting envelope.
+    let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
     }
@@ -806,7 +808,9 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let mut inferred = "0".to_owned();
+    // A deep array nest is lowered element-wise by the flow IR's own
+    // structural lowering, so it charges that lowering's nesting envelope.
+    let mut inferred = "[0]".to_owned();
     for _ in 0..80 {
         inferred = format!("[{inferred}]");
     }

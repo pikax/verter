@@ -213,6 +213,9 @@ impl SemanticGraphStore {
                 }
             }
             SemanticNodeData::InstantiationRef { args, .. } => children.extend_from_slice(args),
+            // A sealed callable carrier opens only to its two sanctioned
+            // consumers — terminal, and decided by construction.
+            SemanticNodeData::DeferredCallable(_) => {}
             // -- Settled leaves and SHALLOW CARRIERS: stop ---------------
             //
             // `Primitive` / `Literal` / `Infer` / `InferRef` /

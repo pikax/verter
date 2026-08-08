@@ -123,6 +123,30 @@ pub fn ambient_virtual_canonical_id(stable_key: ProjectStableKey, canonical_id: 
     ))
 }
 
+/// The scheme prefix every ambient virtual canonical id carries.
+const AMBIENT_VIRTUAL_SCHEME: &str = "ambient:/";
+
+/// Split an ambient virtual canonical id back into the
+/// `(ProjectStableKey, canonical_id)` pair it was minted from — the exact
+/// inverse of [`ambient_virtual_canonical_id`].
+///
+/// Returns `None` for any id that is not an ambient virtual id: a missing
+/// scheme, an unparsable project tag, or an empty canonical tail. The
+/// canonical tail is returned verbatim; it is already normalized because
+/// only [`ambient_virtual_canonical_id`] mints these ids.
+#[must_use]
+pub fn parse_ambient_virtual_canonical_id(
+    virtual_id: &str,
+) -> Option<(ProjectStableKey, Arc<str>)> {
+    let rest = virtual_id.strip_prefix(AMBIENT_VIRTUAL_SCHEME)?;
+    let (tag, canonical) = rest.split_once('/')?;
+    if canonical.is_empty() {
+        return None;
+    }
+    let stable_key = ProjectStableKey::parse_hex_tag(tag)?;
+    Some((stable_key, Arc::from(canonical)))
+}
+
 /// Compute a Hash16 over a source bytes block. Uses xxh3_128, matching the
 /// project-key hash function and the audit-corpus footprint hash function.
 pub fn compute_ambient_hash16(bytes: &[u8]) -> Hash16 {

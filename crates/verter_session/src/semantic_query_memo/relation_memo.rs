@@ -258,6 +258,10 @@ impl SemanticGraphStore {
         })
     }
 
+    /// Publish a decided inline relation member through the same store-owned
+    /// admission fence as an ordinary family cold winner. On success any
+    /// concurrent top-level joiner receives this exact payload and carrier;
+
     /// Test-support enumeration of every published `Relate` family entry as
     /// `(key, outcome)` (freshest candidate per slot). Lets relation tests
     /// assert over the ACTUAL published set instead of probing guessed keys.
@@ -308,6 +312,8 @@ impl SemanticGraphStore {
             params,
             return_type,
             type_parameters,
+            occurrence,
+            return_carrier,
             signature_span,
             return_type_span,
         } = data.as_ref()
@@ -319,6 +325,8 @@ impl SemanticGraphStore {
             params: Arc::clone(params),
             return_type: *return_type,
             type_parameters: Arc::clone(type_parameters),
+            occurrence: occurrence.clone(),
+            return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
             return_type_span: *return_type_span,
         })

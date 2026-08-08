@@ -752,6 +752,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => {
@@ -796,10 +798,36 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         None => None,
                     };
+                    // The parameter's own binder node embeds its declaration-
+                    // local bounds: keep the binder verbatim when they are
+                    // untouched; re-intern it with the substituted bounds
+                    // (same decl identity + index + name) when they move, so
+                    // `param` stays the decl's own `TypeParam` node.
+                    let param = if new_constraint == tp.constraint && new_default == tp.default {
+                        tp.param
+                    } else {
+                        match self.graph().node_data(tp.param).as_deref() {
+                            Some(SemanticNodeData::TypeParam {
+                                decl, param_index, ..
+                            }) => self.graph().intern_preserving_scope(
+                                tp.param,
+                                SemanticNodeData::TypeParam {
+                                    decl: decl.clone(),
+                                    param_index: *param_index,
+                                    constraint: new_constraint,
+                                    default: new_default,
+                                    display_name: Arc::clone(&tp.name),
+                                },
+                            ),
+                            _ => tp.param,
+                        }
+                    };
                     new_type_parameters.push(TypeParamDecl {
                         name: Arc::clone(&tp.name),
+                        param,
                         constraint: new_constraint,
                         default: new_default,
+                        is_const: tp.is_const,
                     });
                 }
                 if !any_changed {
@@ -813,6 +841,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             params: Arc::from(new_params.into_boxed_slice()),
                             return_type: sub_return,
                             type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
+                            // Instantiation PRESERVES the occurrence — an
+                            // instantiated candidate is the same occurrence.
+                            occurrence: occurrence.clone(),
+                            // A declared carrier retargets the substituted
+                            // return node; a body-derived carrier is
+                            // untouched.
+                            return_carrier: match return_carrier {
+                                crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Declared(
+                                        sub_return,
+                                    )
+                                }
+                                crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Function(
+                                        source.clone(),
+                                    )
+                                }
+                            },
                             // Substitution preserves the signature's OXC spans.
                             signature_span: *signature_span,
                             return_type_span: *return_type_span,
@@ -868,6 +914,65 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let rebuilt = data
                     .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
                     .expect("ImportType is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
+            // The sealed index-composed carrier substitutes its OWN
+            // parameters and binder constraints/defaults; the occurrence
+            // and the deferred return carrier are preserved.
+            SemanticNodeData::DeferredCallable(callable) => {
+                let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
+                let mut any_changed = false;
+                let mut new_params = Vec::with_capacity(parts.params.len());
+                for param in parts.params.iter() {
+                    let (sub_ty, changed) =
+                        self.substitute_with_change_tracking(param.ty, parameter_node, arg);
+                    any_changed |= changed;
+                    new_params.push(FunctionParam {
+                        name: param.name.clone(),
+                        ty: sub_ty,
+                        optional: param.optional,
+                        rest: param.rest,
+                        span: param.span,
+                    });
+                }
+                let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());
+                for tp in parts.type_parameters.iter() {
+                    let new_constraint = match tp.constraint {
+                        Some(constraint) => {
+                            let (sub, changed) = self.substitute_with_change_tracking(
+                                constraint,
+                                parameter_node,
+                                arg,
+                            );
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    let new_default = match tp.default {
+                        Some(default) => {
+                            let (sub, changed) =
+                                self.substitute_with_change_tracking(default, parameter_node, arg);
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    new_type_parameters.push(TypeParamDecl {
+                        name: Arc::clone(&tp.name),
+                        param: tp.param,
+                        constraint: new_constraint,
+                        default: new_default,
+                        is_const: tp.is_const,
+                    });
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                let rebuilt = SemanticNodeData::DeferredCallable(callable.with_substituted(
+                    Arc::from(new_params.into_boxed_slice()),
+                    Arc::from(new_type_parameters.into_boxed_slice()),
+                ));
                 (self.graph().intern_preserving_scope(node, rebuilt), true)
             }
             _ => (node, false),

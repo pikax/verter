@@ -1,7 +1,8 @@
 //! The ONE batched SCC member publish — the store-owned admission path
-//! every deferred component member rides, across BOTH domains.
+//! every deferred component member rides, across ALL THREE domains.
 //!
-//! A relation or flow-return SCC defers its non-root members: each one
+//! A relation, flow-return, or call-resolution SCC defers its non-root
+//! members: each one
 //! claims the ordinary family flight, computes inline on the root's
 //! transaction, and batches its publish for the root to drain. The root
 //! publishes first through the family singleflight; the members then
@@ -53,6 +54,7 @@
 
 use super::inflight::InflightState;
 use super::relation_memo::relation_satisfied_projection;
+use super::resolve_call_memo::resolve_call_satisfied_projection;
 use super::*;
 
 /// The root candidate a batched SCC member publish is fenced on.
@@ -85,6 +87,17 @@ impl SccRootWitness {
             admission_seq,
         }
     }
+
+    /// The witness of a call-resolution SCC root's published candidate.
+    pub(crate) fn resolve_call(
+        key: crate::semantic_query::ResolveCallKey,
+        admission_seq: u64,
+    ) -> Self {
+        Self {
+            family: FamilyKey::ResolveCall { key: Box::new(key) },
+            admission_seq,
+        }
+    }
 }
 
 /// One relation member queued for the batched publish.
@@ -110,6 +123,18 @@ pub(crate) struct PendingFlowReturnMember {
     pub(crate) flight: InlineFlowReturnFlight,
 }
 
+/// One call-resolution member queued for the batched publish.
+pub(crate) struct PendingResolveCallMember {
+    /// The member's full call-resolution identity.
+    pub(crate) key: crate::semantic_query::ResolveCallKey,
+    /// The admitted result its inline compute produced — the
+    /// admissibility seal already excludes a rootless winner, so the
+    /// batch needs no further result-kind gate for this domain.
+    pub(crate) result: crate::semantic_query::AdmissibleCallResult,
+    /// The ordinary family flight the member claimed.
+    pub(crate) flight: InlineResolveCallFlight,
+}
+
 /// Whether a member's `entries` write made its family NEWLY resident,
 /// and therefore still owes the retention budget a ledger record.
 ///
@@ -126,6 +151,7 @@ struct NewlyKeyedFamily(bool);
 enum StagedFlight {
     Relation(InlineRelationFlight),
     Flow(InlineFlowReturnFlight),
+    ResolveCall(InlineResolveCallFlight),
 }
 
 /// One member prepared for publication: everything computed OUTSIDE the
@@ -159,8 +185,9 @@ impl SemanticGraphStore {
         validated_at_generation: u64,
         relation_members: Vec<PendingRelationMember>,
         flow_members: Vec<PendingFlowReturnMember>,
+        call_members: Vec<PendingResolveCallMember>,
     ) -> bool {
-        if relation_members.is_empty() && flow_members.is_empty() {
+        if relation_members.is_empty() && flow_members.is_empty() && call_members.is_empty() {
             return true;
         }
         let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
@@ -199,7 +226,7 @@ impl SemanticGraphStore {
         //    backstop — but a backstop spelled as a `debug_assert!` is
         //    absent from the builds that ship, where the payload would
         //    proceed to publication. It refuses instead.
-        let footprint = 1 + relation_members.len() + flow_members.len();
+        let footprint = 1 + relation_members.len() + flow_members.len() + call_members.len();
         let inadmissible = footprint > self.memo_budget.cap()
             || flow_members
                 .iter()
@@ -218,11 +245,14 @@ impl SemanticGraphStore {
             for member in flow_members {
                 self.abort_inline_flow_return_flight(&member.flight);
             }
+            for member in call_members {
+                self.abort_inline_resolve_call_flight(&member.flight);
+            }
             return false;
         }
 
         let mut staged: Vec<StagedMember> =
-            Vec::with_capacity(relation_members.len() + flow_members.len());
+            Vec::with_capacity(relation_members.len() + flow_members.len() + call_members.len());
         for member in relation_members {
             debug_assert!(
                 member.flight.prepared.key() == &member.key.to_query_key(),
@@ -263,6 +293,29 @@ impl SemanticGraphStore {
                 validated_at_generation,
             );
             staged.push(self.stage_member(family, entry, StagedFlight::Flow(member.flight), ctx));
+        }
+        for member in call_members {
+            debug_assert!(
+                matches!(member.flight.prepared.key(), SemanticQueryKey::ResolveCall(k) if **k == member.key),
+                "an inline ResolveCall flight must publish its own exact full key"
+            );
+            let family = FamilyKey::ResolveCall {
+                key: Box::new(member.key),
+            };
+            let entry = self.stage_entry(
+                SemanticQueryValue::ResolveCall(Arc::new(member.result.into_inner())),
+                resolve_call_satisfied_projection(),
+                carrier,
+                self_root_canonicals,
+                &dispatch_dep_signature,
+                validated_at_generation,
+            );
+            staged.push(self.stage_member(
+                family,
+                entry,
+                StagedFlight::ResolveCall(member.flight),
+                ctx,
+            ));
         }
 
         // Test-only injection point — parked immediately before the
@@ -482,6 +535,7 @@ impl SemanticGraphStore {
         match flight {
             StagedFlight::Relation(flight) => self.abort_inline_relation_flight(flight),
             StagedFlight::Flow(flight) => self.abort_inline_flow_return_flight(flight),
+            StagedFlight::ResolveCall(flight) => self.abort_inline_resolve_call_flight(flight),
         }
     }
 
@@ -546,6 +600,7 @@ impl StagedFlight {
         match self {
             StagedFlight::Relation(flight) => &flight.inflight.state,
             StagedFlight::Flow(flight) => &flight.inflight.state,
+            StagedFlight::ResolveCall(flight) => &flight.inflight.state,
         }
     }
 
@@ -566,6 +621,10 @@ impl StagedFlight {
                 store.retire_inflight(&flight.prepared, &flight.inflight, false);
             }
             StagedFlight::Flow(flight) => {
+                flight.inflight.ready.notify_all();
+                store.retire_inflight(&flight.prepared, &flight.inflight, false);
+            }
+            StagedFlight::ResolveCall(flight) => {
                 flight.inflight.ready.notify_all();
                 store.retire_inflight(&flight.prepared, &flight.inflight, false);
             }

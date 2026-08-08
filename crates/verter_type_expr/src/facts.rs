@@ -1556,6 +1556,12 @@ pub struct ValueTypeAnnotationFact {
     pub annotation: Option<SemanticTypeSource>,
     /// Producer-owned authored reference head for exact route provenance.
     pub reference_head: AuthoredReferenceHeadFact,
+    /// Indexed semantic expression source for an inferred declaration value.
+    /// Mutually exclusive with `annotation`: calls and callback returns are
+    /// evaluated from their parsed program record, never reconstructed as a
+    /// fabricated type expression.
+    #[serde(default)]
+    pub expression_source: Option<SemanticExpressionSource>,
 }
 
 /// Locator for one authored reference argument. Macro payloads need the macro
@@ -1627,6 +1633,44 @@ pub enum AuthoredReferenceHeadFact {
     Unavailable,
 }
 
+/// Content-free identity of one indexed program expression.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub struct ProgramExpressionIdentity {
+    /// Canonical file containing the parsed expression record.
+    pub canonical_id: Arc<str>,
+    /// SFC/script-absolute byte offset of the expression root.
+    pub offset: u32,
+}
+
+/// Semantic source of an inferred value expression.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum SemanticExpressionSource {
+    /// A parsed expression record in the retained program index.
+    ProgramExpression(ProgramExpressionIdentity),
+    /// The exact declared/body-derived return carrier of a function value.
+    FunctionReturn(FunctionReturnSource),
+}
+
 /// One narrowed type parameter: its name, ordinal, and constraint/default
 /// locators (never embedded `TypeExpr`).
 #[derive(
@@ -1649,6 +1693,10 @@ pub struct NarrowTypeParam {
     pub constraint: Option<TypeBodySlot>,
     /// Default body locator (`T = D`), if any.
     pub default: Option<TypeBodySlot>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>` is
+    /// valid) — never a session-wide flag.
+    #[serde(default)]
+    pub is_const: bool,
 }
 
 /// A whole type-parameter declaration list.
@@ -3820,6 +3868,7 @@ impl NarrowTypeParam {
             ordinal: self.ordinal,
             constraint: constraint.unwrap_or_else(|| self.constraint.clone()),
             default: default.unwrap_or_else(|| self.default.clone()),
+            is_const: self.is_const,
         })
     }
 }

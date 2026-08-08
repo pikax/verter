@@ -69,6 +69,12 @@ pub use facts::{
     TopLevelOwnerKind, ValueDeclIdentityPart,
 };
 
+mod indexed_expression;
+pub use indexed_expression::{
+    IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
+    IndexedValueLiteralMode,
+};
+
 /// Property-key identity stored by authored type IR.
 pub type TypePropertyKey = PropertyKey<ValueDeclIdentityPart>;
 
@@ -1320,6 +1326,10 @@ pub struct TypeParam {
     pub name: String,
     pub constraint: Option<Arc<TypeExpr>>,
     pub default: Option<Arc<TypeExpr>>,
+    /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>` is
+    /// valid) — never a session-wide flag.
+    #[serde(default)]
+    pub is_const: bool,
 }
 
 /// Modifier for mapped type `optional` and `readonly` fields.

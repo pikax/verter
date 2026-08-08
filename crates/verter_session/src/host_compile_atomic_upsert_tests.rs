@@ -606,17 +606,17 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
 /// the earlier admit and corrupting the batch — `submit_batch_atomic` does
 /// not dedup.
 ///
-/// SCOPE. This is a DEBUG-profile test: it drives the scheduler's per-admit
-/// epoch trace (`test_install_batch_admit_epoch_trace` /
-/// `test_take_batch_admit_epochs`), whose hooks are gated `#[cfg(any(test,
-/// debug_assertions))]` in the scheduler crate, so a `--release` test run
-/// does NOT compile this test. It therefore proves the EXISTENCE and
-/// ORDERING of the check in the debug profile; it does NOT, and cannot,
-/// prove the check is RELEASE-ACTIVE. Release-activeness (the check must be
-/// a real `assert!`/`panic!`, never a `debug_assert!` that a release build
-/// compiles out) is enforced statically by
-/// `tests/cases/g_misc0/uniqueness_check_release_active.rs`, which extracts the
-/// `assert_canonicals_unique` fn body and fails on a `debug_assert*!`
+/// SCOPE. This test drives the scheduler's per-admit epoch trace
+/// (`test_install_batch_admit_epoch_trace` / `test_take_batch_admit_epochs`),
+/// whose hooks are gated on `test` / the scheduler's opt-in `test-support`
+/// feature — which `verter_session` enables from `[dev-dependencies]` — NOT
+/// on the build profile. It therefore compiles and runs whatever the profile
+/// does with `debug_assertions`, and the gate's shipped-cfg surface runs it
+/// with `debug_assertions` OFF: there, a check downgraded to `debug_assert!`
+/// would not panic and property 1 below would fail. The source form is
+/// pinned independently by
+/// `tests/cases/g_misc0/uniqueness_check_release_active.rs`, which extracts
+/// the `assert_canonicals_unique` fn body and fails on a `debug_assert*!`
 /// downgrade.
 ///
 /// Discriminating properties (this test FAILS against the pre-fix tree,
@@ -627,8 +627,8 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
 ///
 ///  1. **The call panics.** Driving `upsert_many_with_priority` with a
 ///     duplicated canonical unwinds (caught here), proving the check
-///     EXISTS and fires in this debug build. (This says nothing about
-///     release — see SCOPE above; the static guard pins the release form.)
+///     EXISTS and fires — including in the shipped-cfg surface's
+///     `debug_assertions`-off build, where a downgraded check would not.
 ///  2. **No batch was admitted.** The per-admit epoch trace — populated
 ///     EXCLUSIVELY by `handle_new_request_batch` (the body of
 ///     `submit_batch_atomic`) — is EMPTY after the panic, proving the
@@ -677,12 +677,11 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
     assert!(
         result.is_err(),
         "a duplicate-canonical batch must PANIC through the uniqueness \
-         assertion before reaching `submit_batch_atomic` (proven here in the \
-         debug profile). The production check MUST be release-active so the \
-         duplicate also cannot silently corrupt the batch in a release build \
-         where a `debug_assert!` would be compiled out — that release form is \
-         pinned statically by `uniqueness_check_release_active.rs`, since this \
-         test does not compile under `--release`"
+         assertion before reaching `submit_batch_atomic`. The check must stay \
+         release-active so the duplicate also cannot silently corrupt the \
+         batch where a `debug_assert!` would be compiled out; this test runs \
+         under the gate's `debug_assertions`-off surface too, and \
+         `uniqueness_check_release_active.rs` pins the source form"
     );
 
     let epochs = host.scheduler.test_take_batch_admit_epochs();

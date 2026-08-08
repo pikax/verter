@@ -25,8 +25,11 @@
 //!    terminal constructor classification), and `FlowNarrowingAt` /
 //!    `ContextualTypeAt` (`ProgramAnalysis` — forward-declared value domains
 //!    whose non-producing execute arms return `Miss` until the reducers land in
-//!    U6), and `SemanticQueryKeyTag::ALL` triangulates against both the spec set
-//!    and the enum-scan set.
+//!    U6), `FlowReturn` (`FlowReturn` — the canonical whole-return carrier),
+//!    and `ResolveCall` (`ResolveCall` — the forward-declared selected-call
+//!    carrier whose non-producing execute arm returns `Miss` until the
+//!    applicability executor lands), and `SemanticQueryKeyTag::ALL`
+//!    triangulates against both the spec set and the enum-scan set.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -170,6 +173,10 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
             // The whole-function return carries its own value domain (the
             // canonical whole-return carrier + fallthrough bit).
             SemanticQueryKeyTag::FlowReturn => SemanticQueryValueTag::FlowReturn,
+            // The call / construct resolution carries its own value domain
+            // (the selected occurrence + final substitution, or genuine
+            // dynamic `any`).
+            SemanticQueryKeyTag::ResolveCall => SemanticQueryValueTag::ResolveCall,
             _ => SemanticQueryValueTag::TypeNode,
         };
         assert_eq!(

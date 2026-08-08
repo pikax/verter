@@ -711,9 +711,9 @@ impl ProjectSemanticDispatch<'_> {
                 span: None,
             })
             .collect();
-        let return_type = match &signature.return_source {
-            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => self
-                .raise_required_interior(
+        let (return_type, return_carrier) = match &signature.return_source {
+            verter_type_expr::facts::FunctionReturnSource::Declared(locator) => {
+                let return_type = self.raise_required_interior(
                     ctx,
                     &scope,
                     crate::meta_resolve::InteriorSourceStep::ReturnType,
@@ -721,13 +721,22 @@ impl ProjectSemanticDispatch<'_> {
                         self.raise_body_slot(locator.slot(), ctx.scope_canonical_id)
                             .at_optional_boundary()
                     },
-                ),
+                );
+                (
+                    return_type,
+                    crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+                )
+            }
             // A body-derived return is demanded from the whole-function
             // producer through the sealed helper — NEVER the absent-slot
             // arm. A degraded evaluation marks the enclosing composition
-            // partial / ReturnOnly.
+            // partial / ReturnOnly. The carrier records the SAME served
+            // position.
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                match ctx.with_interior_step(
+                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                );
+                let return_type = match ctx.with_interior_step(
                     crate::meta_resolve::InteriorSourceStep::ReturnType,
                     || {
                         self.execute_function_return_source(
@@ -744,24 +753,29 @@ impl ProjectSemanticDispatch<'_> {
                         self.miss_node(&scope)
                     }
                     super::flow_return::FunctionReturnNode::Absent => self.miss_node(&scope),
-                }
+                };
+                (return_type, carrier)
             }
-            verter_type_expr::facts::FunctionReturnSource::Absent => self.miss_node(&scope),
+            verter_type_expr::facts::FunctionReturnSource::Absent => (
+                self.miss_node(&scope),
+                crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Absent,
+                ),
+            ),
         };
         let type_parameters: Vec<crate::semantic_query::TypeParamDecl> =
             signature
                 .type_parameters
                 .iter()
                 .enumerate()
-                .map(|(ordinal, param)| crate::semantic_query::TypeParamDecl {
-                    name: Arc::from(param.name.as_str()),
+                .map(|(ordinal, param)| {
                     // A PRESENT constraint/default slot whose raise fails keeps
                     // the historical `None` node shape (no fabricated miss) —
                     // the strict path records the failure instead; a successful
                     // deref whose raised body materializes an
                     // unknown-materializing failure records the conservative
                     // typed failure.
-                    constraint: param.constraint.as_ref().and_then(|slot| {
+                    let constraint = param.constraint.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::TypeParamConstraint {
                                 ordinal: ordinal as u32,
@@ -778,8 +792,8 @@ impl ProjectSemanticDispatch<'_> {
                                 raised.map(HotTypeRef::node)
                             },
                         )
-                    }),
-                    default: param.default.as_ref().and_then(|slot| {
+                    });
+                    let default = param.default.as_ref().and_then(|slot| {
                         ctx.with_interior_step(
                             crate::meta_resolve::InteriorSourceStep::TypeParamDefault {
                                 ordinal: ordinal as u32,
@@ -796,7 +810,31 @@ impl ProjectSemanticDispatch<'_> {
                                 raised.map(HotTypeRef::node)
                             },
                         )
-                    }),
+                    });
+                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let param_node = self.graph().intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl: crate::semantic_query::DeclIdentity::from_scope(
+                                &scope,
+                                Arc::clone(&display_name),
+                            ),
+                            // The shared signature-scoped binder convention
+                            // (`BinderIdentityMode::Signature`): display-name-keyed
+                            // at ordinal 0.
+                            param_index: 0,
+                            constraint,
+                            default,
+                            display_name: Arc::clone(&display_name),
+                        },
+                        scope.clone(),
+                    );
+                    crate::semantic_query::TypeParamDecl {
+                        name: display_name,
+                        param: param_node,
+                        constraint,
+                        default,
+                        is_const: param.is_const,
+                    }
                 })
                 .collect();
         let kind = if construct {
@@ -810,6 +848,11 @@ impl ProjectSemanticDispatch<'_> {
                 params: Arc::from(params.into_boxed_slice()),
                 return_type,
                 type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                // The fact-composition path does not carry occurrence-grade
+                // provenance today; the overload-set producer treats an
+                // occurrence-less candidate as an honest `Miss`.
+                occurrence: None,
+                return_carrier,
                 signature_span: None,
                 return_type_span: None,
             },

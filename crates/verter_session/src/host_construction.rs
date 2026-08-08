@@ -159,11 +159,33 @@ pub(crate) struct WorkspaceSourceLoader {
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.workspace.read().read_file(canonical_id)
+        let workspace = self.workspace.read();
+        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
+        // IS the scheduler / dep-graph file id of a registered ambient lib.
+        // It is served from the ambient registry, which is the content
+        // authority for that id; the plain registration canonical stays
+        // invisible to `read_file` (a user file at that path shadows the
+        // lib instead).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace.read_ambient_lib(project, canonical.as_ref());
+        }
+        workspace.read_file(canonical_id)
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
-        self.workspace.read().file_exists(canonical_id)
+        let workspace = self.workspace.read();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace
+                .read_ambient_lib(project, canonical.as_ref())
+                .is_some();
+        }
+        workspace.file_exists(canonical_id)
     }
 
     fn classify(&self, canonical_id: &str) -> verter_language::FileLanguage {

@@ -109,7 +109,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 110
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -132,6 +132,13 @@ jobs:
         run: pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # Three surfaces. Surfaces 1-2 share one dev-profile archive; SURFACE 3
+      # archives the workspace again under the `no-debug-assertions` profile
+      # and runs `package(verter_session) + package(verter_scheduler)` from it
+      # — the only surface that executes tests with `debug_assertions` off,
+      # which is the cfg every artifact this workflow publishes is built with.
+      # That second whole-workspace compile is why the job timeout is what it
+      # is.
       - name: Rust gate
         env:
           VERTER_REQUIRE_TSGO: "1"

@@ -544,6 +544,9 @@ pub(super) fn body_root_is_resolvable(body: SemanticNodeId, ctx: &PolicyCtx<'_, 
         | Some(SemanticNodeData::Infer { .. })
         | Some(SemanticNodeData::InferRef { .. })
         | Some(SemanticNodeData::SyntheticBinding { .. })
+        // The sealed callable carrier is an intra-transaction call callee,
+        // never a publishable body.
+        | Some(SemanticNodeData::DeferredCallable(_))
         | None => false,
         Some(
             SemanticNodeData::Object(_)

@@ -51,6 +51,7 @@ pub(super) struct FoldedTypeParam<O> {
     pub(super) name: Arc<str>,
     pub(super) constraint: Option<O>,
     pub(super) default: Option<O>,
+    pub(super) is_const: bool,
 }
 
 // ===========================================================================
@@ -291,6 +292,7 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
             type_parameters,
             signature_span,
             return_type_span,
+            ..
         } => {
             let folded = fold_function(
                 alg,
@@ -358,6 +360,11 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
         SemanticNodeData::SyntheticBinding { id, value_node } => {
             alg.synthetic_slot_binding(Arc::new(id.to_carrier_key(*value_node)))
         }
+        // The sealed callable carrier has no raised shape: it is an
+        // intra-transaction call callee, never a published type.
+        SemanticNodeData::DeferredCallable(_) => {
+            alg.opaque_sentinel(&QueryError::UnrepresentableSurface)
+        }
     })
 }
 
@@ -414,6 +421,7 @@ fn fold_function<A: RaisedShapeAlgebra>(
             name: Arc::clone(&tp.name),
             constraint: fold_optional_slot(alg, dispatch, tp.constraint, active)?,
             default: fold_optional_slot(alg, dispatch, tp.default, active)?,
+            is_const: tp.is_const,
         });
     }
     Some(FoldedFunction {

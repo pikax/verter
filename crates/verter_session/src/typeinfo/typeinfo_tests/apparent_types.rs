@@ -12,19 +12,25 @@
 //! Each scenario is one `*Result = ReturnType<typeof apXX>` alias in the
 //! fixture. The Rust test resolves that alias and asserts the TS7 emission.
 //!
-//! These tests are currently ignored because Verter's typeinfo resolver
-//! does not yet perform apparent-type member lookup on primitive
-//! expressions inside function bodies for `ReturnType<typeof fn>`
-//! projection. Apparent-type member resolution requires (a) inferring
-//! the call/member-access result type from the lib.d.ts wrapper interface
-//! (String, Number, Array, Boolean, BigInt, Symbol) given a primitive
-//! receiver, and (b) propagating that result through the function
-//! return-type inference to the `ReturnType<...>` projection. Both are
-//! missing in the current resolver.
+//! The PRIMITIVE rows are ignored: Verter's typeinfo resolver does not
+//! perform apparent-type member lookup on primitive expressions inside
+//! function bodies for `ReturnType<typeof fn>` projection. That requires
+//! (a) inferring the call/member-access result type from the lib.d.ts
+//! wrapper interface (String, Number, Array, Boolean, BigInt, Symbol)
+//! given a primitive receiver, and (b) propagating that result through the
+//! function return-type inference to the `ReturnType<...>` projection.
+//! Neither is in the current resolver.
 //!
-//! Each test name and ignore reason references the future contract.
-//! When apparent-type method dispatch lands, drop the `#[ignore]` and
-//! the assertions should pass as written.
+//! Each ignored test name and ignore reason references the future contract.
+//! When apparent-type method dispatch lands for those receivers, drop the
+//! `#[ignore]` and the assertions should pass as written.
+//!
+//! The CALLABLE row (Ap16) runs: a value whose type carries call signatures
+//! widens to the project's registered ambient `Function` interface through
+//! the `ApparentType` producer, so its apparent members resolve. That row is
+//! this file's U2.CLASS_SURFACES acceptance for the apparent-callable
+//! surface, pinned independently of the `Function.prototype.call`
+//! normalization that consumes it (`call_resolution.rs`).
 //!
 //! These tests are a forward-looking pin; do NOT weaken them.
 //!
@@ -194,5 +200,17 @@ fn apparent_types_ap14_symbol_description() {
 #[ignore = "typeinfo currently does not perform apparent-type member lookup through a generic constraint (T extends string -> apparent type String -> .length: number) inside `ReturnType<typeof fn>`; keep as the future Ap15 apparent-type generic-constraint contract"]
 fn apparent_types_ap15_generic_constraint_length() {
     let expr = resolve_alias("Ap15GenericConstraintLengthResult");
+    assert_primitive(&expr, PrimitiveName::Number);
+}
+
+// ----- 16) Callable apparent surface -> number ---------------------------
+// TS7: a value whose type carries call signatures exposes the members of
+// the standard-library `Function` interface, so `f.length` on an extracted
+// function value resolves through that apparent surface to `number`. This
+// is the callable arm of the apparent-type widening, independent of the
+// `Function.prototype.call` normalization that consumes it.
+#[test]
+fn apparent_types_ap16_callable_apparent_length() {
+    let expr = resolve_alias("Ap16CallableApparentLengthResult");
     assert_primitive(&expr, PrimitiveName::Number);
 }

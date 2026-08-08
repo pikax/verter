@@ -74,6 +74,7 @@ pub(crate) fn build_resolved_local_type_fact(src: &ResolvedLocalType) -> Resolve
 /// [`ValueAnnotationClass::Direct`]; an absent annotation is
 /// [`ValueAnnotationClass::Absent`]. Reading the transient `TypeExpr` here is
 /// producer-legal; the produced fact carries none.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn value_type_annotation_fact(
     annotation: Option<&TypeExpr>,
     is_unique_symbol: bool,
@@ -81,20 +82,34 @@ pub(crate) fn value_type_annotation_fact(
     declaring_canonical: &Arc<str>,
     owner: TopLevelOwnerId,
     annotation_source: Option<SemanticTypeSource>,
+    expression_source: Option<verter_type_expr::facts::SemanticExpressionSource>,
     inference_unavailable: Option<InferenceUnavailableReason>,
 ) -> ValueTypeAnnotationFact {
     if let Some(reason) = inference_unavailable {
         debug_assert!(annotation.is_none());
         debug_assert!(annotation_source.is_none());
+        debug_assert!(expression_source.is_none());
         return ValueTypeAnnotationFact {
             is_unique_symbol: false,
             typeof_alias_target: None,
             classification: ValueAnnotationClass::InferenceUnavailable(reason),
             annotation: None,
             reference_head: AuthoredReferenceHeadFact::Unavailable,
+            expression_source: None,
         };
     }
     let Some(annotation) = annotation else {
+        if expression_source.is_some() {
+            debug_assert!(annotation_source.is_none());
+            return ValueTypeAnnotationFact {
+                is_unique_symbol: false,
+                typeof_alias_target: None,
+                classification: ValueAnnotationClass::Direct,
+                annotation: None,
+                reference_head: AuthoredReferenceHeadFact::NotReference,
+                expression_source,
+            };
+        }
         debug_assert!(
             annotation_source.is_none(),
             "annotation/source pairing: an absent annotation carries no source"
@@ -105,6 +120,7 @@ pub(crate) fn value_type_annotation_fact(
             classification: ValueAnnotationClass::Absent,
             annotation: None,
             reference_head: AuthoredReferenceHeadFact::NotReference,
+            expression_source: None,
         };
     };
 
@@ -143,6 +159,7 @@ pub(crate) fn value_type_annotation_fact(
                 arg_index: u32::try_from(arg_index).ok()?,
             }))
         }),
+        expression_source: None,
     }
 }
 
@@ -356,6 +373,7 @@ mod tests {
             TopLevelOwnerId::ordinary_file(),
             None,
             None,
+            None,
         );
         assert_eq!(fact.classification, ValueAnnotationClass::TypeOfAlias);
         let target = fact.typeof_alias_target.expect("single-hop peel target");
@@ -378,6 +396,7 @@ mod tests {
             TopLevelOwnerId::ordinary_file(),
             None,
             None,
+            None,
         );
         assert_eq!(
             fact.typeof_alias_target, None,
@@ -397,6 +416,7 @@ mod tests {
             "own",
             &canonical,
             TopLevelOwnerId::ordinary_file(),
+            None,
             None,
             None,
         );
@@ -427,6 +447,7 @@ mod tests {
                 "subject",
                 &canonical,
                 TopLevelOwnerId::ordinary_file(),
+                None,
                 None,
                 unavailable,
             )
@@ -503,6 +524,7 @@ mod tests {
             TopLevelOwnerId::ordinary_file(),
             None,
             None,
+            None,
         );
         assert_eq!(absent.classification, ValueAnnotationClass::Absent);
         assert_eq!(absent.typeof_alias_target, None);
@@ -519,6 +541,7 @@ mod tests {
                     PrimitiveName::String,
                 )),
             )),
+            None,
             None,
         );
         assert_eq!(direct.classification, ValueAnnotationClass::Direct);

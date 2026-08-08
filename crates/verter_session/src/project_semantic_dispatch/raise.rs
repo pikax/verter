@@ -294,6 +294,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
         SemanticQueryKey::ClassifyMaterializationCycleGate(_) => "ClassifyMaterializationCycleGate",
         SemanticQueryKey::FlowReturn(_) => "FlowReturn",
+        SemanticQueryKey::ResolveCall(_) => "ResolveCall",
     }
 }
 
@@ -778,6 +779,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)
             | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => {}
             SemanticNodeData::Alias(target) => {
                 stack.push(ReduceFrame::descend(*target, parent_context));
@@ -1086,6 +1088,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Raw-fallback / synthetic-binding carriers pass through this
             // reducer unchanged — the dispatch resolves them as a whole.
             | SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // Unresolved bare-name / dynamic-import reference carriers: a
@@ -1572,6 +1575,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 return_type,
                 type_parameters,
+                occurrence,
+                return_carrier,
                 signature_span,
                 return_type_span,
             } => rebuild_function(
@@ -1581,6 +1586,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 params,
                 *return_type,
                 type_parameters,
+                occurrence.clone(),
+                return_carrier.clone(),
                 *signature_span,
                 *return_type_span,
                 &state.mapping,
@@ -1986,6 +1993,8 @@ fn rebuild_function(
     params: &Arc<[crate::semantic_query::FunctionParam]>,
     return_type: SemanticNodeId,
     type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
+    return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
     return_type_span: Option<verter_span::Span>,
     mapping: &MappingMap,
@@ -2041,7 +2050,18 @@ fn rebuild_function(
             params: Arc::from(new_params.into_boxed_slice()),
             return_type: new_return,
             type_parameters: Arc::from(new_type_params.into_boxed_slice()),
-            // Node remapping preserves source provenance.
+            // Node remapping preserves source provenance — the occurrence
+            // verbatim, the declared carrier retargeted at the remapped
+            // return.
+            occurrence,
+            return_carrier: match return_carrier {
+                crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                    crate::semantic_query::SignatureReturnCarrier::Declared(new_return)
+                }
+                crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                    crate::semantic_query::SignatureReturnCarrier::Function(source)
+                }
+            },
             signature_span,
             return_type_span,
         },
@@ -4252,6 +4272,9 @@ impl<'a> OpenWalk<'a> {
             SemanticNodeData::RawFallback { .. } => self.role.question().undecidable_is_open(),
             // A synthetic slot-binding is a concrete shallow terminal.
             SemanticNodeData::SyntheticBinding { .. } => false,
+            // The sealed callable carrier is a concrete indexed callable
+            // position — closed for both open-ness questions.
+            SemanticNodeData::DeferredCallable(_) => false,
         }
     }
 

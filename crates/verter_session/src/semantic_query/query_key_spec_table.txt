@@ -20,10 +20,11 @@ ResolveAmbientNamespace | Live | TypeNode | P R T L J | Facets,MemberBody,AliasP
 ResolveEnum | Live | TypeNode | R T L J | — | EnumContext | resolve_enum_do_not_warm_hit | NonProducingPendingReducer
 ResolveOverloadSet | Live | OverloadSet | R T L J | — | OverloadSetContext | resolve_overload_set_do_not_warm_hit | Singleflight
 ClassifyBroadRuntime | Live | BroadRuntime | R T L J | — | BroadRuntimeContext | classify_broad_runtime_contexts_do_not_warm_hit | Singleflight
-ApparentType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ApparentTypeContext | apparent_type_do_not_warm_hit | NonProducingPendingReducer
+ApparentType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ApparentTypeContext | apparent_type_do_not_warm_hit | Singleflight
 TemplateLiteralReduce | Live | TypeNode | R T L J | — | TemplateLiteralReduceContext | template_literal_reduce_do_not_warm_hit | Singleflight
 FlowNarrowingAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | flow_narrowing_at_do_not_warm_hit | NonProducingPendingReducer
 ContextualTypeAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | contextual_type_at_do_not_warm_hit | NonProducingPendingReducer
 LowerLocator | Live | TypeNode | P R T L J | — | LocatorLoweringKey | lower_locator_family_distinct_by_parse_env_and_locator | Singleflight
 ClassifyMaterializationCycleGate | Live | MaterializationCycleGate | P R T L J | — | MaterializationCycleGateKey | classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes | Singleflight
 FlowReturn | Live | FlowReturn | P R T L J | — | FlowReturnContext | flow_return_keys_do_not_warm_hit_across_env_axes | Singleflight
+ResolveCall | Live | ResolveCall | P R T L J | — | ResolveCallContext | resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit | Singleflight

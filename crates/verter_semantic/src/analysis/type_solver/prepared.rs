@@ -1418,6 +1418,7 @@ impl PreparedValueDecl {
                 classification: ValueAnnotationClass::Absent,
                 annotation: None,
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+                expression_source: None,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -2515,6 +2516,7 @@ mod tests {
             ordinal,
             constraint: None,
             default: None,
+            is_const: false,
         }
     }
 
@@ -3183,6 +3185,7 @@ mod key_domain_closedness_producer_tests {
                 name: "K".into(),
                 constraint: None,
                 default: None,
+                is_const: false,
             }))],
             false,
         );
@@ -3288,6 +3291,7 @@ mod key_domain_closedness_producer_tests {
                     name: "T".into(),
                     constraint: None,
                     default: None,
+                    is_const: false,
                 }),
                 ClosednessRecipe::ParamRef { name: "T".into() },
             ),

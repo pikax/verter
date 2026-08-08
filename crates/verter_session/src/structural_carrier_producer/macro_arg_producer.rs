@@ -906,6 +906,9 @@ fn lower_function_signature(
         let binder = graph.intern_node_with_scope(
             SemanticNodeData::TypeParam {
                 decl,
+                // The shared signature-scoped binder convention
+                // (`BinderIdentityMode::Signature`): display-name-keyed at
+                // ordinal 0.
                 param_index: 0,
                 constraint,
                 default,
@@ -916,8 +919,10 @@ fn lower_function_signature(
         own_frame.bind(Arc::clone(&display_name), binder);
         type_parameters.push(TypeParamDecl {
             name: display_name,
+            param: binder,
             constraint,
             default,
+            is_const: tp.is_const,
         });
     }
 
@@ -948,12 +953,21 @@ fn lower_function_signature(
         Some(ret) => lower_node(graph, ret, scope, &inner_ctx)?,
         None => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
     };
+    let return_carrier = if func.return_type.is_some() {
+        crate::semantic_query::SignatureReturnCarrier::Declared(return_type)
+    } else {
+        crate::semantic_query::SignatureReturnCarrier::Function(
+            verter_type_expr::facts::FunctionReturnSource::Absent,
+        )
+    };
     Ok(graph.intern_node_with_scope(
         SemanticNodeData::Signature {
             kind,
             params: Arc::from(params.into_boxed_slice()),
             return_type,
             type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            occurrence: None,
+            return_carrier,
             signature_span: func.spans.signature,
             return_type_span: func.spans.return_type,
         },

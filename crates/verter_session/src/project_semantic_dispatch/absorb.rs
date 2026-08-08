@@ -653,6 +653,10 @@ impl ProjectSemanticDispatch<'_> {
                 // infer-bearing child node id.
                 | SemanticNodeData::DeclRef { .. }
                 | SemanticNodeData::RawFallback { .. }
+                // The sealed callable carrier never carries an `infer`
+                // placeholder: it is composed from an indexed function
+                // position's lowered parameters, not from a conditional.
+                | SemanticNodeData::DeferredCallable(_)
                 | SemanticNodeData::SyntheticBinding { .. } => {}
             }
         }

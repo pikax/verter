@@ -421,17 +421,17 @@ fn should_join_driver_thread(
 ///
 /// Every wait is bounded and panics on a real stall so a logic error
 /// fails loudly instead of hanging the suite. The hook is
-/// `cfg`-gated to `test` / `debug_assertions`; it and its single call
-/// site are absent from release builds, so production dispatch is
-/// unchanged.
-#[cfg(any(test, debug_assertions))]
+/// `cfg`-gated to `test` / the opt-in `test-support` feature; it and
+/// its single call site are absent from every build that does not
+/// enable it, so production dispatch is unchanged.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub(crate) struct DispatchPauseHook {
     state: Mutex<DispatchPauseState>,
     cv: parking_lot::Condvar,
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct DispatchPauseState {
     /// `true` once a test has armed the hook.
@@ -450,7 +450,7 @@ struct DispatchPauseState {
     released: bool,
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl DispatchPauseHook {
     /// Driver side: record one dispatch and, if the cumulative count has
     /// reached the armed `pause_after`, park before the next dequeue.
@@ -531,11 +531,11 @@ impl DispatchPauseHook {
 /// per-item re-lock win over a parked waiter. The epoch rail closes
 /// both gaps.)
 ///
-/// Carries zero footprint in release builds — the field, the firing
+/// Carries zero footprint outside test builds — the field, the firing
 /// site, the installer, and the epoch/trace instrumentation are all
-/// `cfg`-gated to `test` / `debug_assertions`, so production batch
-/// admission is unchanged.
-#[cfg(any(test, debug_assertions))]
+/// `cfg`-gated to `test` / the opt-in `test-support` feature, so
+/// production batch admission is unchanged.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub(crate) struct BatchAdmitSeamHook {
     /// Installed by a test; fired once per batch, on the admitting
@@ -544,7 +544,7 @@ pub(crate) struct BatchAdmitSeamHook {
     hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Debug for BatchAdmitSeamHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchAdmitSeamHook")
@@ -553,7 +553,7 @@ impl std::fmt::Debug for BatchAdmitSeamHook {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(any(test, feature = "test-support"))]
 impl BatchAdmitSeamHook {
     /// Install the seam hook. Fired once per subsequent batch, after the
     /// first admit and before the rest, while `dag.lock()` is held.
@@ -796,7 +796,7 @@ impl ScopedCacheFlight {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn owner_count(&self) -> usize {
         self.state.lock().owners.len()
     }
@@ -1118,44 +1118,44 @@ pub struct Scheduler {
     pub(crate) counters: SchedulerCounters,
     /// Test-only dispatch pause instrumentation. Lets a dwell test park
     /// the driver after N dispatches and observe scheduler-queue depth
-    /// before releasing. `cfg`-gated to `test` / `debug_assertions`;
-    /// absent from release builds.
-    #[cfg(any(test, debug_assertions))]
+    /// before releasing. `cfg`-gated to `test` / the opt-in
+    /// `test-support` feature; absent from every build without it.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) dispatch_pause: DispatchPauseHook,
     /// Test-only mid-batch admission seam. Fired once per atomic batch,
     /// after the first admit and before the rest, WHILE the single
     /// `dag.lock()` is held — the rendezvous a LOCK-CONTINUITY test uses
     /// to release a concurrent observer that blocking-acquires the DAG
     /// lock (and thus cannot acquire until all N are admitted).
-    /// `cfg`-gated to `test` / `debug_assertions`; absent from release
-    /// builds.
-    #[cfg(any(test, debug_assertions))]
+    /// `cfg`-gated to `test` / the opt-in `test-support` feature; absent
+    /// from every build without it.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) batch_admit_seam: BatchAdmitSeamHook,
     /// Test-only monotonic counter bumped once per admission-lock
     /// acquisition inside [`Self::handle_new_request_batch`] (co-located
     /// with the `dag.lock()` call via [`Self::acquire_dag_for_admission`]
     /// so a per-item lock/unlock regression bumps it once per item). The
     /// LOCK-CONTINUITY rail asserts every admit in a batch ran under the
-    /// SAME epoch — i.e. ONE acquisition. `cfg`-gated to `test` /
-    /// `debug_assertions`; absent from release builds.
-    #[cfg(any(test, debug_assertions))]
+    /// SAME epoch — i.e. ONE acquisition. `cfg`-gated to `test` / the
+    /// opt-in `test-support` feature; absent from every build without it.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) dag_admit_epoch: AtomicU64,
     /// Test-only per-admit epoch trace. When a test installs a recorder
     /// (`Some(vec)`), [`Self::handle_new_request_batch`] pushes the
     /// acquisition epoch it admitted each request under; the helper then
     /// asserts all entries are equal (one held lock) and `len == N`. When
     /// `None` (the default, and every non-instrumented call) recording is
-    /// a single cheap `Option` check. `cfg`-gated to `test` /
-    /// `debug_assertions`; absent from release builds.
-    #[cfg(any(test, debug_assertions))]
+    /// a single cheap `Option` check. `cfg`-gated to `test` / the opt-in
+    /// `test-support` feature; absent from every build without it.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) batch_admit_epoch_trace: Mutex<Option<Vec<u64>>>,
     /// Test-only one-shot pool-submit fault injector. `0` = off, `1` =
     /// force the next non-inline `try_submit` to report `Full`, `2` =
     /// `Closed`. Lets a test exercise the
     /// [`Self::terminalize_pool_submit_violation`] RELEASE path (cancel
     /// the DAG node, release the parked reservation, surface `Failed`)
-    /// without saturating the real transport. `cfg`-gated to `test` /
-    /// `debug_assertions`; absent from release builds.
+    /// without saturating the real transport. `cfg`-gated to `test`;
+    /// absent from every non-test build.
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) pool_submit_fault: AtomicU8,
     /// Test-only marker set when the last pool-submit fault was injected
@@ -1322,13 +1322,13 @@ impl Scheduler {
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
             counters: SchedulerCounters::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             dispatch_pause: DispatchPauseHook::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             batch_admit_seam: BatchAdmitSeamHook::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             batch_admit_epoch_trace: Mutex::new(None),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault: AtomicU8::new(0),
@@ -1416,13 +1416,13 @@ impl Scheduler {
             #[cfg(not(target_arch = "wasm32"))]
             driver_handle: Mutex::new(None),
             counters: SchedulerCounters::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             dispatch_pause: DispatchPauseHook::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             batch_admit_seam: BatchAdmitSeamHook::default(),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             dag_admit_epoch: AtomicU64::new(0),
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             batch_admit_epoch_trace: Mutex::new(None),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             pool_submit_fault: AtomicU8::new(0),
@@ -1826,7 +1826,7 @@ impl Scheduler {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_scoped_cache_owner_count(&self, identity: &WorkNodeIdentity) -> usize {
         self.scoped_cache_flights
@@ -3305,9 +3305,9 @@ impl Scheduler {
             // per item — the LOCK-CONTINUITY rail detects that as differing
             // recorded epochs. In release builds the helper is a plain
             // `self.dag.lock()` with no epoch.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             let (mut dag, admit_epoch) = self.acquire_dag_for_admission();
-            #[cfg(not(any(test, debug_assertions)))]
+            #[cfg(not(any(test, feature = "test-support")))]
             let mut dag = self.dag.lock();
             for (admit_index, p) in prepared.into_iter().enumerate() {
                 self.admit_prepared_under_lock(&mut dag, p, &mut post);
@@ -3316,8 +3316,8 @@ impl Scheduler {
                 // share ONE epoch (proving one held lock) independently of
                 // any thread-scheduling race. Cheap `Option` check when no
                 // test recorder is installed; zero footprint outside
-                // `cfg(test, debug_assertions)`.
-                #[cfg(any(test, debug_assertions))]
+                // `cfg(test, feature = "test-support")`.
+                #[cfg(any(test, feature = "test-support"))]
                 self.record_batch_admit_epoch(admit_epoch);
                 // Test-only LOCK-CONTINUITY seam: after the FIRST admit and
                 // BEFORE the rest, fire the rendezvous WHILE `dag` is still
@@ -3328,12 +3328,12 @@ impl Scheduler {
                 // the DAG already shows ALL N admitted (the observable
                 // consequence of continuity). The guard `dag` is NOT
                 // released here. Zero footprint outside
-                // `cfg(test, debug_assertions)`.
-                #[cfg(any(test, debug_assertions))]
+                // `cfg(test, feature = "test-support")`.
+                #[cfg(any(test, feature = "test-support"))]
                 if admit_index == 0 {
                     self.batch_admit_seam.fire();
                 }
-                #[cfg(not(any(test, debug_assertions)))]
+                #[cfg(not(any(test, feature = "test-support")))]
                 let _ = admit_index;
             }
         }
@@ -3353,7 +3353,7 @@ impl Scheduler {
     /// per item, bumping a fresh epoch each time, so the recorded epochs
     /// DIFFER. Test-only; release builds take `self.dag.lock()` directly
     /// with no epoch.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn acquire_dag_for_admission(&self) -> (parking_lot::MutexGuard<'_, SchedulerDag>, u64) {
         let guard = self.dag.lock();
         // `+ 1` so the first acquisition observes epoch 1 (epoch 0 is the
@@ -3365,7 +3365,7 @@ impl Scheduler {
     /// Record the acquisition epoch an admit ran under, when a test has
     /// installed an epoch recorder via [`Self::test_install_batch_admit_epoch_trace`].
     /// A no-op (single `Option` check) otherwise. Test-only.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     fn record_batch_admit_epoch(&self, epoch: u64) {
         if let Some(trace) = self.batch_admit_epoch_trace.lock().as_mut() {
             trace.push(epoch);
@@ -4975,7 +4975,7 @@ impl Scheduler {
             // next dequeue) until the test releases, re-draining the inbox
             // so the surplus provably accrues scheduler-queue dwell. No-op
             // unless a test has armed the hook; absent from release builds.
-            #[cfg(any(test, debug_assertions))]
+            #[cfg(any(test, feature = "test-support"))]
             self.dispatch_pause
                 .on_dispatch_and_maybe_pause(&|| self.drain_inbox());
         }
@@ -5590,7 +5590,7 @@ impl Scheduler {
     /// dispatching `pause_after` jobs and BEFORE the next dequeue. Must
     /// be called before submitting the requests whose scheduler-queue
     /// dwell the test inspects. See [`DispatchPauseHook`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_arm_dispatch_pause(&self, pause_after: usize) {
         let mut state = self.dispatch_pause.state.lock();
@@ -5604,7 +5604,7 @@ impl Scheduler {
 
     /// Test-only: block (bounded ~10 s, panic on stall) until the driver
     /// has reached the armed dispatch pause point and is parked.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_wait_until_dispatch_paused(&self) {
         use std::time::{Duration, Instant};
@@ -5632,7 +5632,7 @@ impl Scheduler {
     /// non-dispatched) nodes in the scheduler DAG. Lets a dwell test
     /// confirm the surplus provably SITS in the scheduler queue before
     /// releasing the pause.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
     pub fn test_job_queue_depth(&self) -> usize {
@@ -5640,7 +5640,7 @@ impl Scheduler {
     }
 
     /// Test-only: release the parked driver from the dispatch pause.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_release_dispatch_pause(&self) {
         let mut state = self.dispatch_pause.state.lock();
@@ -5654,7 +5654,7 @@ impl Scheduler {
     /// LOCK-CONTINUITY discriminator to prove the batch holds one
     /// continuously-held DAG lock across all N admits. See
     /// [`BatchAdmitSeamHook`].
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_install_batch_admit_seam(&self, hook: Box<dyn Fn() + Send + Sync>) {
         self.batch_admit_seam.install(hook);
@@ -5666,7 +5666,7 @@ impl Scheduler {
     /// [`Self::test_take_batch_admit_epochs`] to read and disarm. The
     /// LOCK-CONTINUITY rail uses this to prove all N admits shared ONE
     /// lock acquisition.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_install_batch_admit_epoch_trace(&self) {
         *self.batch_admit_epoch_trace.lock() = Some(Vec::new());
@@ -5678,7 +5678,7 @@ impl Scheduler {
     /// it acquires the DAG lock, how many admits had already recorded — a
     /// test-agnostic measure of admission progress (one push per admit) that
     /// is exactly `n` once the batch's held lock drops.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_peek_batch_admit_epoch_count(&self) -> usize {
         self.batch_admit_epoch_trace
@@ -5691,7 +5691,7 @@ impl Scheduler {
     /// [`Self::test_install_batch_admit_epoch_trace`]. Returns the epochs
     /// recorded (one per admit, in admit order). Panics if no recorder was
     /// armed, so a test cannot silently assert over an empty trace.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_take_batch_admit_epochs(&self) -> Vec<u64> {
         self.batch_admit_epoch_trace
@@ -5708,7 +5708,7 @@ impl Scheduler {
     /// only by racing the worker. `try_get_source` keeps serving the
     /// committed source; `try_get_analysis` returns `None` until a new
     /// analysis commit lands.
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn test_clear_analysis(&self, id: &str) {
         if let Some(node) = self.nodes.get(id) {

@@ -1185,6 +1185,96 @@ fn relate_object_record_shaped_mapped_with_inner_record_succeeds() {
     );
 }
 
+fn readonly_member(name: &str, value: crate::semantic_query::SemanticNodeId) -> SurfaceMember {
+    SurfaceMember {
+        readonly: true,
+        ..required_member(name, value)
+    }
+}
+
+/// A property `readonly` modifier is NOT part of object assignability in
+/// EITHER direction: `{ readonly path: string }` and `{ path: string }` relate
+/// both ways. Verified against tsc 5.x:
+/// `{ readonly path: string } extends { path: string } ? "yes" : "no"` is
+/// `"yes"`, and so is the reverse.
+///
+/// The array / tuple `readonly` rules are a DIFFERENT question and stay
+/// refused in the source-readonly direction (`ReadonlyArray<string>` is not
+/// assignable to `string[]`; `readonly [string]` is not assignable to
+/// `[string]`), so this test also pins the two cases the property rule must
+/// not loosen.
+///
+/// Discriminates: a tree that rejects a readonly SOURCE property against a
+/// mutable TARGET property fails the first assertion; a tree that deletes the
+/// array / tuple readonly gates along with the property gate fails the last
+/// two.
+#[test]
+fn property_readonly_modifier_does_not_gate_assignability_in_either_direction() {
+    let host = host_for_relation_tests();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let mutable_object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        required_member("path", string),
+    ])));
+    let readonly_object = graph.intern_node(SemanticNodeData::Object(empty_surface(vec![
+        readonly_member("path", string),
+    ])));
+
+    let readonly_to_mutable =
+        dispatch.execute_relate_pair_as_result_for_tests(readonly_object, mutable_object);
+    assert!(
+        matches!(readonly_to_mutable, RelationResult::Assignable { .. }),
+        "a readonly source property must relate to a mutable target property; got {readonly_to_mutable:?}"
+    );
+
+    let mutable_to_readonly =
+        dispatch.execute_relate_pair_as_result_for_tests(mutable_object, readonly_object);
+    assert!(
+        matches!(mutable_to_readonly, RelationResult::Assignable { .. }),
+        "a mutable source property must relate to a readonly target property; got {mutable_to_readonly:?}"
+    );
+
+    // The array rule is separate and stays enforced.
+    let readonly_array = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: true,
+    });
+    let mutable_array = graph.intern_node(SemanticNodeData::Array {
+        element: string,
+        readonly: false,
+    });
+    let array_result =
+        dispatch.execute_relate_pair_as_result_for_tests(readonly_array, mutable_array);
+    assert!(
+        matches!(array_result, RelationResult::NotAssignable),
+        "a readonly array must NOT relate to a mutable array; got {array_result:?}"
+    );
+
+    // So is the tuple rule.
+    let element = || crate::semantic_query::TupleElement {
+        value: string,
+        optional: false,
+        rest: false,
+        label: None,
+    };
+    let readonly_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(vec![element()].into_boxed_slice()),
+        readonly: true,
+    });
+    let mutable_tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: Arc::from(vec![element()].into_boxed_slice()),
+        readonly: false,
+    });
+    let tuple_result =
+        dispatch.execute_relate_pair_as_result_for_tests(readonly_tuple, mutable_tuple);
+    assert!(
+        matches!(tuple_result, RelationResult::NotAssignable),
+        "a readonly tuple must NOT relate to a mutable tuple; got {tuple_result:?}"
+    );
+}
+
 /// The relation engine uses the shared `relation_memo` rather than
 /// per-call recursion: two `execute_relate` calls with the same pair
 /// warm-hit on the second call.
@@ -4448,6 +4538,8 @@ fn contravariant_infer_candidates_intersect_not_union() {
                 .into_boxed_slice(),
             ),
             return_type: void_node,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void_node),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -4576,11 +4668,15 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
         return_type: inner_u,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(inner_u),
         type_parameters: Arc::from(
             vec![TypeParamDecl {
                 name: Arc::from("U"),
+                param: inner_u,
                 constraint: None,
                 default: None,
+                is_const: false,
             }]
             .into_boxed_slice(),
         ),
@@ -5202,6 +5298,8 @@ fn constructor_type_substitutes_bound_infer_inside_signature() {
             .into_boxed_slice(),
         ),
         return_type: t_ref,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_ref),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -5270,6 +5368,8 @@ fn constructor_type_relates_and_binds_infer_return() {
             kind: crate::semantic_query::SignatureKind::Call,
             params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
             return_type: ret,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -5352,6 +5452,8 @@ fn mapped_constructor_value_substitutes_per_key() {
             .into_boxed_slice(),
         ),
         return_type: k_param,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(k_param),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -5444,6 +5546,8 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
             .into_boxed_slice(),
         ),
         return_type: any_node,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -5462,6 +5566,8 @@ fn constructor_pattern_infer_declaration_shadows_outer_binder() {
             .into_boxed_slice(),
         ),
         return_type: any_node,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -5535,6 +5641,8 @@ fn signature_fixture_nodes(
         kind: crate::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type: ret,
+        occurrence: None,
+        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -5748,6 +5856,8 @@ fn signature_kind_semantics_and_cross_producer_parity() {
             kind: SignatureKind::Construct,
             params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
             return_type: infer_r,
+            occurrence: None,
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(infer_r),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
