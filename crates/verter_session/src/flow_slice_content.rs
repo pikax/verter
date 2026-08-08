@@ -261,25 +261,58 @@ pub enum SliceStatement {
         /// The argument the predicate talks about.
         subject: SliceNarrowSubject,
         /// The predicate's target type, lowered through the frame gate
-        /// exactly like a declarator annotation.
-        target: GatedType,
+        /// exactly like a declarator annotation. `None` for a TARGETLESS
+        /// `asserts x`: the assertion then excludes the subject's
+        /// definitely-falsy arms (the checker's truthiness narrowing for
+        /// an assertion signature with no type predicate).
+        target: Option<GatedType>,
     },
     /// A nested block, as its own region.
     Block(SliceRegion),
+    /// A `break` whose target an enclosing modelled construct absorbs
+    /// (an anonymous break targets the innermost switch, a named one its
+    /// labeled statement). The statement carries the target so the
+    /// EVALUATOR captures the full layer state at the break point: the
+    /// edge past the absorbing construct is that state, never the end
+    /// state of the region the break happens to sit in. Statements after
+    /// it in the same region are unreachable and never evaluate.
+    Break {
+        /// `None` for an anonymous (switch) break, the label's name for a
+        /// named one.
+        target: Option<Arc<str>>,
+    },
+    /// A `throw`: terminates the region path without contributing a
+    /// return arm. The marker lets the evaluator capture the state at the
+    /// throw point (a `catch` clause is entered from every throw point of
+    /// its try block, this one included) and stops the region path here.
+    Throw,
+    /// A bare call at statement position (`mayThrow();`): value-neutral —
+    /// its value is never consumed and its effects ride the slice's typed
+    /// effect obligations — but a call is a THROW POINT, so the marker
+    /// lets the evaluator snapshot the state a `catch` / `finally` clause
+    /// can be entered from.
+    ThrowPoint,
     /// A `switch` statement. The discriminant lowers no VALUE content (the
-    /// evaluator never consumes it); each case clause's statements lower
+    /// evaluator never consumes it) — but when it is a narrowable
+    /// reference it IS carried, so each case clause's dispatch edge narrows
+    /// it by the clause's test (the default clause by the negation of every
+    /// test), and a discriminant whose finite union the tests cover makes
+    /// the no-matching-case path dead. Each case clause's statements lower
     /// as their own region, in source order. A `break` targeting the
     /// switch ends that case's path and reaches past the switch — the
-    /// lowering absorbs it into [`SliceSwitchCase::breaks`], so the
-    /// evaluator's after-switch join carries exactly the paths that reach
-    /// it. Discriminant-driven case NARROWING is not modelled here (that
-    /// is the narrowing lane's subject); the case regions share one block
-    /// scope, exactly as the authored switch body does.
+    /// lowering absorbs it into [`SliceSwitchCase::breaks`] for
+    /// reachability, and the [`SliceStatement::Break`] marker carries its
+    /// state to the evaluator's after-switch join. The case regions share
+    /// one block scope, exactly as the authored switch body does.
     Switch {
+        /// The discriminant as a narrowable subject, when it is one (a
+        /// static member chain rooted at a parameter or modelable local).
+        discriminant: Option<SliceNarrowSubject>,
         /// One lowered clause per case, in source order.
         cases: Arc<[SliceSwitchCase]>,
         /// Whether a `default` clause exists. Without one, the
-        /// no-matching-case path reaches past the switch untouched.
+        /// no-matching-case path reaches past the switch untouched — unless
+        /// the evaluator proves the case tests exhaust the discriminant.
         has_default: bool,
     },
     /// A `try` statement. Each clause is its own region; the evaluator
@@ -296,11 +329,17 @@ pub enum SliceStatement {
         /// The finally clause's region, when authored.
         finally: Option<Box<SliceRegion>>,
     },
-    /// A return-BEARING labeled statement. The label's only flow effect —
-    /// a `break` naming it exits to after the statement — was absorbed by
-    /// the lowering into the statement's reachability, so the body
-    /// evaluates as an ordinary block.
-    Labeled(Box<SliceRegion>),
+    /// A labeled statement. The label is a break target for its OWN body:
+    /// a `break` naming it exits to after the statement, which the lowering
+    /// folds into the statement's reachability and the evaluator joins as
+    /// the break's captured edge state. The name rides the statement so
+    /// the evaluator drains exactly the exits that target it.
+    Labeled {
+        /// The label's name.
+        label: Arc<str>,
+        /// The body region.
+        body: Box<SliceRegion>,
+    },
     /// A `const` / `let` / `var` declarator with an identifier binding.
     Binding {
         /// The binding name.
@@ -331,7 +370,8 @@ pub enum SliceStatement {
     },
     /// A return-free loop: effectful but fall-through transparent. (A
     /// return-free LABELED statement is transparent too, but its body
-    /// still lowers — as a block — so its inner rails keep deciding.)
+    /// still lowers — as a labeled region, so its inner rails and its
+    /// break exits keep deciding.)
     TransparentLoop,
     /// An unsupported construct (return-bearing loop, `with`, a
     /// `break`/`continue` jump no enclosing modelled construct absorbs, a
@@ -352,6 +392,10 @@ pub struct SliceSwitchCase {
     /// A path through the clause exits the switch via `break` (reaching
     /// the statement after the switch).
     pub breaks: bool,
+    /// The case test as a guard literal, when it is one (`case "a":`).
+    /// `None` for the default clause and for a non-literal test — the
+    /// dispatch edge then establishes no discriminant narrow.
+    pub test: Option<SliceGuardLiteral>,
 }
 
 /// One `catch` clause: its parameter binding (a plain identifier only — a
@@ -386,7 +430,7 @@ pub(crate) fn slice_region_may_return(region: &SliceRegion) -> bool {
                 || alternate.as_deref().is_some_and(slice_region_may_return)
         }
         SliceStatement::Block(region) => slice_region_may_return(region),
-        SliceStatement::Labeled(region) => slice_region_may_return(region),
+        SliceStatement::Labeled { body, .. } => slice_region_may_return(body),
         SliceStatement::Switch { cases, .. } => cases
             .iter()
             .any(|case| slice_region_may_return(&case.region)),
@@ -404,6 +448,9 @@ pub(crate) fn slice_region_may_return(region: &SliceRegion) -> bool {
         SliceStatement::Binding { .. }
         | SliceStatement::Assignment { .. }
         | SliceStatement::Assertion { .. }
+        | SliceStatement::Break { .. }
+        | SliceStatement::Throw
+        | SliceStatement::ThrowPoint
         | SliceStatement::TransparentLoop
         | SliceStatement::Unsupported(_) => false,
     })
@@ -2548,8 +2595,10 @@ impl Lowerer<'_> {
                     }
                 }
                 // A `throw` terminates the region path without contributing
-                // a return arm.
+                // a return arm; the marker carries the throw POINT to the
+                // evaluator (a `catch` is entered from it too).
                 Statement::ThrowStatement(_) => {
+                    out.push(SliceStatement::Throw);
                     can_fall_through = false;
                 }
                 Statement::DoWhileStatement(_)
@@ -2588,27 +2637,21 @@ impl Lowerer<'_> {
                             other => may_break.push(other),
                         }
                     }
-                    if self.control_has_return(statement) {
-                        // A return-bearing labeled statement: the body
-                        // evaluates as an ordinary block; the absorbed
-                        // `break` is what lets execution reach past the
-                        // statement even when the body itself cannot.
-                        can_fall_through = child.region.can_fall_through || absorbed;
-                        hit_unsupported = child.hit_unsupported;
-                        out.push(SliceStatement::Labeled(Box::new(child.region)));
-                    } else {
-                        // A return-free label is fall-through transparent,
-                        // but its BODY still lowers: the label wraps an
-                        // ordinary statement whose own rail decides (a
-                        // block's hoisted `var`s, a loop's escaping `var`
-                        // fail-close, an `if` arm's conditional binding,
-                        // `switch` / `try` / `with` unsupported). Emitting
-                        // a bare transparent marker instead would bypass
-                        // EVERY inner rail at once.
-                        can_fall_through = child.region.can_fall_through || absorbed;
-                        hit_unsupported = child.hit_unsupported;
-                        out.push(SliceStatement::Block(child.region));
-                    }
+                    // The body lowers identically whether or not it bears a
+                    // return: the label wraps an ordinary statement whose
+                    // own rail decides (a block's hoisted `var`s, a loop's
+                    // escaping `var` fail-close, an `if` arm's conditional
+                    // binding, `switch` / `try` / `with` unsupported), and
+                    // the EVALUATOR needs the label's name either way —
+                    // the absorbed `break` is what lets execution reach
+                    // past the statement even when the body itself cannot,
+                    // and its captured state is that edge's layer state.
+                    can_fall_through = child.region.can_fall_through || absorbed;
+                    hit_unsupported = child.hit_unsupported;
+                    out.push(SliceStatement::Labeled {
+                        label,
+                        body: Box::new(child.region),
+                    });
                 }
                 Statement::SwitchStatement(switch) => {
                     // Each case clause lowers as its own region with the
@@ -2616,10 +2659,20 @@ impl Lowerer<'_> {
                     // case's path and is absorbed into the clause's
                     // `breaks` flag; a `break` naming an OUTER labeled
                     // statement propagates through the switch untouched.
+                    // The discriminant lowers no value content; when it is
+                    // a narrowable reference it rides the statement so the
+                    // evaluator can narrow it per dispatch edge, and each
+                    // literal case test rides its clause for the same
+                    // purpose (a non-literal test narrows nothing).
                     let has_default = switch.cases.iter().any(|case| case.test.is_none());
+                    let discriminant = self.narrow_subject_of(&switch.discriminant);
                     self.break_targets.push(None);
                     let mut cases = Vec::with_capacity(switch.cases.len());
                     for case in &switch.cases {
+                        let test = case
+                            .test
+                            .as_ref()
+                            .and_then(|test| guard_literal_of(test, self.source));
                         let lowered = self.lower_region(&case.consequent);
                         hit_unsupported |= lowered.hit_unsupported;
                         let mut breaks = false;
@@ -2632,6 +2685,7 @@ impl Lowerer<'_> {
                         cases.push(SliceSwitchCase {
                             region: lowered.region,
                             breaks,
+                            test,
                         });
                     }
                     self.break_targets.pop();
@@ -2645,6 +2699,7 @@ impl Lowerer<'_> {
                             .is_some_and(|case| case.region.can_fall_through)
                         || cases.iter().any(|case| case.breaks);
                     out.push(SliceStatement::Switch {
+                        discriminant,
                         cases: Arc::from(cases.into_boxed_slice()),
                         has_default,
                     });
@@ -2744,7 +2799,17 @@ impl Lowerer<'_> {
                     };
                     match target {
                         Some(target) => {
-                            may_break.push(target);
+                            may_break.push(target.clone());
+                            // The marker lets the evaluator capture the
+                            // layer state AT the break point — the edge
+                            // past the absorbing construct is that state,
+                            // and the rest of this region is unreachable.
+                            out.push(SliceStatement::Break {
+                                target: match target {
+                                    SliceBreakTarget::Anonymous => None,
+                                    SliceBreakTarget::Named(name) => Some(name),
+                                },
+                            });
                             can_fall_through = false;
                         }
                         None => {
@@ -2967,7 +3032,7 @@ impl Lowerer<'_> {
         if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
             return SliceGuard::None;
         }
-        let Some((ordinal, target)) = self.same_file_predicate(name, false) else {
+        let Some((ordinal, Some(target))) = self.same_file_predicate(name, false) else {
             return SliceGuard::None;
         };
         let Some(argument) = call
@@ -2984,13 +3049,14 @@ impl Lowerer<'_> {
     }
 
     /// Read a SAME-FILE function declaration's return-type predicate:
-    /// `x is T` (`asserts` false) or `asserts x is T` (`asserts` true).
-    /// Returns the ordinal of the parameter the predicate talks about
-    /// and the target type lowered through the frame gate (a BODY
-    /// position — the frame's own type declarations are in scope there,
-    /// exactly like a declarator annotation). `None` for any other
-    /// signature spelling.
-    fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, GatedType)> {
+    /// `x is T` (`asserts` false) or `asserts x is T` / a targetless
+    /// `asserts x` (`asserts` true). Returns the ordinal of the parameter
+    /// the predicate talks about and the target type lowered through the
+    /// frame gate (a BODY position — the frame's own type declarations are
+    /// in scope there, exactly like a declarator annotation); the target
+    /// is `None` for the targetless assertion spelling. `None` for the
+    /// whole read for any other signature spelling.
+    fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
         for statement in &self.program.body {
             let Statement::FunctionDeclaration(function) = statement else {
                 continue;
@@ -3005,7 +3071,18 @@ impl Lowerer<'_> {
             if predicate.asserts != asserts {
                 return None;
             }
-            let target = predicate.type_annotation.as_ref()?;
+            let target = predicate.type_annotation.as_ref().map(|target| {
+                self.gate(
+                    lower_ts_type(&target.type_annotation, self.source),
+                    annotation.span,
+                    &[],
+                )
+            });
+            // A non-`asserts` predicate without a target type is not a
+            // predicate spelling at all.
+            if !asserts && target.is_none() {
+                return None;
+            }
             let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) =
                 &predicate.parameter_name
             else {
@@ -3015,12 +3092,7 @@ impl Lowerer<'_> {
                 matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
                     if id.name.as_str() == parameter.name.as_str())
             })?;
-            let gated = self.gate(
-                lower_ts_type(&target.type_annotation, self.source),
-                annotation.span,
-                &[],
-            );
-            return Some((ordinal, gated));
+            return Some((ordinal, target));
         }
         None
     }
@@ -3120,20 +3192,27 @@ impl Lowerer<'_> {
                 })
             }
             Expression::CallExpression(call) => {
-                let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-                    return None;
-                };
-                let name = callee.name.as_str();
-                if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
-                    return None;
-                }
-                let (ordinal, target) = self.same_file_predicate(name, true)?;
-                let argument = call
-                    .arguments
-                    .get(ordinal)
-                    .and_then(|argument| argument.as_expression())?;
-                let subject = self.narrow_subject_of(argument)?;
-                Some(SliceStatement::Assertion { subject, target })
+                // A bare call is a THROW POINT regardless of what it
+                // resolves to; a same-file assertion call additionally
+                // narrows. The marker keeps the throw point even when the
+                // assertion path below does not recognise the callee.
+                let assertion = (|| {
+                    let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
+                        return None;
+                    };
+                    let name = callee.name.as_str();
+                    if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
+                        return None;
+                    }
+                    let (ordinal, target) = self.same_file_predicate(name, true)?;
+                    let argument = call
+                        .arguments
+                        .get(ordinal)
+                        .and_then(|argument| argument.as_expression())?;
+                    let subject = self.narrow_subject_of(argument)?;
+                    Some(SliceStatement::Assertion { subject, target })
+                })();
+                Some(assertion.unwrap_or(SliceStatement::ThrowPoint))
             }
             _ => None,
         }

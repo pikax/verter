@@ -2148,16 +2148,14 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
         "r5LabeledSwitchVar",
         crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
-    // A `try` whose block binds the `var`: the binding is a try-internal
-    // write, and a read past the clause boundary fails closed (the throw
-    // can precede the write — the flag is unconditional until throw-point
-    // joins exist, so even this throw-free block degrades where tsgo's
-    // answer is a clean `number`; honest and never wrong-warm).
-    assert_degraded(
-        &host,
-        "r5LabeledTryVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
-    );
+    // A `try` whose block binds the `var`, with NO catch: the abrupt
+    // paths leave the frame, so past the statement the normal-completion
+    // path is the only reaching one and the write is unconditional —
+    // tsgo's clean `number`, exactly (measured: tsgo
+    // `7.0.0-dev.20260526.1`, `--noEmit --strict --ignoreConfig`). The
+    // clause-write flag keeps its reason only where a catch lets a throw
+    // path reach the read.
+    assert_clean_warm(&host, "r5LabeledTryVar", number());
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -6036,4 +6034,392 @@ fn call_in_a_logical_operand_publishes_the_operand_union() {
             .into_boxed_slice(),
         )),
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// adversarial review — control-flow EDGE STATES and guard edge wiring
+// ──────────────────────────────────────────────────────────────────────
+//
+// Every case here is oracle-anchored against tsgo `7.0.0-dev.20260526.1`
+// (`--noEmit --strict --ignoreConfig`, checker only). The class: a
+// multi-path construct's edge carries the layer state AT the edge point
+// (a `break`, a throw point), never the end state of the region the edge
+// happens to sit in; a terminating `if` arm's writes leave with its path
+// and the surviving edge carries the other reading's guard facts; a
+// block scope's close drops only what the scope DECLARED, never the
+// writes it made to bindings that predate it. The shape-corpus rows
+// X30_switch_terminating_arm_write_fallthrough through
+// X43_plain_block_write_survives and N15..N17 pin the member-level
+// spellings; these probes pin the raw-value answers the corpus's
+// graph-node granularity cannot see (the literal-subtype synthesis above
+// all).
+
+const R1_CANONICAL: &str = "/ws/flow-r1fix.ts";
+const R1_FIXTURE: &str = r#"
+export declare function mayThrow(): void;
+
+// The predicate helpers stay UNEXPORTED: the same-file predicate scan
+// reads direct function declarations, and an `export` wrapper is a
+// different statement shape (the corpus's scripts, spliced into a
+// `<script setup>` block, are unexported the same way).
+function assertStr(v: unknown): asserts v is string { }
+function assertTruthy(v: unknown): asserts v { }
+function isString(v: unknown): v is string { return true }
+
+type U = undefined;
+type A = { kind: "a"; a: string };
+type B = { kind: "b"; b: number };
+
+export function r1LiteralGuardSubtype(x: string) {
+  if (x === "a") { return x }
+  return null
+}
+
+export function r1NegatedTypeofEdge(u: string | number) {
+  if (typeof u === "string") { return null }
+  return u
+}
+
+export function r1NegatedPredicateEdge(x: string | number) {
+  if (isString(x)) { return null }
+  return x
+}
+
+export function r1LabeledBreakState(p: boolean, s: string) {
+  let x: string | number = 0;
+  outer: { x = s; if (p) { return x } break outer }
+  return x
+}
+
+export function r1LabeledBreakNoAssertionLeak(p: boolean, u: string | number) {
+  outer: { if (p) { break outer } assertStr(u); return u }
+  return u
+}
+
+export function r1ConditionalBreakWrite(c: boolean) {
+  let x: string | number | boolean = true;
+  outer: { if (c) { break outer } x = 1 }
+  return x
+}
+
+export function r1PlainBlockWrite(s: string) {
+  let x: string | number = 0;
+  { x = s }
+  return x
+}
+
+export function r1BlockShadowRestored(s: string) {
+  let x: string | number = 0;
+  { let x = s; }
+  return x
+}
+
+export function r1SwitchDefaultBreak(v: number, p: boolean, s: string) {
+  let x: string | number = 0;
+  switch (v) { default: if (p) { break } x = s }
+  return x
+}
+
+export function r1SwitchTerminatingArmWrite(v: number, p: boolean, s: string) {
+  let x: string | number = 0;
+  switch (v) { case 0: if (p) { x = s; break } default: return x }
+}
+
+export function r1SwitchExhaustive(x: "a" | "b") {
+  switch (x) { case "a": return x; case "b": return x }
+}
+
+export function r1SwitchCaseNarrows(u: A | B) {
+  switch (u.kind) { case "a": return u.a; default: return u.b }
+}
+
+export function r1ThrowPointJoin(s: string) {
+  let x: string | number = 0;
+  try { x = s; mayThrow(); x = 0 } catch { return x }
+  return x
+}
+
+export function r1FinallyWrite() {
+  let x: string | number | boolean = true;
+  try { mayThrow() } finally { x = 1 }
+  return x
+}
+
+export function r1TryWriteSurvivesFinally(s: string) {
+  let x: string | number = 0;
+  try { x = s } finally { }
+  return x
+}
+
+export function r1TargetlessAssert(u: string | 0) {
+  assertTruthy(u);
+  return u
+}
+
+export function r1DestructuredAliasUndefined({ x = 1 }: { x: number | U }) {
+  return x
+}
+"#;
+
+fn make_r1_host() -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(R1_CANONICAL.to_string()),
+        input_id: R1_CANONICAL.to_string(),
+        source: Arc::from(R1_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(R1_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    host
+}
+
+fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
+    with_dispatch(host, |dispatch| {
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(R1_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(name),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(R1_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+        };
+        let QueryResult::Value(SemanticQueryOutput {
+            value: SemanticQueryValue::FlowReturn(result),
+            ..
+        }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone())))
+        else {
+            return None;
+        };
+        let ty = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("a flow return value projects");
+        let candidates = dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
+        Some(R5Outcome {
+            ty,
+            degradation: result.degradation(),
+            candidates,
+        })
+    })
+}
+
+/// Assert one function evaluates CLEAN (no degradation), warm-admissible
+/// (one candidate), and to exactly `expected`.
+#[track_caller]
+fn assert_r1_clean_warm(host: &Arc<VerterHost>, name: &str, expected: TypeExpr) {
+    let outcome = r1_eval(host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
+    assert_eq!(outcome.degradation, None, "{name} must evaluate clean");
+    assert_eq!(outcome.ty, expected, "{name} return type");
+    assert_eq!(
+        outcome.candidates, 1,
+        "{name} must warm-admit exactly one candidate"
+    );
+}
+
+fn union(arms: Vec<TypeExpr>) -> TypeExpr {
+    TypeExpr::Union(Arc::from(arms.into_boxed_slice()))
+}
+
+fn string() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::String)
+}
+
+fn boolean() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Boolean)
+}
+
+fn null() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Null)
+}
+
+fn undefined() -> TypeExpr {
+    TypeExpr::Primitive(PrimitiveName::Undefined)
+}
+
+/// The literal a broad-arm `===` guard narrows TO (`x: string` guarded by
+/// `=== "a"` reads `"a"` on the positive edge — the checker's
+/// strict-subtype rule), joined with the surviving edge's `null`.
+/// Mutation recipe: dropping the strict-subtype fallback in the
+/// equality-literal narrow publishes `string | null`.
+/// Oracle: `"a" | null`.
+#[test]
+fn flow_return_literal_guard_synthesizes_the_narrower_subtype() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1LiteralGuardSubtype",
+        union(vec![string_lit("a"), null()]),
+    );
+}
+
+/// The negated `typeof` reading folds onto the surviving edge past a
+/// terminating guard. Mutation recipe: truncating the overlay at the `if`
+/// without the surviving-edge application publishes `string | number |
+/// null`. Oracle: `number | null`.
+#[test]
+fn flow_return_terminating_typeof_guard_folds_the_negated_edge() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1NegatedTypeofEdge", union(vec![number(), null()]));
+}
+
+/// The user-predicate spelling of the same edge wiring. Oracle:
+/// `number | null`.
+#[test]
+fn flow_return_terminating_predicate_guard_folds_the_negated_edge() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1NegatedPredicateEdge",
+        union(vec![number(), null()]),
+    );
+}
+
+/// A labeled `break` carries the state AT the break point: the write
+/// before it survives past the label, and the returning arm's read sees
+/// it too. Oracle: `string`.
+#[test]
+fn flow_return_labeled_break_carries_the_write_state() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1LabeledBreakState", string());
+}
+
+/// An assertion after the labeled break never narrows the break path.
+/// Oracle: `string | number`.
+#[test]
+fn flow_return_labeled_break_drops_the_arm_assertion() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1LabeledBreakNoAssertionLeak",
+        union(vec![string(), number()]),
+    );
+}
+
+/// A conditional labeled break joins the break path's value with the
+/// fall-through path's write. Oracle: `number | boolean`.
+#[test]
+fn flow_return_conditional_labeled_break_joins_the_write() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1ConditionalBreakWrite",
+        union(vec![boolean(), number()]),
+    );
+}
+
+/// A plain block's write to an outer `let` is a reaching definition past
+/// the block. Oracle: `string`.
+#[test]
+fn flow_return_plain_block_write_survives_the_scope_close() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1PlainBlockWrite", string());
+}
+
+/// The twin of the plain-block write: a same-name `let` INSIDE the block
+/// shadows, and closing the scope restores the outer binding. Oracle:
+/// `number`.
+#[test]
+fn flow_return_block_scope_close_restores_the_shadowed_binding() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1BlockShadowRestored", number());
+}
+
+/// The default (last) clause's `break` carries the state at the break
+/// point — not the clause's end state. Oracle: `string | number`.
+#[test]
+fn flow_return_switch_default_break_keeps_its_own_state() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1SwitchDefaultBreak",
+        union(vec![number(), string()]),
+    );
+}
+
+/// A terminating if-arm's write never reaches the switch fall-through
+/// edge. Oracle: `number | undefined`.
+#[test]
+fn flow_return_switch_fallthrough_excludes_the_terminated_arm_write() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1SwitchTerminatingArmWrite",
+        union(vec![number(), undefined()]),
+    );
+}
+
+/// An exhaustive switch over the discriminant's union has no
+/// no-matching-case path, so no implicit `undefined` arm joins.
+/// Oracle: `"a" | "b"`.
+#[test]
+fn flow_return_exhaustive_switch_has_no_implicit_undefined() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1SwitchExhaustive",
+        union(vec![string_lit("a"), string_lit("b")]),
+    );
+}
+
+/// The per-case dispatch narrow: a member-path discriminant narrows the
+/// root per case, the default by the negation of every test. Oracle:
+/// `string | number`.
+#[test]
+fn flow_return_switch_case_narrows_the_discriminant_root() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(
+        &host,
+        "r1SwitchCaseNarrows",
+        union(vec![string(), number()]),
+    );
+}
+
+/// The catch clause is entered from every throw point of the try block:
+/// the read joins the pre-try value with the value at the call.
+/// Oracle: `string | number`.
+#[test]
+fn flow_return_catch_entry_joins_every_throw_point() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1ThrowPointJoin", union(vec![string(), number()]));
+}
+
+/// A `finally` write to an outer `let` applies on every path that reaches
+/// past the statement. Oracle: `number`.
+#[test]
+fn flow_return_finally_write_to_outer_let_applies() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1FinallyWrite", number());
+}
+
+/// With no catch, a normal-completion try write survives past the
+/// statement CLEAN (the abrupt paths left the frame). Oracle: `string`.
+#[test]
+fn flow_return_try_write_survives_finally_clean() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1TryWriteSurvivesFinally", string());
+}
+
+/// A targetless `asserts v` excludes the definitely-falsy arms.
+/// Oracle: `string`.
+#[test]
+fn flow_return_targetless_asserts_excludes_the_falsy_arm() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1TargetlessAssert", string());
+}
+
+/// The destructured-default `undefined` strip tests the arm's REDUCTION:
+/// an aliased `undefined` strips identically to the direct spelling.
+/// Oracle: `number`.
+#[test]
+fn flow_return_destructured_default_strips_aliased_undefined() {
+    let host = make_r1_host();
+    assert_r1_clean_warm(&host, "r1DestructuredAliasUndefined", number());
 }

@@ -266,7 +266,9 @@ fn switch_lowers_case_regions() {
     );
     // No `default` and no `break`: the no-matching-case path reaches the
     // trailing return, so the body still falls through the switch.
-    let [SliceStatement::Switch { cases, has_default }, trailing] = node.body.statements.as_ref()
+    let [SliceStatement::Switch {
+        cases, has_default, ..
+    }, trailing] = node.body.statements.as_ref()
     else {
         panic!("expected a Switch statement followed by the trailing return");
     };

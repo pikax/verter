@@ -235,13 +235,13 @@ pub(crate) const CORPUS: &[Row] = &[
     // `as const` on the SPREAD SOURCE's return. The checker keeps the literal `\"x\"` (spreading strips `readonly` but preserves the literal); every lane here widens to constructors, so agreement is over the member set — the same unpicked-up-literal blind spot B03_as_const_call records.
     Row { id: "X20_as_const_spread_source", script: "function base() { return { label: \"x\" } as const }\nfunction makeProps() { return { ...base(), n: 1 } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: \"x\"; n: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String", "n: { type: Number"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::ObjectSpreadProgram, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label", "n"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // `satisfies Record<string, string | number>` on a PLAIN return (no spread): the substrate keeps `Literal` member nodes that widen to the same constructors the checker prints.
-    Row { id: "X21_satisfies_plain_return", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies Record<string, string | number> }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String", "n: { type: Number"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label", "n"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    Row { id: "X21_satisfies_plain_return", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies Record<string, string | number> }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["label: { type: String", "n: { type: Number"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["label", "n"]), verdict: Verdict::KnownOwed { owed_absent: &[], note: "Same gap as CC09_satisfies_widening_target, through the Record INDEX signature: the satisfies target never contextually types the operand's members, so the fresh literals stay `Literal` where the checker's contextual target (`Record<string, string | number>`) widens them to `string` / `number` — a strict subtype of the truth, warm. The pinned `Literal` members are the tripwire: they flip to `Primitive` when satisfies-contextual widening lands." }, ..Row::BLANK },
     // A case that BREAKS passes no state to the next case: case 1 is reachable only by the dispatch edge, so `x` there is the entry value `"a"`, never the broken-off arm's `"b"`.
     Row { id: "X22_switch_break_case_entry", script: "function makeProps(v: number) { let x: \"a\" | \"b\" = \"a\"; switch (v) { case 0: x = \"b\"; break; case 1: return { v: x }; default: return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"a\"; } | { v: \"b\"; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: String"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["v"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // A `var` DEFINED only on a fall-through edge has no reaching definition on the dispatch edge: the checker unions `undefined`, the substrate flags the conditional definition and degrades at the read instead of publishing the fall-through arm's value clean.
     Row { id: "X23_switch_fallthrough_var", script: "function makeProps(v: number) { switch (v) { case 0: var x: \"a\" | undefined = \"a\"; case 1: return { v: x } } return { v: \"z\" } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"a\" | undefined; } | { v: string; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: null"], hasnt: &[] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::ConditionalVarDefinition, candidates: 0 }, svelte: Svelte::Props(&["v"]), verdict: Verdict::Degraded("the checker unions `undefined` into a var defined only on the fall-through edge; the substrate flags the conditional definition and the read degrades (ConditionalVarDefinition, ReturnOnly) rather than publishing the one-arm value clean"), ..Row::BLANK },
     // A binding WRITTEN in the try and read in the catch: the throw can precede the write, so the checker unions the entry value with the in-try write; without throw-point joins the substrate flags the write and degrades at the read instead of publishing the entry value clean.
-    Row { id: "X24_try_write_catch_read", script: "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"before\" | \"inside\"; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: null"], hasnt: &[] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Literal)], degradation: Degr::ConditionalVarDefinition, candidates: 0 }, svelte: Svelte::Props(&["v"]), verdict: Verdict::Degraded("the checker unions the pre-try value with the in-try write at the catch read; the substrate flags the try-written binding and the read degrades (ConditionalVarDefinition, ReturnOnly) — never the clean one-path answer"), ..Row::BLANK },
+    Row { id: "X24_try_write_catch_read", script: "function makeProps() { let x: \"before\" | \"inside\" = \"before\"; try { x = \"inside\"; throw 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"before\" | \"inside\"; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: null"], hasnt: &[] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::ConditionalVarDefinition, candidates: 0 }, svelte: Svelte::Props(&["v"]), verdict: Verdict::Degraded("the catch entry now JOINS the pre-try state with the state at each throw point — the in-try write `\"inside\"` is in the member's union, normalized to the primitive where the checker keeps the literal pair. The read still degrades (ConditionalVarDefinition, ReturnOnly): an elided call is a throw point the model never captures, so the flag stays the fail-closed net — never the clean one-path answer"), ..Row::BLANK },
     // An assertion narrow established inside the try does NOT reach the catch (the checker's catch antecedent is the try-entry flow) and does NOT survive the try/catch join — scope discipline alone gives the checker's exact union on both reads.
     Row { id: "X25_try_assertion_catch_scope", script: "function assertString(v: unknown): asserts v is string { if (typeof v !== \"string\") throw 0 }\ndeclare function mayThrow(): void\nfunction makeProps(p: string | number) { try { assertString(p); mayThrow() } catch { return { caught: p } } return { caught: p } }", probe: "ReturnType<typeof makeProps>", checker: "{ caught: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["caught: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, svelte: Svelte::Props(&["caught"]), verdict: Verdict::MatchesChecker, ..Row::BLANK },
     // The switch twin of X25_try_assertion_catch_scope: an assertion narrow established in one case must not leak into a sibling case — the dispatch edge carries no narrow.
@@ -322,5 +322,119 @@ pub(crate) const CORPUS: &[Row] = &[
     // (checker: `{ label: string; n: number; }`) — the widening twin of
     // CC05_satisfies_literal_union, and the member-visible sibling of
     // X21_satisfies_plain_return's Record target.
-    Row { id: "CC09_satisfies_widening_target", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies { label: string; n: number } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    Row { id: "CC09_satisfies_widening_target", script: "function makeProps() { return { label: \"x\", n: 1 } satisfies { label: string; n: number } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; n: number; }", owner: Owner::U6ContextualCore, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Literal), ("n", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::KnownOwed { owed_absent: &[], note: "The satisfies TARGET never contextually types the operand's members: the target's member types (`label: string; n: number`) never reach value inference, so the fresh member literals stay `Literal` where the checker widens them under the contextual target (`{ label: string; n: number; }`) — a strict subtype of the truth, warm. The repair is the deferred satisfies-contextual widening contract named on the member-literal policy: carry the gated target into object-literal value inference and widen a fresh member literal when the target's member (or index) type holds no literal. The pinned `Literal` members are the tripwire: they flip to `Primitive` the moment the target drives widening." }, ..Row::BLANK },
+
+    // ── adversarial review: control-flow EDGE STATES ─────────────────
+    // Every row below was measured red against the pinned checker before the
+    // fix landed: the model's answer at each row's pinning lane is in the
+    // row's comment.
+    // A switch fall-through edge must not carry a TERMINATING arm's write:
+    // `case 0`'s `if (p) { x = s; break }` exits the switch, so the default
+    // clause's dispatch+fall-through join reads `x: number`. Red: the
+    // fall-through edge published the broken arm's `string` write. The
+    // graph node is a two-arm union either way (the model keeps
+    // span-distinct arms the checker subtype-reduces), so the runtime
+    // constructor list is the tripwire: `Number` only, never `[Number,
+    // String]`.
+    Row { id: "X30_switch_terminating_arm_write_fallthrough", script: "function makeProps(v: number, p: boolean, s: string) { let x: string | number = 0; switch (v) { case 0: if (p) { x = s; break } default: return { v: x } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; } | undefined", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: Number, required: false"], hasnt: &["String", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A `break` in the LAST (default) clause carries the state AT the break
+    // point, not the clause's end state: break and fall-off-end share no
+    // merge slot. Red: the clause end state (`x = s` applied) served both
+    // exits, so the member pinned `Primitive` where the checker joins the
+    // break path's `number`.
+    Row { id: "X31_switch_default_break_state", script: "function makeProps(v: number, p: boolean, s: string) { let x: string | number = 0; switch (v) { default: if (p) break; x = s } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A switch over a SINGLE-member literal union is exhaustive: no implicit
+    // `undefined` arm. Red: the no-matching-case path was taken as live
+    // (only `has_default` gated it), so the return unioned `undefined` and
+    // the node was `Union`.
+    Row { id: "X32_switch_exhaustive_single_case", script: "function makeProps(x: \"a\") { switch (x) { case \"a\": return { v: x } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"a\"; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Literal)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The switch discriminant narrows PER CASE on the dispatch edge — a
+    // member-path discriminant narrows the ROOT by the case test, and the
+    // default clause by the negation of every test — so `u.a` / `u.b`
+    // project off the narrowed root. Red: no per-case narrowing, both
+    // member reads walked the unnarrowed union, missed, and degraded
+    // (`type: null`). The literal-union member-level twin of this
+    // narrowing is below the corpus's pin granularity (union arm contents
+    // are unpinned); this row's degradation pin is what can fail.
+    Row { id: "X33_switch_case_narrows_discriminant", script: "type A = { kind: \"a\"; a: string }\ntype B = { kind: \"b\"; b: number }\nfunction makeProps(u: A | B) { switch (u.kind) { case \"a\": return { v: u.a }; default: return { v: u.b } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; } | { v: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]", "required: true"], hasnt: &["type: null", "required: false"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The exhaustive two-case spelling of X32_switch_exhaustive_single_case:
+    // the `undefined` arm would reach the emitted surface as an OPTIONAL
+    // prop, so the runtime lane is the tripwire (`required: true`).
+    Row { id: "X34_switch_exhaustive_union_no_implicit_undefined", script: "function makeProps(x: \"a\" | \"b\") { switch (x) { case \"a\": return { v: x }; case \"b\": return { v: x } } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: \"a\"; } | { v: \"b\"; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: String, required: true"], hasnt: &["required: false", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A labeled `break` carries the layer state AT the break point: the
+    // write before it survives past the label. Red: the labeled arm
+    // restored the pre-block layers, so the final read saw the pre-write
+    // `number`. The graph node is a two-arm union either way (span-distinct
+    // arms the checker subtype-reduces to one object), so the runtime
+    // constructor list is the tripwire: `String` only.
+    Row { id: "X35_labeled_break_carries_write_state", script: "function makeProps(p: boolean, s: string) { let x: string | number = 0; outer: { x = s; if (p) return { v: x }; break outer } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: String, required: true"], hasnt: &["Number", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // An assertion AFTER the labeled break must not narrow the break path:
+    // the edge past the label is the break's own state, taken before the
+    // assertion ran. Red: the labeled arm left the body-evaluated overlay
+    // live, so the final read published `string` and the union's
+    // un-narrowed arm was lost — the runtime constructors were `String`
+    // only where the checker unions `string | number` in.
+    Row { id: "X36_labeled_break_drops_arm_assertion", script: "function assertStr(v: unknown): asserts v is string { }\nfunction makeProps(p: boolean, u: string | number) { outer: { if (p) break outer; assertStr(u); return { v: u } } return { v: u } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A CONDITIONAL labeled break: the edge past the label joins the break
+    // path (`x` still `boolean`) with the fall-through path's `x = 1`
+    // write. Red: the join never happened — the restored pre-block state
+    // dropped the write entirely and published `{ v: boolean }` warm.
+    Row { id: "X37_labeled_conditional_break_write", script: "function makeProps(c: boolean) { let x: string | number | boolean = true; outer: { if (c) break outer; x = 1 } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number | boolean; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The switch spelling of X37_labeled_conditional_break_write: the
+    // conditional `break` exits with `x: boolean`, the `x = 1` path breaks
+    // with `number`, the default clause falls off with its own write —
+    // three distinct exit states. Red: the clause's conditional break
+    // carried no state (the clause END state served as the break exit),
+    // dropping the `boolean` arm the default no longer supplies. The
+    // member shape is `Union` either way; the runtime constructor list is
+    // the tripwire.
+    Row { id: "X38_switch_conditional_break_write", script: "function makeProps(v: number, c: boolean) { let x: string | number | boolean = true; switch (v) { case 0: if (c) break; x = 1; break; default: x = \"s\" } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number | boolean; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [Number, Boolean, String]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Union)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The catch clause is entered from EVERY throw point of the try block,
+    // so its start joins the pre-try state with the state at each call /
+    // `throw`: the read sees `string | number`. Red: the catch start was
+    // the pre-try state alone and the try's end value equalled its entry
+    // value (the intermediate `x = s` was invisible to the write flags), so
+    // the catch read published `number` CLEAN — warm and wrong. The graph
+    // node is a span-distinct two-arm union either way; the runtime
+    // constructor list is the tripwire.
+    Row { id: "X39_try_catch_throw_point_join", script: "declare function mayThrow(): void\nfunction makeProps(s: string) { let x: string | number = 0; try { x = s; mayThrow(); x = 0 } catch { return { v: x } } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string | number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: [String, Number]"], hasnt: &["type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Union, members: &[], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A `finally` write to an OUTER `let` applies on every path that
+    // reaches past the statement. Red: the clause evaluation restored the
+    // pre-clause lexical layer, dropping the write, and the post-statement
+    // read published `boolean` warm. The graph-node member shape is
+    // `Primitive` either way, so the runtime constructor is the tripwire.
+    Row { id: "X40_finally_write_to_outer_let", script: "declare function mayThrow(): void\nfunction makeProps() { let x: string | number | boolean = true; try { mayThrow() } finally { x = 1 } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; }", owner: Owner::U6ValueInference, runtime: Runtime::Emitted { has: &["v: { type: Number"], hasnt: &["v: { type: Boolean", "type: null"] }, tsx: Tsx::Projects, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // With NO catch, the abrupt paths leave the frame, so a normal-
+    // completion try write survives past the statement CLEAN (the
+    // conditional-definition flag exists for the catch-observable paths
+    // only). Red: the clause's end state dropped the write AND the flag
+    // fired — a degraded `number` where the checker has `string`.
+    Row { id: "X41_try_write_survives_finally", script: "function makeProps(s: string) { let x: string | number = 0; try { x = s } finally { } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The destructured-default `undefined` strip tests the REDUCED arm, not
+    // the direct spelling: an aliased `undefined` (`type U = undefined`)
+    // strips identically. Red: the direct-spelling match kept the alias
+    // arm, so the member stayed `Union` (`number | undefined`). The direct
+    // spelling is the X28_destructured_default_undefined control.
+    Row { id: "X42_destructured_default_alias_undefined", script: "type U = undefined\nfunction makeProps({ x = 1 }: { x: number | U }) { return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: number; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The surviving edge past a TERMINATING guard carries the guard's
+    // NEGATED facts: `u` is `number` after the `typeof` guard's arm throws.
+    // Red: the negated reading never folded past the `if`, so the surviving
+    // read published `string | number` and the member pinned `Union`.
+    Row { id: "N15_terminating_typeof_guard_negated_edge", script: "function makeProps(u: string | number) { if (typeof u === \"string\") { throw new Error() } return { label: u } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: number; }", owner: Owner::U6NarrowTypeof, demand: Demand::Narrowing(NarrowBlock::NarrowTypeof), flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The user-predicate spelling of N15_terminating_typeof_guard_negated_edge:
+    // the negated predicate fact (`x` is NOT `string`) survives past the
+    // terminating guard. Red: `x` published unnarrowed, member `Union`.
+    Row { id: "N16_terminating_predicate_guard_negated_edge", script: "function isString(v: unknown): v is string { return true }\nfunction makeProps(x: string | number) { if (isString(x)) { throw new Error() } return { label: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: number; }", owner: Owner::U6NarrowSubstitution, demand: Demand::Narrowing(NarrowBlock::NarrowSubstitution), flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // A TARGETLESS `asserts v` excludes the definitely-falsy arms of `v`
+    // (the checker's truthiness narrowing for assertion signatures with no
+    // type predicate). Red: the predicate was dropped at lowering (no type
+    // annotation meant no assertion), so `0` survived in the member.
+    Row { id: "N17_targetless_asserts_drops_falsy_arm", script: "function assertTruthy(v: unknown): asserts v { }\nfunction makeProps(u: string | 0) { assertTruthy(u); return { label: u } }", probe: "ReturnType<typeof makeProps>", checker: "{ label: string; }", owner: Owner::U6NarrowSubstitution, demand: Demand::Narrowing(NarrowBlock::NarrowSubstitution), flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("label", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
+    // The plainest block-scope form of the X37_labeled_conditional_break_write
+    // class: a write to an OUTER `let` inside a plain block is a reaching
+    // definition past the block (the block executes unconditionally).
+    // Red: the block arm restored the pre-block lexical layer wholesale,
+    // dropping the write — the same restore the labeled / try-clause arms
+    // shared, closed by the one scope-close authority.
+    Row { id: "X43_plain_block_write_survives", script: "function makeProps(s: string) { let x: string | number = 0; { x = s } return { v: x } }", probe: "ReturnType<typeof makeProps>", checker: "{ v: string; }", owner: Owner::U6ValueInference, flow: Flow::Result { function: "makeProps", node: NodeShape::Object, members: &[("v", NodeShape::Primitive)], degradation: Degr::None, candidates: 1 }, verdict: Verdict::MatchesChecker, ..Row::BLANK },
 ];

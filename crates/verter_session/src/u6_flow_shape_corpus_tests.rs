@@ -2069,6 +2069,13 @@ const OPEN_DEBTS: &[&str] = &[
     // the one-hop fallback — a conservative zero-member publication where the
     // checker computes the closed surface.
     "C15_heritage_nested_builtin_open",
+    // ── satisfies-contextual widening (value inference) ────────────────
+    // The satisfies TARGET never contextually types the operand's members:
+    // a fresh member literal keeps its `Literal` node where the checker's
+    // contextual target widens it — a strict subtype of the truth, warm.
+    // The gap and its repair are named on both rows' notes.
+    "CC09_satisfies_widening_target",
+    "X21_satisfies_plain_return",
 ];
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2092,12 +2099,12 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2IndexedAccess, 1, 1, 0),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 26, 23, 1),
-    (Owner::U6ContextualCore, 8, 8, 0),
+    (Owner::U6ValueInference, 40, 36, 2),
+    (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 44, 36, 2),
-    (Owner::U6NarrowTypeof, 9, 9, 0),
+    (Owner::U6NarrowTypeof, 10, 10, 0),
     (Owner::U6NarrowLattice, 3, 3, 0),
-    (Owner::U6NarrowSubstitution, 2, 2, 0),
+    (Owner::U6NarrowSubstitution, 4, 4, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
     (Owner::SharedCompilePipeline, 7, 1, 6),
