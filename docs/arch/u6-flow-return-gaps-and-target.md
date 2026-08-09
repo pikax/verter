@@ -194,17 +194,44 @@ Add the edge classes the contract already reserves by name: `NarrowingPredicate`
 `ClosureCapture`, `ClosureEscape`, `LoopSummary`, `TryFinallyOverride`. The demand planner
 continues to do reachability over the same graph; no new CFG appears.
 
-### 4.2 Separate the domains that are currently conflated
+### 4.2 Return collection is structural — reachability never gates it
 
-Carry reachability as a mask over two domains rather than one boolean:
+This is the single most important correction in this document, and it removes machinery
+rather than adding it.
 
-- **`Execution`** — can control actually reach here at runtime.
-- **`ReturnInference`** — does this authored return still contribute to the inferred type.
+**Control-flow reachability does not decide which `return` statements contribute.** Returns
+are collected *structurally* — every return statement in the body — and their expression
+types are unioned. Flow analysis is used for two separate and narrower jobs: the **type of
+each return expression** at its own program point, and **whether the endpoint is reachable**
+(which adds `undefined`).
 
-A subject narrowing to `never` clears `Execution` on that edge while leaving
-`ReturnInference` intact. G1 and G2 stop being expressible: there is no path from
-"subject domain is empty" to "drop this branch's unrelated returns" that does not also
-fail an exhaustive domain match.
+Measured against the pinned checker:
+
+| probe | tsc | what it proves |
+|---|---|---|
+| `function f() { return "a" as const; return "b" as const }` | `"a" \| "b"` | a statically unreachable return **still contributes** |
+| `function f(x: boolean) { if (x) { return "a" as const } }` | `"a" \| undefined` | endpoint reachability is a **separate** question |
+| `function f(x: string) { if (typeof x === "number") { return x } return "live" as const }` | `"live"` | the return **does** contribute; its expression narrowed to `never`, and `never` is union-neutral |
+
+The third row is the exact mechanism behind G1 and G2. Today the substrate deletes the whole
+branch, losing an unrelated `"dead" as const`. TypeScript keeps the branch; the union simply
+loses the arm when — and only when — the returned *expression* is itself `never`.
+
+So the rule is:
+
+```
+inferred = union(type_of(expr) for every return statement, structurally)
+           ∪ (endpoint_reachable ? {undefined} : {})
+```
+
+Correctness follows from `never` being the union identity, not from any reachability gate.
+G1/G2 become unspellable because there is no longer a mechanism that can drop a return: an
+empty subject domain can only ever produce a `never`-typed *expression*, which the union
+absorbs on its own.
+
+This supersedes the dual-`Execution`/`ReturnInference` edge-domain design considered earlier.
+That design reached the right answers, but it re-introduced reachability as a semantic input
+and then needed a second domain to undo the damage. Structural collection needs neither.
 
 ### 4.3 One completion algebra
 
@@ -309,6 +336,14 @@ narrower type than tsc would.
 So: implement tsc's semantics, with a reusable cached fixed point instead of a per-reference
 backward walk, and a typed refusal state tsc does not have.
 
+**A porting caveat, recorded because it was nearly missed.** An algorithm-level port was
+seriously considered and produced one correction worth keeping regardless (§4.2: returns are
+structural, not reachability-gated). The lesson generalises: *tsc's observable behaviour is
+authority; anyone's summary of tsc's behaviour — including this document — is not.* Before
+implementing any rule here, probe the pinned checker directly and pin the result as a corpus
+row with a discriminating assertion. Each of the three §4.2 rows exists because a plausible
+mental model of the semantics was wrong in a way only measurement exposed.
+
 ---
 
 ## 6. Work items, in order
@@ -325,10 +360,11 @@ acceptance test passes cold **and** warm.
 2. **Relation authority — nominal `unique symbol` + tri-state comparability.** Delete flow's
    private classifier. *Proof:* G3 matches the checker; the negative control (structurally
    overlapping intersection) still survives.
-3. **`U6.NARROW_*` — narrowing-predicate edges + the shared `FlowFrame` lattice.** The
-   domain split of §4.2 lands here. *Proof:* G1, G2, and the two recorded ledger entries
+3. **`U6.NARROW_*` — narrowing-predicate edges + the shared `FlowFrame` lattice.** Structural
+   return collection (§4.2) lands here, together with the removal of every reachability gate
+   on return contribution. *Proof:* G1, G2, and the two recorded ledger entries
    (conditional-`var` branch join; unapplied write-effect source order) all publish clean and
-   warm-admissible.
+   warm-admissible; the three §4.2 probes are pinned as rows.
 4. **`U6.LOOP_CLOSURE` — closure-escape, loop-summary, `try`/`finally`-override edges.**
    Capture summaries (§4.5), the completion algebra (§4.3), and the producer change to
    `push_nested_capture_reads`. *Proof:* G4–G10 match the checker, and the position matrix
